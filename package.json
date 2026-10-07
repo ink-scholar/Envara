@@ -1,0 +1,85 @@
+{
+  "name": "envara",
+  "version": "0.1.0",
+  "description": "Envara 境舱 — an open-source desktop workspace for isolated fingerprint browser environments",
+  "author": "ink-scholar",
+  "license": "MIT",
+  "main": "electron/main.mjs",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/prepare-sites-build.mjs",
+    "preview": "vite preview",
+    "desktop": "node scripts/dev-desktop.mjs",
+    "start": "electron .",
+    "test": "node --test tests/backend.test.mjs tests/runtime.test.mjs",
+    "test:smoke": "node scripts/native-smoke.mjs",
+    "dist:mac": "npm run build && electron-builder --mac --arm64",
+    "dist:win": "npm run build && electron-builder --win --x64",
+    "dist:linux": "npm run build && electron-builder --linux --x64",
+    "test:sites": "node --test tests/sites-worker.test.mjs"
+  },
+  "dependencies": {
+    "cloakbrowser": "0.5.12",
+    "playwright-core": "1.60.0"
+  },
+  "devDependencies": {
+    "@phosphor-icons/react": "2.1.10",
+    "@vitejs/plugin-react": "5.0.4",
+    "electron": "44.6.0",
+    "electron-builder": "26.15.3",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "vite": "6.4.2"
+  },
+  "build": {
+    "appId": "io.envara.desktop",
+    "productName": "Envara",
+    "copyright": "Copyright © 2026 ink-scholar",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/client/**/*",
+      "electron/**/*",
+      "package.json",
+      "build/icon.png",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md",
+      "!electron/smoke.mjs"
+    ],
+    "asarUnpack": [
+      "node_modules/cloakbrowser/**/*",
+      "node_modules/playwright-core/**/*"
+    ],
+    "artifactName": "Envara-${version}-${os}-${arch}.${ext}",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "identity": null,
+      "icon": "build/icon.png"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Network",
+      "icon": "build/icon.png"
+    }
+  }
+}

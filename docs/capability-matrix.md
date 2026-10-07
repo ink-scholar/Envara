@@ -1,8 +1,31 @@
 # Envara 境舱能力与验收矩阵
 
-记录日期：2026-10-07。本轮将 BrowseForge 固定版本源码纳入 `third_party/browseforge/`，由 Envara 桌面应用自动管理本地服务。macOS Apple Silicon 冻结源码的两家族原生回归 12 项通过，另有 6 轮、12 个新 Cloak 环境的并行单标签页回归；Alpha 仅为独立单项启动验证。macOS arm64 .app、DMG、ZIP 已构建，打包一致性、归档完整性、启动和基本 UI 只读验收通过；全部 GUI 操作未逐项验收。
+记录日期：2026-10-07。当前为 **0.3.0 本地开发候选版**，新增真实代理出口时区与每环境终端。BrowseForge 固定版本源码纳入 `third_party/browseforge/`，由 Envara 桌面应用自动管理本地服务；新增终端和出口解析是 Envara 的桌面扩展，不代表上游已有相同产品入口。
 
-状态含义：**源码已接入**表示实现或适配代码已纳入仓库；**Mac 后端已验证**表示 macOS Apple Silicon 上的新服务与真实浏览器有执行证据；**待验证**表示当前路径还需测试；**计划中**表示尚未形成可验收的产品能力。后端测试不代表 Electron 界面已验收，旧版直接运行 CloakBrowser 的验证也不自动转移到新后端。
+状态含义：**源码已接入**表示实现或适配代码已纳入仓库；**Mac 后端已验证**表示所注明版本在 macOS Apple Silicon 上有真实执行证据；**待验证**表示当前路径还需测试；**计划中**表示尚未形成可验收的产品能力。中间阶段测试不代表冻结源码已通过，后端测试不代表 Electron 界面已验收，历史版本结果不自动转移到新增代码。
+
+## 0.3.0 新增能力
+
+| 能力 | 实现范围 | 当前验收状态 |
+| --- | --- | --- |
+| 多内核浏览器后端 | 三 provider 的能力目录与桌面安装入口保留 | 0.3.0 Cloak 原生回归 11 项通过；Camoufox 与 Alpha 本轮未执行，不能把目录读取当可见会话测试。两家族和 Alpha 的 0.2.0 证据保留在下一节 |
+| 认证代理真实出口与地域检测 | 通过 HTTP、HTTPS 或 SOCKS5 代理访问固定 HTTPS 服务，校验公网 IP、粗略城市和 IANA 时区；按有效代理配置缓存，修改配置使缓存失效 | 实际 ipwho.is 直连 HTTPS 出口检查通过，IP 已脱敏；用户代理供应商结果待验收。代理入口地址、预设时区或失败结果不算检测成功 |
+| 自动时区与浏览器/终端解析 | 同一环境使用有效代理与时区解析规则；自动结果只作为临时会话参数，不改保存的手动值。有代理检测失败拒绝启动，无代理可明确回退本地时区 | 3 项真实 Cloak 临时时区检查，以及直连出口→默认 PTY TZ/Intl 和旧指纹字段兼容共 7 项通过；保存的配置未改。代理供应商完整联动待验收 |
+| 每环境原生终端与工作目录 | 真实 node-pty、原生目录选择与会话标签；默认 360 px 底部面板支持拖动、键盘调节、放大恢复和独立窗口；Web 预览禁用原生操作 | Electron 44.6.0 预检、12 项真实 PTY 和最终候选包 3 项终端检查通过。原生 pwd/date、放大恢复、复制新 PTY 与独立窗口命令通过；Web 高度/键盘/8 标签交互通过 |
+| 同境舱复制会话 | 创建独立 PTY 与代理桥，共用所属境舱配置/历史；使用原选启动 cwd，不追踪 shell 手动 cd，不复制命令或临时环境变量 | 真实 PTY 副本独立输入输出、代理路由及关闭源后副本继续运行通过；全境舱会话停止前目录保持锁定 |
+| 终端视图与会话分离 | 折叠面板或关闭独立窗口保留会话；明确关闭会话、自然退出或退出应用清理所属进程 | 原生关闭副本 B 后 A 继续运行；关闭独立视图返回主窗后 A 与输出保留。原位已有会话复用仅有服务/单元证据，尚未单独 GUI 验收 |
+| 独立工具配置与历史 | 每环境 HOME、XDG、Claude 配置、shell 历史和临时目录分开；从白名单构建环境变量，不直接继承宿主 API 密钥或启动钩子 | 真实 PTY 分离、0700/0600 权限与 6 项历史校验通过，重开保留；仍使用同一 OS 用户权限，不是文件或进程沙箱 |
+| SOCKS5 命令行代理桥 | 私有随机认证的本机 HTTP 桥与远程 SOCKS DNS；HTTP/HTTPS 代理使用子进程代理变量，localhost 明确直连 | 冻结源码中代理感知 PTY 客户端的认证 SOCKS5 请求通过，凭据不进入目标站点或快照；不强制路由所有程序 |
+| 终端退出清理 | 明确关闭会话、shell 自行退出与应用关闭时清理已记录归属的进程和桥连接 | 真实 PTY 关闭/重开/后台子进程清理通过，源与副本互不误杀，所属剩余为 0，不影响无关进程；不保证捕获提前完全脱离且未记录的守护进程 |
+| Claude CLI | 设置独立 CLAUDE_CONFIG_DIR，并提供代理变量与 HTTP 桥 | 配置接口已接入；Claude 安装、登录、远端请求尚未执行 |
+
+本轮 npm test **145/145** 通过；其中终端 Service 18 项、Process 6 项、Bridge 12 项共 36 项单元及本地进程/网络测试。Go 全包及 API/browser/profile race 检查通过；原生 PTY 预检和 15 份许可证准备通过。真实 PTY 记录为 `test-artifacts/terminal-smoke/run-j1qwoT/proof.json`，会话时区记录为 `test-artifacts/sidecar-prototype/session-timezone-9ylq6ufu/proof.json`，Cloak 回归为 `test-artifacts/sidecar-smoke/run-NwBoJB/proof.json`。列出的原生多窗口核心操作已通过，全部 GUI 未逐项验收。IP 地理定位只估算地域，不提供住宅街道地址；环境和账号隔离不保证免于服务封禁。
+
+直连出口与旧字段兼容链为 `test-artifacts/auto-egress-terminal/run-nAADv9/proof.json`，最终候选包终端为 `test-artifacts/packaged-terminal/run-blswCc/proof.json`。当前包 19 份源码/前端/许可证文件 SHA 匹配、package.json 语义匹配、Node 可执行、15 份许可证完整、DMG/ZIP 完整性通过；后端与上述原生记录相同。包证据为 `test-artifacts/package-verification/0.3.0-mac-arm64.json`；该包终端检查不覆盖远端 CLI、代理路由或完整 GUI。
+
+## 0.2.0 多内核历史基线
+
+以下记录对应 0.2.0：macOS Apple Silicon 两家族原生回归 12 项通过，另有 6 轮、12 个新 Cloak 环境的并行单标签页回归；Alpha 为独立单项启动验证。.app、DMG、ZIP 的打包一致性、归档完整性、启动和基本 UI 只读验收通过；全部 GUI 操作未逐项验收。这些结果保留作回归对照，不能作为新增 0.3.0 功能已通过的证明。
 
 | 能力 | 本地 BrowseForge 服务路径 | 已有证据与剩余工作 |
 | --- | --- | --- |
@@ -15,7 +38,7 @@
 | 语言、时区自动匹配出口 | 源码与适配测试已验证；外部出口待验证 | 支持清空手动设置并恢复自动模式；尚未对真实外部 GeoIP、代理地域回退及自动原生结果做端到端验证 |
 | Cookie、localStorage 隔离与重启保留 | Mac 后端已验证 | 两个 Cloak 环境的 Cookie/localStorage 隔离且停止重启后保留；Firefox 跨内核隔离及 localStorage 持久化通过 |
 | HTTP、HTTPS、SOCKS5 代理 | HTTP 认证 Mac 后端已验证；其余待验证 | 真实浏览器请求通过本地认证 HTTP 代理。认证 SOCKS5 relay、HTTPS、外部代理出口与泄漏检测尚未验收 |
-| 代理检查 | 源码已接入 | 桌面检查只证明 TCP 端口可达；代理认证、实际请求及出口地域需要独立证据 |
+| 代理检查 | 历史实现 | 0.2.0 桌面检查只证明 TCP 端口可达；0.3.0 替换为上方的认证 HTTPS 实际出口检测，最终验收单独记录 |
 | 分组、标签与分组代理策略 | 源码及适配测试已接入；原生待验证 | 原生测试保存了分组；默认/强制代理继承、运行中修改和完整标签流程仍需验证 |
 | 配置导入导出、备份与恢复 | 配置交换 Mac 后端已验证；完整备份待验证 | v2 配置导出脱敏代理凭据，导入必须显式映射代理且保留绑定。配置导出不含完整浏览数据，不等于 Cookie/浏览器目录备份 |
 | 旧工作区迁移 | Mac 后端已验证 | 自愿迁移复制真实浏览器目录与本地代理凭据；迁移后 Cookie/localStorage 可读取，备份摘要正确，原配置摘要不变且源目录保留 |
@@ -24,9 +47,9 @@
 | WebRTC、字体、硬件、Canvas/WebGL 等完整指纹 | 上游源码具备；检测待验证 | 手动可见字段测试未覆盖这些表面的完整一致性、UA-CH 与物理内核版本一致性，亦未证明通过全部第三方检测器 |
 | 多用户与权限管理 | 计划中 | 当前面向本机工作区；尚无已验收的多人协作与权限流程 |
 
-## 内核范围
+## 多内核历史范围
 
-| Provider | 上游固定基线 | Envara 新路径的实际状态 |
+| Provider | 上游固定基线 | Envara 0.2.0 实际状态 |
 | --- | --- | --- |
 | `cloakbrowser` | macOS `145.0.7632.109.2`；Linux/Windows `146.0.7680.177.4` | macOS Apple Silicon 的双环境手动参数、截图、HTTP 认证代理、隔离、重启与迁移已验证；其他平台未实测 |
 | `camoufox` | `v135.0.1-beta.24` | macOS Apple Silicon 官方安装、与 Chromium 同时运行、手动语言/Intl/时区/屏幕、跨内核隔离与 localStorage 持久化已验证；Intl 的 zh-Hans-CN 与请求 zh-CN 语义一致 |
@@ -36,15 +59,15 @@ BrowseForge Chromium 上游有 macOS、Linux 与 Windows 的 Alpha 产物，但�
 
 ## 平台与许可
 
-- **macOS Apple Silicon：**新服务真实浏览器验收通过，范围见上表；.app、DMG、ZIP 已构建，打包代码与验收后端相同，Node、provenance、许可证完整，DMG/ZIP 完整性通过。启动与基本 UI 只读验收完成，迁移预览取消保留空列表和内核目录；真实用户写操作及全部 GUI 操作未逐项验收。旧版与当前证据见 [验证记录](verification.md)。
-- **macOS Intel、Windows、Linux：**本轮 Envara 新服务与安装包均未完成实机验收。上游的平台矩阵与 CI 构建目标分别说明源码/产物范围，不能作为 Envara 已可用的证明。
+- **macOS Apple Silicon：**0.2.0 新服务真实浏览器与基本打包 UI 已验收，范围见历史基线。0.3.0 真实多 PTY、临时时区、实际直连出口链、旧字段兼容、包资源与列出的原生多窗口核心操作已验证；原位已有会话复用及完整 GUI 未逐项验收。版本与路径分别见 [验证记录](verification.md)。
+- **macOS Intel、Windows、Linux：**Envara 本地服务、终端与安装包未完成实机验收。上游的平台矩阵与 CI 构建目标分别说明源码/产物范围，不能作为 Envara 已可用的证明。
 - **源码许可：**Envara 与纳入的 BrowseForge 代码采用 MIT，保留上游归属和许可证。[固定版本 BrowseForge License](https://github.com/nczz/BrowseForge/blob/fa9e0bb670e749706a9c8f2d4095333347d6c521/LICENSE)。
 - **CloakBrowser：**包装层为 MIT，编译浏览器适用独立专有许可。Envara 不把该内核打入安装包；用户须从官方渠道获取，版本与订阅条件以其条款为准。[包装层 License](https://github.com/CloakHQ/CloakBrowser/blob/5fa65172f0612b3ea3efbee719be0cb618594285/LICENSE)、[Binary License](https://github.com/CloakHQ/CloakBrowser/blob/5fa65172f0612b3ea3efbee719be0cb618594285/BINARY-LICENSE.md)。
 
 上游对照基线为 BrowseForge `fa9e0bb670e749706a9c8f2d4095333347d6c521`（v2.1.15）：[provider registry](https://github.com/nczz/BrowseForge/blob/fa9e0bb670e749706a9c8f2d4095333347d6c521/internal/runtime/runtime.go)、[平台与版本定义](https://github.com/nczz/BrowseForge/blob/fa9e0bb670e749706a9c8f2d4095333347d6c521/internal/runtime/support.go)、[Chromium 启动逻辑](https://github.com/nczz/BrowseForge/blob/fa9e0bb670e749706a9c8f2d4095333347d6c521/internal/browser/launch_chromium.go)。后续只有补丁后的实际验证通过，才更新对应状态。
 
-当前验证计数为 npm test **65/65**、资源准备辅助测试 **7 项**；Go 全包及 browser/API/MCP race 检查通过。本机冻结源码原生记录为 `test-artifacts/sidecar-smoke/run-Wed9Ik/proof.json`（更新后的 `latest-proof.json`），并行专项为 `test-artifacts/sidecar-smoke/parallel-fixed-S4ov8I/proof.json`；Alpha 独立记录为 `test-artifacts/alpha-smoke/run-jcUD6L/proof.json`，仍为实验性，且未验证其归档的官方发布摘要。
+0.2.0 历史验证计数为 npm test **65/65**、资源准备辅助测试 **7 项**；Go 全包及 browser/API/MCP race 检查通过。该轮冻结源码原生记录为 `test-artifacts/sidecar-smoke/run-Wed9Ik/proof.json`，并行专项为 `test-artifacts/sidecar-smoke/parallel-fixed-S4ov8I/proof.json`；Alpha 独立记录为 `test-artifacts/alpha-smoke/run-jcUD6L/proof.json`，仍为实验性，且未验证其归档的官方发布摘要。latest-proof 别名可能被新测试覆盖，复核历史时以该轮路径为准。
 
-当前服务 SHA-256 为 `915faddfe43506aa2cc4887e2b1b7e386d1399a1e1847c08ecfb085cb52d8acd`，源码树 SHA-256 为 `ddde9f2114ccef3e7f7a2c4cea1fb583e0b4f617483cc6bdb05c0fed073ccdc3`，对应最终资源构建记录。隔离测试产物不提交至公开仓库，不构成浏览器包签名或发布完整性认证。构建资源包含匹配的 Node/Playwright 驱动和许可证，桌面用户无需系统 Go 或 Node。
+0.2.0 服务 SHA-256 为 `915faddfe43506aa2cc4887e2b1b7e386d1399a1e1847c08ecfb085cb52d8acd`，源码树 SHA-256 为 `ddde9f2114ccef3e7f7a2c4cea1fb583e0b4f617483cc6bdb05c0fed073ccdc3`，对应该轮最终资源构建记录。隔离测试产物不提交至公开仓库，不构成浏览器包签名或发布完整性认证。构建资源包含匹配的 Node/Playwright 驱动与许可证；0.3.0 还准备原生 PTY 资源，目标是桌面用户无需系统 Go 或 Node。
 
-发布继续暂停，新代码尚未推送，当前没有公开的 0.2.0 正式下载版。其他系统、全部 MCP、完整指纹、外部自动 GeoIP、非 HTTP 代理及完整浏览资料备份保持未验收。
+发布继续暂停，新代码尚未推送，当前没有公开的 0.3.0 正式下载版。其他系统、全部 MCP、完整指纹、其他地理服务与外部代理供应商结果、全部代理协议完整流程及完整浏览资料备份保持未验收。

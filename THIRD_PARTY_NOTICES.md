@@ -1,6 +1,6 @@
 # Third-party notices
 
-Envara's original application code is licensed under the MIT License. Third-party software retains its own copyright and license. JavaScript versions are recorded in `package-lock.json`; the vendored Go backend and its dependencies are pinned in `third_party/browseforge/ENVARA_UPSTREAM.md`, `go.mod`, and `go.sum`. This document describes the local 0.2.0 development candidate; public releases are paused.
+Envara's original application code is licensed under the MIT License. Third-party software retains its own copyright and license. JavaScript versions are recorded in `package-lock.json`; the vendored Go backend and its dependencies are pinned in `third_party/browseforge/ENVARA_UPSTREAM.md`, `go.mod`, and `go.sum`. This document describes the local 0.3.0 development candidate; public releases are paused.
 
 ## Main dependencies
 
@@ -16,6 +16,12 @@ Envara's original application code is licensed under the MIT License. Third-part
 | CloakBrowser JavaScript wrapper | MIT | 2026 CloakHQ · [license](https://github.com/CloakHQ/CloakBrowser/blob/main/LICENSE) |
 | Playwright client and official driver | Apache-2.0 | Microsoft Corporation · [license](https://github.com/microsoft/playwright/blob/main/LICENSE) |
 | electron-builder | MIT | 2015 Loopline Systems · [source](https://github.com/electron-userland/electron-builder) |
+| node-pty 1.1.0 | MIT | 2012–2015 Christopher Jeffrey · [source](https://github.com/microsoft/node-pty/tree/v1.1.0) |
+| @xterm/xterm 6.0.0 | MIT | xterm.js authors; SourceLair; Christopher Jeffrey · [source](https://github.com/xtermjs/xterm.js) |
+| @xterm/addon-fit 0.11.0 | MIT | 2019 xterm.js authors · [source](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-fit) |
+| socks 2.8.10 | MIT | 2013 Josh Glazebrook · [source](https://github.com/JoshGlazebrook/socks) |
+| https-proxy-agent 9.1.0 / socks-proxy-agent 10.1.0 | MIT | 2013 Nathan Rajlich · [source](https://github.com/TooTallNate/proxy-agents) |
+| ipaddr.js 2.5.0 | MIT | 2011–2017 whitequark · [source](https://github.com/whitequark/ipaddr.js) |
 
 Electron includes Chromium, Node.js and additional components with their own licenses. The Electron runtime distribution includes its `LICENSE` and `LICENSES.chromium.html` notices. Transitive dependencies and build tools may carry additional licenses; their notices are retained in their distributions.
 
@@ -24,6 +30,12 @@ Electron includes Chromium, Node.js and additional components with their own lic
 BrowseForge v2.1.15 is incorporated at commit `fa9e0bb670e749706a9c8f2d4095333347d6c521`. Its original MIT copyright and license are preserved under `third_party/browseforge/`. Envara applies local desktop lifecycle, manual identity, and integration patches. The source baseline is recorded in [ENVARA_UPSTREAM.md](third_party/browseforge/ENVARA_UPSTREAM.md).
 
 The prepared backend resources include a compiled Go sidecar, the official Playwright driver 1.61.1 and its Node.js runtime. The Go standard library uses the Go project's BSD-style license; Node.js carries its own MIT and third-party notices. The resource builders retain the Go runtime and module licenses in `build/backend/licenses/`, and the driver, binding, Node and bundled dependency notices beside the prepared driver. Build provenance records exact versions and checksums. These generated resources are excluded from the source repository and are separate from browser-engine binaries.
+
+## Terminal and proxy dependency notices
+
+The native preparation step retains complete notices for the terminal renderer, node-pty and proxy dependencies in `build/native/licenses/`, with a manifest; application resources include them under `licenses/npm/`. The whole node-pty package is unpacked to preserve native modules and platform helpers. winpty and Microsoft Terminal ConPTY notices are retained separately. Development-only @electron/rebuild 4.2.1 is MIT and is not installed by the running application.
+
+[third_party/npm-licenses/README.md](third_party/npm-licenses/README.md) records exact versions, official sources and two supplementary notices. The Microsoft Terminal notice comes from its official MIT license. The proxy-agent-negotiate notice explicitly records the npm tarball's missing standalone license, retaining the declared MIT attribution and the same maintainer's distributed MIT text; it is an Envara supplement, not a claimed file from that tarball. Optional Kerberos support is not installed or used by Envara's explicit Basic authentication path.
 
 ### MIT notice for the MIT components above
 
@@ -57,6 +69,6 @@ The multi-engine catalog also includes Camoufox and BrowseForge Chromium Alpha. 
 
 ## Design references and assets
 
-[BrowseForge](https://github.com/nczz/BrowseForge) began as a product reference and is now the pinned local backend for the 0.2.0 candidate. Envara supplies its own desktop interface and integration layer while retaining the vendored source's attribution and license.
+[BrowseForge](https://github.com/nczz/BrowseForge) began as a product reference and is now the pinned local backend. Envara supplies its desktop interface, terminal workspace and integration layer while retaining the vendored source's attribution and license.
 
 `build/icon.png` was generated with OpenAI's built-in image generation tool for Envara. It contains no third-party browser logo or supplied reference artwork.

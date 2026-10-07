@@ -1,0 +1,104 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { TerminalController } from '../electron/terminal-controller.mjs';
+
+function fixture(pickDirectory = async () => ({ canceled: false, path: '/selected/workspace' })) {
+  const profiles = [{ id: 'prof_a', name: '工作环境', group: '工作', proxyId: 'proxy_a' }];
+  const state = { profiles: [{ profileId: 'prof_a', cwd: null, sessions: [] }] };
+  const calls = [];
+  const terminal = {
+    snapshot: async () => structuredClone(state),
+    setDirectory: async ({ id, path }) => { calls.push(['directory', id, path]); state.profiles[0].cwd = path; },
+    create: async (args) => { calls.push(['create', args.id]); const session = { sessionId: 'session_a', profileId: args.id, status: 'running' }; state.profiles[0].sessions = [session]; return session; },
+    close: async (args) => { calls.push(['close', args.sessionId]); state.profiles[0].sessions = []; },
+    write: async (args) => { calls.push(['write', args]); },
+    resize: async (args) => { calls.push(['resize', args]); },
+    removeProfile: async ({ id }) => { calls.push(['removeOwnedConfiguration', id]); },
+  };
+  const controller = new TerminalController({ terminal, service: { snapshot: async () => ({ profiles: structuredClone(profiles) }) }, pickDirectory });
+  return { controller, terminal, profiles, state, calls };
+}
+
+test('directory picker cancellation never launches a shell or stores a directory', async () => {
+  const { controller, calls } = fixture(async () => ({ canceled: true }));
+  assert.deepEqual(await controller.dispatch('openTerminal', { id: 'prof_a' }), { canceled: true });
+  assert.deepEqual(calls, []);
+});
+
+test('first terminal launch chooses a directory and rejects missing profiles', async () => {
+  const { controller, calls } = fixture();
+  await assert.rejects(controller.dispatch('openTerminal', { id: 'prof_missing' }), { code: 'PROFILE_NOT_FOUND' });
+  await controller.dispatch('openTerminal', { id: 'prof_a', columns: 80, rows: 24 });
+  assert.deepEqual(calls, [['directory', 'prof_a', '/selected/workspace'], ['create', 'prof_a']]);
+});
+
+test('duplicate dispatch validates the owning environment and never opens a directory picker', async () => {
+  const f = fixture(async () => { throw new Error('Picker must not open'); });
+  f.state.profiles[0].sessions = [{ sessionId: 'session_a', profileId: 'prof_a', status: 'running' }];
+  f.terminal.duplicate = async args => ({ sessionId: 'session_b', profileId: 'prof_a', source: args.sessionId });
+  assert.deepEqual(await f.controller.dispatch('duplicateTerminal', { sessionId: 'session_a' }), { sessionId: 'session_b', profileId: 'prof_a', source: 'session_a' });
+  await assert.rejects(f.controller.dispatch('duplicateTerminal', { sessionId: 'missing' }), { code: 'TERMINAL_SESSION_NOT_FOUND' });
+  f.profiles.length = 0;
+  await assert.rejects(f.controller.dispatch('duplicateTerminal', { sessionId: 'session_a' }), { code: 'PROFILE_NOT_FOUND' });
+  assert.deepEqual(f.calls, []);
+});
+
+test('profile deletion while a native directory picker is open never launches the deleted profile', async () => {
+  let profiles;
+  const chosen = fixture(async () => { profiles.length = 0; return { canceled: false, path: '/selected/workspace' }; });
+  profiles = chosen.profiles;
+  await assert.rejects(chosen.controller.dispatch('openTerminal', { id: 'prof_a' }), { code: 'PROFILE_NOT_FOUND' });
+  assert.deepEqual(chosen.calls, []);
+});
+
+test('active terminal configuration is protected while unrelated proxies remain editable', async () => {
+  const { controller, state } = fixture();
+  state.profiles[0].sessions = [{ status: 'running', sessionId: 'session_a' }];
+  let mutations = 0;
+  const change = async () => { mutations++; return { updated: true }; };
+  for (const [method, args] of [['updateProfile', { id: 'prof_a' }], ['deleteProfile', { id: 'prof_a' }], ['saveProxy', { proxy: { id: 'proxy_a' } }], ['clearGroupProxy', { name: '工作' }], ['bulkProfiles', { action: 'move', ids: ['prof_a'] }], ['bulkProfiles', { action: 'delete', ids: ['prof_a'] }]]) {
+    await assert.rejects(controller.protectMutation(method, args, change), { code: 'TERMINAL_BUSY' });
+  }
+  await assert.rejects(controller.dispatch('chooseWorkspaceDirectory', { id: 'prof_a' }), { code: 'TERMINAL_BUSY' });
+  assert.equal(mutations, 0);
+  await controller.protectMutation('saveProxy', { proxy: { id: 'proxy_unused' } }, change);
+  await controller.protectMutation('stopProfile', { id: 'prof_a' }, change);
+  assert.equal(mutations, 2);
+});
+
+test('proxy edit cannot race past a terminal launch using the old proxy configuration', async () => {
+  const { controller, terminal, state } = fixture();
+  state.profiles[0].cwd = '/selected/workspace';
+  let releaseLaunch;
+  let enteredLaunch;
+  const started = new Promise((resolve) => { enteredLaunch = resolve; });
+  terminal.create = async () => {
+    enteredLaunch();
+    await new Promise((resolve) => { releaseLaunch = resolve; });
+    state.profiles[0].sessions = [{ sessionId: 'session_a', status: 'running' }];
+    return state.profiles[0].sessions[0];
+  };
+  const launch = controller.dispatch('openTerminal', { id: 'prof_a' });
+  await started;
+  let edited = false;
+  const edit = controller.protectMutation('saveProxy', { proxy: { id: 'proxy_a' } }, async () => { edited = true; });
+  releaseLaunch();
+  await launch;
+  await assert.rejects(edit, { code: 'TERMINAL_BUSY' });
+  assert.equal(edited, false);
+});
+
+test('explicit profile deletion cleans only owned terminal configuration after backend deletion succeeds', async () => {
+  const { controller, calls } = fixture();
+  const result = await controller.protectMutation('deleteProfile', { id: 'prof_a' }, async () => ({ deleted: true }));
+  assert.deepEqual(result, { deleted: true });
+  assert.deepEqual(calls, [['removeOwnedConfiguration', 'prof_a']]);
+  await assert.rejects(controller.protectMutation('deleteProfile', { id: 'prof_a' }, async () => { throw new Error('backend rejected'); }));
+  assert.equal(calls.length, 1);
+});
+
+test('bulk deletion cleans only successful profile removals', async () => {
+  const { controller, calls } = fixture();
+  await controller.protectMutation('bulkProfiles', { action: 'delete', ids: ['prof_a', 'prof_missing'] }, async () => ({ results: [{ id: 'prof_a', ok: true }, { id: 'prof_missing', ok: false }] }));
+  assert.deepEqual(calls, [['removeOwnedConfiguration', 'prof_a']]);
+});

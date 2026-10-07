@@ -16,4 +16,10 @@ contextBridge.exposeInMainWorld('envara', Object.freeze({
     ipcRenderer.on('envara:snapshot', handler);
     return () => ipcRenderer.removeListener('envara:snapshot', handler);
   },
+  onTerminalEvent: (listener) => {
+    if (typeof listener !== 'function') throw new TypeError('终端监听器必须是函数。');
+    const handler = (_event, message) => listener(message);
+    ipcRenderer.on('envara:terminal-event', handler);
+    return () => ipcRenderer.removeListener('envara:terminal-event', handler);
+  },
 }));

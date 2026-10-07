@@ -69,7 +69,7 @@ const tool = async (name, args = {}) => {
   return response.content?.filter(item => item.type === 'text').map(item => item.text).join('\n') ?? '';
 };
 const information = profileId => evaluate(profileId, '({title:document.title,url:location.href,userAgent:navigator.userAgent,language:navigator.language,languages:navigator.languages,intlLocale:Intl.DateTimeFormat().resolvedOptions().locale,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,width:screen.width,height:screen.height,platform:navigator.platform,webdriver:navigator.webdriver})');
-const makeService = () => new BrowseForgeService(dataDir, manager.client, { appVersion: '0.2.0-smoke' }, () => {}, {
+const makeService = () => new BrowseForgeService(dataDir, manager.client, { appVersion: '0.3.0-smoke' }, () => {}, {
   profilesDir: path.join(manager.baseDir, 'profiles'),
   getEngineStates: () => manager.getEngineStates(),
   installEngine: id => manager.installEngine(id),

@@ -1,6 +1,6 @@
 {
   "name": "envara",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Envara \u5883\u8231 \u2014 an open-source desktop workspace for isolated fingerprint browser environments",
   "author": "ink-scholar",
   "license": "MIT",
@@ -10,23 +10,34 @@
     "dev": "vite",
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "preview": "vite preview",
-    "desktop": "npm run backend:prepare && node scripts/dev-desktop.mjs",
-    "start": "electron .",
+    "desktop": "npm run native:prepare && npm run backend:prepare && node scripts/dev-desktop.mjs",
+    "start": "npm run native:prepare && electron .",
     "test": "node --test tests/*.test.mjs",
     "test:smoke": "node scripts/native-smoke.mjs",
-    "dist:mac": "npm run backend:prepare && npm run build && electron-builder --mac",
-    "dist:win": "npm run backend:prepare && npm run build && electron-builder --win --x64",
-    "dist:linux": "npm run backend:prepare && npm run build && electron-builder --linux --x64",
+    "dist:mac": "npm run native:prepare && npm run backend:prepare && npm run build && electron-builder --mac",
+    "dist:win": "npm run native:prepare && npm run backend:prepare && npm run build && electron-builder --win --x64",
+    "dist:linux": "npm run native:prepare && npm run backend:prepare && npm run build && electron-builder --linux --x64",
     "test:sites": "node --test tests/sites-worker.test.mjs",
     "backend:prepare": "node scripts/build-sidecar.mjs && node scripts/prepare-playwright-driver.mjs",
-    "test:sidecar": "node scripts/sidecar-smoke.mjs"
+    "test:sidecar": "node scripts/sidecar-smoke.mjs",
+    "native:prepare": "node scripts/prepare-native.mjs",
+    "native:rebuild": "node scripts/prepare-native.mjs --force-rebuild",
+    "postinstall": "node scripts/prepare-native.mjs"
   },
   "dependencies": {
     "cloakbrowser": "0.5.12",
-    "playwright-core": "1.60.0"
+    "playwright-core": "1.60.0",
+    "node-pty": "1.1.0",
+    "socks": "2.8.10",
+    "https-proxy-agent": "9.1.0",
+    "socks-proxy-agent": "10.1.0",
+    "ipaddr.js": "2.5.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "4.2.1",
     "@phosphor-icons/react": "2.1.10",
+    "@xterm/xterm": "6.0.0",
+    "@xterm/addon-fit": "0.11.0",
     "@vitejs/plugin-react": "5.0.4",
     "electron": "44.6.0",
     "electron-builder": "26.15.3",
@@ -53,8 +64,10 @@
     ],
     "asarUnpack": [
       "node_modules/cloakbrowser/**/*",
-      "node_modules/playwright-core/**/*"
+      "node_modules/playwright-core/**/*",
+      "node_modules/node-pty/**/*"
     ],
+    "npmRebuild": false,
     "artifactName": "Envara-${version}-${os}-${arch}.${ext}",
     "mac": {
       "category": "public.app-category.productivity",
@@ -95,6 +108,10 @@
       {
         "from": "third_party/browseforge/LICENSE",
         "to": "licenses/BrowseForge-LICENSE"
+      },
+      {
+        "from": "build/native/licenses",
+        "to": "licenses/npm"
       }
     ]
   }

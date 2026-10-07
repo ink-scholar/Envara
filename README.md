@@ -2,29 +2,42 @@
 
 # Envara · 境舱
 
-一个中文优先的浏览器环境桌面管理器。用独立的持久化环境管理浏览器资料、指纹配置和代理，在桌面应用内完成环境管理与会话操作。
+一个中文优先的浏览器环境桌面管理器。每个环境管理独立浏览资料、指纹、网络出口和终端工作区，在桌面应用内完成浏览器与命令行会话操作。
 
-**Envara is an open-source desktop workspace for isolated browser environments.** The current 0.2.0 development candidate integrates a locally managed BrowseForge backend and a multi-engine catalog.
+**Envara is an open-source desktop workspace for isolated browser environments.** The local 0.3.0 candidate adds per-environment terminals, working directories and authenticated proxy egress detection to the multi-engine BrowseForge backend.
 
 [项目源码](https://github.com/ink-scholar/Envara) · [问题反馈](https://github.com/ink-scholar/Envara/issues) · [能力矩阵](docs/capability-matrix.md) · [架构说明](docs/architecture.md) · [验证记录](docs/verification.md) · [参与贡献](CONTRIBUTING.md)
 
 ![Envara 三栏界面预览](docs/envara-preview.png)
 
-上图为当前界面的 Web 预览，带有「界面预览」标识并使用演示配置。真实浏览器与打包桌面的验收分别记录。
+上图为带「界面预览」标识的浏览器工作区预览，使用演示配置。0.3.0 保留三栏布局，底部终端默认高 360 px，可拖动或用键盘调整、放大/恢复，并可在独立窗口中使用。
 
 ## 当前状态
 
-**0.2.0 本地开发候选版，尚未发布。** 源码仓库已公开；0.1.x 的两个 GitHub 发行版保留为草稿，自动发布已暂停。当前优先完善实际功能、布局和多内核支持。
+**0.3.0 本地开发候选版，尚未发布。** 既有源码仓库保持公开，安装发行版为草稿；新代码未推送，自动发布暂停。
 
-新的本地后端固定于 BrowseForge v2.1.15（提交 fa9e0bb670e749706a9c8f2d4095333347d6c521），源码纳入 third_party/browseforge/。Envara 管理服务启动、私有本机连接和退出；桌面包包含编译后的 Go sidecar 和官方 Playwright driver/Node，用户无需另行安装 Go 或 Node.js。macOS arm64 的 .app、DMG 与 ZIP 已构建，打包一致性、归档完整性、本机启动、基本界面与迁移预览/取消已通过验收。
+本地后端基于固定的 BrowseForge v2.1.15（提交 fa9e0bb670e749706a9c8f2d4095333347d6c521），纳入 third_party/browseforge/ 并增加桌面补丁。应用管理私有本机服务，打包 sidecar、官方 Playwright driver/Node 与原生终端模块；最终安装包用户无需配置 Go 或 Node.js。
 
-| 内核 | 当前证据 |
+| 内核 | 按版本记录的原生证据 |
 | --- | --- |
-| CloakBrowser / Chromium | macOS arm64 新服务原生回归通过：手动身份、多环境隔离、Cookie/localStorage 持久化和认证 HTTP 代理 |
-| Camoufox / Firefox | macOS arm64 官方安装及可见会话通过，可与 Chromium 同时运行；手动身份、跨内核隔离和 localStorage 重启保留通过 |
-| BrowseForge Chromium | macOS arm64 Alpha 0.1.6 单项安装、可见会话、手动身份、截图与停止通过；仍为实验性内核 |
+| CloakBrowser / Chromium | 0.3.0 macOS arm64 原生回归 11 项通过：手动身份、多环境隔离、Cookie/localStorage 持久化、认证 HTTP 代理和迁移；另有 3 项临时会话时区检查 |
+| Camoufox / Firefox | 0.2.0 macOS arm64 官方安装及可见会话通过，可与 Chromium 同时运行；手动身份、跨内核隔离和 localStorage 重启保留通过。0.3.0 本轮尚未执行该内核 |
+| BrowseForge Chromium | 0.2.0 macOS arm64 Alpha 0.1.6 单项安装、可见会话、手动身份、截图与停止通过；仍为实验性内核，0.3.0 本轮尚未执行 |
 
-macOS Apple Silicon 是当前本地验证平台。冻结源码的原生回归 12 项通过，并通过 6 轮、12 个新 Cloak 环境的并行启动检查，每个仅打开一个测试标签页。新服务已通过重启、代理映射、脱敏导出和旧 Cookie/localStorage 复制迁移，备份与原配置不变均有实际证据。JavaScript 测试 65/65、Go 全包和 browser/API/MCP race 检查通过。桌面 UI 只读验收覆盖布局、表单与迁移预览/取消；真实用户资料的迁移、新增和启停未执行，全部 GUI 按钮也未逐项验收。macOS Intel、Windows 与 Linux 尚未实机验收。范围见 [能力矩阵](docs/capability-matrix.md)。
+macOS Apple Silicon 是当前验证平台。0.3.0 的 npm test **145/145** 通过，终端在 Electron 44.6.0 上完成 12 项真实 PTY 验收；直连实际出口、旧指纹兼容与包内终端检查亦通过。打包桌面已验证真实命令、放大恢复、复制 PTY、独立窗口、关闭副本保留原会话，以及关闭视图保留输出。Cloak 浏览器回归与临时会话时区有原生证据。0.2.0 的其他内核与并行启动结果保留为历史基线；其余 GUI、外部代理供应商和其他操作系统仍分别验收，范围见 [验证记录](docs/verification.md)。
+
+## 0.3.0 新增工作区能力
+
+- **真实网络出口与时区：**通过配置的认证 HTTP、HTTPS 或 SOCKS5 代理发出 HTTPS 请求，读取实际出口 IP、粗略城市和 IANA 时区；不把代理入口地址当出口。配置变化会让相关检测缓存失效。
+- **共用环境上下文：**浏览器与终端使用同一环境的网络、固定/自动时区解析规则。自动模式有代理时检测失败会拒绝启动；无代理时可明确使用本地时区回退，并显示来源。自动解析不会覆盖保存的手动配置。
+- **每环境终端：**可折叠 xterm 面板连接真实 PTY，支持本地工作目录、可调高度、放大/恢复、独立窗口和同环境多会话。终端原生操作仅在桌面模式使用，Web 预览禁用。
+- **独立工具配置与历史：**每环境拥有独立 HOME、XDG、Claude 配置目录和 shell 历史。不会直接继承宿主 API 密钥、SSH agent 或 shell/Node 启动钩子。
+
+SOCKS5 环境为支持 HTTP 代理的 CLI 提供本机随机认证 HTTP 桥。代理变量只对支持它们的命令行工具生效；localhost 明确直连，不代表强制路由全部程序。Claude 配置路径已接入，Claude 本身的安装、登录和远端请求尚未测试。
+
+复制终端会创建独立 PTY，沿用原会话启动时选择的工作目录、网络与时区；同一境舱共享工具配置和历史。它不追踪 shell 中手动 cd 后的目录，也不复制正在运行的命令或临时环境变量。折叠面板或关闭独立窗口只关闭视图，会话继续运行；「关闭会话」或退出应用才结束所属进程。
+
+配置隔离仍使用同一个操作系统用户的权限，不是文件或进程沙箱。IP 地理定位只能估算地域，不能得到住宅街道地址；环境或账号隔离也不保证避免服务封禁。
 
 ## 本轮接入范围
 
@@ -37,7 +50,7 @@ macOS Apple Silicon 是当前本地验证平台。冻结源码的原生回归 12
 
 原生后端的已通过项目见上表；分组、批量操作及其他桌面联动仍按 [验证记录](docs/verification.md) 分项验收。当前不能宣称已实现 BrowseForge 的完整功能对等。
 
-代理检查只确认 TCP 端口可达。内置 VLESS 客户端、多人协作和云同步尚未实现；VLESS 等协议可由外部客户端提供 HTTP/SOCKS5 端口。指纹效果取决于内核、系统、字体、硬件和目标网站，Envara 不承诺通过所有检测站点。
+0.3.0 的出口检查使用实际 HTTPS 请求，成功需得到有效公网 IP 与时区；失败不会伪造成功或转为直连。内置 VLESS 客户端、多人协作和云同步尚未实现；VLESS 等协议可由外部客户端提供 HTTP/SOCKS5 端口。指纹效果取决于内核、系统、字体、硬件和目标网站，Envara 不承诺通过所有检测站点。
 
 ## 本地开发
 
@@ -48,7 +61,7 @@ npm ci
 npm run desktop
 ~~~
 
-desktop 会先运行 backend:prepare，编译固定版本 Go 后端并准备配套 driver，再打开桌面开发界面。首次准备所需资源需要联网；浏览器内核另由用户主动安装。
+desktop 会先运行 native:prepare 验证 Electron 原生 PTY，再运行 backend:prepare 构建后端与 driver，然后打开开发界面。首次准备需要联网；浏览器内核另由用户主动安装。原生模块不兼容时从源码重建，需要目标平台的编译工具。
 
 构建后运行桌面应用：
 
@@ -66,7 +79,7 @@ npm run build
 npm run test:sites
 ~~~
 
-test:sites 检查生成的文件，所以先运行 build。旧 test:smoke 覆盖直接驱动 CloakBrowser 的路径；test:sidecar 是新服务原生验收入口，其结果见验证记录。候选安装包构建命令仍需最终闭环验收，当前没有正式 0.2.0 下载版。
+start 也会执行原生 PTY 准备。test:sites 检查生成的文件，所以先运行 build。旧 test:smoke 覆盖直接驱动路径，test:sidecar 覆盖本地浏览器服务；真实 PTY 验收由 scripts/terminal-smoke.mjs 执行。最终结果见验证记录，当前没有公开正式 0.3.0 下载版。
 
 ## 旧工作区与配置导出
 

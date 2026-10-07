@@ -105,3 +105,36 @@ func TestCloakNativePlatformSwitchUsesOSNameInsteadOfNavigatorValue(t *testing.T
 		})
 	}
 }
+
+func TestResolvedLaunchTimezoneWinsLaterGeoAndPreservesStoredLocalePersona(t *testing.T) {
+	for _, locale := range []string{"", "zh-CN"} {
+		p := &profile.Profile{
+			Fingerprint:     map[string]any{"timezone": "America/Los_Angeles", "screen.width": 1440, "screen.height": 900},
+			LaunchOverrides: &profile.LaunchOverrides{Timezone: "Asia/Singapore", Locale: locale, TargetOS: "windows"},
+		}
+		timezone, language, err := launchGeoOverrides(p, "Europe/London", "en-US")
+		if err != nil || timezone != "Asia/Singapore" {
+			t.Fatalf("resolved timezone was replaced by later GeoIP: %q %v", timezone, err)
+		}
+		wantLocale := locale
+		if wantLocale == "" {
+			wantLocale = "en-US"
+		}
+		if language != wantLocale {
+			t.Fatalf("locale inheritance/automatic choice=%q want %q", language, wantLocale)
+		}
+		for _, runtimeID := range []bfruntime.ID{bfruntime.CloakBrowser, bfruntime.BrowseForgeChromium} {
+			persona, err := buildChromiumLaunchPersona(p, runtimeID, "Win32", timezone, language, "", "arm64", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persona.Native.Locale.Timezone != "Asia/Singapore" || persona.Native.Locale.Locale != wantLocale || persona.Native.Platform.OS != "windows" || persona.Native.Screen.Width != 1440 {
+				t.Fatalf("launch-only timezone lost other persona fields: %+v", persona.Native)
+			}
+		}
+		camou := map[string]any{"timezone": "Europe/London", "locale:language": "en", "screen.width": 1440}
+		if err := applyCamoufoxLaunchOverrides(camou, p, "arm64"); err != nil || camou["timezone"] != "Asia/Singapore" || camou["screen.width"] != 1440 {
+			t.Fatalf("Firefox did not consume launch-only timezone while preserving fingerprint: %v %v", camou, err)
+		}
+	}
+}

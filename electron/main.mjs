@@ -7,35 +7,67 @@ import { EnvaraService } from './service.mjs';
 import { BrowserRuntime } from './runtime.mjs';
 import { SidecarManager } from './sidecar-manager.mjs';
 import { BrowseForgeService } from './browseforge-service.mjs';
+import { TerminalService } from './terminal-service.mjs';
+import { TerminalController, TERMINAL_METHODS } from './terminal-controller.mjs';
+import { resolveTerminalView, terminalViewSnapshot } from './terminal-view.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const isSmoke = process.env.ENVARA_SMOKE === '1' && !app.isPackaged;
 if (isSmoke && process.env.ENVARA_SMOKE_DATA) app.setPath('userData', process.env.ENVARA_SMOKE_DATA);
+// Development acceptance runs use an owned directory without touching real workspaces.
+if (!isSmoke && !app.isPackaged && process.env.ENVARA_DEV_DATA) {
+  if (!path.isAbsolute(process.env.ENVARA_DEV_DATA)) throw new Error('ENVARA_DEV_DATA must be an absolute path');
+  app.setPath('userData', path.resolve(process.env.ENVARA_DEV_DATA));
+}
 app.setName('Envara');
 const ownsLock = app.requestSingleInstanceLock();
 if (!ownsLock) app.quit();
 let window;
 let service;
 let sidecar;
+let terminal;
+let terminalController;
+const views = new Map();
+const terminalWindows = new Map();
 let quitting = false;
 let publishing = false;
 let needsPublish = false;
 const pendingImports = new Map();
 
+function workspaceSnapshot(value) {
+  if (!value || !Array.isArray(value.profiles) || !Array.isArray(value.proxies) || !value.system) return value;
+  return { ...value, system: { ...value.system, terminal: { supported: !!terminal, isolation: 'configuration', networkScope: 'proxy-aware-cli' } } };
+}
+
+async function shutdownOwnedServices() {
+  await terminal?.shutdown().catch(() => {});
+  if (service) await service.shutdown();
+  else await sidecar?.shutdown();
+}
+
 async function publish() {
-  if (!service || window?.isDestroyed()) return;
+  if (!service || !views.size) return;
   if (publishing) { needsPublish = true; return; }
   publishing = true;
   try {
-    const snapshot = await service.snapshot();
-    if (window && !window.isDestroyed()) window.webContents.send('envara:snapshot', snapshot);
+    const snapshot = workspaceSnapshot(await service.snapshot());
+    for (const { window: view, kind } of views.values()) if (!view.isDestroyed()) view.webContents.send('envara:snapshot', kind === 'terminal' ? terminalViewSnapshot(snapshot) : snapshot);
   } catch (error) { console.error('Unable to refresh workspace:', error.message); }
   finally { publishing = false; if (needsPublish) { needsPublish = false; void publish(); } }
 }
-const allowedMethods = new Set(['snapshot','createProfile','updateProfile','cloneProfile','deleteProfile','clearProfile','startProfile','stopProfile','focusProfile','saveProxy','deleteProxy','checkProxy','saveSettings','installEngine','importProfiles','cancelImport','exportProfiles','openDataDirectory','openDocumentation','previewLegacyMigration','migrateLegacy','saveGroup','deleteGroup','clearGroupProxy','bulkProfiles','exportAutomationConfig']);
+const allowedMethods = new Set(['snapshot','createProfile','updateProfile','cloneProfile','deleteProfile','clearProfile','startProfile','stopProfile','focusProfile','saveProxy','deleteProxy','checkProxy','saveSettings','installEngine','importProfiles','cancelImport','exportProfiles','openDataDirectory','openDocumentation','previewLegacyMigration','migrateLegacy','saveGroup','deleteGroup','clearGroupProxy','bulkProfiles','exportAutomationConfig','openTerminalWindow', ...TERMINAL_METHODS]);
 
-async function handleCall(method, args = {}) {
+async function handleCall(method, args = {}, caller = window) {
+  if (quitting) throw Object.assign(new Error('应用正在退出。'), { code: 'APP_CLOSING' });
   if (!allowedMethods.has(method)) throw new Error('不支持的操作');
+  if (TERMINAL_METHODS.has(method)) {
+    if (!terminalController) throw new Error('当前运行路径尚未启用终端。');
+    return terminalController.dispatch(method, args, { window: caller });
+  }
+  if (method === 'openTerminalWindow') {
+    if (!terminalController) throw new Error('当前运行路径尚未启用终端。');
+    return terminalController.serialize(() => openTerminalWindow(args));
+  }
   if (method === 'openDocumentation') {
     const urls = { project: 'https://github.com/ink-scholar/Envara', 'runtime-license': 'https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md', automation: 'https://github.com/nczz/BrowseForge/blob/fa9e0bb670e749706a9c8f2d4095333347d6c521/docs/developer-integration.md', upstream: 'https://github.com/nczz/BrowseForge' };
     if (!Object.hasOwn(urls, args.target)) throw new Error('无效文档链接');
@@ -93,38 +125,93 @@ async function handleCall(method, args = {}) {
     }
     return service.call(method, sidecar ? { document: data, proxyMap: args.proxyMap ?? {} } : { profiles: data.profiles });
   }
-  return service.call(method, args);
+  return terminalController ? terminalController.protectMutation(method, args, () => service.call(method, args)) : service.call(method, args);
 }
 
-async function createWindow() {
-  window = new BrowserWindow({ width: 1500, height: 940, minWidth: 1120, minHeight: 720, title: 'Envara · 境舱', backgroundColor: '#1e1e1e', titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 17 }, icon: path.join(root, 'build/icon.png'), webPreferences: { preload: path.join(root, 'electron/preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, devTools: !app.isPackaged } });
-  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  window.webContents.on('will-navigate', (event, url) => {
+function registerView(view, kind, profileId = null) {
+  const contents = view.webContents;
+  views.set(contents, { window: view, kind, profileId });
+  view.on('closed', () => {
+    views.delete(contents);
+    for (const [key, item] of terminalWindows) if (item === view) terminalWindows.delete(key);
+    if (window === view) window = null;
+  });
+  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  contents.on('will-navigate', (event, url) => {
     const devUrl = process.env.ENVARA_DEV_URL;
     if (!devUrl || !url.startsWith(`${devUrl}/`)) event.preventDefault();
   });
-  window.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
-  window.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+  contents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+  contents.session.webRequest.onHeadersReceived((details, callback) => {
     const dev = !!process.env.ENVARA_DEV_URL && !app.isPackaged;
     const csp = `default-src 'self'; script-src 'self'${dev ? " 'unsafe-inline'" : ''}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'${dev ? ' ws://127.0.0.1:5173 http://127.0.0.1:5173' : ''}; object-src 'none'; base-uri 'self'`;
     callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [csp] } });
   });
-  if (process.env.ENVARA_DEV_URL && !app.isPackaged) await window.loadURL(process.env.ENVARA_DEV_URL);
-  else await window.loadFile(path.join(root, 'dist/client/index.html'));
+}
+
+async function loadView(view, query = {}) {
+  if (process.env.ENVARA_DEV_URL && !app.isPackaged) {
+    const url = new URL(process.env.ENVARA_DEV_URL);
+    for (const [key, value] of Object.entries(query)) if (value != null) url.searchParams.set(key, value);
+    await view.loadURL(url.href);
+  } else await view.loadFile(path.join(root, 'dist/client/index.html'), { query: Object.fromEntries(Object.entries(query).filter(([, value]) => value != null)) });
+}
+
+function viewOptions() {
+  return { backgroundColor: '#1e1e1e', titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 17 }, icon: path.join(root, 'build/icon.png'), webPreferences: { preload: path.join(root, 'electron/preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, devTools: !app.isPackaged } };
+}
+
+async function openTerminalWindow(args) {
+  if (!terminal) throw new Error('当前运行路径尚未启用终端。');
+  const target = resolveTerminalView(args, await service.snapshot(), await terminal.snapshot());
+  const key = JSON.stringify([target.profileId, target.sessionId ?? '']);
+  const previous = terminalWindows.get(key);
+  if (previous && !previous.isDestroyed()) {
+    // The window may have selected another tab since it was first opened.
+    // Reload only its view request; the owned terminal process keeps running.
+    await loadView(previous, { view: 'terminal', profileId: target.profileId, sessionId: target.sessionId });
+    if (previous.isMinimized()) previous.restore();
+    previous.show(); previous.focus();
+    return { ok: true, windowId: previous.id, profileId: target.profileId, sessionId: target.sessionId, reused: true };
+  }
+  if (terminalWindows.size >= 8) throw Object.assign(new Error('最多打开 8 个独立终端窗口。'), { code: 'TERMINAL_WINDOW_LIMIT' });
+  const view = new BrowserWindow({ ...viewOptions(), width: 1100, height: 760, minWidth: 640, minHeight: 480, title: `${target.name} · 终端 · Envara`, show: false });
+  terminalWindows.set(key, view); registerView(view, 'terminal', target.profileId);
+  try {
+    await loadView(view, { view: 'terminal', profileId: target.profileId, sessionId: target.sessionId });
+    if (quitting || view.isDestroyed()) throw new Error('应用正在退出。');
+    view.show(); view.focus();
+    return { ok: true, windowId: view.id, profileId: target.profileId, sessionId: target.sessionId };
+  } catch (failure) { if (!view.isDestroyed()) view.close(); throw failure; }
+}
+
+async function createWindow() {
+  window = new BrowserWindow({ ...viewOptions(), width: 1500, height: 940, minWidth: 1120, minHeight: 720, title: 'Envara · 境舱' });
+  registerView(window, 'workspace');
+  await loadView(window);
   if (isSmoke) {
     const { runSmoke } = await import('./smoke.mjs');
     await runSmoke({ app, window, service, runtime: service.runtime });
   }
 }
 
-app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } });
-app.on('window-all-closed', () => app.quit());
-app.on('activate', () => { if (!quitting && BrowserWindow.getAllWindows().length === 0) void createWindow(); });
+app.on('second-instance', () => {
+  if (window && !window.isDestroyed()) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); }
+  else if (!quitting) void createWindow();
+});
+async function quitWhenIdle() {
+  if (quitting || views.size) return;
+  const snapshot = await terminal?.snapshot();
+  if (snapshot?.profiles?.some(profile => profile.sessions?.some(session => ['starting', 'running', 'closing'].includes(session.status)))) return;
+  if (!views.size) app.quit();
+}
+app.on('window-all-closed', () => { void quitWhenIdle().catch(() => app.quit()); });
+app.on('activate', () => { if (!quitting && (!window || window.isDestroyed())) void createWindow(); });
 app.on('before-quit', event => {
-  if (quitting || (!service && !sidecar)) return;
+  if (quitting || (!service && !sidecar && !terminal)) return;
   event.preventDefault();
   quitting = true;
-  void (service ? service.shutdown() : sidecar.shutdown()).finally(() => app.quit());
+  void shutdownOwnedServices().finally(() => app.quit());
 });
 // Electron waits for the entry module to settle before emitting ready.
 // Waiting for ready with top-level await would deadlock app startup.
@@ -144,13 +231,39 @@ if (ownsLock) void app.whenReady().then(async () => {
       cancelInstall: () => sidecar.cancelInstall(),
       assertLegacyStopped: () => sidecar.assertLegacyStopped(), shutdown: () => sidecar.shutdown(),
     });
+    terminal = new TerminalService({
+      dataDir,
+      additionalExecutablePaths: [path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'backend', 'playwright-driver')],
+      resolveContext: id => service.resolveWorkspaceContext(id),
+      onEvent: event => {
+        for (const { window: view, kind, profileId } of views.values()) if (!view.isDestroyed() && (kind === 'workspace' || profileId === event.profileId)) view.webContents.send('envara:terminal-event', event);
+        if (event.type === 'exit' && !views.size) void quitWhenIdle().catch(() => app.quit());
+      },
+    });
+    terminalController = new TerminalController({ terminal, service, pickDirectory: async ({ currentPath }, context) => {
+      const parent = context?.window ?? window;
+      if (!parent || parent.isDestroyed()) throw new Error('终端窗口已关闭。');
+      parent.show(); parent.focus();
+      const choice = await dialog.showOpenDialog(parent, { title: '选择此境舱的工作目录', properties: ['openDirectory'], ...(currentPath ? { defaultPath: currentPath } : {}) });
+      return { canceled: choice.canceled, path: choice.filePaths[0] };
+    } });
   }
   ipcMain.handle('envara:call', async (event, request) => {
     try {
-      if (event.sender !== window?.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('不允许的请求来源');
+      const source = views.get(event.sender);
+      if (!source || source.window.isDestroyed() || event.senderFrame !== event.sender.mainFrame) throw new Error('不允许的请求来源');
       if (!request || typeof request.method !== 'string') throw new Error('无效请求');
-      const value = await handleCall(request.method, request.args);
-      return { ok: true, value };
+      if (source.kind === 'terminal' && !TERMINAL_METHODS.has(request.method) && !['snapshot', 'openTerminalWindow'].includes(request.method)) throw new Error('此窗口仅支持终端操作。');
+      if (source.kind === 'terminal') {
+        if (request.method === 'terminalSnapshot') request.args = { ...request.args, id: source.profileId };
+        if (['chooseWorkspaceDirectory', 'openTerminal', 'openTerminalWindow'].includes(request.method) && request.args?.id !== source.profileId) throw new Error('此窗口仅操作当前环境。');
+        if (['duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal'].includes(request.method)) {
+          const current = await terminal.snapshot({ id: source.profileId });
+          if (!current.profiles?.some(profile => profile.sessions?.some(session => session.sessionId === request.args?.sessionId))) throw new Error('该会话不属于此终端窗口。');
+        }
+      }
+      const value = workspaceSnapshot(await handleCall(request.method, request.args, source.window));
+      return { ok: true, value: source.kind === 'terminal' ? terminalViewSnapshot(value) : value };
     } catch (error) { return { ok: false, error: { message: error.message, code: error.code || 'ACTION_FAILED' } }; }
   });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
@@ -163,7 +276,7 @@ if (ownsLock) void app.whenReady().then(async () => {
   const refreshTimer = setInterval(() => { void publish(); }, 4000);
   refreshTimer.unref();
 }).catch(async error => {
-  await sidecar?.shutdown().catch(() => {});
+  await shutdownOwnedServices().catch(() => {});
   console.error(error);
   if (isSmoke) process.exitCode = 1;
   dialog.showErrorBox('境舱无法启动', error.message);

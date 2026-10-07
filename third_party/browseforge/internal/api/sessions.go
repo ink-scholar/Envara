@@ -21,10 +21,22 @@ import (
 
 func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProfileID string `json:"profile_id"`
+		ProfileID       string          `json:"profile_id"`
+		LaunchOverrides json.RawMessage `json:"launch_overrides"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
 		writeError(w, 400, "INVALID_BODY", err.Error())
+		return
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		writeError(w, 400, "INVALID_BODY", "request body must contain one JSON object")
+		return
+	}
+	timezone, err := decodeSessionLaunchTimezone(req.LaunchOverrides)
+	if err != nil {
+		writeError(w, 400, "INVALID_LAUNCH_OVERRIDES", err.Error())
 		return
 	}
 	p, err := h.store.Get(req.ProfileID)
@@ -32,7 +44,12 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "PROFILE_NOT_FOUND", err.Error())
 		return
 	}
-	sess, err := h.mgr.LaunchSession(p)
+	launchProfile, err := profileForSessionLaunch(p, timezone)
+	if err != nil {
+		writeError(w, 500, "PREPARE_LAUNCH_FAILED", err.Error())
+		return
+	}
+	sess, err := h.mgr.LaunchSession(launchProfile)
 	if err != nil {
 		writeSessionLaunchError(w, err)
 		return

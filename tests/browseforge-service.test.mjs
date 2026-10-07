@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { BrowseForgeService } from '../electron/browseforge-service.mjs';
+import { ProxyNetworkProbe } from '../electron/proxy-network.mjs';
 
 const descriptors = [
   { id: 'cloakbrowser', display_name: 'CloakBrowser', family: 'chromium', enabled: true, platform_supported: true, capabilities: { supports_seed_fingerprint: true, supports_structured_config: false } },
@@ -150,6 +151,87 @@ test('switching fixed locale and timezone to auto clears overrides and old finge
   assert.equal(client.profiles[0].fingerprint['navigator.language'], 'en-US');
 });
 
+test('fingerprint-only legacy timezone and locale stay fixed and launch without geolocation or storage changes', async (t) => {
+  let networkRequests = 0;
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => { networkRequests++; throw new Error('Geo must not be needed for a legacy manual timezone'); } });
+  const { service, client } = await fixture(t, { networkProbe });
+  const profile = await create(service, { timezone: 'Asia/Tokyo', locale: 'ja-JP' });
+  delete client.profiles[0].launch_overrides;
+  const before = structuredClone(client.profiles[0]);
+  const snapshot = (await service.snapshot()).profiles[0];
+  assert.equal(snapshot.timezone, 'Asia/Tokyo'); assert.equal(snapshot.timezoneMode, 'fixed'); assert.equal(snapshot.timezoneSource, 'manual');
+  assert.equal(snapshot.resolvedTimezone, 'Asia/Tokyo'); assert.equal(snapshot.locale, 'ja-JP'); assert.equal(snapshot.localeMode, 'fixed');
+  const context = await service.resolveWorkspaceContext(profile.id);
+  assert.equal(context.timezone, 'Asia/Tokyo'); assert.equal(context.timezoneSource, 'manual'); assert.equal(context.network, null);
+  const started = await service.call('startProfile', { id: profile.id });
+  assert.equal(started.profiles[0].resolvedTimezone, 'Asia/Tokyo');
+  assert.deepEqual(client.requests.find((request) => request.route === '/api/sessions' && request.method === 'POST').body.launch_overrides, { timezone: 'Asia/Tokyo' });
+  assert.equal(networkRequests, 0); assert.deepEqual(client.profiles[0], before, 'legacy fingerprint and stored overrides must remain untouched');
+});
+
+test('explicit launch overrides take precedence over conflicting legacy fingerprint fields', async (t) => {
+  let networkRequests = 0;
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => { networkRequests++; return networkGeo; } });
+  const { service, client } = await fixture(t, { networkProbe });
+  const profile = await create(service, { timezone: 'Asia/Tokyo', locale: 'ja-JP' });
+  client.profiles[0].launch_overrides = { timezone: 'Europe/Berlin', locale: 'de-DE' };
+  const snapshot = (await service.snapshot()).profiles[0];
+  assert.equal(snapshot.timezone, 'Europe/Berlin'); assert.equal(snapshot.locale, 'de-DE');
+  assert.equal(snapshot.timezoneMode, 'fixed'); assert.equal(snapshot.localeMode, 'fixed');
+  const context = await service.resolveWorkspaceContext(profile.id);
+  assert.equal(context.timezone, 'Europe/Berlin'); assert.equal(context.timezoneSource, 'manual'); assert.equal(networkRequests, 0);
+  assert.equal(client.profiles[0].fingerprint.timezone, 'Asia/Tokyo');
+});
+
+test('changing a legacy fingerprint timezone invalidates its previously resolved workspace context', async (t) => {
+  const { service, client } = await fixture(t);
+  const profile = await create(service, { timezone: 'Asia/Tokyo' });
+  delete client.profiles[0].launch_overrides;
+  await service.resolveWorkspaceContext(profile.id);
+  const previousSignature = service.workspaceContexts.get(profile.id).signature;
+  client.profiles[0].fingerprint.timezone = 'America/New_York';
+  const snapshot = (await service.snapshot()).profiles[0];
+  assert.equal(snapshot.resolvedTimezone, 'America/New_York', 'old context must not keep displaying the previous timezone');
+  assert.equal(snapshot.timezoneSource, 'manual');
+  const context = await service.resolveWorkspaceContext(profile.id);
+  assert.equal(context.timezone, 'America/New_York'); assert.notEqual(service.workspaceContexts.get(profile.id).signature, previousSignature);
+});
+
+test('legacy fixed to explicit automatic mode clears fingerprint defaults even when Go omits empty override fields', async (t) => {
+  let networkRequests = 0;
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => { networkRequests++; return networkGeo; } });
+  const { service, client } = await fixture(t, { networkProbe });
+  const profile = await create(service, { timezone: 'Asia/Tokyo', locale: 'ja-JP' });
+  delete client.profiles[0].launch_overrides;
+  await service.resolveWorkspaceContext(profile.id);
+  await service.call('updateProfile', { id: profile.id, profile: { timezone: '', locale: '' } });
+  assert.equal(client.profiles[0].fingerprint.timezone, undefined); assert.equal(client.profiles[0].fingerprint['navigator.language'], undefined);
+  for (const key of ['timezone', 'locale']) delete client.profiles[0].launch_overrides[key]; // Real Go omitempty representation.
+  const snapshot = (await service.snapshot()).profiles[0];
+  assert.equal(snapshot.timezone, null); assert.equal(snapshot.locale, null); assert.equal(snapshot.timezoneMode, 'auto'); assert.equal(snapshot.localeMode, 'auto');
+  assert.equal(snapshot.resolvedTimezone, null); assert.equal(snapshot.timezoneSource, null);
+  const context = await service.resolveWorkspaceContext(profile.id);
+  assert.equal(context.timezone, 'America/New_York'); assert.equal(context.timezoneSource, 'direct'); assert.equal(networkRequests, 1);
+  assert.equal(client.profiles[0].launch_overrides.timezone, undefined, 'resolution never writes a fixed timezone into automatic storage');
+});
+
+test('invalid legacy manual timezone reports validation failure and cannot silently become automatic', async (t) => {
+  let networkRequests = 0;
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => { networkRequests++; return networkGeo; } });
+  const { service, client } = await fixture(t, { networkProbe });
+  const profile = await create(service);
+  delete client.profiles[0].launch_overrides;
+  client.profiles[0].fingerprint.timezone = 'Mars/Olympus';
+  const snapshot = (await service.snapshot()).profiles[0];
+  assert.equal(snapshot.timezoneMode, 'fixed'); assert.equal(snapshot.resolvedTimezone, null);
+  await assert.rejects(service.resolveWorkspaceContext(profile.id), { code: 'INVALID_MANUAL_TIMEZONE' });
+  await assert.rejects(service.call('startProfile', { id: profile.id }), { code: 'INVALID_MANUAL_TIMEZONE' });
+  assert.match((await service.snapshot()).profiles[0].lastError, /手动时区无效/);
+  assert.equal(networkRequests, 0); assert.equal(client.requests.some((request) => request.route === '/api/sessions' && request.method === 'POST'), false);
+  client.profiles[0].fingerprint.timezone = 0;
+  await assert.rejects(service.resolveWorkspaceContext(profile.id), { code: 'INVALID_MANUAL_TIMEZONE' });
+});
+
 test('OS metrics hook gets actual backend profiles and only valid live measurements are displayed', async (t) => {
   let received, values = {};
   const { service, client } = await fixture(t, { getMetrics: (profiles) => { received = profiles; return values; } });
@@ -273,6 +355,112 @@ test('proxy and group bindings are preserved and missing region or proxy referen
   await assert.rejects(create(service, { proxyId: 'missing' }), { code: 'PROXY_NOT_FOUND' });
   const noRegion = (await service.call('saveProxy', { proxy: { name: '无地域', protocol: 'http', host: 'localhost', port: 8080 } })).proxies.find((item) => item.name === '无地域');
   await assert.rejects(create(service, { engine: 'browseforge-chromium', proxyId: noRegion.id }), { code: 'INVALID_PROXY_REGION' });
+});
+
+const networkGeo = { success: true, ip: '8.8.8.8', country: 'United States', country_code: 'US', region: 'New York', city: 'New York', timezone: { id: 'America/New_York' } };
+const savedProxy = async (service, patch = {}) => (await service.call('saveProxy', { proxy: { name: '认证出口', protocol: 'http', host: 'proxy.example', port: 8080, username: 'dummy-user', password: 'dummy-password', ...patch } })).proxies.find((proxy) => proxy.name === (patch.name ?? '认证出口'));
+
+test('egress checks cache saved configuration, exclude network cache from export, and do not save drafts', async (t) => {
+  let requests = 0;
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => { requests++; return networkGeo; } });
+  const { service } = await fixture(t, { networkProbe });
+  const proxy = await savedProxy(service);
+  const result = await service.call('checkProxy', { id: proxy.id });
+  assert.equal(result.scope, 'egress'); assert.equal(result.ip, '8.8.8.8'); assert.equal(result.ok, true);
+  assert.equal((await service.snapshot()).proxies[0].network.timezone, 'America/New_York');
+  const before = JSON.stringify(await service.store.read());
+  const draft = await service.call('checkProxy', { proxy: { protocol: 'socks5', host: 'draft.example', port: 1080, username: 'draft-user', password: 'draft-password', endpoint: 'https://evil.invalid/' } });
+  assert.equal(draft.ok, true); assert.equal(JSON.stringify(await service.store.read()), before);
+  await create(service, { proxyId: proxy.id });
+  const exported = await service.call('exportProfiles');
+  assert.equal(JSON.stringify(exported).includes('network'), false); assert.equal(JSON.stringify(result).includes('dummy-password'), false);
+  const updated = await savedProxy(service, { id: proxy.id, password: 'new-password' });
+  assert.equal(updated.network, null, 'credential edits invalidate cached egress');
+  assert.equal(requests, 2);
+});
+
+test('automatic timezone resolves an enforced group proxy and sends a transient launch override', async (t) => {
+  const inputs = [];
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => networkGeo });
+  const probe = networkProbe.probe.bind(networkProbe);
+  networkProbe.probe = (proxy, options) => { inputs.push({ proxy: structuredClone(proxy), options }); return probe(proxy, options); };
+  const { service, client } = await fixture(t, { networkProbe });
+  const ownProxy = await savedProxy(service, { name: '个人出口', host: 'own.example' });
+  const groupProxy = await savedProxy(service, { name: '分组出口', host: 'group.example', password: 'group-password' });
+  await service.call('saveGroup', { name: '强制分组', proxyId: groupProxy.id, proxyMode: 'enforced' });
+  const profile = await create(service, { group: '强制分组', proxyId: ownProxy.id, timezone: '' });
+  const started = await service.call('startProfile', { id: profile.id });
+  assert.equal(inputs[0].proxy.host, 'group.example'); assert.equal(inputs[0].options.force, true);
+  assert.deepEqual(client.requests.find((request) => request.route === '/api/sessions' && request.method === 'POST').body.launch_overrides, { timezone: 'America/New_York' });
+  assert.equal(client.profiles[0].launch_overrides.timezone, '', 'stored profile remains automatic');
+  assert.equal(started.profiles[0].resolvedTimezone, 'America/New_York'); assert.equal(started.profiles[0].timezoneSource, 'proxy');
+  assert.equal(started.profiles[0].network.ip, '8.8.8.8');
+  const context = await service.resolveWorkspaceContext(profile.id);
+  assert.equal(context.proxy.password, 'group-password'); assert.equal(context.proxySource, 'group'); assert.equal(context.timezone, 'America/New_York');
+  await assert.rejects(service.call('resolveWorkspaceContext', { id: profile.id }), { code: 'UNKNOWN_METHOD' });
+  await assert.rejects(service.call('getWorkspaceContext', { id: profile.id }), { code: 'UNKNOWN_METHOD' });
+  assert.equal(JSON.stringify(started.profiles[0].network).includes('group-password'), false);
+});
+
+test('failed proxy geolocation blocks automatic launch without direct fallback and manual timezone remains usable', async (t) => {
+  const inputs = [];
+  const networkProbe = new ProxyNetworkProbe({ endpoints: [{ url: 'https://ipwho.is/', source: 'ipwho.is', format: 'ipwho' }], transport: async () => { throw new Error('credentials dummy-user:dummy-password must not appear'); } });
+  const probe = networkProbe.probe.bind(networkProbe);
+  networkProbe.probe = (proxy, options) => { inputs.push(proxy); return probe(proxy, options); };
+  const { service, client } = await fixture(t, { networkProbe });
+  const proxy = await savedProxy(service);
+  const profile = await create(service, { proxyId: proxy.id, timezone: '' });
+  await assert.rejects(service.call('startProfile', { id: profile.id }), { code: 'AUTO_TIMEZONE_FAILED' });
+  assert.equal(client.requests.some((request) => request.route === '/api/sessions' && request.method === 'POST'), false);
+  assert.ok(inputs.every((input) => input?.host === 'proxy.example'));
+  const failed = (await service.snapshot()).profiles[0];
+  assert.equal(failed.status, 'error'); assert.equal(failed.network.ok, false); assert.match(failed.networkLastError, /HTTPS/);
+  assert.equal(JSON.stringify(failed).includes('dummy-password'), false);
+  await service.call('updateProfile', { id: profile.id, profile: { timezone: 'Asia/Shanghai' } });
+  const started = await service.call('startProfile', { id: profile.id });
+  assert.equal(inputs.length, 1, 'fixed timezone does not retry geolocation or overwrite manual settings');
+  assert.equal(started.profiles[0].resolvedTimezone, 'Asia/Shanghai'); assert.equal(started.profiles[0].timezoneSource, 'manual');
+  assert.equal(client.profiles[0].launch_overrides.timezone, 'Asia/Shanghai');
+});
+
+test('direct automatic lookup uses explicit direct routing and failure is labeled local without changing process timezone', async (t) => {
+  const inputs = [], originalTZ = process.env.TZ;
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => { throw new Error('offline'); } });
+  const probe = networkProbe.probe.bind(networkProbe);
+  networkProbe.probe = (proxy, options) => { inputs.push(proxy); return probe(proxy, options); };
+  const { service, client } = await fixture(t, { networkProbe });
+  const profile = await create(service, { timezone: '' });
+  const started = await service.call('startProfile', { id: profile.id });
+  assert.deepEqual(inputs, [null]); assert.equal(started.profiles[0].timezoneSource, 'local');
+  assert.equal(started.profiles[0].network.ok, false); assert.ok(started.profiles[0].networkLastError);
+  assert.equal(started.profiles[0].resolvedTimezone, Intl.DateTimeFormat().resolvedOptions().timeZone);
+  assert.equal(process.env.TZ, originalTZ); assert.equal(client.profiles[0].launch_overrides.timezone, '');
+});
+
+test('direct successful geolocation is labeled direct and automatic starts refresh previous checks', async (t) => {
+  let hits = 0;
+  const networkProbe = new ProxyNetworkProbe({ transport: async ({ agent }) => { assert.equal(agent, false); hits++; return { ...networkGeo, timezone: { id: hits === 1 ? 'America/New_York' : 'America/Los_Angeles' } }; } });
+  const { service, client } = await fixture(t, { networkProbe });
+  const profile = await create(service, { timezone: '' });
+  const initial = await service.resolveWorkspaceContext(profile.id);
+  assert.equal(initial.timezoneSource, 'direct'); assert.equal(initial.timezone, 'America/New_York');
+  const started = await service.call('startProfile', { id: profile.id });
+  assert.equal(hits, 2, 'browser launch must verify current egress instead of trusting an earlier check');
+  assert.equal(started.profiles[0].resolvedTimezone, 'America/Los_Angeles'); assert.equal(started.profiles[0].timezoneSource, 'direct');
+  assert.equal(client.profiles[0].launch_overrides.timezone, '');
+});
+
+test('a stale in-flight check cannot attach old egress information to an edited proxy', async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => { await gate; return networkGeo; } });
+  const { service } = await fixture(t, { networkProbe });
+  const proxy = await savedProxy(service);
+  const pending = service.call('checkProxy', { id: proxy.id });
+  while (!networkProbe.inflight.size) await new Promise((resolve) => setImmediate(resolve));
+  await savedProxy(service, { id: proxy.id, password: 'new-password' });
+  release(); await pending;
+  assert.equal((await service.snapshot()).proxies[0].network, null);
 });
 
 test('redacted export retains required proxy mapping and import never silently switches to direct', async (t) => {

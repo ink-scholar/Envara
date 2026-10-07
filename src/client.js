@@ -24,7 +24,7 @@ let state;
 try { state = JSON.parse(localStorage.getItem('envara.preview.v1')); } catch {}
 state ||= { profiles: initialProfiles, proxies: [{ id: 'preview-proxy', name: '本地代理', protocol: 'socks5', host: '127.0.0.1', port: 1080, username: '', password: '' }], settings: { closeBrowsersOnExit: true }, events: [] };
 const listeners = new Set();
-const snapshot = () => structuredClone({ ...state, engines, engine: engines[0], runtime: { message: catalogNotice }, system: { platform: 'darwin', appVersion: '0.2.0', dataDir: '桌面 App 中查看本地数据目录', preview: true } });
+const snapshot = () => structuredClone({ ...state, engines, engine: engines[0], runtime: { message: catalogNotice }, system: { platform: 'darwin', appVersion: '0.3.0', dataDir: '桌面 App 中查看本地数据目录', preview: true } });
 function commit() {
   localStorage.setItem('envara.preview.v1', JSON.stringify(state));
   const value = snapshot();
@@ -39,6 +39,7 @@ function download(data, filename) {
 }
 const preview = {
   isDesktop: false,
+  onTerminalEvent() { return () => {}; },
   subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
   async call(method, args = {}) {
     const p = state.profiles.find(item => item.id === args.id);
@@ -82,6 +83,8 @@ const preview = {
         window.open(urls[args.target], '_blank', 'noopener,noreferrer');
         return { ok: true };
       }
+      case 'terminalSnapshot': case 'chooseWorkspaceDirectory': case 'openTerminal': case 'writeTerminal': case 'resizeTerminal': case 'closeTerminal': case 'duplicateTerminal': case 'openTerminalWindow':
+        throw new Error('内置终端与本地工作目录需要境舱桌面应用。');
       case 'installEngine': case 'startProfile': case 'stopProfile': case 'focusProfile': case 'checkProxy': case 'openDataDirectory':
         throw new Error('当前是界面预览，未安装或连接浏览器内核；请打开 Envara 桌面 App 使用浏览器与本地功能。');
       default: throw new Error('不支持的操作');

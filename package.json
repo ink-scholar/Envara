@@ -1,6 +1,6 @@
 {
   "name": "envara",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Envara 境舱 — an open-source desktop workspace for isolated fingerprint browser environments",
   "author": "ink-scholar",
   "license": "MIT",
@@ -74,6 +74,7 @@
       "allowToChangeInstallationDirectory": true
     },
     "linux": {
+      "maintainer": "ink-scholar <77475229+ink-scholar@users.noreply.github.com>",
       "target": [
         "AppImage",
         "deb"

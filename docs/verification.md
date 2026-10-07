@@ -1,6 +1,6 @@
-# 0.1.0 Alpha 验证记录
+# 0.1.1 Alpha 验证记录
 
-记录日期：2026-10-07。当前本机验证平台为 macOS Apple Silicon；浏览器基线为 CloakBrowser Chromium `145.0.7632.109.2`，包装层为 `cloakbrowser@0.5.12`。
+记录日期：2026-10-07。0.1.1 补充 Linux 发布维护者元数据，浏览器功能代码与完成原生验收的 0.1.0 相同。当前本机验证平台为 macOS Apple Silicon；浏览器基线为 CloakBrowser Chromium `145.0.7632.109.2`，包装层为 `cloakbrowser@0.5.12`。
 
 ## 已确认的结果
 

@@ -1,0 +1,54 @@
+{
+  "port": "19280",
+  "public_base_url": "",
+  "profiles_dir": "profiles",
+  "data_dir": "data",
+  "log_file": "logs/server.log",
+  "default_runtime_id": "camoufox",
+  "runtimes": {
+    "camoufox": {
+      "enabled": true,
+      "binary_path": "camoufox/camoufox",
+      "family": "firefox",
+      "display_name": "Camoufox"
+    },
+    "cloakbrowser": {
+      "enabled": false,
+      "binary_path": "",
+      "family": "chromium",
+      "display_name": "CloakBrowser",
+      "settings": {
+        "safe_gpu": false,
+        "auto_safe_gpu_fallback": false,
+        "isolated_runtime_cache": false,
+        "repair_transient_cache_on_launch_failure": false,
+        "fingerprint_platform": "auto",
+        "fonts_dir": "",
+        "storage_quota_mb": 0,
+        "target_platform_policy": "warn",
+        "extra_args": []
+      }
+    },
+    "browseforge-chromium": {
+      "enabled": true,
+      "binary_path": "browsers/browseforge-chromium/chrome",
+      "skip_auto_update": false,
+      "family": "chromium",
+      "display_name": "BrowseForge Chromium",
+      "settings": {
+        "safe_gpu": false,
+        "auto_safe_gpu_fallback": true,
+        "isolated_runtime_cache": true,
+        "repair_transient_cache_on_launch_failure": true,
+        "fingerprint_platform": "auto",
+        "fonts_dir": "",
+        "storage_quota_mb": 0,
+        "target_platform_policy": "warn",
+        "native_mode": "enabled",
+        "plugins_pdf": "enabled",
+        "extra_args": []
+      }
+    }
+  },
+  "fingerprint_dir": "data"
+}

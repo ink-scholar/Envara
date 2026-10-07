@@ -18,10 +18,17 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+          cache-dependency-path: third_party/browseforge/go.sum
       - run: npm ci
       - run: npm run build
       - run: npm test
       - run: npm run test:sites
+      - run: go test ./...
+        working-directory: third_party/browseforge
+      - run: npm run backend:prepare
       - name: Check build contract
         run: |
           test -f dist/client/index.html

@@ -32,10 +32,16 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+          cache-dependency-path: third_party/browseforge/go.sum
       - run: npm ci
       - run: npm run build
       - run: npm test
       - run: npm run test:sites
+      - run: go test ./...
+        working-directory: third_party/browseforge
       - name: Build installer
         run: npm run dist:${{ matrix.target }} -- --publish never
       - uses: actions/upload-artifact@v4
@@ -65,7 +71,7 @@ jobs:
         run: |
           cd artifacts
           sha256sum * > SHA256SUMS
-      - name: Publish release assets
+      - name: Prepare draft release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
@@ -76,6 +82,6 @@ jobs:
             if [[ "$RELEASE_TAG" == v0.* || "$RELEASE_TAG" == *-* ]]; then
               flags+=(--prerelease)
             fi
-            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes "${flags[@]}"
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --generate-notes "${flags[@]}"
           fi
           gh release upload "$RELEASE_TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber

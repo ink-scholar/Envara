@@ -1,0 +1,464 @@
+import { randomInt, randomUUID } from 'node:crypto';
+import { access, cp, lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import net from 'node:net';
+import path from 'node:path';
+import { performance } from 'node:perf_hooks';
+import { EnvaraStore } from './store.mjs';
+
+const PROFILE_KEYS = new Set(['name', 'group', 'notes', 'engine', 'platform', 'seed', 'locale', 'timezone', 'width', 'height', 'startUrl', 'proxyId', 'tags', 'fingerprint']);
+const now = () => new Date().toISOString();
+const unwrap = (response) => response?.data;
+const array = (response) => Array.isArray(unwrap(response)) ? unwrap(response) : [];
+const encoded = (value) => encodeURIComponent(identifier(value));
+function error(message, code = 'VALIDATION_ERROR') { return Object.assign(new Error(message), { code }); }
+function identifier(value) { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(value)) throw error('无效的环境标识。'); return value; }
+function object(value, label) { if (!value || typeof value !== 'object' || Array.isArray(value)) throw error(`${label}必须是对象。`); return value; }
+function fingerprintConfig(value) {
+  object(value, '指纹');
+  const validate = (entry) => {
+    if (entry && typeof entry === 'object') for (const [key, child] of Object.entries(entry)) {
+      if (['__proto__', 'constructor', 'prototype'].includes(key) || /password|username|credential|token|secret/i.test(key)) throw error('指纹配置不能包含凭据或保留字段。');
+      validate(child);
+    }
+    else if (entry != null && !['string', 'number', 'boolean'].includes(typeof entry)) throw error('指纹配置必须是 JSON 数据。');
+  };
+  if (JSON.stringify(value).length > 200000) throw error('指纹配置过大。');
+  validate(value);
+  return structuredClone(value);
+}
+function text(value, label, maximum = 100, optional = false) {
+  if (optional && value == null) return '';
+  if (typeof value !== 'string' || value.includes('\0') || value.length > maximum || (!optional && !value.trim())) throw error(`${label}格式无效。`);
+  return value.trim();
+}
+function number(value, label, minimum, maximum) { if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw error(`${label}必须为 ${minimum} 至 ${maximum} 的整数。`); return value; }
+function proxyConfig(input) {
+  object(input, '网络出口');
+  const protocol = input.protocol ?? input.type;
+  if (!['http', 'https', 'socks5'].includes(protocol)) throw error('代理协议仅支持 HTTP、HTTPS 和 SOCKS5。');
+  let host = text(input.host, '代理主机', 253);
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+  if (/[/@\s?#]/.test(host) || (host.includes(':') && net.isIP(host) !== 6)) throw error('代理主机仅填写域名或 IP。');
+  if (typeof input.port !== 'number' && !(typeof input.port === 'string' && /^\d+$/.test(input.port))) throw error('代理端口必须为整数。');
+  const port = Number(input.port);
+  number(port, '代理端口', 1, 65535);
+  for (const key of ['username', 'password']) if (input[key] != null && (typeof input[key] !== 'string' || input[key].length > 2048 || input[key].includes('\0'))) throw error('代理凭据格式无效。');
+  const region = text(input.region ?? '', '代理地域', 64, true);
+  return { protocol, host, port, username: input.username ?? '', password: input.password ?? '', region };
+}
+const upstreamProxy = (proxy) => proxy ? { type: proxy.protocol, host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password, ...(proxy.region ? { region: proxy.region } : {}) } : null;
+const sameProxy = (a, b) => JSON.stringify(proxyConfig(a)) === JSON.stringify(proxyConfig(b));
+function event(workspace, type, message, profileId) { workspace.events.unshift({ id: randomUUID(), time: now(), type, message, ...(profileId ? { profileId } : {}) }); workspace.events.length = Math.min(200, workspace.events.length); }
+function isClosed(errorValue) { return /(?:target|page|browser|context|connection).*(?:has been closed|is closed)|TargetClosed|session not found/i.test(errorValue?.message ?? ''); }
+const metric = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+async function dataSize(directory) {
+  try {
+    let size = 0;
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) { const part = await dataSize(path.join(directory, entry.name)); if (part === null) return null; size += part; }
+      else if (entry.isFile()) size += (await stat(path.join(directory, entry.name))).size;
+    }
+    return size;
+  } catch (value) { return value.code === 'ENOENT' ? 0 : null; }
+}
+
+/** Native manager for the pinned BrowseForge HTTP contract. Legacy files are never opened for writing. */
+export class BrowseForgeService {
+  constructor(dataDir, client, system = {}, onChange = () => {}, options = {}) {
+    if (!path.isAbsolute(dataDir)) throw error('应用数据目录必须是绝对路径。');
+    this.dataDir = path.resolve(dataDir);
+    this.client = client;
+    this.system = { platform: process.platform, appVersion: '0.2.0', ...system, dataDir: this.dataDir };
+    this.options = options;
+    if (options.profilesDir && !path.isAbsolute(options.profilesDir)) throw error('BrowseForge 资料目录必须是绝对路径。');
+    this.profilesDir = path.resolve(options.profilesDir ?? path.join(this.dataDir, 'browseforge', 'profiles'));
+    const legacyProfilesDir = path.join(this.dataDir, 'profiles');
+    if (this.profilesDir === legacyProfilesDir || this.profilesDir.startsWith(`${legacyProfilesDir}${path.sep}`)) throw error('BrowseForge 必须使用新的资料目录，不能覆盖旧环境。');
+    this.store = new EnvaraStore(path.join(this.dataDir, 'browseforge-manager'));
+    this.onChange = onChange;
+    this.queue = Promise.resolve();
+    this.profileQueues = new Map();
+    this.installingEngine = null;
+    this.starting = new Set();
+    this.lastErrors = new Map();
+    this.previews = new Map();
+    this.previewAttempts = new Map();
+    this.previewCapturedAt = new Map();
+    this.previewInFlight = new Map();
+    this.closed = false;
+    this.ready = this.store.ready;
+  }
+
+  changed() { try { Promise.resolve(this.onChange()).catch(() => {}); } catch {} }
+  request(method, route, body, options) { return this.client.request(method, route, body, options); }
+  serialize(operation) { const result = this.queue.then(operation); this.queue = result.catch(() => {}); return result; }
+  serializeMutation(operation) { return this.serialize(() => { if (this.closed) throw error('应用正在退出。', 'APP_CLOSING'); if (this.installingEngine) throw error('内核安装期间暂时无法修改工作区。', 'ENGINE_INSTALL_BUSY'); return operation(); }); }
+  profileSerialize(profileId, operation) {
+    identifier(profileId);
+    const result = (this.profileQueues.get(profileId) ?? Promise.resolve()).then(operation);
+    const settled = result.catch(() => {});
+    this.profileQueues.set(profileId, settled);
+    settled.then(() => { if (this.profileQueues.get(profileId) === settled) this.profileQueues.delete(profileId); });
+    return result;
+  }
+  async remote() {
+    const results = await Promise.all([this.request('GET', '/api/profiles'), this.request('GET', '/api/sessions'), this.request('GET', '/api/runtimes'), this.request('GET', '/api/groups')]);
+    return { profiles: array(results[0]), sessions: array(results[1]), descriptors: array(results[2]), defaultEngine: results[2].default_runtime_id ?? null, groups: array(results[3]) };
+  }
+  directory(profile) {
+    const target = path.join(this.profilesDir, identifier(profile.id));
+    if (profile.profile_dir && path.resolve(profile.profile_dir) !== target) throw error('环境资料目录不属于境舱管理的 BrowseForge 目录。', 'UNSAFE_PROFILE_PATH');
+    return target;
+  }
+  async checkedDirectory(profile) {
+    const target = this.directory(profile);
+    const root = await realpath(this.profilesDir);
+    let legacyRoot;
+    try { legacyRoot = await realpath(path.join(this.dataDir, 'profiles')); } catch (value) { if (value.code !== 'ENOENT') throw value; }
+    if (legacyRoot && (root === legacyRoot || root.startsWith(`${legacyRoot}${path.sep}`))) throw error('新的 BrowseForge 目录不能链接到旧浏览资料。', 'UNSAFE_PROFILE_PATH');
+    const info = await lstat(target);
+    if (!info.isDirectory() || info.isSymbolicLink() || await realpath(target) !== path.join(root, profile.id)) throw error('环境资料目录包含不安全的链接，操作已取消。', 'UNSAFE_PROFILE_PATH');
+    return target;
+  }
+  async health(session) {
+    try {
+      const response = await this.request('POST', `/api/sessions/${encoded(session.session_id)}/eval`, { script: '({url:location.href,language:navigator.language,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,width:screen.width,height:screen.height,platform:navigator.platform})' });
+      return { alive: true, observed: unwrap(response) };
+    } catch (value) { return { alive: isClosed(value) ? false : null, error: value.message }; }
+  }
+  async engines(descriptors) {
+    const managed = await this.options.getEngineStates?.() ?? {};
+    return Promise.all(descriptors.map(async (descriptor) => {
+      let installed = false;
+      const state = Array.isArray(managed) ? managed.find((item) => item.id === descriptor.id) ?? {} : managed[descriptor.id] ?? {};
+      const binaryPath = state.binaryPath ?? descriptor.binary_path;
+      if (binaryPath && path.isAbsolute(binaryPath)) { try { const info = await stat(binaryPath); await access(binaryPath, process.platform === 'win32' ? constants.F_OK : constants.X_OK); installed = info.isFile(); } catch {} }
+      return { id: descriptor.id, displayName: descriptor.display_name, family: descriptor.family, enabled: !!descriptor.enabled, supported: !!descriptor.platform_supported, installed, installing: !!state.installing, version: installed ? state.version ?? null : null, progress: state.progress ?? null, experimental: descriptor.id === 'browseforge-chromium', capabilities: descriptor.capabilities ?? {}, error: state.error ?? descriptor.unsupported_reason ?? null, binaryPath: installed ? binaryPath : null };
+    }));
+  }
+  proxies(workspace, remote) {
+    const result = [...workspace.proxies];
+    for (const profile of remote.profiles) if (profile.proxy && !result.some((proxy) => sameProxy(proxy, profile.proxy))) result.push({ id: `inline_${profile.id}`, name: `${profile.name} · 配置内代理`, ...proxyConfig(profile.proxy), source: 'profile', profileId: profile.id });
+    for (const group of remote.groups) if (group.proxy && !result.some((proxy) => sameProxy(proxy, group.proxy))) result.push({ id: `group_${Buffer.from(group.name).toString('hex').slice(0, 70)}`, name: `${group.name} · 分组代理`, ...proxyConfig(group.proxy), source: 'group', groupName: group.name });
+    return result;
+  }
+  effectiveProxy(profile, groups) {
+    const group = groups.find((item) => item.name === profile.group);
+    if (group?.proxy_mode === 'enforced' && group.proxy) return { proxy: group.proxy, source: 'group', mode: 'enforced' };
+    if (profile.proxy) return { proxy: profile.proxy, source: 'profile', mode: group?.proxy_mode ?? 'default' };
+    return { proxy: group?.proxy ?? null, source: group?.proxy ? 'group' : 'direct', mode: group?.proxy_mode ?? 'default' };
+  }
+  async snapshot() {
+    await this.ready;
+    const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
+    const proxies = this.proxies(workspace, remote);
+    const engines = await this.engines(remote.descriptors);
+    const knownIds = new Set(remote.profiles.map((profile) => profile.id));
+    for (const profileId of new Set([...this.previews.keys(), ...this.previewInFlight.keys(), ...this.previewAttempts.keys(), ...this.previewCapturedAt.keys()])) if (!knownIds.has(profileId)) this.resetPreview(profileId);
+    let measurements = {};
+    try { measurements = await this.options.getMetrics?.(remote.profiles) ?? {}; } catch { /* Unavailable OS measurements remain unknown. */ }
+    const profiles = await Promise.all(remote.profiles.map(async (profile) => {
+      const metadata = workspace.profiles.find((item) => item.id === profile.id) ?? {};
+      const session = remote.sessions.find((item) => item.profile_id === profile.id);
+      const health = session ? await this.health(session) : null;
+      const effective = this.effectiveProxy(profile, remote.groups);
+      const proxyId = effective.proxy ? proxies.find((proxy) => sameProxy(proxy, effective.proxy))?.id ?? null : null;
+      const fingerprint = profile.fingerprint ?? {};
+      const launchOverrides = profile.launch_overrides ?? {};
+      const locale = Object.hasOwn(launchOverrides, 'locale') ? launchOverrides.locale : fingerprint['navigator.language'] ?? null;
+      const timezone = Object.hasOwn(launchOverrides, 'timezone') ? launchOverrides.timezone : fingerprint.timezone ?? null;
+      const status = this.starting.has(profile.id) ? 'starting' : session && health?.alive === true ? 'running' : session && health?.alive === null ? 'error' : this.lastErrors.has(profile.id) ? 'error' : 'stopped';
+      const measurement = status === 'running' ? measurements[profile.id] ?? {} : {};
+      if (status === 'running') await this.capture(profile.id, session.session_id, { force: false });
+      else this.resetPreview(profile.id);
+      let bytes = null;
+      try { bytes = await dataSize(path.join(await this.checkedDirectory(profile), 'browser-data')); } catch {}
+      return { id: profile.id, name: profile.name, group: profile.group ?? '', tags: profile.tags ?? [], notes: metadata.notes ?? '', engine: profile.runtime_id, platform: launchOverrides.target_os || profile.identity?.target_os || null, seed: profile.fingerprint_seed || null, locale, timezone, localeMode: launchOverrides.locale ? 'fixed' : 'auto', timezoneMode: launchOverrides.timezone ? 'fixed' : 'auto', launchOverrides, width: fingerprint['screen.width'] ?? null, height: fingerprint['screen.height'] ?? null, fingerprint, startUrl: metadata.startUrl ?? 'about:blank', proxyId, profileProxyId: profile.proxy ? proxies.find((proxy) => sameProxy(proxy, profile.proxy))?.id ?? null : null, proxySource: effective.source, proxyMode: effective.mode, createdAt: metadata.createdAt ?? profile.created_at, updatedAt: metadata.updatedAt ?? profile.created_at, lastLaunchedAt: metadata.lastLaunchedAt ?? null, status, lastError: health?.alive === null ? health.error : this.lastErrors.get(profile.id) ?? null, dataBytes: bytes, cpuPercent: metric(measurement.cpuPercent), memoryBytes: metric(measurement.memoryBytes), observed: health?.observed ?? null, ...(this.previews.has(profile.id) && status === 'running' ? { screenshot: this.previews.get(profile.id), screenshotCapturedAt: this.previewCapturedAt.get(profile.id) } : {}) };
+    }));
+    let legacyMigration;
+    try { const migration = await this.previewLegacyMigration(); legacyMigration = { available: migration.detected && migration.profiles.some((profile) => !profile.migrated), count: migration.profiles.filter((profile) => !profile.migrated).length, migrated: migration.profiles.filter((profile) => profile.migrated).length, ...migration }; }
+    catch (value) { legacyMigration = { available: false, count: 0, migrated: 0, error: value.message }; }
+    const connection = await this.options.getConnectionInfo?.() ?? {};
+    const publicConnection = Object.fromEntries(['apiUrl', 'mcpUrl', 'status', 'version', 'sourceCommit'].filter((key) => Object.hasOwn(connection, key)).map((key) => [key, connection[key]]));
+    return { profiles: profiles.sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '')), proxies, groups: remote.groups.map((group) => ({ ...group, proxyId: group.proxy ? proxies.find((proxy) => sameProxy(proxy, group.proxy))?.id ?? null : null, proxy: undefined })), engines, engine: engines.find((item) => item.id === remote.defaultEngine) ?? engines[0] ?? {}, settings: { ...workspace.settings, defaultEngine: remote.defaultEngine }, events: workspace.events, legacyMigration, system: this.system, integration: { backup: { configExport: true, browserDataExport: false, credentialExport: false }, mcp: { supported: true, authentication: 'bearer', ...publicConnection } } };
+  }
+  find(remote, profileId) { identifier(profileId); const profile = remote.profiles.find((item) => item.id === profileId); if (!profile) throw error('环境不存在。', 'PROFILE_NOT_FOUND'); return profile; }
+  async assertStopped(remote, profileId) {
+    if (this.starting.has(profileId)) throw error('请先停止环境。', 'PROFILE_RUNNING');
+    const session = remote.sessions.find((item) => item.profile_id === profileId);
+    if (session) { if ((await this.health(session)).alive !== false) throw error('请先停止环境。', 'PROFILE_RUNNING'); await this.request('DELETE', `/api/sessions/${encoded(session.session_id)}`); }
+  }
+  normalize(input, descriptor, workspace, remote, existing = null) {
+    object(input, '环境配置');
+    for (const key of Object.keys(input)) if (!PROFILE_KEYS.has(key)) throw error(`不支持的环境字段：${key}`);
+    const name = text(input.name ?? existing?.name, '环境名称');
+    const group = text(input.group ?? existing?.group ?? '', '分组', 100, true);
+    if (!descriptor || !descriptor.platform_supported) throw error('当前平台不支持所选浏览器内核。', 'UNSUPPORTED_ENGINE');
+    const payload = { name, group, runtime_id: descriptor.id };
+    const launchOverrides = { ...(existing?.launch_overrides ?? {}) };
+    if (input.tags != null) { if (!Array.isArray(input.tags) || input.tags.length > 30) throw error('标签格式无效。'); payload.tags = input.tags.map((tag) => text(tag, '标签', 60)); }
+    const platform = input.platform ?? existing?.identity?.target_os;
+    if (platform != null) { if (!['macos', 'windows', 'linux'].includes(platform)) throw error('指纹平台无效。'); payload.identity = { ...(existing?.identity ?? {}), target_os: platform }; launchOverrides.target_os = platform; }
+    const fingerprint = { ...(existing?.fingerprint ?? {}) };
+    if (input.fingerprint != null) Object.assign(fingerprint, fingerprintConfig(input.fingerprint));
+    if (input.locale === '') {
+      launchOverrides.locale = '';
+      for (const key of ['navigator.language', 'navigator.languages', 'locale:language', 'locale:region']) delete fingerprint[key];
+    } else if (input.locale != null) { let locale; try { locale = Intl.getCanonicalLocales(input.locale)[0]; } catch { throw error('语言代码无效。'); } if (!locale) throw error('语言代码无效。'); fingerprint['navigator.language'] = locale; fingerprint['navigator.languages'] = [...new Set([locale, locale.split('-')[0]])]; const parts = locale.split('-'); fingerprint['locale:language'] = parts[0]; if (parts[1]) fingerprint['locale:region'] = parts[1]; launchOverrides.locale = locale; }
+    if (input.timezone === '') { launchOverrides.timezone = ''; delete fingerprint.timezone; }
+    else if (input.timezone != null) { try { new Intl.DateTimeFormat('en', { timeZone: input.timezone }); } catch { throw error('时区无效。'); } fingerprint.timezone = input.timezone; launchOverrides.timezone = input.timezone; }
+    if (Object.keys(launchOverrides).length) payload.launch_overrides = launchOverrides;
+    if (input.width != null) fingerprint['screen.width'] = number(input.width, '屏幕宽度', 800, 7680);
+    if (input.height != null) fingerprint['screen.height'] = number(input.height, '屏幕高度', 600, 4320);
+    if (Object.keys(fingerprint).length || existing?.fingerprint != null || input.fingerprint != null) payload.fingerprint = fingerprint;
+    if (descriptor.capabilities?.supports_seed_fingerprint) payload.fingerprint_seed = input.seed != null ? number(input.seed, '指纹种子', 1, 4294967295) : existing?.fingerprint_seed || randomInt(1, 4294967295);
+    else if (input.seed != null) throw error('所选内核使用结构化指纹，不支持种子参数。', 'UNSUPPORTED_CAPABILITY');
+    if (existing && input.seed != null && payload.fingerprint_seed !== existing.fingerprint_seed) throw error('现有环境种子不可修改，请克隆新环境。');
+    let proxy = existing?.proxy ?? null;
+    if (Object.hasOwn(input, 'proxyId')) { if (input.proxyId === null || input.proxyId === '') proxy = null; else { const selected = this.proxies(workspace, remote).find((item) => item.id === input.proxyId); if (!selected) throw error('指定代理不存在，不能自动切换为直接连接。', 'PROXY_NOT_FOUND'); proxy = upstreamProxy(selected); } payload.proxy = proxy; }
+    const effective = this.effectiveProxy({ ...existing, ...payload, proxy }, remote.groups);
+    if (descriptor.id === 'browseforge-chromium' && effective.proxy && !effective.proxy.region) throw error('BrowseForge Chromium 使用代理时，需要填写地域标签，例如 us-ny。', 'INVALID_PROXY_REGION');
+    return payload;
+  }
+  metadata(input, profileId, existing = {}) {
+    const startUrl = input.startUrl ?? existing.startUrl ?? 'about:blank';
+    if (startUrl !== 'about:blank') { let url; try { url = new URL(startUrl); } catch { throw error('启动网址无效。'); } if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw error('启动网址仅支持不含凭据的 HTTP 或 HTTPS。'); }
+    return { ...existing, id: profileId, notes: text(input.notes ?? existing.notes ?? '', '备注', 4000, true), startUrl, updatedAt: now() };
+  }
+  async call(method, args = {}) {
+    await this.ready;
+    if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
+    object(args, '操作参数');
+    if (['snapshot', 'getSnapshot'].includes(method)) return this.snapshot();
+    const direct = new Set(['checkProxy', 'exportProfiles', 'previewLegacyMigration']);
+    const mutations = new Set(['createProfile', 'updateProfile', 'cloneProfile', 'deleteProfile', 'clearProfile', 'startProfile', 'stopProfile', 'focusProfile', 'saveProxy', 'deleteProxy', 'saveGroup', 'deleteGroup', 'clearGroupProxy', 'bulkProfiles', 'importProfiles', 'migrateLegacy', 'saveSettings', 'installEngine']);
+    if (!direct.has(method) && !mutations.has(method)) throw error('不支持的操作。', 'UNKNOWN_METHOD');
+    if (direct.has(method)) return this[method](args);
+    if (this.installingEngine && method !== 'installEngine') throw error('内核安装期间暂时无法修改工作区。', 'ENGINE_INSTALL_BUSY');
+    const lifecycle = ['startProfile', 'stopProfile', 'focusProfile'].includes(method);
+    const result = lifecycle ? await this.profileSerialize(args.id, () => this[method](args)) : ['installEngine', 'bulkProfiles'].includes(method) ? await this[method](args) : await this.serializeMutation(() => this[method](args));
+    this.changed();
+    const snapshot = await this.snapshot();
+    if (result) snapshot.actionResult = result;
+    return snapshot;
+  }
+  async createProfile({ profile }) {
+    const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
+    if (remote.profiles.length >= 500) throw error('最多支持 500 个环境。');
+    const descriptor = remote.descriptors.find((item) => item.id === (profile?.engine ?? remote.defaultEngine));
+    const metadata = this.metadata(profile, null);
+    const payload = this.normalize(profile, descriptor, workspace, remote);
+    const created = unwrap(await this.request('POST', '/api/profiles', payload));
+    try { await this.store.transaction((next) => { next.profiles.push({ ...metadata, id: created.id }); event(next, 'profile', `创建环境「${created.name}」`, created.id); }); }
+    catch (value) { await this.request('DELETE', `/api/profiles/${encoded(created.id)}`).catch(() => {}); throw value; }
+    return { createdId: created.id };
+  }
+  async updateProfile({ id: profileId, profile }) {
+    const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
+    const existing = this.find(remote, profileId);
+    await this.assertStopped(remote, profileId);
+    const engineId = profile?.engine ?? existing.runtime_id;
+    if (engineId !== existing.runtime_id) throw error('已有资料不能直接切换内核，请创建新环境。', 'ENGINE_CHANGE_REQUIRES_NEW_PROFILE');
+    const metadata = this.metadata(profile, profileId, workspace.profiles.find((item) => item.id === profileId));
+    const payload = this.normalize(profile, remote.descriptors.find((item) => item.id === engineId), workspace, remote, existing);
+    await this.request('PUT', `/api/profiles/${encoded(profileId)}`, payload);
+    await this.store.transaction((next) => { next.profiles = next.profiles.filter((item) => item.id !== profileId); next.profiles.push(metadata); event(next, 'profile', `更新环境「${payload.name}」`, profileId); });
+  }
+  async cloneProfile({ id: profileId }) {
+    const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
+    const original = this.find(remote, profileId);
+    const descriptor = remote.descriptors.find((item) => item.id === original.runtime_id);
+    if (!descriptor?.platform_supported) throw error('当前平台不支持原环境的内核。');
+    const payload = { name: `${original.name.slice(0, 90)} 副本`, runtime_id: original.runtime_id, group: original.group ?? '', tags: original.tags ?? [], proxy: original.proxy ?? null, identity: original.identity, launch_overrides: original.launch_overrides };
+    if (descriptor.capabilities?.supports_seed_fingerprint) { payload.fingerprint_seed = randomInt(1, 4294967295); while (payload.fingerprint_seed === original.fingerprint_seed) payload.fingerprint_seed = randomInt(1, 4294967295); }
+    const created = unwrap(await this.request('POST', '/api/profiles', payload));
+    try { await this.store.transaction((next) => { const old = workspace.profiles.find((item) => item.id === profileId); next.profiles.push(this.metadata(old ?? {}, created.id)); event(next, 'profile', `克隆环境「${original.name}」`, created.id); }); }
+    catch (value) { await this.request('DELETE', `/api/profiles/${encoded(created.id)}`).catch(() => {}); throw value; }
+    return { createdId: created.id };
+  }
+  async deleteProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); await this.assertStopped(remote, profileId); await this.checkedDirectory(profile); await this.request('DELETE', `/api/profiles/${encoded(profileId)}`); await this.store.transaction((next) => { next.profiles = next.profiles.filter((item) => item.id !== profileId); event(next, 'profile', `删除环境「${profile.name}」`, profileId); }); this.lastErrors.delete(profileId); this.resetPreview(profileId); }
+  async clearProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); await this.assertStopped(remote, profileId); const directory = await this.checkedDirectory(profile); await rm(path.join(directory, 'browser-data'), { recursive: true, force: true }); await rm(path.join(directory, 'cookies-backup.json'), { force: true }); await mkdir(path.join(directory, 'browser-data'), { recursive: true, mode: 0o700 }); await this.store.transaction((next) => event(next, 'profile', `清理环境「${profile.name}」的完整浏览资料，保留下载文件`, profileId)); this.lastErrors.delete(profileId); this.resetPreview(profileId); }
+  async startProfile({ id: profileId }) {
+    const reservation = await this.serialize(async () => {
+      if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
+      if (this.installingEngine) throw error('内核正在安装，请稍后启动。', 'ENGINE_INSTALL_BUSY');
+      const remote = await this.remote(); const profile = this.find(remote, profileId); const previous = remote.sessions.find((item) => item.profile_id === profileId);
+      if (previous && (await this.health(previous)).alive === true) return { profile, focus: true };
+      const engine = (await this.engines(remote.descriptors)).find((item) => item.id === profile.runtime_id);
+      if (!engine?.installed || !engine.enabled) throw error('请先安装并启用该环境的浏览器内核。', 'ENGINE_NOT_INSTALLED');
+      this.starting.add(profileId); this.lastErrors.delete(profileId); this.resetPreview(profileId);
+      return { profile };
+    });
+    const { profile } = reservation;
+    if (reservation.focus) return this.focusProfile({ id: profileId });
+    this.changed();
+    try {
+      const session = unwrap(await this.request('POST', '/api/sessions', { profile_id: profileId }, { timeoutMs: 180000 }));
+      const metadata = (await this.store.read()).profiles.find((item) => item.id === profileId);
+      if (metadata?.startUrl && metadata.startUrl !== 'about:blank') { try { await this.request('POST', `/api/sessions/${encoded(session.session_id)}/navigate`, { url: metadata.startUrl, wait_until: 'domcontentloaded' }); } catch (value) { this.lastErrors.set(profileId, `页面未加载完成：${value.message}`); } }
+      await this.store.transaction((next) => { const metadata = next.profiles.find((item) => item.id === profileId); if (metadata) metadata.lastLaunchedAt = now(); event(next, 'browser', `启动环境「${profile.name}」`, profileId); });
+      await this.capture(profileId, session.session_id);
+    } catch (value) { this.lastErrors.set(profileId, value.message); await this.store.transaction((next) => event(next, 'error', `环境「${profile.name}」启动失败：${value.message}`, profileId)); throw value; }
+    finally { this.starting.delete(profileId); this.changed(); }
+  }
+  async stopProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); const session = remote.sessions.find((item) => item.profile_id === profileId); if (session) await this.request('DELETE', `/api/sessions/${encoded(session.session_id)}`); this.resetPreview(profileId); this.lastErrors.delete(profileId); await this.store.transaction((next) => event(next, 'browser', `停止环境「${profile.name}」`, profileId)); }
+  async focusProfile({ id: profileId }) { const remote = await this.remote(); this.find(remote, profileId); const session = remote.sessions.find((item) => item.profile_id === profileId); if (!session || (await this.health(session)).alive !== true) throw error('环境尚未运行。', 'PROFILE_NOT_RUNNING'); if (this.options.focusSession) await this.options.focusSession(session); else await this.request('POST', `/api/sessions/${encoded(session.session_id)}/focus`); await this.capture(profileId, session.session_id); }
+  resetPreview(profileId) { this.previews.delete(profileId); this.previewAttempts.delete(profileId); this.previewCapturedAt.delete(profileId); this.previewInFlight.delete(profileId); }
+  async capture(profileId, sessionId, { force = true } = {}) {
+    const pending = this.previewInFlight.get(profileId);
+    if (pending) return pending.promise;
+    const timestamp = this.options.nowMs?.() ?? Date.now();
+    if (!force && this.previewAttempts.has(profileId) && timestamp - this.previewAttempts.get(profileId) < 10000) return;
+    this.previewAttempts.set(profileId, timestamp);
+    const operation = { promise: null };
+    this.previewInFlight.set(profileId, operation);
+    operation.promise = (async () => {
+      try {
+        const image = await this.request('GET', `/api/sessions/${encoded(sessionId)}/screenshot`, undefined, { responseType: 'arraybuffer' });
+        if (!image?.byteLength) return;
+        if (!this.closed && this.previewInFlight.get(profileId) === operation) {
+          this.previews.set(profileId, `data:image/png;base64,${Buffer.from(image).toString('base64')}`);
+          this.previewCapturedAt.set(profileId, new Date(this.options.nowMs?.() ?? Date.now()).toISOString());
+        }
+      } catch { /* Preserve the last successful image and its original capture time. */ }
+      finally { if (this.previewInFlight.get(profileId) === operation) this.previewInFlight.delete(profileId); }
+    })();
+    return operation.promise;
+  }
+  async saveProxy({ proxy }) {
+    const config = { ...proxyConfig(proxy), name: text(proxy.name, '代理名称') };
+    const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
+    const existing = proxy.id ? this.proxies(workspace, remote).find((item) => item.id === proxy.id) : null;
+    if (proxy.id && !existing) throw error('网络出口不存在。', 'PROXY_NOT_FOUND');
+    const users = existing ? remote.profiles.filter((profile) => profile.proxy && sameProxy(profile.proxy, existing)) : [];
+    const groups = existing ? remote.groups.filter((group) => group.proxy && sameProxy(group.proxy, existing)) : [];
+    const affected = remote.profiles.filter((profile) => users.includes(profile) || groups.some((group) => group.name === profile.group));
+    for (const profile of affected) await this.assertStopped(remote, profile.id);
+    for (const profile of affected) if (profile.runtime_id === 'browseforge-chromium' && !config.region) throw error('该内核代理必须包含地域标签。', 'INVALID_PROXY_REGION');
+    if (groups.length && config.protocol === 'https') throw error('BrowseForge 分组代理仅支持 HTTP 或 SOCKS5。', 'UNSUPPORTED_GROUP_PROXY');
+    const applied = [], appliedGroups = [];
+    try {
+      for (const profile of users) { await this.request('PUT', `/api/profiles/${encoded(profile.id)}`, { proxy: upstreamProxy(config) }); applied.push(profile); }
+      for (const group of groups) { await this.request('PUT', `/api/groups/${encodeURIComponent(group.name)}`, { proxy_mode: group.proxy_mode, proxy: upstreamProxy(config) }); appliedGroups.push(group); }
+      await this.store.transaction((next) => { const savedId = workspace.proxies.some((item) => item.id === proxy.id) ? proxy.id : randomUUID(); next.proxies = next.proxies.filter((item) => item.id !== savedId); next.proxies.push({ id: savedId, ...config }); event(next, 'proxy', `保存网络出口「${config.name}」`); });
+    } catch (value) {
+      const failures = [];
+      for (const profile of applied) { try { await this.request('PUT', `/api/profiles/${encoded(profile.id)}`, { proxy: profile.proxy }); } catch { failures.push(profile.id); } }
+      for (const group of appliedGroups) { try { await this.request('PUT', `/api/groups/${encodeURIComponent(group.name)}`, { proxy_mode: group.proxy_mode, proxy: group.proxy }); } catch { failures.push(`分组 ${group.name}`); } }
+      if (failures.length) value.message += `；以下绑定恢复未完成：${failures.join(', ')}`;
+      throw value;
+    }
+  }
+  async deleteProxy({ id: proxyId }) { const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]); const proxy = this.proxies(workspace, remote).find((item) => item.id === proxyId); if (!proxy) throw error('网络出口不存在。'); if (remote.profiles.some((profile) => profile.proxy && sameProxy(profile.proxy, proxy)) || remote.groups.some((group) => group.proxy && sameProxy(group.proxy, proxy))) throw error('请先解除环境和分组对该代理的引用。', 'PROXY_IN_USE'); await this.store.transaction((next) => { next.proxies = next.proxies.filter((item) => item.id !== proxyId); event(next, 'proxy', `删除网络出口「${proxy.name}」`); }); }
+  async checkProxy({ id: proxyId }) { const snapshot = await this.snapshot(); const proxy = snapshot.proxies.find((item) => item.id === proxyId); if (!proxy) throw error('网络出口不存在。'); return new Promise((resolve) => { const started = performance.now(); const socket = net.createConnection({ host: proxy.host, port: proxy.port }); let finished = false; const finish = (ok, message) => { if (finished) return; finished = true; socket.destroy(); resolve({ ok, latencyMs: ok ? Math.round(performance.now() - started) : null, scope: 'tcp', checkedAt: now(), message }); }; socket.setTimeout(5000); socket.once('connect', () => finish(true, 'TCP 端口可达；尚未验证认证和实际出口。')); socket.once('timeout', () => finish(false, 'TCP 连接超时。')); socket.once('error', (value) => finish(false, `TCP 连接失败：${value.code}`)); }); }
+  async stoppedGroup(name) { const remote = await this.remote(); for (const profile of remote.profiles.filter((item) => item.group === name)) await this.assertStopped(remote, profile.id); }
+  async saveGroup({ name, proxyId, proxyMode = 'default' }) { text(name, '分组名称'); if (!['default', 'enforced'].includes(proxyMode)) throw error('分组代理策略无效。'); const snapshot = await this.snapshot(); const proxy = snapshot.proxies.find((item) => item.id === proxyId); if (!proxy) throw error('请选择分组代理。'); if (proxy.protocol === 'https') throw error('BrowseForge 的分组代理仅支持 HTTP 或 SOCKS5，请使用环境专属 HTTPS 代理。', 'UNSUPPORTED_GROUP_PROXY'); await this.stoppedGroup(name); const result = unwrap(await this.request('PUT', `/api/groups/${encodeURIComponent(name)}`, { proxy_mode: proxyMode, proxy: upstreamProxy(proxy) })); return { restartRequired: !!result?.restart_required }; }
+  async deleteGroup({ name }) { text(name, '分组名称'); await this.stoppedGroup(name); await this.request('DELETE', `/api/groups/${encodeURIComponent(name)}`); }
+  async clearGroupProxy({ name }) { text(name, '分组名称'); await this.stoppedGroup(name); await this.request('DELETE', `/api/groups/${encodeURIComponent(name)}/proxy`); }
+  async bulkProfiles({ action, ids, group }) {
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 500 || new Set(ids).size !== ids.length) throw error('请选择 1 至 500 个不同环境。');
+    ids.forEach(identifier);
+    if (!['start', 'stop', 'delete', 'clear', 'move'].includes(action)) throw error('不支持的批量操作。');
+    const results = new Array(ids.length); let next = 0;
+    const worker = async () => {
+      while (next < ids.length) {
+        const index = next++, profileId = ids[index];
+        try {
+          if (action === 'move') await this.serializeMutation(() => this.updateProfile({ id: profileId, profile: { group } }));
+          else if (['start', 'stop'].includes(action)) await this.profileSerialize(profileId, () => this[`${action}Profile`]({ id: profileId }));
+          else await this.serializeMutation(() => this[`${action}Profile`]({ id: profileId }));
+          results[index] = { id: profileId, ok: true };
+        } catch (value) { results[index] = { id: profileId, ok: false, code: value.code, message: value.message }; }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, ids.length) }, worker));
+    return { results };
+  }
+  async saveSettings({ settings }) { object(settings, '设置'); if (settings.closeBrowsersOnExit === false) throw error('当前版本退出会关闭托管会话。'); if (Object.keys(settings).some((key) => key !== 'closeBrowsersOnExit')) throw error('不支持的设置。'); await this.store.transaction((next) => { next.settings.closeBrowsersOnExit = true; }); }
+  async installEngine({ id: engineId, engine, runtimeId }) {
+    const selected = runtimeId ?? engineId ?? engine;
+    if (!this.options.installEngine) throw error('本机内核安装服务尚未就绪。', 'ENGINE_INSTALL_UNAVAILABLE');
+    await this.serialize(async () => {
+      if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
+      if (this.installingEngine || this.starting.size) throw error('请等待内核安装或浏览器启动完成。', 'ENGINE_INSTALL_BUSY');
+      const remote = await this.remote();
+      if (!remote.descriptors.some((item) => item.id === selected && item.platform_supported)) throw error('当前平台不支持所选内核。', 'UNSUPPORTED_ENGINE');
+      for (const session of remote.sessions) { if ((await this.health(session)).alive !== false) throw error('安装内核会重启本地服务，请先停止所有浏览器会话。', 'PROFILE_RUNNING'); await this.request('DELETE', `/api/sessions/${encoded(session.session_id)}`); }
+      this.installingEngine = selected;
+    });
+    this.pendingInstall = Promise.resolve().then(() => this.options.installEngine(selected));
+    try { return await this.pendingInstall; } finally { this.pendingInstall = null; this.installingEngine = null; this.changed(); }
+  }
+  async exportProfiles({ id: profileId } = {}) {
+    const snapshot = await this.snapshot(); const selected = profileId ? [snapshot.profiles.find((item) => item.id === profileId)] : snapshot.profiles;
+    if (selected.some((item) => !item)) throw error('环境不存在。');
+    const proxyIds = new Set(selected.map((profile) => profile.proxyId).filter(Boolean));
+    return { schema: 'envara.profiles', version: 2, profiles: selected.map((profile) => ({ ...Object.fromEntries([...PROFILE_KEYS].map((key) => [key, profile[key]])), fingerprint: fingerprintConfig(profile.fingerprint) })), proxies: snapshot.proxies.filter((proxy) => proxyIds.has(proxy.id)).map(({ id, name, protocol, host, port, region, username, password }) => ({ id, name, protocol, host, port, region, requiresCredentials: !!(username || password) })), notice: '包含完整指纹配置与代理引用；不包含登录凭据、Cookie 或浏览资料。导入时需要明确代理映射。' };
+  }
+  async importProfiles({ document, profiles, proxyMap = {} }) {
+    const rows = document?.profiles ?? profiles;
+    if (!Array.isArray(rows) || !rows.length || rows.length > 500) throw error('导入文件须包含 1 至 500 个环境。');
+    const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
+    const candidates = rows.map((row) => {
+      const config = Object.fromEntries(Object.entries(object(row, '导入环境')).filter(([key]) => PROFILE_KEYS.has(key)));
+      if (row.proxyId) { const mapped = proxyMap[row.proxyId]; if (!mapped) throw error(`环境「${row.name}」的代理尚未映射，导入已取消。`, 'PROXY_MAPPING_REQUIRED'); config.proxyId = mapped; }
+      else if (Object.hasOwn(row, 'proxy') && row.proxy) throw error('原始代理配置需要先建立明确映射。', 'PROXY_MAPPING_REQUIRED');
+      if (Object.keys(row).some((key) => !PROFILE_KEYS.has(key) && !['id', 'createdAt', 'updatedAt', 'lastLaunchedAt'].includes(key))) throw error('导入配置包含不支持的字段。');
+      const descriptor = remote.descriptors.find((item) => item.id === (config.engine ?? remote.defaultEngine));
+      return { payload: this.normalize(config, descriptor, workspace, remote), metadata: this.metadata(config, null) };
+    });
+    const created = [];
+    try {
+      for (const candidate of candidates) { const profile = unwrap(await this.request('POST', '/api/profiles', candidate.payload)); created.push({ profile, metadata: { ...candidate.metadata, id: profile.id } }); }
+      await this.store.transaction((next) => { next.profiles.push(...created.map((item) => item.metadata)); event(next, 'profile', `导入 ${created.length} 个环境配置`); });
+    } catch (value) { const failures = []; for (const item of created) { try { await this.request('DELETE', `/api/profiles/${encoded(item.profile.id)}`); } catch { failures.push(item.profile.id); } } if (failures.length) value.message += `；以下新环境回滚未完成：${failures.join(', ')}`; throw value; }
+    return { importedCount: created.length, createdIds: created.map((item) => item.profile.id) };
+  }
+  async legacy() {
+    let workspace; try { workspace = JSON.parse(await readFile(path.join(this.dataDir, 'workspace.json'), 'utf8')); } catch (value) { if (value.code === 'ENOENT') return null; throw value; }
+    if (workspace.schema !== 'envara.workspace' || workspace.version !== 1 || !Array.isArray(workspace.profiles) || !Array.isArray(workspace.proxies)) throw error('旧工作区格式无法识别，原文件已保留。');
+    return workspace;
+  }
+  async previewLegacyMigration() { const workspace = await this.legacy(); const migrated = (await this.store.read()).profiles.map((item) => item.legacyId).filter(Boolean); return { detected: !!workspace, profiles: workspace?.profiles.map((profile) => ({ id: profile.id, name: profile.name, engine: profile.engine, migrated: migrated.includes(profile.id), hasProxy: !!profile.proxyId })) ?? [], proxyCount: workspace?.proxies.length ?? 0, originalDataDir: this.dataDir, destinationDir: this.profilesDir, notice: '迁移会备份并复制旧配置与选定浏览资料，旧文件保留。代理绑定和凭据会在本机保留。' }; }
+  async migrateLegacy({ ids, copyBrowserData = true } = {}) {
+    if (typeof copyBrowserData !== 'boolean' || (ids != null && (!Array.isArray(ids) || !ids.length || ids.some((profileId) => typeof profileId !== 'string')))) throw error('迁移选项格式无效。');
+    if (!this.options.assertLegacyStopped || !await this.options.assertLegacyStopped()) throw error('必须先确认旧版本的所有浏览器会话已停止，才能复制资料。', 'LEGACY_SESSIONS_NOT_CONFIRMED_STOPPED');
+    const legacy = await this.legacy(); if (!legacy) throw error('没有发现旧工作区。');
+    const existing = await this.store.read(); const migrated = new Set(existing.profiles.map((item) => item.legacyId).filter(Boolean));
+    const selected = legacy.profiles.filter((profile) => (!ids || ids.includes(profile.id)) && !migrated.has(profile.id));
+    if (!selected.length) throw error('没有需要迁移的环境。');
+    const remote = await this.remote(); const descriptor = remote.descriptors.find((item) => item.id === 'cloakbrowser');
+    const importedProxies = legacy.proxies.map((proxy) => ({ ...proxyConfig(proxy), name: text(proxy.name, '旧代理名称'), id: randomUUID(), legacyId: proxy.id }));
+    const stagedWorkspace = { ...existing, proxies: [...existing.proxies, ...importedProxies] };
+    const candidates = selected.map((profile) => { if (!/^[0-9a-f-]{36}$/i.test(profile.id)) throw error('旧环境 ID 无效，迁移取消。'); const proxyId = profile.proxyId ? importedProxies.find((proxy) => proxy.legacyId === profile.proxyId)?.id : null; if (profile.proxyId && !proxyId) throw error('旧代理绑定缺失，不能改为直接连接。', 'PROXY_MAPPING_REQUIRED'); const config = Object.fromEntries([...PROFILE_KEYS].filter((key) => Object.hasOwn(profile, key)).map((key) => [key, profile[key]])); config.proxyId = proxyId; return { old: profile, payload: this.normalize(config, descriptor, stagedWorkspace, remote), metadata: this.metadata(config, null) }; });
+    const backupDir = path.join(this.dataDir, 'migration-backups', `${Date.now()}-${randomUUID()}`);
+    await mkdir(backupDir, { recursive: true, mode: 0o700 });
+    await cp(path.join(this.dataDir, 'workspace.json'), path.join(backupDir, 'workspace.json'), { errorOnExist: true, force: false });
+    for (const candidate of candidates) {
+      const source = path.join(this.dataDir, 'profiles', candidate.old.id);
+      let info;
+      try { info = await lstat(source); } catch (value) { if (value.code === 'ENOENT') continue; throw value; }
+      if (!info.isDirectory()) throw error('旧资料目录不是普通目录。');
+      await cp(source, path.join(backupDir, 'profiles', candidate.old.id), { recursive: true, force: false, errorOnExist: true });
+    }
+    const created = [];
+    try {
+      for (const candidate of candidates) {
+        const profile = unwrap(await this.request('POST', '/api/profiles', candidate.payload)); created.push({ profile, metadata: { ...candidate.metadata, id: profile.id, legacyId: candidate.old.id, migrationBackup: backupDir, createdAt: candidate.old.createdAt, lastLaunchedAt: candidate.old.lastLaunchedAt } });
+        if (copyBrowserData) {
+          const source = path.join(backupDir, 'profiles', candidate.old.id);
+          let exists = true;
+          try { await access(source); } catch (value) { if (value.code === 'ENOENT') exists = false; else throw value; }
+          if (exists) await cp(source, path.join(await this.checkedDirectory(profile), 'browser-data'), { recursive: true, force: false, errorOnExist: true, filter: (entry) => !['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'DevToolsActivePort'].includes(path.basename(entry)) });
+        }
+      }
+      await writeFile(path.join(backupDir, 'migration-result.json'), JSON.stringify({ completedAt: now(), profiles: created.map((item) => ({ legacyId: item.metadata.legacyId, newId: item.profile.id })), copyBrowserData }, null, 2), { mode: 0o600 });
+      await this.store.transaction((next) => { next.proxies.push(...importedProxies); next.profiles.push(...created.map((item) => item.metadata)); event(next, 'migration', `复制迁移 ${created.length} 个旧环境，原资料与备份均保留`); });
+    } catch (value) { const failures = []; for (const item of created) { try { await this.request('DELETE', `/api/profiles/${encoded(item.profile.id)}`); } catch { failures.push(item.profile.id); } } value.message += `；原资料未修改，备份位于 ${backupDir}${failures.length ? `；新环境回滚未完成：${failures.join(', ')}` : ''}`; throw value; }
+    return { migratedCount: created.length, backupDir, createdIds: created.map((item) => item.profile.id) };
+  }
+  async shutdown() { await this.ready; this.closed = true; await this.options.cancelInstall?.(); await Promise.allSettled([this.queue, ...this.profileQueues.values(), ...(this.pendingInstall ? [this.pendingInstall] : [])]); if (this.options.shutdown) await this.options.shutdown(); else await this.request('POST', '/api/shutdown'); }
+}
+
+export default BrowseForgeService;

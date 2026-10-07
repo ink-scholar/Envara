@@ -1,0 +1,1350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BrowseForge</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,sans-serif;background:#1e1e2e;color:#cdd6f4;min-height:100vh}
+.header{padding:16px 24px;border-bottom:1px solid #45475a;display:flex;align-items:center;gap:16px}
+.header h1{font-size:18px;font-weight:600}
+.header .status{font-size:12px;color:#a6e3a1}
+.header .spacer{flex:1}
+.lang-select{padding:6px 8px;background:#2a2a3c;border:1px solid #45475a;border-radius:6px;color:#cdd6f4;font-size:12px}
+.toolbar{padding:12px 24px;display:flex;gap:8px;border-bottom:1px solid #313244;flex-wrap:wrap;align-items:center}
+button{padding:8px 16px;background:#45475a;border:none;border-radius:6px;color:#cdd6f4;cursor:pointer;font-size:13px}
+button:hover{background:#585b70}
+button.primary{background:#89b4fa;color:#1e1e2e}
+button.danger{background:#f38ba8;color:#1e1e2e}
+.toolbar input,.toolbar select{padding:8px;background:#2a2a3c;border:1px solid #45475a;border-radius:6px;color:#cdd6f4;font-size:13px}
+.toolbar input{width:180px}
+.toolbar select{max-width:180px}
+.manager{margin:16px 24px 0;border:1px solid #45475a;border-radius:8px;background:#242437}
+.manager-head{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid #313244}
+.manager-head h2{font-size:15px;font-weight:600}
+.manager-body{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;padding:16px}
+.group-row{background:#2a2a3c;border:1px solid #45475a;border-radius:8px;padding:12px}
+.group-row .title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.group-row .name{font-weight:600}
+.group-row .meta{font-size:12px;color:#a6adc8;line-height:1.6}
+.group-row .actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.group-row .actions button{padding:6px 10px;font-size:12px}
+.chip{display:inline-block;padding:2px 7px;border-radius:999px;background:#313244;color:#a6adc8;font-size:11px}
+.chip.warn{background:#4a3a2a;color:#f9e2af}
+.summary{padding:10px 24px;color:#a6adc8;font-size:12px;border-bottom:1px solid #313244}
+.grid{padding:24px;display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}
+.card{background:#2a2a3c;border:1px solid #45475a;border-radius:10px;padding:16px;position:relative}
+.card .name{font-size:15px;font-weight:600;margin-bottom:4px}
+.card .meta{font-size:12px;color:#6c7086;margin-bottom:12px}
+.card .tags{display:flex;gap:4px;flex-wrap:wrap;margin:8px 0}
+.card .runtime{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;background:#313244}
+.card .runtime.firefox{color:#f9e2af}
+.card .runtime.chromium{color:#89b4fa}
+.card .fp{font-size:11px;color:#6c7086;margin:8px 0;line-height:1.6}
+.card .fp span{color:#a6adc8}
+.card .actions{display:flex;gap:6px;margin-top:12px;flex-wrap:wrap}
+.card .actions button{padding:6px 12px;font-size:12px}
+.card .thumb{margin-top:8px;border-radius:6px;max-width:100%;border:1px solid #45475a}
+.badge{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.badge.active{background:#a6e3a1}
+.badge.inactive{background:#6c7086}
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center}
+.modal-bg.show{display:flex}
+.modal{background:#2a2a3c;border-radius:12px;padding:24px;width:420px;max-height:80vh;overflow-y:auto}
+.modal h2{margin-bottom:16px;font-size:16px}
+.modal label{display:block;font-size:12px;color:#a6adc8;margin:8px 0 4px}
+.modal input,.modal select{width:100%;padding:8px;background:#1e1e2e;border:1px solid #45475a;border-radius:6px;color:#cdd6f4;font-size:13px}
+.group-picker{display:grid;grid-template-columns:1fr 160px;gap:8px}
+.group-picker input,.group-picker select{min-width:0}
+@media (max-width:600px){.group-picker{grid-template-columns:1fr}}
+.modal .btn-row{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
+#toast{position:fixed;bottom:24px;right:24px;padding:12px 20px;background:#313244;border-radius:8px;font-size:13px;display:none;z-index:200}
+.login-overlay{position:fixed;inset:0;background:#1e1e2e;z-index:300;display:flex;align-items:center;justify-content:center}
+.login-box{text-align:center;width:360px}
+.login-box h1{margin-bottom:8px}
+.login-box p{font-size:13px;color:#6c7086;margin-bottom:16px}
+.login-box input{width:100%;padding:10px;background:#2a2a3c;border:1px solid #45475a;border-radius:6px;color:#cdd6f4;font-size:14px;margin-bottom:8px}
+.login-box .error{color:#f38ba8;font-size:12px;margin-bottom:8px;display:none}
+.login-box button{width:100%;padding:10px}
+.empty-state{text-align:center;padding:80px 24px;color:#6c7086;grid-column:1/-1}
+.empty-state h2{color:#cdd6f4;margin-bottom:8px}
+.empty-state p{margin-bottom:16px;font-size:14px}
+</style>
+</head>
+<body>
+
+<!-- Login overlay -->
+<div class="login-overlay" id="loginOverlay">
+  <div class="login-box">
+    <h1>🦊 BrowseForge</h1>
+    <p><span data-i18n="loginPrompt">Enter API Token</span><br><code>./BrowseForge token</code> <span data-i18n="loginOr">or check</span> <code>data/.api-token</code></p>
+    <input type="password" id="loginToken" placeholder="API Token" autofocus>
+    <div class="error" id="loginError" data-i18n="invalidToken">Invalid token. Please try again.</div>
+    <button class="primary" onclick="submitLogin()" data-i18n="login">Log in</button>
+  </div>
+</div>
+
+<div class="header">
+  <h1>🦊 BrowseForge</h1>
+  <span class="status" id="status" data-i18n="connecting">Connecting...</span>
+  <span class="spacer"></span>
+  <select class="lang-select" id="langSelect" aria-label="Language">
+    <option value="en">English</option>
+    <option value="zh-TW">繁體中文</option>
+  </select>
+</div>
+<div class="toolbar" id="toolbar" style="display:none">
+  <button class="primary" onclick="showCreate()" data-i18n="newProfile">+ New Profile</button>
+  <button onclick="toggleGroupManager(true)" data-i18n="groupManager">Group Manager</button>
+  <button onclick="refreshAll()" data-i18n="refresh">🔄 Refresh</button>
+  <input id="filter-search" data-i18n-placeholder="searchPlaceholder" placeholder="Search" oninput="setFilter('search', this.value)">
+  <select id="filter-group" onchange="setFilter('group', this.value)"></select>
+  <select id="filter-runtime" onchange="setFilter('runtime', this.value)">
+    <option value="" data-i18n="allRuntimes">All runtimes</option>
+  </select>
+  <select id="filter-status" onchange="setFilter('status', this.value)">
+    <option value="" data-i18n="allStatuses">All statuses</option>
+    <option value="active" data-i18n="activeOnly">Active</option>
+    <option value="inactive" data-i18n="inactiveOnly">Inactive</option>
+  </select>
+  <input id="filter-tag" data-i18n-placeholder="tagFilterPlaceholder" placeholder="Tag" oninput="setFilter('tag', this.value)">
+  <select id="sort-profiles" onchange="setFilter('sort', this.value)">
+    <option value="name" data-i18n="sortName">Name</option>
+    <option value="group" data-i18n="sortGroup">Group</option>
+    <option value="runtime" data-i18n="sortRuntime">Runtime</option>
+    <option value="created_desc" data-i18n="sortNewest">Newest</option>
+    <option value="last_used_desc" data-i18n="sortLastUsed">Last used</option>
+  </select>
+  <span style="flex:1"></span>
+  <button onclick="importProfile()" data-i18n="importProfile">📥 Import Profile</button>
+  <button onclick="backupAll()" data-i18n="backupAll">📦 Backup All</button>
+  <button onclick="restoreBackup()" data-i18n="restoreBackup">📤 Restore Backup</button>
+  <input type="file" id="importFile" accept=".zip" style="display:none" onchange="handleImport(this)">
+  <input type="file" id="restoreFile" accept=".zip" style="display:none" onchange="handleRestore(this)">
+</div>
+<div class="manager" id="groupManager" style="display:none">
+  <div class="manager-head">
+    <h2 data-i18n="groupManager">Group Manager</h2>
+    <span class="spacer"></span>
+    <button onclick="showGroupProxy()" data-i18n="newGroupProxy">New Group Proxy</button>
+    <button onclick="toggleGroupManager(false)" data-i18n="close">Close</button>
+  </div>
+  <div class="manager-body" id="groupList"></div>
+</div>
+<div class="summary" id="summary" style="display:none"></div>
+<div class="grid" id="grid"></div>
+<datalist id="groupOptions"></datalist>
+
+<div class="modal-bg" id="editModal">
+  <div class="modal">
+    <h2 data-i18n="editProfile">Edit Profile</h2>
+    <input type="hidden" id="e-id">
+    <label data-i18n="name">Name</label><input id="e-name">
+    <label data-i18n="group">Group</label>
+    <div class="group-picker">
+      <input id="e-group" list="groupOptions" data-i18n-placeholder="groupPlaceholder" placeholder="Client A" oninput="syncGroupPicker('e')">
+      <select id="e-group-select" onchange="applyGroupSelection('e', this.value)"></select>
+    </div>
+    <label data-i18n="tags">Tags</label><input id="e-tags" data-i18n-placeholder="tagsPlaceholder" placeholder="client, warmup">
+    <label data-i18n="proxyType">Proxy Type</label>
+    <select id="e-proxy-type"><option value="" data-i18n="noProxy">No Proxy</option><option value="socks5">SOCKS5</option><option value="http">HTTP</option></select>
+    <label>Proxy Host</label><input id="e-proxy-host">
+    <label>Proxy Port</label><input id="e-proxy-port" type="number">
+    <label data-i18n="proxyUsername">Proxy Username</label><input id="e-proxy-user">
+    <label data-i18n="proxyPassword">Proxy Password</label><input id="e-proxy-pass" type="password">
+    <label data-i18n="proxyRegion">Proxy Region</label><select id="e-proxy-region"></select>
+    <div class="btn-row">
+      <button onclick="hideEdit()" data-i18n="cancel">Cancel</button>
+      <button class="primary" onclick="saveProfile()" data-i18n="save">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="createModal">
+  <div class="modal">
+    <h2 data-i18n="newProfileTitle">New Profile</h2>
+    <label data-i18n="name">Name</label><input id="f-name" placeholder="FB Brand #1">
+    <label data-i18n="runtime">Runtime</label><select id="f-runtime"></select>
+    <label data-i18n="group">Group</label>
+    <div class="group-picker">
+      <input id="f-group" list="groupOptions" data-i18n-placeholder="groupPlaceholder" placeholder="Client A" oninput="syncGroupPicker('f')">
+      <select id="f-group-select" onchange="applyGroupSelection('f', this.value)"></select>
+    </div>
+    <label data-i18n="tags">Tags</label><input id="f-tags" data-i18n-placeholder="tagsPlaceholder" placeholder="client, warmup">
+    <label data-i18n="proxyOptional">Proxy (optional)</label>
+    <select id="f-proxy-type"><option value="" data-i18n="noProxy">No Proxy</option><option value="socks5">SOCKS5</option><option value="http">HTTP</option></select>
+    <input id="f-proxy-host" placeholder="proxy.example.com" style="margin-top:4px">
+    <input id="f-proxy-port" placeholder="1080" type="number" style="margin-top:4px">
+    <input id="f-proxy-user" data-i18n-placeholder="usernameOptional" placeholder="Username (optional)" style="margin-top:4px">
+    <input id="f-proxy-pass" data-i18n-placeholder="passwordOptional" placeholder="Password (optional)" type="password" style="margin-top:4px">
+    <select id="f-proxy-region" style="margin-top:4px"></select>
+    <div class="btn-row">
+      <button onclick="hideCreate()" data-i18n="cancel">Cancel</button>
+      <button class="primary" onclick="createProfile()" data-i18n="create">Create</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="groupProxyModal">
+  <div class="modal">
+    <h2 id="g-title" data-i18n="groupProxy">Group Proxy</h2>
+    <label data-i18n="group">Group</label>
+    <input id="g-name" data-i18n-placeholder="groupPlaceholder" placeholder="Client A">
+    <label data-i18n="proxyMode">Proxy Mode</label>
+    <select id="g-proxy-mode"><option value="default" data-i18n="proxyModeDefault">Default (profile overrides group)</option><option value="enforced" data-i18n="proxyModeEnforced">Enforced (group overrides profile)</option></select>
+    <label data-i18n="proxyType">Proxy Type</label>
+    <select id="g-proxy-type"><option value="" data-i18n="noProxy">No Proxy</option><option value="socks5">SOCKS5</option><option value="http">HTTP</option></select>
+    <label>Proxy Host</label><input id="g-proxy-host">
+    <label>Proxy Port</label><input id="g-proxy-port" type="number" placeholder="1080">
+    <label data-i18n="proxyUsername">Proxy Username</label><input id="g-proxy-user">
+    <label data-i18n="proxyPassword">Proxy Password</label><input id="g-proxy-pass" type="password">
+    <label data-i18n="proxyRegion">Proxy Region</label><select id="g-proxy-region"></select>
+    <p style="font-size:12px;color:#666" data-i18n="groupProxyRestart">Group proxy changes apply to newly opened browsers. Close and reopen active browsers in the group to apply changes.</p>
+    <div class="btn-row">
+      <button onclick="hideGroupProxy()" data-i18n="cancel">Cancel</button>
+      <button id="g-clear-proxy" onclick="clearGroupProxy()" data-i18n="clearProxy">Clear Proxy</button>
+      <button class="primary" onclick="saveGroupProxy()" data-i18n="save">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const API = '/api';
+const LOCALES = {
+  en: {
+    loginPrompt: 'Enter API Token',
+    loginOr: 'or check',
+    invalidToken: 'Invalid token. Please try again.',
+    enterToken: 'Enter a token',
+    login: 'Log in',
+    connecting: 'Connecting...',
+    offline: 'Offline',
+    newProfile: '+ New Profile',
+    refresh: '🔄 Refresh',
+    groupProxy: 'Group Proxy',
+    newGroupProxy: 'New Group Proxy',
+    editGroupProxy: 'Edit Group Proxy',
+    setGroupProxy: 'Set Group Proxy',
+    groupManager: 'Group Manager',
+    searchPlaceholder: 'Search profiles',
+    allGroups: 'All groups',
+    allRuntimes: 'All runtimes',
+    allStatuses: 'All statuses',
+    activeOnly: 'Active',
+    inactiveOnly: 'Inactive',
+    tagFilterPlaceholder: 'Tag',
+    sortName: 'Name',
+    sortGroup: 'Group',
+    sortRuntime: 'Runtime',
+    runtime: 'Runtime',
+    sortNewest: 'Newest',
+    sortLastUsed: 'Last used',
+    showingProfiles: 'Showing {shown} of {total} profiles',
+    tags: 'Tags',
+    tagsPlaceholder: 'client, warmup',
+    profilesCount: '{count} profiles',
+    activeCount: '{count} active',
+    noGroupPolicies: 'No group proxy settings yet. Add a Group Proxy or assign profiles to a group first.',
+    editProxy: 'Edit Proxy',
+    setProxy: 'Set Proxy',
+    policyConfigured: 'proxy configured',
+    noPolicy: 'no proxy',
+    importProfile: '📥 Import Profile',
+    backupAll: '📦 Backup All',
+    restoreBackup: '📤 Restore Backup',
+    editProfile: 'Edit Profile',
+    newProfileTitle: 'New Profile',
+    name: 'Name',
+    group: 'Group',
+    groupPlaceholder: 'Client A',
+    selectExistingGroup: 'Select group...',
+    proxyType: 'Proxy Type',
+    noProxy: 'No Proxy',
+    proxyUsername: 'Proxy Username',
+    proxyPassword: 'Proxy Password',
+    proxyRegion: 'Proxy Region',
+    proxyRegionPlaceholder: 'Select a proxy region preset',
+    proxyRegionRequired: 'Select a Proxy Region preset for BrowseForge Chromium when a proxy is configured',
+    proxyRegionInvalid: 'Select one of the supported Proxy Region presets',
+    proxyOptional: 'Proxy (optional)',
+    proxyMode: 'Proxy Mode',
+    proxyModeDefault: 'Default (profile overrides group)',
+    proxyModeEnforced: 'Enforced (group overrides profile)',
+    groupProxyRestart: 'Group proxy changes apply to newly opened browsers. Close and reopen active browsers in the group to apply changes.',
+    clearProxy: 'Clear Proxy',
+    proxySourceProfile: 'profile proxy',
+    proxySourceGroup: 'group proxy',
+    proxySourceEnforced: 'group proxy enforced',
+    groupRequired: 'Enter a group',
+    usernameOptional: 'Username (optional)',
+    passwordOptional: 'Password (optional)',
+    cancel: 'Cancel',
+    save: 'Save',
+    create: 'Create',
+    noProfiles: 'No profiles yet',
+    noProfilesBody: 'Create your first browser profile to get started.',
+    noMatches: 'No profiles match the current filters.',
+    ungrouped: 'Ungrouped',
+    close: 'Close',
+    navigate: '🔗 Navigate',
+    screenshot: '📷 Screenshot',
+    open: 'Open',
+    edit: 'Edit',
+    export: 'Export',
+    duplicate: 'Duplicate',
+    delete: 'Delete',
+    deleteGroupConfirm: 'Delete group {name}? Profiles in this group will not be deleted, but they will become ungrouped.',
+    deleteGroupActive: 'Close active browsers in this group before deleting it.',
+    navigatePrompt: 'Enter URL to navigate:',
+    navigating: '🔗 Navigating...',
+    starting: 'Starting...',
+    browserOpened: '✅ Browser opened',
+    closed: 'Closed',
+    saved: '✅ Saved',
+    nameRequired: 'Enter a name',
+    created: '✅ Created ',
+    duplicated: '✅ Duplicated',
+    deleteConfirm: 'Delete {name}?',
+    deleted: 'Deleted',
+    exporting: 'Exporting...',
+    exportFailed: '❌ Export failed',
+    exported: '✅ Exported',
+    importing: 'Importing...',
+    imported: '✅ Imported',
+    backingUp: 'Backing up...',
+    backupFailed: '❌ Backup failed',
+    backedUp: '✅ Backed up',
+    restoreConfirm: 'Restore will import profiles without overwriting existing profiles and update group proxy settings from the backup. Continue?',
+    restoring: 'Restoring...',
+    restored: '✅ Restored {count} profiles and {groups} group proxy settings',
+  },
+  'zh-TW': {
+    loginPrompt: '請輸入 API Token',
+    loginOr: '或查看',
+    invalidToken: 'Token 無效，請重新輸入',
+    enterToken: '請輸入 Token',
+    login: '登入',
+    connecting: '連線中...',
+    offline: '離線',
+    newProfile: '+ 新增 Profile',
+    refresh: '🔄 重新整理',
+    groupProxy: 'Group Proxy',
+    newGroupProxy: '新增 Group Proxy',
+    editGroupProxy: '編輯 Group Proxy',
+    setGroupProxy: '設定 Group Proxy',
+    groupManager: 'Group 管理',
+    searchPlaceholder: '搜尋 Profile',
+    allGroups: '所有分組',
+    allRuntimes: '所有 Runtime',
+    allStatuses: '所有狀態',
+    activeOnly: '已開啟',
+    inactiveOnly: '未開啟',
+    tagFilterPlaceholder: '標籤',
+    sortName: '名稱',
+    sortGroup: '分組',
+    sortRuntime: 'Runtime',
+    runtime: 'Runtime',
+    sortNewest: '最新建立',
+    sortLastUsed: '最近使用',
+    showingProfiles: '顯示 {shown} / {total} 個 Profile',
+    tags: '標籤',
+    tagsPlaceholder: '客戶, 暖機',
+    profilesCount: '{count} 個 Profile',
+    activeCount: '{count} 個已開啟',
+    noGroupPolicies: '尚無 group proxy 設定。可先新增 Group Proxy，或先把 Profile 指派到 group。',
+    editProxy: '編輯 Proxy',
+    setProxy: '設定 Proxy',
+    policyConfigured: '已設定 proxy',
+    noPolicy: '尚無 proxy',
+    importProfile: '📥 匯入 Profile',
+    backupAll: '📦 全部備份',
+    restoreBackup: '📤 還原備份',
+    editProfile: '編輯 Profile',
+    newProfileTitle: '新增 Profile',
+    name: '名稱',
+    group: '分組',
+    groupPlaceholder: '客戶A',
+    selectExistingGroup: '選擇既有分組...',
+    proxyType: 'Proxy 類型',
+    noProxy: '無 Proxy',
+    proxyUsername: 'Proxy 帳號',
+    proxyPassword: 'Proxy 密碼',
+    proxyRegion: 'Proxy 地區',
+    proxyRegionPlaceholder: '選擇 Proxy 地區預設',
+    proxyRegionRequired: 'BrowseForge Chromium 設定 Proxy 時必須選擇 Proxy 地區預設',
+    proxyRegionInvalid: '請選擇支援的 Proxy 地區預設',
+    proxyOptional: 'Proxy (選填)',
+    proxyMode: 'Proxy 模式',
+    proxyModeDefault: '預設（Profile 優先於 Group）',
+    proxyModeEnforced: '強制（Group 優先於 Profile）',
+    groupProxyRestart: 'Group proxy 變更只會套用到新開啟的瀏覽器。請關閉並重新開啟該 group 內已開啟的瀏覽器。',
+    clearProxy: '清除 Proxy',
+    proxySourceProfile: 'profile proxy',
+    proxySourceGroup: 'group proxy',
+    proxySourceEnforced: 'group proxy enforced',
+    groupRequired: '請輸入分組',
+    usernameOptional: '帳號 (選填)',
+    passwordOptional: '密碼 (選填)',
+    cancel: '取消',
+    save: '儲存',
+    create: '建立',
+    noProfiles: '尚無 Profile',
+    noProfilesBody: '建立你的第一個瀏覽器 Profile 開始使用',
+    noMatches: '沒有符合目前篩選條件的 Profile',
+    ungrouped: '未分組',
+    close: '關閉',
+    navigate: '🔗 導航',
+    screenshot: '📷 截圖',
+    open: '開啟',
+    edit: '編輯',
+    export: '匯出',
+    duplicate: '複製',
+    delete: '刪除',
+    deleteGroupConfirm: '確定刪除 {name}？這不會刪除這個 group 內的 Profile，但會將它們改為未分組。',
+    deleteGroupActive: '刪除 group 前，請先關閉這個 group 內已開啟的瀏覽器。',
+    navigatePrompt: '輸入要導航的 URL：',
+    navigating: '🔗 導航中...',
+    starting: '啟動中...',
+    browserOpened: '✅ 瀏覽器已開啟',
+    closed: '已關閉',
+    saved: '✅ 已儲存',
+    nameRequired: '請輸入名稱',
+    created: '✅ 已建立 ',
+    duplicated: '✅ 已複製',
+    deleteConfirm: '確定刪除 {name}？',
+    deleted: '已刪除',
+    exporting: '匯出中...',
+    exportFailed: '❌ 匯出失敗',
+    exported: '✅ 已匯出',
+    importing: '匯入中...',
+    imported: '✅ 已匯入',
+    backingUp: '備份中...',
+    backupFailed: '❌ 備份失敗',
+    backedUp: '✅ 已備份',
+    restoreConfirm: '還原備份會匯入 Profile（不會覆蓋現有 Profile）並更新備份內的 group proxy 設定，確定？',
+    restoring: '還原中...',
+    restored: '✅ 已還原 {count} 個 Profile 與 {groups} 個 group proxy 設定',
+  },
+};
+let locale = localStorage.getItem('bf-locale') || (navigator.language === 'zh-TW' ? 'zh-TW' : 'en');
+let TOKEN = '';
+let profiles = [];
+let groups = [];
+let runtimes = [];
+let defaultRuntimeID = '';
+let sessions = new Set();
+let screenshots = {}; // profileId → blob URL
+let statusState = 'connecting';
+let statusVersion = '';
+let filters = { search: '', group: '', runtime: '', status: '', tag: '', sort: 'name' };
+let groupManagerOpen = false;
+
+function t(key, vars = {}) {
+  let value = (LOCALES[locale] && LOCALES[locale][key]) || LOCALES.en[key] || key;
+  for (const [name, replacement] of Object.entries(vars)) value = value.replace(`{${name}}`, replacement);
+  return value;
+}
+
+const PROXY_REGION_PRESETS = [
+  { value: "us-ny", label: "United States \u2014 New York" },
+  { value: "us-ca", label: "United States \u2014 California" },
+  { value: "us-tx", label: "United States \u2014 Texas" },
+  { value: "ca-on", label: "Canada \u2014 Ontario" },
+  { value: "ca-bc", label: "Canada \u2014 British Columbia" },
+  { value: "mx-cdmx", label: "Mexico \u2014 Mexico City" },
+  { value: "br-sao-paulo", label: "Brazil \u2014 S\u00e3o Paulo" },
+  { value: "gb-london", label: "United Kingdom \u2014 London" },
+  { value: "de-berlin", label: "Germany \u2014 Berlin" },
+  { value: "fr-paris", label: "France \u2014 Paris" },
+  { value: "nl-amsterdam", label: "Netherlands \u2014 Amsterdam" },
+  { value: "es-madrid", label: "Spain \u2014 Madrid" },
+  { value: "it-milan", label: "Italy \u2014 Milan" },
+  { value: "se-stockholm", label: "Sweden \u2014 Stockholm" },
+  { value: "ch-zurich", label: "Switzerland \u2014 Z\u00fcrich" },
+  { value: "pl-warsaw", label: "Poland \u2014 Warsaw" },
+  { value: "tw-taipei", label: "Taiwan \u2014 Taipei" },
+  { value: "jp-tokyo", label: "Japan \u2014 Tokyo" },
+  { value: "kr-seoul", label: "South Korea \u2014 Seoul" },
+  { value: "sg", label: "Singapore" },
+  { value: "hk", label: "Hong Kong" },
+  { value: "in-mumbai", label: "India \u2014 Mumbai" },
+  { value: "id-jakarta", label: "Indonesia \u2014 Jakarta" },
+  { value: "th-bangkok", label: "Thailand \u2014 Bangkok" },
+  { value: "my-kuala-lumpur", label: "Malaysia \u2014 Kuala Lumpur" },
+  { value: "ph-manila", label: "Philippines \u2014 Manila" },
+  { value: "vn-ho-chi-minh", label: "Vietnam \u2014 Ho Chi Minh City" },
+  { value: "au-sydney", label: "Australia \u2014 Sydney" },
+  { value: "nz-auckland", label: "New Zealand \u2014 Auckland" },
+  { value: "af", label: "Afghanistan" },
+  { value: "al", label: "Albania" },
+  { value: "dz", label: "Algeria" },
+  { value: "as", label: "American Samoa" },
+  { value: "ad", label: "Andorra" },
+  { value: "ao", label: "Angola" },
+  { value: "ai", label: "Anguilla" },
+  { value: "aq", label: "Antarctica" },
+  { value: "ag", label: "Antigua and Barbuda" },
+  { value: "ar", label: "Argentina" },
+  { value: "am", label: "Armenia" },
+  { value: "aw", label: "Aruba" },
+  { value: "au", label: "Australia" },
+  { value: "at", label: "Austria" },
+  { value: "az", label: "Azerbaijan" },
+  { value: "bs", label: "Bahamas" },
+  { value: "bh", label: "Bahrain" },
+  { value: "bd", label: "Bangladesh" },
+  { value: "bb", label: "Barbados" },
+  { value: "by", label: "Belarus" },
+  { value: "be", label: "Belgium" },
+  { value: "bz", label: "Belize" },
+  { value: "bj", label: "Benin" },
+  { value: "bm", label: "Bermuda" },
+  { value: "bt", label: "Bhutan" },
+  { value: "bo", label: "Bolivia, Plurinational State of" },
+  { value: "bq", label: "Bonaire, Sint Eustatius and Saba" },
+  { value: "ba", label: "Bosnia and Herzegovina" },
+  { value: "bw", label: "Botswana" },
+  { value: "bv", label: "Bouvet Island" },
+  { value: "br", label: "Brazil" },
+  { value: "io", label: "British Indian Ocean Territory" },
+  { value: "bn", label: "Brunei Darussalam" },
+  { value: "bg", label: "Bulgaria" },
+  { value: "bf", label: "Burkina Faso" },
+  { value: "bi", label: "Burundi" },
+  { value: "cv", label: "Cabo Verde" },
+  { value: "kh", label: "Cambodia" },
+  { value: "cm", label: "Cameroon" },
+  { value: "ca", label: "Canada" },
+  { value: "ky", label: "Cayman Islands" },
+  { value: "cf", label: "Central African Republic" },
+  { value: "td", label: "Chad" },
+  { value: "cl", label: "Chile" },
+  { value: "cn", label: "China" },
+  { value: "cx", label: "Christmas Island" },
+  { value: "cc", label: "Cocos (Keeling) Islands" },
+  { value: "co", label: "Colombia" },
+  { value: "km", label: "Comoros" },
+  { value: "cg", label: "Congo" },
+  { value: "cd", label: "Congo, Democratic Republic of the" },
+  { value: "ck", label: "Cook Islands" },
+  { value: "cr", label: "Costa Rica" },
+  { value: "hr", label: "Croatia" },
+  { value: "cu", label: "Cuba" },
+  { value: "cw", label: "Cura\u00e7ao" },
+  { value: "cy", label: "Cyprus" },
+  { value: "cz", label: "Czechia" },
+  { value: "ci", label: "C\u00f4te d'Ivoire" },
+  { value: "dk", label: "Denmark" },
+  { value: "dj", label: "Djibouti" },
+  { value: "dm", label: "Dominica" },
+  { value: "do", label: "Dominican Republic" },
+  { value: "ec", label: "Ecuador" },
+  { value: "eg", label: "Egypt" },
+  { value: "sv", label: "El Salvador" },
+  { value: "gq", label: "Equatorial Guinea" },
+  { value: "er", label: "Eritrea" },
+  { value: "ee", label: "Estonia" },
+  { value: "sz", label: "Eswatini" },
+  { value: "et", label: "Ethiopia" },
+  { value: "fk", label: "Falkland Islands (Malvinas)" },
+  { value: "fo", label: "Faroe Islands" },
+  { value: "fj", label: "Fiji" },
+  { value: "fi", label: "Finland" },
+  { value: "fr", label: "France" },
+  { value: "gf", label: "French Guiana" },
+  { value: "pf", label: "French Polynesia" },
+  { value: "tf", label: "French Southern Territories" },
+  { value: "ga", label: "Gabon" },
+  { value: "gm", label: "Gambia" },
+  { value: "ge", label: "Georgia" },
+  { value: "de", label: "Germany" },
+  { value: "gh", label: "Ghana" },
+  { value: "gi", label: "Gibraltar" },
+  { value: "gr", label: "Greece" },
+  { value: "gl", label: "Greenland" },
+  { value: "gd", label: "Grenada" },
+  { value: "gp", label: "Guadeloupe" },
+  { value: "gu", label: "Guam" },
+  { value: "gt", label: "Guatemala" },
+  { value: "gg", label: "Guernsey" },
+  { value: "gn", label: "Guinea" },
+  { value: "gw", label: "Guinea-Bissau" },
+  { value: "gy", label: "Guyana" },
+  { value: "ht", label: "Haiti" },
+  { value: "hm", label: "Heard Island and McDonald Islands" },
+  { value: "va", label: "Holy See" },
+  { value: "hn", label: "Honduras" },
+  { value: "hu", label: "Hungary" },
+  { value: "is", label: "Iceland" },
+  { value: "in", label: "India" },
+  { value: "id", label: "Indonesia" },
+  { value: "ir", label: "Iran, Islamic Republic of" },
+  { value: "iq", label: "Iraq" },
+  { value: "ie", label: "Ireland" },
+  { value: "im", label: "Isle of Man" },
+  { value: "il", label: "Israel" },
+  { value: "it", label: "Italy" },
+  { value: "jm", label: "Jamaica" },
+  { value: "jp", label: "Japan" },
+  { value: "je", label: "Jersey" },
+  { value: "jo", label: "Jordan" },
+  { value: "kz", label: "Kazakhstan" },
+  { value: "ke", label: "Kenya" },
+  { value: "ki", label: "Kiribati" },
+  { value: "kp", label: "Korea, Democratic People's Republic of" },
+  { value: "kr", label: "Korea, Republic of" },
+  { value: "kw", label: "Kuwait" },
+  { value: "kg", label: "Kyrgyzstan" },
+  { value: "la", label: "Lao People's Democratic Republic" },
+  { value: "lv", label: "Latvia" },
+  { value: "lb", label: "Lebanon" },
+  { value: "ls", label: "Lesotho" },
+  { value: "lr", label: "Liberia" },
+  { value: "ly", label: "Libya" },
+  { value: "li", label: "Liechtenstein" },
+  { value: "lt", label: "Lithuania" },
+  { value: "lu", label: "Luxembourg" },
+  { value: "mo", label: "Macao" },
+  { value: "mg", label: "Madagascar" },
+  { value: "mw", label: "Malawi" },
+  { value: "my", label: "Malaysia" },
+  { value: "mv", label: "Maldives" },
+  { value: "ml", label: "Mali" },
+  { value: "mt", label: "Malta" },
+  { value: "mh", label: "Marshall Islands" },
+  { value: "mq", label: "Martinique" },
+  { value: "mr", label: "Mauritania" },
+  { value: "mu", label: "Mauritius" },
+  { value: "yt", label: "Mayotte" },
+  { value: "mx", label: "Mexico" },
+  { value: "fm", label: "Micronesia, Federated States of" },
+  { value: "md", label: "Moldova, Republic of" },
+  { value: "mc", label: "Monaco" },
+  { value: "mn", label: "Mongolia" },
+  { value: "me", label: "Montenegro" },
+  { value: "ms", label: "Montserrat" },
+  { value: "ma", label: "Morocco" },
+  { value: "mz", label: "Mozambique" },
+  { value: "mm", label: "Myanmar" },
+  { value: "na", label: "Namibia" },
+  { value: "nr", label: "Nauru" },
+  { value: "np", label: "Nepal" },
+  { value: "nl", label: "Netherlands, Kingdom of the" },
+  { value: "nc", label: "New Caledonia" },
+  { value: "nz", label: "New Zealand" },
+  { value: "ni", label: "Nicaragua" },
+  { value: "ne", label: "Niger" },
+  { value: "ng", label: "Nigeria" },
+  { value: "nu", label: "Niue" },
+  { value: "nf", label: "Norfolk Island" },
+  { value: "mk", label: "North Macedonia" },
+  { value: "mp", label: "Northern Mariana Islands" },
+  { value: "no", label: "Norway" },
+  { value: "om", label: "Oman" },
+  { value: "pk", label: "Pakistan" },
+  { value: "pw", label: "Palau" },
+  { value: "ps", label: "Palestine, State of" },
+  { value: "pa", label: "Panama" },
+  { value: "pg", label: "Papua New Guinea" },
+  { value: "py", label: "Paraguay" },
+  { value: "pe", label: "Peru" },
+  { value: "ph", label: "Philippines" },
+  { value: "pn", label: "Pitcairn" },
+  { value: "pl", label: "Poland" },
+  { value: "pt", label: "Portugal" },
+  { value: "pr", label: "Puerto Rico" },
+  { value: "qa", label: "Qatar" },
+  { value: "ro", label: "Romania" },
+  { value: "ru", label: "Russian Federation" },
+  { value: "rw", label: "Rwanda" },
+  { value: "re", label: "R\u00e9union" },
+  { value: "bl", label: "Saint Barth\u00e9lemy" },
+  { value: "sh", label: "Saint Helena, Ascension and Tristan da Cunha" },
+  { value: "kn", label: "Saint Kitts and Nevis" },
+  { value: "lc", label: "Saint Lucia" },
+  { value: "mf", label: "Saint Martin (French part)" },
+  { value: "pm", label: "Saint Pierre and Miquelon" },
+  { value: "vc", label: "Saint Vincent and the Grenadines" },
+  { value: "ws", label: "Samoa" },
+  { value: "sm", label: "San Marino" },
+  { value: "st", label: "Sao Tome and Principe" },
+  { value: "sa", label: "Saudi Arabia" },
+  { value: "sn", label: "Senegal" },
+  { value: "rs", label: "Serbia" },
+  { value: "sc", label: "Seychelles" },
+  { value: "sl", label: "Sierra Leone" },
+  { value: "sx", label: "Sint Maarten (Dutch part)" },
+  { value: "sk", label: "Slovakia" },
+  { value: "si", label: "Slovenia" },
+  { value: "sb", label: "Solomon Islands" },
+  { value: "so", label: "Somalia" },
+  { value: "za", label: "South Africa" },
+  { value: "gs", label: "South Georgia and the South Sandwich Islands" },
+  { value: "ss", label: "South Sudan" },
+  { value: "es", label: "Spain" },
+  { value: "lk", label: "Sri Lanka" },
+  { value: "sd", label: "Sudan" },
+  { value: "sr", label: "Suriname" },
+  { value: "sj", label: "Svalbard and Jan Mayen" },
+  { value: "se", label: "Sweden" },
+  { value: "ch", label: "Switzerland" },
+  { value: "sy", label: "Syrian Arab Republic" },
+  { value: "tw", label: "Taiwan" },
+  { value: "tj", label: "Tajikistan" },
+  { value: "tz", label: "Tanzania, United Republic of" },
+  { value: "th", label: "Thailand" },
+  { value: "tl", label: "Timor-Leste" },
+  { value: "tg", label: "Togo" },
+  { value: "tk", label: "Tokelau" },
+  { value: "to", label: "Tonga" },
+  { value: "tt", label: "Trinidad and Tobago" },
+  { value: "tn", label: "Tunisia" },
+  { value: "tm", label: "Turkmenistan" },
+  { value: "tc", label: "Turks and Caicos Islands" },
+  { value: "tv", label: "Tuvalu" },
+  { value: "tr", label: "T\u00fcrkiye" },
+  { value: "ug", label: "Uganda" },
+  { value: "ua", label: "Ukraine" },
+  { value: "ae", label: "United Arab Emirates" },
+  { value: "gb", label: "United Kingdom of Great Britain and Northern Ireland" },
+  { value: "um", label: "United States Minor Outlying Islands" },
+  { value: "us", label: "United States of America" },
+  { value: "uy", label: "Uruguay" },
+  { value: "uz", label: "Uzbekistan" },
+  { value: "vu", label: "Vanuatu" },
+  { value: "ve", label: "Venezuela, Bolivarian Republic of" },
+  { value: "vn", label: "Viet Nam" },
+  { value: "vg", label: "Virgin Islands (British)" },
+  { value: "vi", label: "Virgin Islands (U.S.)" },
+  { value: "wf", label: "Wallis and Futuna" },
+  { value: "eh", label: "Western Sahara" },
+  { value: "ye", label: "Yemen" },
+  { value: "zm", label: "Zambia" },
+  { value: "zw", label: "Zimbabwe" },
+  { value: "ax", label: "\u00c5land Islands" }
+];
+
+function validProxyRegion(region) {
+  if (!region) return true;
+  const value = region.trim().toLowerCase();
+  return PROXY_REGION_PRESETS.some(p => p.value === value);
+}
+
+function validateProxyRegionInput(runtimeID, region, requiredForRuntime = false) {
+  const value = (region || '').trim();
+  if (requiredForRuntime && runtimeID === 'browseforge-chromium' && !value) return t('proxyRegionRequired');
+  if (value && !validProxyRegion(value)) return t('proxyRegionInvalid');
+  return '';
+}
+
+function refreshProxyRegionOptions() {
+  const optionLabel = p => p.value === 'tw' ? p.label : `${p.label} (${p.value})`;
+  const options = '<option value="">' + t('proxyRegionPlaceholder') + '</option>' +
+    PROXY_REGION_PRESETS.map(p => `<option value="${escAttr(p.value)}">${esc(optionLabel(p))}</option>`).join('');
+  ['e-proxy-region', 'f-proxy-region', 'g-proxy-region'].forEach(id => {
+    const select = document.getElementById(id);
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = options;
+    select.value = PROXY_REGION_PRESETS.some(p => p.value === current) ? current : '';
+  });
+}
+
+function applyI18n() {
+  document.documentElement.lang = locale;
+  document.getElementById('langSelect').value = locale;
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+  refreshFilterControls();
+  refreshProxyRegionOptions();
+  updateStatusText();
+}
+
+function updateStatusText() {
+  const el = document.getElementById('status');
+  if (!el) return;
+  if (statusState === 'online') {
+    el.textContent = '✅ v' + statusVersion;
+  } else if (statusState === 'offline') {
+    el.textContent = '❌ ' + t('offline');
+  } else {
+    el.textContent = t('connecting');
+  }
+}
+
+// --- Login ---
+async function init() {
+  applyI18n();
+  document.getElementById('langSelect').addEventListener('change', e => {
+    locale = e.target.value;
+    localStorage.setItem('bf-locale', locale);
+    applyI18n();
+    renderAll();
+  });
+  TOKEN = location.hash.slice(1) || localStorage.getItem('bf-token') || localStorage.getItem('cmfx-token') || '';
+  if (TOKEN) {
+    const valid = await verifyToken(TOKEN);
+    if (valid) {
+      localStorage.setItem('bf-token', TOKEN);
+      localStorage.removeItem('cmfx-token');
+      showApp();
+      return;
+    }
+  }
+  document.getElementById('loginOverlay').style.display = 'flex';
+}
+
+async function verifyToken(token) {
+  try {
+    const r = await fetch(API + '/profiles', { headers: { 'Authorization': 'Bearer ' + token } });
+    return r.status !== 401;
+  } catch { return false; }
+}
+
+async function submitLogin() {
+  const input = document.getElementById('loginToken');
+  const err = document.getElementById('loginError');
+  TOKEN = input.value.trim();
+  if (!TOKEN) { err.style.display = 'block'; err.textContent = t('enterToken'); return; }
+  const valid = await verifyToken(TOKEN);
+  if (!valid) { err.style.display = 'block'; err.textContent = t('invalidToken'); return; }
+  localStorage.setItem('bf-token', TOKEN);
+  localStorage.removeItem('cmfx-token');
+  showApp();
+}
+
+document.getElementById('loginToken').addEventListener('keydown', e => { if (e.key === 'Enter') submitLogin(); });
+
+function showApp() {
+  document.getElementById('loginOverlay').style.display = 'none';
+  document.getElementById('toolbar').style.display = 'flex';
+  checkStatus();
+  loadRuntimes();
+  loadGroups();
+  loadProfiles();
+  loadSessions();
+}
+
+// --- API ---
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(API + path, opts);
+  return r.json();
+}
+
+async function checkStatus() {
+  try {
+    const r = await fetch(API + '/status');
+    const d = await r.json();
+    statusState = 'online';
+    statusVersion = d.version || '';
+  } catch {
+    statusState = 'offline';
+    statusVersion = '';
+  }
+  updateStatusText();
+}
+
+async function loadRuntimes() {
+  const d = await api('GET', '/runtimes');
+  runtimes = d.data || [];
+  defaultRuntimeID = d.default_runtime_id || '';
+  renderAll();
+}
+
+async function loadProfiles() {
+  const d = await api('GET', '/profiles');
+  profiles = d.data || [];
+  renderAll();
+}
+
+async function loadGroups() {
+  const d = await api('GET', '/groups');
+  groups = d.data || [];
+  renderAll();
+}
+
+async function loadSessions() {
+  const d = await api('GET', '/sessions');
+  sessions = new Set((d.data || []).map(s => s.profile_id));
+  renderAll();
+}
+
+async function refreshAll() {
+  await Promise.all([loadRuntimes(), loadGroups(), loadProfiles(), loadSessions()]);
+}
+
+function renderAll() {
+  refreshGroupOptions();
+  refreshRuntimeOptions();
+  refreshFilterControls();
+  renderGroupManager();
+  render();
+}
+
+function setFilter(key, value) {
+  filters[key] = value || '';
+  refreshFilterControls();
+  render();
+}
+
+function refreshFilterControls() {
+  const groupSelect = document.getElementById('filter-group');
+  if (!groupSelect) return;
+  const current = filters.group || '';
+  groupSelect.innerHTML = `<option value="">${t('allGroups')}</option>` + knownGroupNames().map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
+  groupSelect.value = knownGroupNames().includes(current) ? current : '';
+  filters.group = groupSelect.value;
+  const runtime = document.getElementById('filter-runtime');
+  const status = document.getElementById('filter-status');
+  const sort = document.getElementById('sort-profiles');
+  if (runtime) runtime.innerHTML = `<option value="">${t('allRuntimes')}</option>` + runtimes.map(rt => `<option value="${esc(rt.id)}">${esc(rt.display_name || rt.id)}</option>`).join('');
+  if (runtime) runtime.value = filters.runtime;
+  if (status) status.value = filters.status;
+  if (sort) sort.value = filters.sort;
+}
+
+function runtimeLabel(id) {
+  const rt = runtimes.find(r => r.id === id);
+  if (rt) return rt.display_name || rt.id;
+  return id || 'Unknown runtime';
+}
+
+function runtimeFamily(id) {
+  const rt = runtimes.find(r => r.id === id);
+  return (rt && rt.family) || 'unknown';
+}
+
+function refreshRuntimeOptions() {
+  const select = document.getElementById('f-runtime');
+  if (!select) return;
+  const options = runtimes.filter(rt => rt.enabled);
+  select.innerHTML = options.length ? options.map(rt => `<option value="${esc(rt.id)}">${esc(rt.display_name || rt.id)} (${esc(rt.family || '')})</option>`).join('') : '<option value="">No enabled runtimes</option>';
+  if (options.some(rt => rt.id === defaultRuntimeID)) select.value = defaultRuntimeID;
+}
+
+function knownGroupNames() {
+  const names = new Set();
+  profiles.forEach(p => { if ((p.group || '').trim()) names.add(p.group.trim()); });
+  groups.forEach(g => { if ((g.name || '').trim()) names.add(g.name.trim()); });
+  return [...names].sort((a, b) => a.localeCompare(b));
+}
+
+function refreshGroupOptions() {
+  const datalist = document.getElementById('groupOptions');
+  const names = knownGroupNames();
+  if (datalist) {
+    datalist.innerHTML = names.map(name => `<option value="${esc(name)}"></option>`).join('');
+  }
+  ['f', 'e'].forEach(prefix => refreshGroupPicker(prefix, names));
+}
+
+function groupInputId(prefix) {
+  return prefix + '-group';
+}
+
+function refreshGroupPicker(prefix, names = knownGroupNames()) {
+  const select = document.getElementById(prefix + '-group-select');
+  if (!select) return;
+  const input = document.getElementById(groupInputId(prefix));
+  const value = (input?.value || '').trim();
+  select.innerHTML = `<option value="">${t('selectExistingGroup')}</option>` + names.map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
+  select.value = names.includes(value) ? value : '';
+}
+
+function applyGroupSelection(prefix, value) {
+  if (!value) return;
+  const input = document.getElementById(groupInputId(prefix));
+  if (input) input.value = value;
+  refreshGroupPicker(prefix);
+}
+
+function syncGroupPicker(prefix) {
+  refreshGroupPicker(prefix);
+}
+
+function filteredProfiles() {
+  const search = filters.search.trim().toLowerCase();
+  const tag = filters.tag.trim().toLowerCase();
+  let items = profiles.filter(p => {
+    const runtimeName = runtimeLabel(p.runtime_id);
+    const tags = p.tags || [];
+    const haystack = [p.name, p.id, p.group, p.runtime_id, runtimeName, ...(tags || [])].join(' ').toLowerCase();
+    if (search && !haystack.includes(search)) return false;
+    if (filters.group && (p.group || '').trim() !== filters.group) return false;
+    if (filters.runtime && p.runtime_id !== filters.runtime) return false;
+    if (filters.status === 'active' && !sessions.has(p.id)) return false;
+    if (filters.status === 'inactive' && sessions.has(p.id)) return false;
+    if (tag && !tags.some(x => (x || '').toLowerCase().includes(tag))) return false;
+    return true;
+  });
+  items = [...items].sort((a, b) => {
+    switch (filters.sort) {
+    case 'group':
+      return ((a.group || '') + a.name).localeCompare((b.group || '') + b.name);
+    case 'runtime':
+      return ((a.runtime_id || '') + a.name).localeCompare((b.runtime_id || '') + b.name);
+    case 'created_desc':
+      return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+    case 'last_used_desc':
+      return new Date(b.last_used || 0) - new Date(a.last_used || 0);
+    default:
+      return (a.name || '').localeCompare(b.name || '');
+    }
+  });
+  return items;
+}
+
+function render() {
+  const grid = document.getElementById('grid');
+  const summary = document.getElementById('summary');
+  const visible = filteredProfiles();
+  if (summary) {
+    summary.style.display = profiles.length ? 'block' : 'none';
+    summary.textContent = t('showingProfiles', { shown: visible.length, total: profiles.length });
+  }
+
+  // Empty state
+  if (profiles.length === 0) {
+    grid.innerHTML = `<div class="empty-state">
+      <h2>${t('noProfiles')}</h2>
+      <p>${t('noProfilesBody')}</p>
+      <button class="primary" onclick="showCreate()">${t('newProfile')}</button>
+    </div>`;
+    return;
+  }
+
+  if (visible.length === 0) {
+    grid.innerHTML = `<div class="empty-state"><h2>${t('noProfiles')}</h2><p>${t('noMatches')}</p></div>`;
+    return;
+  }
+
+  grid.innerHTML = visible.map(p => {
+    const active = sessions.has(p.id);
+    const fp = p.fingerprint || {};
+    const proxyInfo = effectiveProxyInfo(p);
+    const tags = (p.tags || []).map(tag => `<span class="chip">${esc(tag)}</span>`).join('');
+    return `<div class="card">
+      <div class="name"><span class="badge ${active ? 'active' : 'inactive'}"></span>${esc(p.name)}</div>
+      <div class="meta">
+        <span class="runtime ${escAttr(runtimeFamily(p.runtime_id))}">${esc(runtimeLabel(p.runtime_id))}</span>
+        · ${esc(p.group || t('ungrouped'))}
+        ${proxyInfo ? ' · 🔒 ' + esc(proxyInfo.host) + ' (' + esc(proxyInfo.label) + ')' : ''}
+      </div>
+      ${tags ? `<div class="tags">${tags}</div>` : ''}
+      <div class="fp">
+        <span>UA:</span> ${esc((fp['navigator.userAgent']||'').substring(0,60))}...<br>
+        <span>Platform:</span> ${esc(fp['navigator.platform']||'N/A')}
+        · <span>Screen:</span> ${fp['screen.width']||'?'}×${fp['screen.height']||'?'}
+      </div>
+      ${active ? `<img class="thumb" id="thumb-${p.id}" src="" style="display:none">` : ''}
+      <div class="actions">
+        ${active
+          ? `<button class="danger" onclick="closeSession('${p.id}')">${t('close')}</button>
+             <button onclick="navigateTo('${p.id}')">${t('navigate')}</button>
+             <button onclick="loadScreenshot('${p.id}')">${t('screenshot')}</button>`
+          : `<button class="primary" onclick="openSession('${p.id}')">${t('open')}</button>`}
+        <button onclick="editProfile('${p.id}')">${t('edit')}</button>
+        <button onclick="exportProfile('${escAttr(p.id)}','${escAttr(p.name)}')">${t('export')}</button>
+        <button onclick="duplicateProfile('${p.id}')">${t('duplicate')}</button>
+        <button onclick="deleteProfile('${escAttr(p.id)}','${escAttr(p.name)}')">${t('delete')}</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Restore cached screenshots
+  for (const pid in screenshots) {
+    const img = document.getElementById('thumb-' + pid);
+    if (img) { img.src = screenshots[pid]; img.style.display = 'block'; }
+  }
+}
+
+function toggleGroupManager(open = !groupManagerOpen) {
+  groupManagerOpen = open;
+  const el = document.getElementById('groupManager');
+  if (el) el.style.display = groupManagerOpen ? 'block' : 'none';
+  renderGroupManager();
+}
+
+function renderGroupManager() {
+  const el = document.getElementById('groupList');
+  if (!el) return;
+  const names = knownGroupNames();
+  if (names.length === 0) {
+    el.innerHTML = `<div class="empty-state"><p>${t('noGroupPolicies')}</p></div>`;
+    return;
+  }
+  el.innerHTML = names.map(name => {
+    const policy = groupPolicy(name);
+    const members = profiles.filter(p => (p.group || '').trim() === name);
+    const active = members.filter(p => sessions.has(p.id)).length;
+    const proxy = policy?.proxy;
+    const mode = policy?.proxy_mode || 'default';
+    const state = proxy?.host ? t('policyConfigured') : t('noPolicy');
+    return `<div class="group-row">
+      <div class="title"><span class="name">${esc(name)}</span><span class="chip ${proxy?.host ? '' : 'warn'}">${esc(state)}</span></div>
+      <div class="meta">
+        ${t('profilesCount', { count: members.length })} · ${t('activeCount', { count: active })}<br>
+        ${proxy?.host ? `${esc(mode)} · ${esc(proxy.type)}://${esc(proxy.host)}:${proxy.port}` : esc(t('noPolicy'))}
+      </div>
+      <div class="actions">
+        <button onclick="showGroupProxy('${escAttr(name)}')">${t('edit')}</button>
+        <button onclick="deleteGroup('${escAttr(name)}')">${t('delete')}</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function groupPolicy(name) {
+  const normalized = (name || '').trim();
+  return groups.find(g => g.name === normalized);
+}
+
+function parseTags(value) {
+  return (value || '').split(',').map(x => x.trim()).filter(Boolean);
+}
+
+function effectiveProxyInfo(p) {
+  const policy = p.group ? groupPolicy(p.group) : null;
+  const groupProxy = policy?.proxy;
+  const mode = policy?.proxy_mode || 'default';
+  if (mode === 'enforced' && groupProxy?.host) return { host: groupProxy.host, label: t('proxySourceEnforced') };
+  if (p.proxy?.host) return { host: p.proxy.host, label: t('proxySourceProfile') };
+  if (groupProxy?.host) return { host: groupProxy.host, label: t('proxySourceGroup') };
+  return null;
+}
+
+// --- Navigate ---
+function navigateTo(profileId) {
+  const url = prompt(t('navigatePrompt'), 'https://');
+  if (!url) return;
+  api('POST', '/sessions/sess_' + profileId + '/navigate', { url });
+  toast(t('navigating'));
+}
+
+// --- Screenshot preview ---
+async function loadScreenshot(profileId) {
+  try {
+    const r = await fetch(API + '/sessions/sess_' + profileId + '/screenshot?quality=30', {
+      headers: { 'Authorization': 'Bearer ' + TOKEN }
+    });
+    if (!r.ok) return;
+    const blob = await r.blob();
+    if (screenshots[profileId]) URL.revokeObjectURL(screenshots[profileId]);
+    screenshots[profileId] = URL.createObjectURL(blob);
+    const img = document.getElementById('thumb-' + profileId);
+    if (img) { img.src = screenshots[profileId]; img.style.display = 'block'; }
+  } catch {}
+}
+
+// --- Sessions ---
+async function openSession(profileId) {
+  toast(t('starting'));
+  const d = await api('POST', '/sessions', { profile_id: profileId });
+  if (d.error) { toast('❌ ' + d.error.message); return; }
+  toast(t('browserOpened'));
+  sessions.add(profileId);
+  renderAll();
+}
+
+async function closeSession(profileId) {
+  await api('DELETE', '/sessions/sess_' + profileId);
+  sessions.delete(profileId);
+  renderAll();
+  toast(t('closed'));
+}
+
+// --- Profile CRUD ---
+function showCreate() {
+  refreshGroupOptions();
+  refreshRuntimeOptions();
+  syncGroupPicker('f');
+  document.getElementById('createModal').classList.add('show');
+}
+function hideCreate() { document.getElementById('createModal').classList.remove('show'); }
+function hideEdit() { document.getElementById('editModal').classList.remove('show'); }
+function showGroupProxy(name = '') {
+  const policy = name ? groupPolicy(name) : null;
+  const proxy = policy?.proxy;
+  const nameInput = document.getElementById('g-name');
+  const title = document.getElementById('g-title');
+  const clearButton = document.getElementById('g-clear-proxy');
+  nameInput.value = name || '';
+  nameInput.readOnly = !!name;
+  if (title) title.textContent = name ? (proxy?.host ? t('editGroupProxy') : t('setGroupProxy')) : t('newGroupProxy');
+  if (clearButton) clearButton.style.display = proxy?.host ? '' : 'none';
+  document.getElementById('g-proxy-mode').value = policy?.proxy_mode || 'default';
+  document.getElementById('g-proxy-type').value = proxy?.type || '';
+  document.getElementById('g-proxy-host').value = proxy?.host || '';
+  document.getElementById('g-proxy-port').value = proxy?.port || '';
+  document.getElementById('g-proxy-user').value = proxy?.username || '';
+  document.getElementById('g-proxy-pass').value = proxy?.password || '';
+  document.getElementById('g-proxy-region').value = proxy?.region || '';
+  document.getElementById('groupProxyModal').classList.add('show');
+}
+function hideGroupProxy() { document.getElementById('groupProxyModal').classList.remove('show'); }
+
+async function editProfile(id) {
+  const p = profiles.find(x => x.id === id);
+  if (!p) return;
+  document.getElementById('e-id').value = p.id;
+  document.getElementById('e-name').value = p.name || '';
+  document.getElementById('e-group').value = p.group || '';
+  refreshGroupOptions();
+  syncGroupPicker('e');
+  document.getElementById('e-tags').value = (p.tags || []).join(', ');
+  document.getElementById('e-proxy-type').value = p.proxy?.type || '';
+  document.getElementById('e-proxy-host').value = p.proxy?.host || '';
+  document.getElementById('e-proxy-port').value = p.proxy?.port || '';
+  document.getElementById('e-proxy-user').value = p.proxy?.username || '';
+  document.getElementById('e-proxy-pass').value = p.proxy?.password || '';
+  document.getElementById('e-proxy-region').value = p.proxy?.region || '';
+  document.getElementById('editModal').classList.add('show');
+}
+
+async function saveProfile() {
+  const id = document.getElementById('e-id').value;
+  const body = {
+    name: document.getElementById('e-name').value,
+    group: document.getElementById('e-group').value.trim(),
+    tags: parseTags(document.getElementById('e-tags').value)
+  };
+  const proxyType = document.getElementById('e-proxy-type').value;
+  if (proxyType) {
+    const proxyRegion = document.getElementById('e-proxy-region').value.trim();
+    const currentProfile = profiles.find(x => x.id === id);
+    const regionError = validateProxyRegionInput(currentProfile?.runtime_id, proxyRegion, true);
+    if (regionError) { toast(regionError); return; }
+    body.proxy = { type: proxyType, host: document.getElementById('e-proxy-host').value, port: parseInt(document.getElementById('e-proxy-port').value) || 1080, username: document.getElementById('e-proxy-user').value || undefined, password: document.getElementById('e-proxy-pass').value || undefined, region: proxyRegion || undefined };
+  } else { body.proxy = null; }
+  const d = await api('PUT', '/profiles/' + id, body);
+  if (d.error) { toast('❌ ' + d.error.message); return; }
+  hideEdit(); toast(t('saved')); await loadProfiles(); await loadGroups();
+}
+
+async function createProfile() {
+  const name = document.getElementById('f-name').value;
+  if (!name) { toast(t('nameRequired')); return; }
+  const body = { name, runtime_id: document.getElementById('f-runtime').value, group: document.getElementById('f-group').value.trim() || undefined, tags: parseTags(document.getElementById('f-tags').value) };
+  const proxyType = document.getElementById('f-proxy-type').value;
+  if (proxyType) {
+    const proxyRegion = document.getElementById('f-proxy-region').value.trim();
+    const regionError = validateProxyRegionInput(document.getElementById('f-runtime').value, proxyRegion, true);
+    if (regionError) { toast(regionError); return; }
+    body.proxy = { type: proxyType, host: document.getElementById('f-proxy-host').value, port: parseInt(document.getElementById('f-proxy-port').value) || 1080, username: document.getElementById('f-proxy-user').value || undefined, password: document.getElementById('f-proxy-pass').value || undefined, region: proxyRegion || undefined };
+  }
+  const d = await api('POST', '/profiles', body);
+  if (d.error) { toast('❌ ' + d.error.message); return; }
+  hideCreate(); toast(t('created') + name); await loadProfiles(); await loadGroups();
+}
+
+async function saveGroupProxy() {
+  const name = document.getElementById('g-name').value.trim();
+  if (!name) { toast(t('groupRequired')); return; }
+  const proxyType = document.getElementById('g-proxy-type').value;
+  if (!proxyType) { await clearGroupProxy(); return; }
+  const proxyRegion = document.getElementById('g-proxy-region').value.trim();
+  const regionError = validateProxyRegionInput('browseforge-chromium', proxyRegion, false);
+  if (regionError) { toast(regionError); return; }
+  const body = {
+    proxy_mode: document.getElementById('g-proxy-mode').value || 'default',
+    proxy: {
+      type: proxyType,
+      host: document.getElementById('g-proxy-host').value,
+      port: parseInt(document.getElementById('g-proxy-port').value) || 1080,
+      username: document.getElementById('g-proxy-user').value || undefined,
+      password: document.getElementById('g-proxy-pass').value || undefined,
+      region: proxyRegion || undefined
+    }
+  };
+  const d = await api('PUT', '/groups/' + encodeURIComponent(name), body);
+  if (d.error) { toast('❌ ' + d.error.message); return; }
+  hideGroupProxy(); toast(t('saved')); await loadGroups();
+}
+
+async function clearGroupProxy(nameArg = '') {
+  const name = (nameArg || document.getElementById('g-name').value).trim();
+  if (!name) { toast(t('groupRequired')); return; }
+  const d = await api('DELETE', '/groups/' + encodeURIComponent(name) + '/proxy');
+  if (d.error) { toast('❌ ' + d.error.message); return; }
+  hideGroupProxy(); toast(t('saved')); await loadGroups();
+}
+
+async function deleteGroup(name) {
+  if (!confirm(t('deleteGroupConfirm', { name }))) return;
+  const d = await api('DELETE', '/groups/' + encodeURIComponent(name));
+  if (d.error) {
+    toast('❌ ' + (d.error.code === 'GROUP_HAS_ACTIVE_SESSIONS' ? t('deleteGroupActive') : d.error.message));
+    return;
+  }
+  toast(t('deleted'));
+  await loadProfiles();
+  await loadGroups();
+}
+
+async function duplicateProfile(id) { await api('POST', '/profiles/' + id + '/duplicate'); toast(t('duplicated')); await loadProfiles(); }
+
+async function deleteProfile(id, name) {
+  if (!confirm(t('deleteConfirm', { name }))) return;
+  await api('DELETE', '/profiles/' + id); toast(t('deleted')); await loadProfiles();
+}
+
+async function exportProfile(id, name) {
+  toast(t('exporting'));
+  const r = await fetch(API + '/profiles/' + id + '/export', { method: 'POST', headers: { 'Authorization': 'Bearer ' + TOKEN } });
+  if (!r.ok) { toast(t('exportFailed')); return; }
+  const blob = await r.blob();
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = (name || id) + '.zip'; a.click();
+  toast(t('exported'));
+}
+
+function importProfile() { document.getElementById('importFile').click(); }
+async function handleImport(input) {
+  const file = input.files[0]; if (!file) return;
+  toast(t('importing')); const fd = new FormData(); fd.append('file', file);
+  const r = await fetch(API + '/profiles/import', { method: 'POST', headers: { 'Authorization': 'Bearer ' + TOKEN }, body: fd });
+  const d = await r.json(); input.value = '';
+  if (d.error) { toast('❌ ' + d.error.message); return; }
+  toast(t('imported')); await loadProfiles();
+}
+
+async function backupAll() {
+  toast(t('backingUp'));
+  const r = await fetch(API + '/backup', { method: 'POST', headers: { 'Authorization': 'Bearer ' + TOKEN } });
+  if (!r.ok) { toast(t('backupFailed')); return; }
+  const blob = await r.blob();
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'browseforge-backup-' + new Date().toISOString().slice(0,10) + '.zip'; a.click();
+  toast(t('backedUp'));
+}
+
+function restoreBackup() { document.getElementById('restoreFile').click(); }
+async function handleRestore(input) {
+  const file = input.files[0]; if (!file) return;
+  if (!confirm(t('restoreConfirm'))) { input.value = ''; return; }
+  toast(t('restoring')); const fd = new FormData(); fd.append('file', file);
+  const r = await fetch(API + '/restore', { method: 'POST', headers: { 'Authorization': 'Bearer ' + TOKEN }, body: fd });
+  const d = await r.json(); input.value = '';
+  if (d.error) { toast('❌ ' + d.error.message); return; }
+  toast(t('restored', { count: d.data.imported, groups: d.data.groups_imported || 0 }));
+  await loadGroups(); await loadProfiles();
+}
+
+function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 3000); }
+function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+function escAttr(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+init();
+</script>
+</body>
+</html>

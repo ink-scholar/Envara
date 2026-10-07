@@ -1,6 +1,6 @@
 # Third-party notices
 
-Envara's original application code is licensed under the MIT License. Third-party software retains its own copyright and license. Versions used for a particular build are recorded in `package-lock.json`.
+Envara's original application code is licensed under the MIT License. Third-party software retains its own copyright and license. JavaScript versions are recorded in `package-lock.json`; the vendored Go backend and its dependencies are pinned in `third_party/browseforge/ENVARA_UPSTREAM.md`, `go.mod`, and `go.sum`. This document describes the local 0.2.0 development candidate; public releases are paused.
 
 ## Main dependencies
 
@@ -11,11 +11,19 @@ Envara's original application code is licensed under the MIT License. Third-part
 | Vite | MIT | 2019–present VoidZero Inc. and Vite contributors · [source](https://github.com/vitejs/vite) |
 | @vitejs/plugin-react | MIT | 2019–present Yuxi (Evan) You and Vite contributors · [source](https://github.com/vitejs/vite-plugin-react) |
 | Phosphor Icons | MIT | 2020 Phosphor Icons · [source](https://github.com/phosphor-icons/react) |
+| BrowseForge vendored backend | MIT | 2026 BrowseForge contributors · [preserved license](third_party/browseforge/LICENSE) |
+| Playwright Go binding | MIT | 2020 Max Schmitt · [license](https://github.com/mxschmitt/playwright-go/blob/main/LICENSE) |
 | CloakBrowser JavaScript wrapper | MIT | 2026 CloakHQ · [license](https://github.com/CloakHQ/CloakBrowser/blob/main/LICENSE) |
-| Playwright | Apache-2.0 | Microsoft Corporation · [license](https://github.com/microsoft/playwright/blob/main/LICENSE) |
+| Playwright client and official driver | Apache-2.0 | Microsoft Corporation · [license](https://github.com/microsoft/playwright/blob/main/LICENSE) |
 | electron-builder | MIT | 2015 Loopline Systems · [source](https://github.com/electron-userland/electron-builder) |
 
 Electron includes Chromium, Node.js and additional components with their own licenses. The Electron runtime distribution includes its `LICENSE` and `LICENSES.chromium.html` notices. Transitive dependencies and build tools may carry additional licenses; their notices are retained in their distributions.
+
+## Vendored backend and prepared resources
+
+BrowseForge v2.1.15 is incorporated at commit `fa9e0bb670e749706a9c8f2d4095333347d6c521`. Its original MIT copyright and license are preserved under `third_party/browseforge/`. Envara applies local desktop lifecycle, manual identity, and integration patches. The source baseline is recorded in [ENVARA_UPSTREAM.md](third_party/browseforge/ENVARA_UPSTREAM.md).
+
+The prepared backend resources include a compiled Go sidecar, the official Playwright driver 1.61.1 and its Node.js runtime. The Go standard library uses the Go project's BSD-style license; Node.js carries its own MIT and third-party notices. The resource builders retain the Go runtime and module licenses in `build/backend/licenses/`, and the driver, binding, Node and bundled dependency notices beside the prepared driver. Build provenance records exact versions and checksums. These generated resources are excluded from the source repository and are separate from browser-engine binaries.
 
 ### MIT notice for the MIT components above
 
@@ -39,14 +47,16 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Separately downloaded browser runtime
+## Separately downloaded browser runtimes
 
 The compiled CloakBrowser Chromium binary is **not included** in the Envara source tree or application installers. An end user initiates its download from official CloakHQ distribution channels within the application settings.
 
 The wrapper's MIT license does not apply to that binary. It is governed by [CloakBrowser Binary License v1.3, July 2026](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md), including restrictions on redistribution and third-party hosted browser access. Version access can require an upstream subscription. The official license, as applicable to the version obtained, is authoritative; Envara does not grant an additional license to the binary.
 
+The multi-engine catalog also includes Camoufox and BrowseForge Chromium Alpha. Camoufox source is under [MPL-2.0](https://github.com/daijro/camoufox/blob/main/LICENSE); the BrowseForge Chromium runtime repository uses [Apache-2.0](https://github.com/nczz/browseforge-runtime-chromium/blob/92cfe89356ef0e7fb22979f5ee8d95a0a832d69b/LICENSE), with Chromium and other upstream components retaining their own notices. Their browser binaries are obtained through the respective official channels, not redistributed by Envara. Catalog integration does not mean a binary has been installed or accepted on every platform; current evidence is recorded in the [capability matrix](docs/capability-matrix.md).
+
 ## Design references and assets
 
-[BrowseForge](https://github.com/nczz/BrowseForge) was a product-direction reference. Envara is a separate implementation; no BrowseForge source is incorporated in this initial release.
+[BrowseForge](https://github.com/nczz/BrowseForge) began as a product reference and is now the pinned local backend for the 0.2.0 candidate. Envara supplies its own desktop interface and integration layer while retaining the vendored source's attribution and license.
 
 `build/icon.png` was generated with OpenAI's built-in image generation tool for Envara. It contains no third-party browser logo or supplied reference artwork.

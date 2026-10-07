@@ -11,17 +11,18 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode/utf16"
 	"unsafe"
 
 	"envara.io/windows-app-routing/internal/dnsbroker"
+	"envara.io/windows-app-routing/internal/ownership"
 	"envara.io/windows-app-routing/internal/protocol"
 	"envara.io/windows-app-routing/internal/socks5"
 	"golang.org/x/sys/windows"
@@ -55,6 +56,7 @@ type launchParams struct {
 }
 type routeState struct {
 	id          string
+	tag         uint64
 	owner       string
 	application application
 	workspace   workspace
@@ -63,21 +65,27 @@ type routeState struct {
 	dns         *dnsbroker.Broker
 }
 type sessionState struct {
-	id          string
-	owner       string
-	routeID     string
-	kernelID    uint64
-	process     windows.Handle
-	job         windows.Handle
-	pid         uint32
-	active      bool
-	exitCode    *int
-	connections map[net.Conn]bool
+	id           string
+	owner        string
+	routeID      string
+	kernelID     uint64
+	process      windows.Handle
+	job          windows.Handle
+	pid          uint32
+	active       bool
+	revoked      bool
+	generation   uint64
+	creationTime uint64
+	exitCode     *int
+	connections  map[net.Conn]bool
 }
 
 type engine struct {
 	mu             sync.Mutex
-	driver         *driver
+	capture        *captureDriver
+	captureFault   string
+	identities     *identitySnapshot
+	policy         *ownership.Registry
 	listener4      *net.TCPListener
 	listener6      *net.TCPListener
 	port           uint16
@@ -91,50 +99,86 @@ type engine struct {
 
 func newEngine() *engine {
 	engine := &engine{routes: map[string]*routeState{}, sessions: map[string]*sessionState{}, kernelSessions: map[uint64]*sessionState{}, closed: make(chan struct{}), relaySlots: make(chan struct{}, 256)}
-	engine.driver, _ = openDriver()
-	if engine.driver != nil {
-		engine.listener4, _ = net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
-		if engine.listener4 != nil {
-			engine.port = uint16(engine.listener4.Addr().(*net.TCPAddr).Port)
-			engine.listener6, _ = net.ListenTCP("tcp6", &net.TCPAddr{IP: net.IPv6loopback, Port: int(engine.port)})
-		}
-		if engine.listener4 == nil || engine.listener6 == nil {
-			if engine.listener4 != nil {
-				engine.listener4.Close()
-			}
-			if engine.listener6 != nil {
-				engine.listener6.Close()
-			}
-			engine.driver.close()
-			engine.driver = nil
-			engine.port = 0
-		} else {
-			go engine.accept(engine.listener4)
-			go engine.accept(engine.listener6)
-		}
-	}
+	engine.policy, _ = ownership.NewRegistry(ownership.DefaultLimits(), ownership.Generation{Core: 1, Adapter: 1})
+	engine.identities = newIdentitySnapshot(engine.policy)
+	// SCM service construction and status/setup must not implicitly activate a
+	// network driver. Protected launch remains gated by real native acceptance.
 	go engine.watch()
 	return engine
+}
+
+func (engine *engine) startCaptureLocked() error {
+	if engine.captureFault != "" {
+		return errors.New("capture instance is drained; a new quiesced service instance is required")
+	}
+	if engine.capture != nil {
+		return errors.New("capture already active")
+	}
+	capture, err := loadCapture(engine.identities.callback)
+	if err != nil {
+		return err
+	}
+	listener4, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4zero})
+	if err != nil {
+		capture.close()
+		return err
+	}
+	port := uint16(listener4.Addr().(*net.TCPAddr).Port)
+	listener6, err := net.ListenTCP("tcp6", &net.TCPAddr{IP: net.IPv6zero, Port: int(port)})
+	if err != nil {
+		_ = listener4.Close()
+		capture.close()
+		return err
+	}
+	if err = capture.activate(port); err == nil {
+		err = capture.refresh()
+	}
+	if err != nil || !capture.status.Running || !capture.status.SocketReady || !capture.status.NetworkReady {
+		_ = listener4.Close()
+		_ = listener6.Close()
+		capture.close()
+		return errors.New("capture setup did not produce healthy handles")
+	}
+	engine.capture, engine.listener4, engine.listener6, engine.port = capture, listener4, listener6, port
+	go engine.accept(listener4)
+	go engine.accept(listener6)
+	return nil
 }
 
 func (engine *engine) statusLocked(owner string) protocol.Status {
 	status := protocol.MissingStatus("Windows shared DNS attribution and full native acceptance are not yet available; application launch is disabled.")
 	status.Authorized = true
-	if engine.driver != nil {
-		engine.observeDriverLocked()
+	bundle, err := inspectCaptureBundle()
+	if bundle != nil {
+		captureStatus := bundle.status
+		status.Capture = &captureStatus
+		bundle.close()
+	}
+	if err == nil {
 		status.Installed = true
-		status.Capabilities = engine.driver.capabilities
-		health := engine.driver.enforcement
-		status.Enforcement = &health
-		if !health.FilteringReady {
-			status.Capabilities.FailClosed = false
-			status.Reason = "Windows BFE filtering is unavailable; routes are revoked and application launch is disabled."
+	} else if status.Capture != nil {
+		status.Capture.Reason = err.Error()
+	}
+	if engine.capture != nil {
+		if engine.capture.refresh() == nil {
+			captureStatus := engine.capture.status
+			status.Capture = &captureStatus
+			status.Capabilities.TCP = captureStatus.TCPCapture
+			status.Capabilities.ChildProcesses = captureStatus.IdentityCallback
+		} else {
+			status.Reason = "Capture health is unavailable; native acceptance remains unverified."
 		}
 	}
+	status.Capabilities.DNS = false
+	status.Capabilities.UDP = false
+	status.Capabilities.FailClosed = false
 	// No file, environment variable, build flag, or RPC can assert acceptance.
 	// Capability and verification must come from real platform self-tests once
 	// shared DNS attribution is implemented. Source compilation is not a pass.
 	status.Ready = false
+	if engine.captureFault != "" {
+		status.Reason = engine.captureFault
+	}
 	for _, session := range engine.sessions {
 		if session.owner == owner {
 			state := "stopped"
@@ -147,16 +191,21 @@ func (engine *engine) statusLocked(owner string) protocol.Status {
 	return status
 }
 
-func (engine *engine) observeDriverLocked() {
-	previous := engine.driver.enforcement.Generation
-	err := engine.driver.refresh()
-	if err == nil && engine.driver.enforcement.FilteringReady && (previous == 0 || previous == engine.driver.enforcement.Generation) {
+func (engine *engine) observeCaptureLocked() {
+	err := engine.capture.refresh()
+	if err == nil && engine.capture.status.Running && engine.capture.status.SocketReady && engine.capture.status.NetworkReady {
 		return
 	}
-	// A new BFE epoch invalidates even otherwise healthy prepared routes. Never
-	// restart an old application or silently resume its captured connections.
+	engine.drainCaptureLocked("Capture health failed; owned Jobs are revoked and routing acceptance remains unavailable.")
+}
+
+func (engine *engine) drainCaptureLocked(reason string) {
+	engine.captureFault = reason
+	// Capture failure revokes all owned routes before terminating their Jobs.
+	// The independent service keeps capture open while stopping owned processes.
 	for _, route := range engine.routes {
 		route.active = false
+		_ = engine.policy.RevokeRoute(ownership.RouteID(route.id), ownership.OwnerID(route.owner))
 		if route.dns != nil {
 			route.dns.Close()
 		}
@@ -166,9 +215,26 @@ func (engine *engine) observeDriverLocked() {
 			_ = engine.stopLocked(session)
 		}
 	}
-	if err != nil {
-		engine.driver.enforcement.FilteringReady = false
+	for _, session := range engine.sessions {
+		if session.active {
+			return
+		}
 	}
+	// Official WinDivert cleanup can reinject original queued packets. Stop is
+	// permitted only after the owned process trees are verified quiescent.
+	if engine.listener4 != nil {
+		_ = engine.listener4.Close()
+		engine.listener4 = nil
+	}
+	if engine.listener6 != nil {
+		_ = engine.listener6.Close()
+		engine.listener6 = nil
+	}
+	if engine.capture != nil {
+		engine.capture.close()
+		engine.capture = nil
+	}
+	engine.port = 0
 }
 
 func (engine *engine) dispatch(request protocol.Request, client caller) protocol.Response {
@@ -207,13 +273,24 @@ func (engine *engine) dispatch(request protocol.Request, client caller) protocol
 		}
 		params.Application.ExecutablePath = path
 		params.Workspace.CWD = cwd
+		tag, err := kernelID()
+		if err != nil {
+			return protocol.Failure(request, "NATIVE_ERROR", "Route identity allocation failed.")
+		}
+		if err = authenticateManagedRoute(params.Route); err != nil {
+			return protocol.Failure(request, "PROXY_UNAVAILABLE", "The authenticated managed route is unavailable.")
+		}
 		dnsTransport, err := dnsbroker.NewManagedDoH(params.Route)
 		if err != nil {
 			return protocol.Failure(request, "DNS_ROUTE_UNAVAILABLE", "The owned DNS transport could not be prepared.")
 		}
-		engine.routes[id] = &routeState{id: id, owner: client.sid, application: params.Application, workspace: params.Workspace, route: params.Route, active: true, dns: dnsbroker.New(dnsTransport)}
+		if err = engine.policy.RegisterRoute(ownership.RouteSpec{ID: ownership.RouteID(id), Owner: ownership.OwnerID(client.sid), Generation: engine.policy.Generation(), UDPPolicy: ownership.UDPBlock, Health: ownership.RouteHealth{ProxyReady: true}}); err != nil {
+			dnsTransport.Close()
+			return protocol.Failure(request, "NATIVE_ERROR", "Owned route registration failed.")
+		}
+		engine.routes[id] = &routeState{id: id, tag: tag, owner: client.sid, application: params.Application, workspace: params.Workspace, route: params.Route, active: true, dns: dnsbroker.New(dnsTransport)}
 		status := engine.statusLocked(client.sid)
-		return protocol.Success(request, map[string]any{"routeId": id, "ready": true, "failClosed": true, "capabilities": status.Capabilities, "verification": status.Verification})
+		return protocol.Success(request, map[string]any{"routeId": id, "ready": status.Ready, "failClosed": status.Capabilities.FailClosed, "capabilities": status.Capabilities, "verification": status.Verification})
 	case "launch":
 		if !engine.statusLocked(client.sid).CanLaunch() {
 			return protocol.Failure(request, "ROUTING_NOT_READY", "Windows routing is not ready; no application was started.")
@@ -276,6 +353,7 @@ func (engine *engine) dispatch(request protocol.Request, client caller) protocol
 			return protocol.Failure(request, "ROUTE_NOT_FOUND", "The owned route is unavailable.")
 		}
 		route.active = false
+		_ = engine.policy.RevokeRoute(ownership.RouteID(route.id), ownership.OwnerID(route.owner))
 		if route.dns != nil {
 			route.dns.Close()
 		}
@@ -358,6 +436,9 @@ func kernelID() (uint64, error) {
 }
 
 func (engine *engine) launchLocked(client caller, route *routeState, params launchParams) (*sessionState, error) {
+	if engine.capture == nil || engine.port == 0 || !engine.capture.status.Running || !engine.capture.status.SocketReady || !engine.capture.status.NetworkReady {
+		return nil, errors.New("capture is not active")
+	}
 	if len(params.Args) > 128 {
 		return nil, errors.New("too many arguments")
 	}
@@ -418,21 +499,32 @@ func (engine *engine) launchLocked(client caller, route *routeState, params laun
 	if err != nil {
 		return nil, err
 	}
-	if err = engine.driver.register(process, kernelID, engine.port); err != nil {
-		return nil, err
-	}
 	sessionID, err := randomID()
 	if err != nil {
-		_ = engine.driver.control(ioctlRevokeRoute, kernelID)
 		return nil, err
 	}
-	session := &sessionState{id: sessionID, owner: client.sid, routeID: route.id, kernelID: kernelID, process: process.Process, job: job, pid: process.ProcessId, active: true, connections: map[net.Conn]bool{}}
+	identity, err := actualIdentity(process.Process)
+	if err != nil {
+		return nil, err
+	}
+	generation := engine.policy.Generation()
+	jobID := ownership.JobID(sessionID)
+	if err = engine.policy.RegisterSession(ownership.SessionSpec{ID: ownership.SessionID(sessionID), Owner: ownership.OwnerID(client.sid), RouteID: ownership.RouteID(route.id), JobID: jobID, Generation: generation}); err != nil {
+		return nil, err
+	}
+	if err = engine.identities.registerRoot(process.Process, job, route.tag, kernelID, generation.Adapter, ownership.SessionID(sessionID), ownership.OwnerID(client.sid), jobID); err != nil {
+		_ = engine.policy.RevokeSession(ownership.SessionID(sessionID), ownership.OwnerID(client.sid))
+		return nil, err
+	}
+	session := &sessionState{id: sessionID, owner: client.sid, routeID: route.id, kernelID: kernelID, generation: generation.Adapter, creationTime: identity.creationTime, process: process.Process, job: job, pid: process.ProcessId, active: true, connections: map[net.Conn]bool{}}
 	engine.sessions[session.id] = session
 	engine.kernelSessions[kernelID] = session
 	if _, err = windows.ResumeThread(process.Thread); err != nil {
 		delete(engine.sessions, session.id)
 		delete(engine.kernelSessions, kernelID)
-		_ = engine.driver.control(ioctlRevokeRoute, kernelID)
+		engine.identities.revokeSession(kernelID)
+		_ = engine.capture.revoke(kernelID, generation.Adapter)
+		engine.identities.releaseJob(kernelID)
 		return nil, err
 	}
 	success = true
@@ -500,8 +592,11 @@ func (engine *engine) stopLocked(session *sessionState) error {
 		return nil
 	}
 	// Revoke first; if termination fails, living process tombstones still block.
-	if engine.driver != nil {
-		_ = engine.driver.control(ioctlRevokeRoute, session.kernelID)
+	session.revoked = true
+	engine.identities.revokeSession(session.kernelID)
+	var revokeErr error
+	if engine.capture != nil {
+		revokeErr = engine.capture.revoke(session.kernelID, session.generation)
 	}
 	for connection := range session.connections {
 		_ = connection.Close()
@@ -524,10 +619,15 @@ func (engine *engine) stopLocked(session *sessionState) error {
 		time.Sleep(20 * time.Millisecond)
 	}
 	engine.finishLocked(session)
-	return nil
+	return revokeErr
 }
 
 func (engine *engine) finishLocked(session *sessionState) {
+	session.revoked = true
+	engine.identities.revokeSession(session.kernelID)
+	if engine.capture != nil {
+		_ = engine.capture.revoke(session.kernelID, session.generation)
+	}
 	for connection := range session.connections {
 		_ = connection.Close()
 	}
@@ -538,6 +638,7 @@ func (engine *engine) finishLocked(session *sessionState) {
 	}
 	session.active = false
 	delete(engine.kernelSessions, session.kernelID)
+	engine.identities.releaseJob(session.kernelID)
 	_ = windows.CloseHandle(session.process)
 	_ = windows.CloseHandle(session.job)
 	session.process = 0
@@ -552,9 +653,16 @@ func (engine *engine) watch() {
 		case <-engine.closed:
 			return
 		case <-ticker.C:
+			engine.identities.reapExited()
 			engine.mu.Lock()
-			if engine.driver != nil {
-				engine.observeDriverLocked()
+			if engine.capture != nil {
+				if engine.captureFault != "" {
+					engine.drainCaptureLocked(engine.captureFault)
+				} else if engine.identities.needsDrain() {
+					engine.drainCaptureLocked("Identity capacity is approaching its bound; owned Jobs are revoked before capture shutdown. This service instance cannot reactivate routing.")
+				} else {
+					engine.observeCaptureLocked()
+				}
 			}
 			for _, session := range engine.sessions {
 				if !session.active {
@@ -569,7 +677,7 @@ func (engine *engine) watch() {
 					engine.finishLocked(session)
 					continue
 				}
-				if engine.driver == nil || engine.driver.control(ioctlHeartbeat, session.kernelID) != nil {
+				if engine.capture == nil {
 					_ = engine.stopLocked(session)
 				}
 			}
@@ -593,49 +701,140 @@ func (engine *engine) accept(listener *net.TCPListener) {
 	}
 }
 
+func authenticateManagedRoute(route socks5.Route) error {
+	if err := route.Validate(); err != nil {
+		return err
+	}
+	conn, err := net.DialTimeout("tcp", route.Address(), 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	return socks5.Authenticate(conn, route)
+}
+func captureAddrPort(endpoint captureEndpoint) (netip.AddrPort, error) {
+	if endpoint.Reserved != 0 || endpoint.Port == 0 {
+		return netip.AddrPort{}, errors.New("capture endpoint invalid")
+	}
+	var address netip.Addr
+	switch endpoint.Family {
+	case 4:
+		for _, value := range endpoint.Address[4:] {
+			if value != 0 {
+				return netip.AddrPort{}, errors.New("capture IPv4 padding invalid")
+			}
+		}
+		var bytes [4]byte
+		copy(bytes[:], endpoint.Address[:4])
+		address = netip.AddrFrom4(bytes)
+	case 6:
+		address = netip.AddrFrom16(endpoint.Address)
+	default:
+		return netip.AddrPort{}, errors.New("capture address family invalid")
+	}
+	if address.IsUnspecified() || address.IsMulticast() {
+		return netip.AddrPort{}, errors.New("capture address invalid")
+	}
+	return netip.AddrPortFrom(address.Unmap(), endpoint.Port), nil
+}
+func trustedFlow(result captureRelayResult) (ownership.FlowInstance, error) {
+	for _, value := range result.Original.Reserved {
+		if value != 0 {
+			return ownership.FlowInstance{}, errors.New("capture tuple padding invalid")
+		}
+	}
+	source, err := captureAddrPort(result.Original.Source)
+	if err != nil {
+		return ownership.FlowInstance{}, err
+	}
+	destination, err := captureAddrPort(result.Original.Destination)
+	if err != nil {
+		return ownership.FlowInstance{}, err
+	}
+	flow := ownership.FlowInstance{Key: ownership.FlowKey{Source: source, Destination: destination, Protocol: ownership.TCP}, Token: result.FlowID}
+	if !flow.Key.Valid() || destination.Port() == 53 {
+		return ownership.FlowInstance{}, errors.New("flow requires a verified DNS adapter")
+	}
+	return flow, nil
+}
+func (engine *engine) relayAllowedLocked(session *sessionState, route *routeState, flow ownership.FlowInstance) bool {
+	if session == nil || route == nil || !session.active || session.revoked || !route.active || session.owner != route.owner {
+		return false
+	}
+	decision := engine.policy.DecideFlowInstance(flow)
+	return decision.Action == ownership.ActionProxy && decision.Binding.SessionID == ownership.SessionID(session.id) && decision.Binding.RouteID == ownership.RouteID(route.id) && decision.Binding.Owner == ownership.OwnerID(session.owner) && decision.Binding.JobID == ownership.JobID(session.id) && decision.Generation == engine.policy.Generation()
+}
 func (engine *engine) relay(client *net.TCPConn) {
 	defer client.Close()
-	destination, err := redirectedDestination(client)
+	engine.mu.Lock()
+	capture := engine.capture
+	engine.mu.Unlock()
+	if capture == nil {
+		return
+	}
+	// Only a live NAT lease from the installed capture module can authorize a
+	// connection to the exposed relay listener. Ordinary direct accepts fail.
+	destination, err := capture.destination(client)
+	if err != nil || !engine.identities.verifyRelay(destination) {
+		return
+	}
+	flow, err := trustedFlow(destination)
 	if err != nil {
 		return
 	}
 	engine.mu.Lock()
-	session := engine.kernelSessions[destination.routeID]
-	if session == nil || !session.active {
+	session := engine.kernelSessions[destination.SessionTag]
+	if session == nil || session.generation != destination.Generation {
 		engine.mu.Unlock()
 		return
 	}
 	route := engine.routes[session.routeID]
-	if route == nil || !route.active {
+	if route == nil || route.tag != destination.RouteTag {
 		engine.mu.Unlock()
+		return
+	}
+	identity := ownership.ProcessIdentity{PID: destination.PID, CreationTime: destination.CreationTime}
+	if engine.policy.BindFlowInstance(flow, identity, engine.policy.Generation()) != nil {
+		engine.mu.Unlock()
+		return
+	}
+	if !engine.relayAllowedLocked(session, route, flow) {
+		engine.mu.Unlock()
+		_ = engine.policy.CloseFlowInstance(flow)
 		return
 	}
 	transport := route.route
 	session.connections[client] = true
 	engine.mu.Unlock()
-	defer func() { engine.mu.Lock(); delete(session.connections, client); engine.mu.Unlock() }()
-	dialer := net.Dialer{Timeout: 10 * time.Second, Control: func(_, _ string, raw syscall.RawConn) error {
-		var recordErr error
-		err := raw.Control(func(fd uintptr) { recordErr = setRedirectRecords(fd, destination.records) })
-		if err != nil {
-			return err
-		}
-		return recordErr
-	}}
-	upstream, err := dialer.Dial("tcp", transport.Address())
+	defer func() {
+		_ = engine.policy.CloseFlowInstance(flow)
+		engine.mu.Lock()
+		delete(session.connections, client)
+		engine.mu.Unlock()
+	}()
+	// The managed loopback core is the sole dial target. There are no redirect
+	// records, environment-proxy substitution or direct destination fallback.
+	upstream, err := net.DialTimeout("tcp", transport.Address(), 10*time.Second)
 	if err != nil {
 		return
 	}
 	defer upstream.Close()
 	engine.mu.Lock()
-	if !session.active || !route.active {
+	if !engine.relayAllowedLocked(session, route, flow) {
 		engine.mu.Unlock()
 		return
 	}
 	session.connections[upstream] = true
 	engine.mu.Unlock()
 	defer func() { engine.mu.Lock(); delete(session.connections, upstream); engine.mu.Unlock() }()
-	if err = socks5.Connect(upstream, transport, destination.ip, destination.port); err != nil {
+	if err = socks5.Connect(upstream, transport, net.IP(flow.Key.Destination.Addr().AsSlice()), flow.Key.Destination.Port()); err != nil {
+		return
+	}
+	engine.mu.Lock()
+	allowed := engine.relayAllowedLocked(session, route, flow)
+	engine.mu.Unlock()
+	if !allowed {
 		return
 	}
 	done := make(chan struct{}, 1)
@@ -648,8 +847,6 @@ func (engine *engine) relay(client *net.TCPConn) {
 	}()
 	_, _ = io.Copy(client, upstream)
 	_ = client.CloseWrite()
-	// The reverse copy may still be blocked in client.Read after upstream EOF.
-	// Closing only upstream does not wake that read and would leak a relay slot.
 	_ = client.CloseRead()
 	_ = upstream.Close()
 	<-done
@@ -660,15 +857,17 @@ func (engine *engine) close() {
 		close(engine.closed)
 		engine.mu.Lock()
 		defer engine.mu.Unlock()
+		allStopped := true
 		for _, session := range engine.sessions {
 			if session.active {
 				_ = engine.stopLocked(session)
 				if session.active {
-					_ = windows.CloseHandle(session.job)
+					allStopped = false
 				}
 			}
 		}
 		for _, route := range engine.routes {
+			_ = engine.policy.RevokeRoute(ownership.RouteID(route.id), ownership.OwnerID(route.owner))
 			if route.dns != nil {
 				route.dns.Close()
 			}
@@ -677,12 +876,21 @@ func (engine *engine) close() {
 			route.active = false
 		}
 		if engine.listener4 != nil {
-			engine.listener4.Close()
+			_ = engine.listener4.Close()
 		}
 		if engine.listener6 != nil {
-			engine.listener6.Close()
+			_ = engine.listener6.Close()
 		}
-		engine.driver.close()
+		// WinDivert shutdown can reinject queued original packets. Never stop or
+		// unload capture before every owned Job is known quiescent. A failed
+		// termination retains the guard and borrowed Jobs until service teardown;
+		// service-crash persistence remains explicitly unverified/unsupported.
+		if allStopped {
+			if engine.capture != nil {
+				engine.capture.close()
+			}
+			engine.identities.close()
+		}
 	})
 }
 
@@ -691,23 +899,23 @@ func (engine *engine) close() {
 // a broker does not prove interception of arbitrary DnsQuery/getaddrinfo calls.
 // PID and creation time originate from authenticate(), not caller JSON.
 func (engine *engine) resolveOwnedDNS(ctx context.Context, client caller, question dnsbroker.Request) ([]byte, error) {
-	engine.mu.Lock()
-	if engine.driver == nil {
-		engine.mu.Unlock()
-		return nil, errors.New("owned DNS routing unavailable")
-	}
-	engine.observeDriverLocked()
-	if !engine.driver.enforcement.FilteringReady {
-		engine.mu.Unlock()
-		return nil, errors.New("owned DNS filtering unavailable")
-	}
-	kernelID, err := engine.driver.processRoute(client.pid, client.creationTime)
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, client.pid)
 	if err != nil {
-		engine.mu.Unlock()
-		return nil, errors.New("DNS requester is not an owned process")
+		return nil, errors.New("DNS requester identity unavailable")
 	}
-	session := engine.kernelSessions[kernelID]
-	if session == nil || !session.active || session.owner != client.sid {
+	defer windows.CloseHandle(process)
+	observed := engine.identities.resolve(process, processIdentity{client.pid, client.creationTime})
+	if observed.Decision != identityOwned {
+		return nil, errors.New("DNS requester is not an active owned process")
+	}
+	engine.mu.Lock()
+	decision := engine.policy.DecideProcess(ownership.ProcessIdentity{PID: client.pid, CreationTime: client.creationTime}, ownership.TCP, true)
+	if decision.Action != ownership.ActionProxy || decision.Binding.Owner != ownership.OwnerID(client.sid) {
+		engine.mu.Unlock()
+		return nil, errors.New("verified owned DNS adapter unavailable")
+	}
+	session := engine.sessions[string(decision.Binding.SessionID)]
+	if session == nil || !session.active || session.revoked || session.owner != client.sid {
 		engine.mu.Unlock()
 		return nil, errors.New("owned DNS session unavailable")
 	}

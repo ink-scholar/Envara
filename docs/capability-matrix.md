@@ -18,7 +18,7 @@
 | 附加软件绑定 | 原生选择本地软件，按身份绑定境舱，白名单原子存储，运行时状态不持久化 | 添加与管理绑定已接入；应用网络接管未就绪时启动明确拒绝，不以代理变量替代 |
 | 附加软件启动与失败清理 | 私有 launch context、严格原生能力/验收门禁、主进程串行活跃配置锁；状态缺失转 error 并尝试清理 | 未确认停止/撤销时保留 route/session 归属及修改锁，不假报 stopped，不释放保护后继续运行 |
 | macOS 应用接管 | Network Extension App Proxy 与 helper RPC 源码已接入 | 缺 Developer ID/provisioning、安装授权/扩展激活和系统验收，ready=false；源码编译/测试不代表原生可用 |
-| Windows 应用接管 | WFP TCP/UDP 策略、受管 relay、进程/Job、BFE 代次撤销/过滤恢复与独立认证 DoH broker 源码已接入 | 共享 DNS 调用适配、WDK 构建/签名及实机故障验收未完成，ready=false；broker 不等于任意软件 DNS 已截获 |
+| Windows 应用接管 | WinDivert 官方签名 x64 依赖、capture DLL、TCP NAT/认证 relay、实际 PID/创建时间/Job、撤销、UDP 阻断与独立 DoH broker 源码已接入 | 共享 DNS、整个 guard 崩溃阻断、无关应用既有连接保留及安装/实机验收未完成，ready=false；ARM64 helper 不等于捕获支持 |
 
 0.5.0 的实际测试与桌面证据单独记录，以上不预填最终通过计数。终端代理、浏览器隐私与原生软件接管是不同范围；源码纳入完整上游不等于全部 BrowseForge 工作流均已在桌面逐项验收。以下为历史基线。
 

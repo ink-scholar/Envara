@@ -2,6 +2,25 @@
 
 记录日期：2026-10-07。当前开发 0.5.0 本地候选版，发布暂停。结果按版本与运行路径区分，旧结果不自动代表新增代码已验收。状态见 [能力矩阵](capability-matrix.md)。
 
+## Windows WinDivert 后续源码候选
+
+默认路由由自写 WFP 驱动改为 WinDivert 2.2.2-A 原版签名 x64 依赖、Envara capture DLL 与 Go guard。原 WFP 源码保留为未启用备选。这轮是组件源码与二进制检查，**没有完成 Windows 软件分流**，没有发布。此前 Mac 安装包没有包含这轮新增的 capture/installer，不能以它的旧包验证结果代表新源码。
+
+| 检查 | 实际结果与范围 |
+| --- | --- |
+| Windows Go | `routing:test:win` 的全包 race、host vet、amd64/arm64 Windows vet 与 PE 交叉构建通过；Windows host 测试二进制仅编译，没有执行 |
+| 原生 C | 生产 capture core 的完整 IPv4/IPv6 tuple NAT、socket 事件时间、单次 claim、PID 复用、撤销、FIN/进程退出 lease、容量检查，在本机实际编译并运行通过；UBSan 通过。保留旧驱动的便携生命周期/ABI 检查通过 |
+| 捕获 DLL | MinGW 实际构建 x64 PE32+ DLL；恰好 5 个 ABI 导出，依赖 WinDivert、Windows IPHLPAPI/WS2_32/Kernel32/UCRT，没有外部 OpenSSL/TCP 栈。没有加载 DLL 或驱动 |
+| 资源与来源 | 固定官方 ZIP `63cb41763bb4b20f600b6de04e991a9c2be73279e317d4d82f237b150c5f3f15`，完整源码归档 `2955621df8f6ef32ad65170f0c0f11bd2f261cf5a960624f416d0b9c6343e99c`；原 SYS/DLL 哈希核对，SYS 原证书表保留，尚未 Windows 信任/加载验收 |
+| ARM64 | Go helper/test 二进制可交叉构建；原版依赖没有 ARM64 驱动，构建明确生成 capture unavailable 说明，不能称 ARM64 接管支持 |
+| 安装脚本 | 默认只读 Validate/Plan；显式 Install 创建受保护目录、SCM 服务；显式 Uninstall 仅卸载所属服务、保留文件。PowerShell grammar/schema 静态检查，不是 Windows UAC/ACL/SCM 执行结果 |
+| JavaScript 回归 | `npm test` 共 223 项，221 通过、2 个显式原生 Chromium 测试跳过、0 失败。本轮未再启用浏览器 fixture；下方 0.5.0 的 223/223 是先前实际 Chromium 环境的记录 |
+| Mac 外部组件 | 官方 mitmproxy-macos 0.12.11 wheel 固定 SHA；`codesign --verify --deep --strict` 通过，Redirector/app extension Team ID=S8XHQB96PW，Gatekeeper accepted / Notarized Developer ID。只在 /tmp 检查，未安装/运行/授权扩展或 CA |
+
+独立源码复核修正了旧 socket 快照放行、身份数组槽复用、relay 同端口误拦、TCP 关闭后 NAT lease 未回收问题。Go 在累计身份达到 960 时撤销路由、终止并确认全部 Job 停止，再停止捕获；终止失败保留 capture/Job 并重试。同一已排空的服务实例不自动重启捕获。这些机制尚需 Windows 压力/故障实测。
+
+仍有实质实现门槛：共享系统 DNS 未适配；stock WinDivert 在整个 guard 崩溃时不能保证持续阻断；捕获前旧 socket 与无法归属的 fragments 会影响无关软件；系统驱动加载、管理员安装、真实进程/socket 复用、双境舱、VPN/TUN 共存与清理未实机验收。`ready/dns/failClosed/verification` 始终 false，普通用户启动拒绝。没有接触用户节点或凭据，没有修改 TUN。详见 [实现与备选路线](application-routing-options.md)。
+
 ## 0.5.0：专用工作页、语言与隐私
 
 | 检查 | 本轮证据与范围 |

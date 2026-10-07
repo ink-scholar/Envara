@@ -63,15 +63,16 @@ type Session struct {
 }
 
 type Status struct {
-	Platform     string       `json:"platform"`
-	Installed    bool         `json:"installed"`
-	Authorized   bool         `json:"authorized"`
-	Ready        bool         `json:"ready"`
-	Capabilities Capabilities `json:"capabilities"`
-	Verification Verification `json:"verification"`
-	Sessions     []Session    `json:"sessions"`
-	Reason       string       `json:"reason,omitempty"`
-	Enforcement  *Enforcement `json:"enforcement,omitempty"`
+	Platform     string         `json:"platform"`
+	Installed    bool           `json:"installed"`
+	Authorized   bool           `json:"authorized"`
+	Ready        bool           `json:"ready"`
+	Capabilities Capabilities   `json:"capabilities"`
+	Verification Verification   `json:"verification"`
+	Sessions     []Session      `json:"sessions"`
+	Reason       string         `json:"reason,omitempty"`
+	Enforcement  *Enforcement   `json:"enforcement,omitempty"`
+	Capture      *CaptureStatus `json:"capture,omitempty"`
 }
 
 func (s Status) CanLaunch() bool {
@@ -116,5 +117,5 @@ func Failure(request Request, code, message string) Response {
 
 func MissingStatus(reason string) Status {
 	return Status{Platform: "win32", Sessions: []Session{}, Reason: reason,
-		Verification: Verification{Version: "windows-wfp-v1"}}
+		Verification: Verification{Version: "windows-windivert-v1"}}
 }

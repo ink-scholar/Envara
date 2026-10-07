@@ -1,65 +1,54 @@
 # Windows application routing
 
-This is the native Windows module for the desktop application's `envara.application-routing` version 1 RPC. It does not change networking on macOS and does not install or activate anything as part of a build.
+The default Windows capture source uses the unmodified, officially signed **WinDivert 2.2.2-A x64** driver and a separate Envara user-mode DLL/Go service. The old custom WFP kernel driver remains under `driver/` as an inactive alternative; it is not built, installed or required by this route. This avoids applying for our own kernel-driver signing certificate merely to build this candidate. Administrator permission and native driver-trust checks are still necessary for eventual installation.
 
 ## Current acceptance boundary
 
-**The full arbitrary-application routing feature is not ready. The native helper reports `ready:false`, `verification.passed:false`, and `dns:false`, and refuses `prepareRoute` and `launch`.** A build or a loaded driver is not treated as a passed networking test. There is no environment variable, editable acceptance file, command-line switch, or RPC that overrides this gate.
+**Application routing is not ready for arbitrary software.** `ready`, `dns`, `failClosed` and `verification.passed` remain false. `prepareRoute` and `launch` refuse to run. There is no command, RPC, environment variable or editable acceptance file that overrides this gate. Status/setup inspect protected files and hashes; they do not load a DLL, install a service or open a driver. Cross-compilation on this Mac is source/build evidence only.
 
-Implemented native source:
+## Implemented source
 
-- WFP ALE connect redirection for owned TCP flows, IPv4 and IPv6, with original-destination context and redirect-record propagation.
-- A local authenticated SOCKS5 relay into the existing application-owned proxy core. The relay never connects directly to the original destination and does not fall back to no-auth SOCKS5.
-- Owned UDP and non-TCP flow blocking. `udpPolicy:block` is explicit; this module does not advertise datagram proxying. Inbound physical-interface flows to attached applications are blocked so replies cannot create a direct path; local TCP IPC remains possible. Attachment is intended for outbound client applications, not local server publishing. Unattached processes continue through their existing networking policies.
-- A suspended root process registered by process object and creation time, kernel process-create inheritance, exit cleanup, and process-table overflow rejection before an owned child executes. Executable-path-wide rules are not used.
-- Creation under the named-pipe caller's interactive user token, never the privileged service token. A non-breakaway Job Object is assigned before the initial thread resumes; closing the service's job handle kills that owned process tree.
-- Route revocation retains living process entries as blocked tombstones. Driver heartbeat expiry blocks new owned connections. Revocation closes relay sockets and terminates the job, and `stop` confirms zero active job processes before reporting success.
-- BFE state subscription is established before the initial state read. The source invalidates route generations before stopping owned processes, denies subsequent owned child creation, drains referenced process objects outside the table lock, and rebuilds the six FWPM filters on BFE recovery. Kernel callouts register once; recovered filtering never revives an old route. Status, registration, and heartbeat check both BFE state and the actual filter objects. The native stop/crash timing remains unaccepted.
-- A per-route DNS broker for a future owned resolver adapter: authenticated SOCKS5 to a fixed literal DoH endpoint, verified TLS, bounded DNS message validation, private TTL cache, HTTP `Age` deduction, and cancellation on route revocation. There is no system-resolver, ambient-proxy, HTTP-redirect, or direct-network fallback. Its private service boundary checks the pipe caller's actual PID, creation time and SID against the kernel-owned route. It is not exposed as a desktop RPC or claimed as interception of Win32 resolver calls; the public launch gate remains closed.
-- Kernel device ACL restricted to SYSTEM/Administrators; local-only named-pipe ACL; client SID obtained by named-pipe impersonation; native client verifies the server PID against the installed SCM service before sending credentials; per-SID route and session ownership; bounded stdin and pipe frames; credentials held in memory only.
+- SOCKET events and packet-triggered owner lookup, actual process handles, PID plus creation time and membership in retained non-breakaway Jobs. A root is created suspended under the named-pipe caller's interactive token, assigned to its Job and registered before resume. The LocalSystem service does not launch the application under its own token.
+- Separate opaque route/session generations and a portable ownership registry, including confirmed-unowned decisions, bounded capacity and irreversible revocation. The same executable path can have different process identities; path-wide proxy rules are not the capture boundary.
+- Complete IPv4/IPv6 TCP tuple NAT into Windows' own TCP stack at the local relay, unique aliases, original destination recovery and single-use lookup. The relay uses only the selected authenticated loopback SOCKS route; it has no direct fallback. The old WFP redirect-record API is not used on WinDivert connections.
+- Explicit owned UDP and TCP/UDP DNS-port blocking. This prototype does not advertise UDP proxying or shared-system DNS interception. Unknown ownership is held briefly then dropped. These behaviors are not a substitute for complete routing or proof that all unrelated applications are unaffected.
+- Revocation blocks retained owned identities, closes relay connections and terminates Jobs; stop waits for zero active Job processes. The guard owns capture handles separately from relay workers. Failures in the guard itself remain an unresolved boundary.
+- Administrator-protected installation directory/ancestor/file ACL checks, no reparse points, retained non-write-share file handles, strict SHA-256 ABI provenance, absolute-path DLL loading with constrained search flags and x64-only capture. Hash provenance does not establish Authenticode trust or native networking acceptance.
+- Local-only named-pipe RPC with actual caller PID/SID/creation time; the client checks the installed SCM server identity before sending credentials. Secrets stay in bounded private stdin/pipe frames and memory, not argv or export files.
+- A separate per-route authenticated SOCKS → verified TLS → literal DoH broker with private TTL/Age-aware cache and cancellation. It is a foundation for a future resolver adapter, not proof that Win32 DNS requests were intercepted.
 
-Not implemented or accepted:
+## Remaining work
 
-- Safe attribution of an application's `DnsQuery`/`getaddrinfo` calls that are sent by the shared Windows DNS Client service. Capturing all `svchost.exe` DNS traffic would change other applications' network and is deliberately not done.
-- A complete resolver adapter or OS isolation boundary for arbitrary attached executables. WFP's shared-service socket PID does not identify the original DNS caller; ETW observations after a request, a standalone DoH broker, or `DnsQueryEx` settings for one caller do not establish that coverage. An application must not be launched with this gap. The broker currently accepts ASCII DNS names; IDN normalization also belongs in the future adapter.
-- Arbitrary software's requests handed to an existing system broker, an unrelated service, an already-running single-instance app, WSL, or an elevated launcher. These cannot be presented as ordinary owned descendants without explicit integration and tests.
-- Windows kernel-driver build, Driver Verifier/HLK, driver signing, installation, and live networking acceptance. BFE restart/stop behavior also remains unaccepted: even the new source callbacks, filter checks and portable transition tests do not prove that owned processes always exit before filtering disappears during a real BFE stop or abrupt crash. The absence of a direct-connection window needs native fault testing. This checkout is being developed on macOS; Go cross-compilation does not exercise WFP.
-- Windows OS geolocation spoofing or timezone changes. `TZ` is scoped to launched processes; applications that ignore it continue to use their own OS APIs.
+1. Attribute and intercept arbitrary Win32 `DnsQuery`/`getaddrinfo` calls sent through the shared DNS Client service, without routing unrelated `svchost.exe` traffic. A packet PID, ETW event or controller's own `DnsSetApplicationSettings` call cannot by itself do this. Per-route DoH is not the missing resolver adapter.
+2. Preserve blocking if the whole guard process or driver fails. The stock WinDivert driver removes its filters on handle cleanup and may reinject pending original packets. Job kill-on-close and worker cancellation do not prove there is no direct-connection window. A persistent protection or stronger OS isolation boundary is required.
+3. Native Windows acceptance for PID/socket reuse, actual child processes, IPv4/IPv6 TCP, UDP/DNS blocking, both environments concurrently, unchanged unrelated applications, resource exhaustion, abrupt guard/core failures, Windows firewall/VPN coexistence and cleanup. Windows x64 is the first capture target. ARM64 has only a helper cross-build, because this pinned release has no ARM64 driver.
+4. Privileged per-machine installation with protected ACLs, user consent, service lifecycle and native Authenticode/Secure Boot/HVCI verification. No component was installed or activated on this Mac. A controller must not silently reuse a user's existing WinDivert/mitmproxy installation.
 
-Microsoft documents a separate connected-UDP limitation for local ALE redirection. This implementation avoids claiming a generic UDP relay and blocks UDP rather than routing it directly.
+A [candidate PowerShell component installer](installer/README.md) now implements read-only Validate/Plan, explicit protected per-machine installation, manual SCM registration and service-only uninstall with files retained. Its grammar/schema have been checked on macOS; UAC, ACLs, driver trust and SCM operations still require Windows testing. It never activates capture or changes the launch gate. Build output includes the exact `install-manifest.json` and prints its review digest.
 
-## Build and integration
+Software using an already-running single-instance process, an existing system service, WSL or an external elevated broker needs specific integration. GUI timezone/location APIs, device identity and encrypted application telemetry are not spoofed by this route.
 
-`node scripts/build-windows-app-routing.mjs` cross-compiles the Go helper to:
+## Build
 
-```
-build/app-routing/win32/x64/EnvaraAppRouting.exe
-build/app-routing/win32/arm64/EnvaraAppRouting.exe
-```
+`npm run routing:build:win` builds Go x64/ARM64 helpers and the x64 capture DLL. On macOS/Linux it requires `x86_64-w64-mingw32-gcc`; on Windows use a current Visual Studio x64 Developer Command Prompt or set `ENVARA_WINDOWS_CC` to an x64 MinGW compiler. Go is also a build prerequisite. These compilers are developer tools, not runtime dependencies.
 
-The desktop packages these as `resources/app-routing/win32/<arch>/EnvaraAppRouting.exe` and invokes `--rpc`. Each invocation accepts one JSON request on stdin and emits one JSON response on stdout. Requests and secrets must never be put in argv. The helper connects to `\\.\pipe\EnvaraApplicationRouting-v1`. The installed SCM service runs the same executable with `--service`. `status` and `setup` return capabilities and readiness; `setup` does not perform an implicit privileged install.
+`prepare-windivert.mjs` downloads only pinned official archive/source bytes, checks fixed SHA-256 digests and preserves the original DLL and signed driver without patching or re-signing. Generated resources live in ignored `build/app-routing/win32/`:
 
-The driver project `driver/EnvaraAppRouting.vcxproj` targets Visual Studio 2022 + Windows 11 SDK/WDK, x64 and ARM64, with `/INTEGRITYCHECK`, SHA-256 catalog generation, Spectre mitigation, and signing disabled at build time. A production installer must use a legitimately Microsoft-signed driver package and a signed helper, grant user consent, install service `EnvaraAppRouting` as LocalSystem with a binary directory writable only by administrators, and use SCM dependencies on `BFE` and driver service `EnvaraAppRoutingDriver`. No third-party signatures or downloaded drivers are reused. Driver removal/replacement requires a reboot after stopping managed jobs; the production driver deliberately cannot unload while running.
+- `x64/EnvaraAppRouting.exe`, `EnvaraCapture.dll`, `WinDivert.dll`, `WinDivert64.sys`, `capture-provenance.json`, full WinDivert corresponding source, licenses and provenance.
+- `arm64/EnvaraAppRouting.exe` and an explicit `CAPTURE-UNAVAILABLE.txt`; there are no falsely labelled ARM64 driver resources.
 
-The production-ready gate must be completed with **real** TCP/IPv6, UDP blocking, shared-DNS isolation, child-process/reuse, service/core failure, unaffected-app, VPN-coexistence, and cleanup tests. The `verification` response must only report a versioned pass after those platform tests actually succeed. Modifying a boolean is not an acceptable implementation of acceptance.
+The Electron application packages these under `resources/app-routing/win32/<arch>/`. RPC version 1 uses stdin/stdout and the installed local named pipe. `setup` does not implicitly install or activate a privileged component. Build artifacts cannot create a passing acceptance record. Publication is paused.
 
-Microsoft Hardware Developer Program onboarding requires organization verification, an authorized legal contact and a purchased EV code-signing certificate. A personal Microsoft or Store developer account does not replace this process; the project has not completed enrollment or purchased a certificate. This requirement applies to publishing the custom kernel-driver route above, not every Windows desktop application. See [Microsoft's Hardware Developer Program registration requirements](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/hardware-program-register).
+## Source checks and primary sources
 
-## Local source checks
+`npm run routing:test:win` runs Go race/vet, Windows helper cross-builds, portable production C lifecycle/ABI and capture tuple/identity/lease checks, and unsupported-platform launch rejection. Local DNS tests exercise real loopback authenticated SOCKS/TLS/DoH fixtures without user nodes or credentials. None of these tests prove native Windows routing.
 
-`node scripts/test-windows-app-routing.mjs` runs Go race tests, Go vet, and builds the helper for Windows x64 and ARM64. It compiles and executes the production lifecycle transition header and driver ABI assertions as portable C, checks the source's closed launch gate, and confirms the local unsupported-platform helper cannot spawn an application. DNS fixtures use loopback sockets only: they exercise authenticated SOCKS5 → verified TLS → a local DoH server, certificate refusal, fixed literal CONNECT, HTTP `Age`/cache expiry, redirect refusal, and cancellation. It does not activate a driver, require administrator rights, contact a real node or resolver, or read user credentials.
+- [WinDivert official binary download, signatures and administrator requirement](https://reqrypt.org/windivert.html)
+- [Pinned WinDivert source](https://github.com/basil00/WinDivert/tree/1789526ecfb9ff5397c94f9f54c1a3dc2fb60440)
+- [WinDivert cleanup releases pending packets](https://github.com/basil00/WinDivert/blob/1789526ecfb9ff5397c94f9f54c1a3dc2fb60440/sys/windivert.c#L1949-L2035)
+- [Capture provenance, original MIT technique and detailed limits](capture/PROVENANCE.md)
+- [Windows Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
+- [DNS application settings apply to the current process, Windows 11+](https://learn.microsoft.com/en-us/windows/win32/api/windns/nf-windns-dnssetapplicationsettings)
+- [DoH cache age and DNS TTL](https://www.rfc-editor.org/rfc/rfc8484.html#section-5.1)
 
-## Primary sources
-
-- [WFP bind/connect redirection and proxy redirect-record tracking](https://learn.microsoft.com/en-us/windows-hardware/drivers/network/using-bind-or-connect-redirection)
-- [ALE authorization applies to TCP, the first UDP packet to a tuple, and raw ICMP](https://learn.microsoft.com/en-us/windows/win32/fwp/ale-layers)
-- [Microsoft's connected-UDP local-redirection limitation](https://learn.microsoft.com/en-us/troubleshoot/windows-hardware/drivers/redirection-connected-udp-traffic-local-proxy-fail)
-- [Process-create callbacks and integrity requirements](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nf-ntddk-pssetcreateprocessnotifyroutineex)
-- [Windows Job Objects and kill-on-close process tree ownership](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
-- [Kernel driver signing requirements](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/kernel-mode-code-signing-policy--windows-vista-and-later-)
-- [BFE state subscription, initial-read ordering and callback cleanup](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/fwpmk/nf-fwpmk-fwpmbfestatesubscribechanges0)
-- [WFP filtering conditions available at each layer](https://learn.microsoft.com/en-us/windows/win32/fwp/filtering-conditions-available-at-each-filtering-layer)
-- [Cloudflare DoH wire-format endpoint](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/)
-- [DoH HTTP cache age and DNS TTL requirements](https://www.rfc-editor.org/rfc/rfc8484.html#section-5.1)
-
-The Go helper uses Go standard libraries and `golang.org/x/sys v0.30.0` (BSD-3-Clause), pinned by `go.sum`. The driver and helper implementation are original project source under Envara's MIT license; no WFPSampler code is copied.
+Envara's own source is MIT; ProxyBridge's retained MIT attribution and WinDivert's original LGPLv3/GPLv2 licensing apply to their respective components. The Go helper retains Go/x/sys BSD notices. The MIT application license does not replace third-party licenses. The custom driver source under `driver/` would still require its own Microsoft-signing/deployment process if selected later; it is not the default implemented route.

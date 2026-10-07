@@ -27,6 +27,14 @@ try {
   const transitions = spawnSync(lifecycle, [], { encoding: 'utf8' });
   assert.equal(transitions.status, 0, `Lifecycle transition tests failed: ${transitions.stderr || ''}`);
   console.log('Portable C: production lifecycle transitions and ABI sizes passed; no WDK/runtime claim.');
+  const captureTest = path.join(temporary, process.platform === 'win32' ? 'capture-test.exe' : 'capture-test');
+  const captureCompile = spawnSync(compiler, ['-std=c11', '-Wall', '-Wextra', '-Werror',
+    ...(process.platform === 'win32' ? [] : ['-fsanitize=undefined', '-fno-sanitize-recover=all']),
+    '-Icapture', 'capture/capture_core.c', 'capture/tests/core_test.c', '-o', captureTest], { cwd: source, encoding: 'utf8' });
+  assert.equal(captureCompile.status, 0, `Portable production capture compile failed: ${captureCompile.stderr || captureCompile.error || ''}`);
+  const captureRun = spawnSync(captureTest, [], { encoding: 'utf8' });
+  assert.equal(captureRun.status, 0, `Capture identity/tuple/lease checks failed: ${captureRun.stderr || ''}`);
+  console.log(`Portable capture C: ${captureRun.stdout.trim()} (no driver activation).`);
   for (const arch of ['amd64', 'arm64']) {
     const env = { ...process.env, GOOS: 'windows', GOARCH: arch, CGO_ENABLED: '0' };
     run(['vet', './...'], { env });
@@ -37,7 +45,8 @@ try {
     const peOffset = binary.readUInt32LE(0x3c);
     assert.equal(binary.readUInt32LE(peOffset), 0x00004550);
     assert.equal(binary.readUInt16LE(peOffset + 4), arch === 'amd64' ? 0x8664 : 0xaa64);
-    console.log(`Windows ${arch}: helper cross-compiled and vetted.`);
+    run(['test', '-c', '-o', path.join(temporary, `${arch}-host-tests.exe`), './internal/host'], { env });
+    console.log(`Windows ${arch}: helper vetted/cross-built and native host tests compiled, not executed.`);
   }
   if (process.platform !== 'win32') {
     const envelope = { protocol: 'envara.application-routing', version: 1, id: 'fixture', method: 'status', params: {} };
@@ -60,7 +69,7 @@ try {
   assert.match(engine, /status\.Ready\s*=\s*false/);
   assert.match(engine, /CREATE_SUSPENDED/);
   assert.match(engine, /JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE/);
-  console.log('Source tests passed. Windows WFP runtime, driver build/signing and DNS isolation remain unverified.');
+  console.log('Source tests passed. WinDivert activation, whole-guard failure protection, unaffected applications, DNS isolation and native Windows acceptance remain unverified. ARM64 is a helper cross-build only.');
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }

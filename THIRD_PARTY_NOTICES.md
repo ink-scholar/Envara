@@ -1,6 +1,6 @@
 # Third-party notices
 
-Envara's original application code is licensed under the MIT License. Third-party software retains its own copyright and license. JavaScript versions are recorded in `package-lock.json`; the vendored Go backend and its dependencies are pinned in `third_party/browseforge/ENVARA_UPSTREAM.md`, `go.mod`, and `go.sum`. This document describes the local 0.4.0 development candidate; public releases are paused.
+Envara's original application code is licensed under the MIT License. Third-party software retains its own copyright and license. JavaScript versions are recorded in `package-lock.json`; the vendored Go backend and its dependencies are pinned in `third_party/browseforge/ENVARA_UPSTREAM.md`, `go.mod`, and `go.sum`. This document describes local development candidates; public releases are paused.
 
 ## Main dependencies
 
@@ -13,6 +13,8 @@ Envara's original application code is licensed under the MIT License. Third-part
 | Phosphor Icons | MIT | 2020 Phosphor Icons · [source](https://github.com/phosphor-icons/react) |
 | BrowseForge vendored backend | MIT | 2026 BrowseForge contributors · [preserved license](third_party/browseforge/LICENSE) |
 | Mihomo v1.19.32 proxy core | GPLv3 | Upstream authors and contributors · [preserved license](third_party/proxy-core/LICENSE) · [fixed source record](third_party/proxy-core/SOURCE.md) |
+| WinDivert 2.2.2-A x64 DLL / original signed driver | LGPLv3 / GPLv2 upstream choice | Basil and contributors · [retained full license](native/windows-app-routing/capture/vendor/WinDivert-LICENSE) · [pinned preparation](scripts/prepare-windivert.mjs) |
+| ProxyBridge TCP NAT technique | MIT | 2025 Anof-cyber/InterceptSuite · [retained license](native/windows-app-routing/capture/LICENSE) · [fixed source attribution](native/windows-app-routing/capture/PROVENANCE.md) |
 | Playwright Go binding | MIT | 2020 Max Schmitt · [license](https://github.com/mxschmitt/playwright-go/blob/main/LICENSE) |
 | CloakBrowser JavaScript wrapper | MIT | 2026 CloakHQ · [license](https://github.com/CloakHQ/CloakBrowser/blob/main/LICENSE) |
 | Playwright client and official driver | Apache-2.0 | Microsoft Corporation · [license](https://github.com/microsoft/playwright/blob/main/LICENSE) |
@@ -41,6 +43,8 @@ Envara 0.4.0 prepares the unmodified official Mihomo v1.19.32 executable at comm
 The source baseline, official archive/executable checksums and build details are recorded in [third_party/proxy-core/SOURCE.md](third_party/proxy-core/SOURCE.md) and generated provenance. No upstream source patches are applied to the supplied executable. These records describe component attribution and prepared distribution contents, not a legal conclusion about the combined application.
 
 ## Terminal and proxy dependency notices
+
+The Windows routing component build preserves WinDivert's unmodified x64 DLL and signed driver at commit `1789526ecfb9ff5397c94f9f54c1a3dc2fb60440`, the complete pinned corresponding source archive, original license and artifact hashes. It dynamically loads the DLL without changing the driver signature. Envara's user-mode capture source and Go guard service are separate components; ProxyBridge's MIT address-swap technique retains its attribution. See [Windows source and acceptance boundary](native/windows-app-routing/README.md). No routing component has been installed or accepted on Windows during this Mac-hosted build. The ARM64 helper does not include or claim an ARM64 driver.
 
 The native preparation step retains complete notices for the terminal renderer, node-pty and proxy dependencies in `build/native/licenses/`, with a manifest; application resources include them under `licenses/npm/`. The whole node-pty package is unpacked to preserve native modules and platform helpers. winpty and Microsoft Terminal ConPTY notices are retained separately. Development-only @electron/rebuild 4.2.1 is MIT and is not installed by the running application.
 

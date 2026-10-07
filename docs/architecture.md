@@ -18,7 +18,7 @@ flowchart LR
   Context --> Applications
   Applications --> NativeGuard[原生能力与验收门禁]
   NativeGuard --> Mac[macOS App Proxy 源码 未就绪]
-  NativeGuard --> Windows[Windows WFP 源码 未就绪]
+  NativeGuard --> Windows[Windows WinDivert capture 与 guard 未就绪]
   UI --> Xterm[可折叠 xterm 面板]
   Xterm --> Bridge
   Terminal --> CWD[用户选择的工作目录]
@@ -61,7 +61,7 @@ Playwright Go 模块固定于 v0.6100.0，配套官方 driver 1.61.1 及 Node.js
 | src/TerminalPane.jsx、TerminalWindowApp.jsx | 终端工作页/折叠面板、拖动/键盘尺寸、放大恢复、多会话与独立窗口视图 |
 | electron/application-store.mjs、application-service.mjs | 本地软件绑定、白名单存储、串行启动/停止与失败清理 |
 | electron/application-routing.mjs | 原生 helper 私有 RPC、协议校验与真实能力/验收门禁 |
-| native/macos-app-routing/、native/windows-app-routing/ | App Proxy 与 WFP/helper 源码；平台部署和系统验收尚未完成 |
+| native/macos-app-routing/、native/windows-app-routing/ | App Proxy、WinDivert capture/Go guard 与保留的 WFP 备选源码；平台部署和系统验收尚未完成 |
 | third_party/browseforge/ | 固定 Go 后端与 Envara 桌面补丁 |
 | scripts/build-sidecar.mjs、scripts/prepare-playwright-driver.mjs | 后端和官方 driver/Node 资源构建准备 |
 | scripts/prepare-proxy-core.mjs、third_party/proxy-core/ | 固定 Mihomo 二进制、对应源码/vendor、许可与构建来源准备 |
@@ -152,7 +152,7 @@ ApplicationService 接受本地 .app/.exe 或可执行文件，检查真实路�
 
 主进程在 ApplicationService 的同一串行队列内执行活跃境舱、代理及相关分组/批量操作的修改检查，避免启动与配置修改竞态。starting/running/stopping，以及 error 状态下仍持有 routeId/sessionId 的未完成清理，均保留归属和修改锁。helper 状态缺失、能力失效或会话异常会转为 error 并尝试停止与撤销；只有原生确认停止/撤销后才清除相应归属。失败不能假报 stopped，也不能释放保护后继续运行。
 
-macOS 软件接管部署已暂停，现有 Network Extension App Proxy、所属进程启动与私有 helper RPC 源码保留；缺少 Developer ID、provisioning、实际安装/授权/扩展激活及系统验收，仍为未就绪。当前优先 Windows：源码包含 WFP TCP 重定向、受管 SOCKS relay、所属进程/Job 生命周期、UDP 阻断、BFE 代次撤销/过滤恢复检查和每 route 的认证 SOCKS→TLS→DoH 基础模块。共享 DNS Client 的请求归属与适配、BFE 突发故障的断网保护时序、WDK 驱动构建/签名及实机验收仍未完成，ready 保持 false。交叉编译和源码测试不构成全软件网络接管证明。平台适配不修改系统时区/定位；GUI 软件是否采用进程 TZ、共享系统服务及提前脱离的进程覆盖仍需实机确认。
+macOS 软件接管部署已暂停，现有 Network Extension App Proxy、所属进程启动与私有 helper RPC 源码保留；自有扩展仍缺合法签名/profile、实际安装/授权/激活与系统验收。原版已签名 mitmproxy 外部组件也是可研究路线，其官方组件的只读签名/公证检查通过，尚未安装或集成。当前优先 Windows：默认 WinDivert 官方签名 x64 依赖 + Envara capture DLL/Go guard，包含 TCP NAT、认证 SOCKS relay、实际 PID/创建时间/Job、撤销、UDP 阻断及独立 SOCKS→TLS→DoH 基础。共享 DNS 调用适配、整个 guard 崩溃后的持续阻断、无关应用既有连接保留、安装与 Windows 实机验收仍未完成，ready=false。ARM64 只有 helper 交叉构建，没有对应 capture 驱动。细节见 [路线与实测](application-routing-options.md)。平台适配不修改系统时区/定位；GUI 软件是否采用进程 TZ、共享系统服务及提前脱离的进程覆盖仍需实机确认。
 
 ## 当前边界
 

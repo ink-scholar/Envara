@@ -29,7 +29,7 @@ func Call(request protocol.Request) protocol.Response {
 	handle, err := windows.CreateFile(name, windows.FILE_READ_DATA|windows.FILE_WRITE_DATA|windows.SYNCHRONIZE, 0, nil, windows.OPEN_EXISTING, 0, 0)
 	if err != nil {
 		if request.Method == "status" || request.Method == "setup" {
-			return protocol.Success(request, protocol.MissingStatus("The signed Windows routing service and driver are not installed or available."))
+			return protocol.Success(request, protocol.MissingStatus("The Windows routing components are not installed or available."))
 		}
 		return protocol.Failure(request, "ROUTING_NOT_READY", "The Windows routing service is unavailable; no application was started.")
 	}

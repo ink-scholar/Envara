@@ -4,6 +4,8 @@ release/
 build/backend/
 build/native/
 build/proxy-core/
+build/app-routing/
+build/development-app-routing/
 .DS_Store
 *.log
 .env*
@@ -14,3 +16,5 @@ design-qa.md
 playwright-report/
 *.pem
 *.key
+*.p12
+*.pfx

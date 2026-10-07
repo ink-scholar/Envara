@@ -47,6 +47,10 @@ const chromiumAutomationMitigationInitScript = `(() => {
 })();`
 
 func (m *Manager) launchChromium(p *profile.Profile) (*Session, error) {
+	privacyMode, err := browserPrivacyMode(p)
+	if err != nil {
+		return nil, err
+	}
 	desc, err := m.runtimes.ResolveProfile(p)
 	if err != nil {
 		return nil, err
@@ -75,6 +79,7 @@ func (m *Manager) launchChromium(p *profile.Profile) (*Session, error) {
 		"--test-type",
 		chromiumWebRTCIPHandlingArg,
 	}
+	args = append(args, chromiumPrivacyArgs(privacyMode)...)
 	if p.FingerprintSeed > 0 {
 		args = append(args, fmt.Sprintf("--fingerprint=%d", p.FingerprintSeed))
 	}
@@ -250,6 +255,14 @@ func (m *Manager) launchChromium(p *profile.Profile) (*Session, error) {
 			ExtraHttpHeaders:  browseForgeChromiumHTTPHeaders(persona),
 			IgnoreDefaultArgs: ignoreArgs,
 		}
+		if privacyMode != "off" {
+			opts.ServiceWorkers = playwright.ServiceWorkerPolicyBlock
+		}
+		if locale != "" && desc.ID == bfruntime.CloakBrowser && runtime.GOOS == "darwin" {
+			// Keep Intl's default region aligned with the native language flags,
+			// including regions missing from the macOS launcher's locale prefs.
+			opts.Locale = playwright.String(locale)
+		}
 
 		var relay *SOCKS5Relay
 		if effectiveProxy.Proxy != nil {
@@ -324,6 +337,14 @@ func (m *Manager) launchChromium(p *profile.Profile) (*Session, error) {
 		ctx.Close()
 		return nil, fmt.Errorf("install chromium automation mitigations: %w", err)
 	}
+	privacyState, err := installBrowserPrivacy(ctx, p, true)
+	if err != nil {
+		if relay != nil {
+			relay.Close()
+		}
+		ctx.Close()
+		return nil, fmt.Errorf("install browser privacy: %w", err)
+	}
 
 	dlDir := downloadsDir
 	onDl := func(d playwright.Download) { go d.SaveAs(filepath.Join(dlDir, d.SuggestedFilename())) }
@@ -357,6 +378,7 @@ func (m *Manager) launchChromium(p *profile.Profile) (*Session, error) {
 		ProfileDir:     p.ProfileDir,
 		UserDataDir:    userDataDir,
 		ExecutablePath: absChromiumPath,
+		Privacy:        privacyState,
 	}, nil
 }
 

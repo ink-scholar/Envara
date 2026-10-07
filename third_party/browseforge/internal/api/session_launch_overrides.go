@@ -13,8 +13,11 @@ import (
 // Session overrides contain already-resolved runtime values. A managed local
 // proxy is never part of the stored profile or its exported configuration.
 type sessionLaunchOverrides struct {
-	Timezone string
-	Proxy    *profile.ProxyConfig
+	Timezone    string
+	Locale      string
+	Proxy       *profile.ProxyConfig
+	Geolocation *profile.Geolocation
+	Privacy     *profile.PrivacyConfig
 }
 
 var sessionProxyRegionPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,62}[A-Za-z0-9])?$`)
@@ -25,17 +28,58 @@ func decodeSessionLaunchOverrides(raw json.RawMessage) (*sessionLaunchOverrides,
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
-		return nil, fmt.Errorf("launch_overrides must be an object containing timezone or proxy")
+		return nil, fmt.Errorf("launch_overrides must be an object")
 	}
 	if len(fields) == 0 {
-		return nil, fmt.Errorf("launch_overrides requires timezone or proxy")
+		return nil, fmt.Errorf("launch_overrides requires at least one runtime field")
 	}
 	for key := range fields {
-		if key != "timezone" && key != "proxy" {
-			return nil, fmt.Errorf("launch_overrides accepts only timezone and proxy")
+		if key != "timezone" && key != "proxy" && key != "locale" && key != "geolocation" && key != "privacy" {
+			return nil, fmt.Errorf("launch_overrides contains an unsupported runtime field")
 		}
 	}
 	overrides := &sessionLaunchOverrides{}
+	if value, present := fields["locale"]; present {
+		if err := json.Unmarshal(value, &overrides.Locale); err != nil || overrides.Locale == "" {
+			return nil, fmt.Errorf("launch_overrides.locale must be a nonempty BCP 47 language tag")
+		}
+		if err := profile.ValidateLaunchOverrides(&profile.LaunchOverrides{Locale: overrides.Locale}); err != nil {
+			return nil, err
+		}
+	}
+	if value, present := fields["geolocation"]; present && !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		var geoFields map[string]json.RawMessage
+		if err := json.Unmarshal(value, &geoFields); err != nil || len(geoFields) != 3 {
+			return nil, fmt.Errorf("launch_overrides.geolocation requires latitude, longitude and accuracy")
+		}
+		for key, field := range geoFields {
+			if (key != "latitude" && key != "longitude" && key != "accuracy") || bytes.Equal(bytes.TrimSpace(field), []byte("null")) {
+				return nil, fmt.Errorf("launch_overrides.geolocation contains an invalid field")
+			}
+		}
+		geo := &profile.Geolocation{}
+		if err := json.Unmarshal(value, geo); err != nil {
+			return nil, fmt.Errorf("launch_overrides.geolocation requires numeric regional coordinates")
+		}
+		if err := profile.ValidateGeolocation(geo); err != nil {
+			return nil, err
+		}
+		overrides.Geolocation = geo
+	}
+	if value, present := fields["privacy"]; present {
+		var privacyFields map[string]json.RawMessage
+		if err := json.Unmarshal(value, &privacyFields); err != nil || len(privacyFields) != 1 || privacyFields["mode"] == nil {
+			return nil, fmt.Errorf("launch_overrides.privacy requires only mode")
+		}
+		privacy := &profile.PrivacyConfig{}
+		if err := json.Unmarshal(value, privacy); err != nil {
+			return nil, fmt.Errorf("launch_overrides.privacy.mode is invalid")
+		}
+		if _, err := profile.NormalizePrivacy(privacy); err != nil {
+			return nil, err
+		}
+		overrides.Privacy = privacy
+	}
 	if value, present := fields["timezone"]; present {
 		if err := json.Unmarshal(value, &overrides.Timezone); err != nil || overrides.Timezone == "" {
 			return nil, fmt.Errorf("launch_overrides.timezone must be a nonempty IANA timezone")
@@ -112,9 +156,24 @@ func profileForSessionLaunch(stored *profile.Profile, overrides *sessionLaunchOv
 		}
 		launch.LaunchOverrides.Timezone = overrides.Timezone
 	}
+	if overrides != nil && overrides.Locale != "" {
+		if launch.LaunchOverrides == nil {
+			launch.LaunchOverrides = &profile.LaunchOverrides{}
+		}
+		launch.LaunchOverrides.Locale = overrides.Locale
+	}
 	if overrides != nil && overrides.Proxy != nil {
 		proxy := *overrides.Proxy
 		launch.SessionProxy = &proxy
+	}
+	launch.SessionPrivacy = &profile.PrivacyConfig{Mode: "standard"}
+	if overrides != nil && overrides.Privacy != nil {
+		privacy := *overrides.Privacy
+		launch.SessionPrivacy = &privacy
+	}
+	if overrides != nil && overrides.Geolocation != nil {
+		geo := *overrides.Geolocation
+		launch.SessionGeolocation = &geo
 	}
 	return &launch, nil
 }

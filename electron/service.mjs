@@ -4,9 +4,10 @@ import net from 'node:net';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import EnvaraStore from './store.mjs';
+import { normalizePrivacy } from './privacy-policy.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const PROFILE_FIELDS = new Set(['name', 'group', 'notes', 'engine', 'platform', 'seed', 'locale', 'timezone', 'width', 'height', 'startUrl', 'proxyId']);
+const PROFILE_FIELDS = new Set(['name', 'group', 'notes', 'engine', 'platform', 'seed', 'locale', 'timezone', 'width', 'height', 'startUrl', 'proxyId', 'privacy']);
 const IMPORT_FIELDS = new Set([...PROFILE_FIELDS, 'id', 'createdAt', 'updatedAt', 'lastLaunchedAt']);
 const PROXY_FIELDS = new Set(['id', 'name', 'protocol', 'host', 'port', 'username', 'password']);
 const MAX_PROFILES = 500;
@@ -59,6 +60,7 @@ function id(value) {
 function profileConfig(input, defaults, proxyIds) {
   allowed(input, PROFILE_FIELDS, '环境配置');
   const result = { ...defaults, ...input };
+  result.privacy = normalizePrivacy(result.privacy);
   result.name = string(result.name, '环境名称', 100);
   result.group = string(result.group, '分组', 100, { optional: true });
   result.notes = string(result.notes, '备注', 4000, { optional: true });
@@ -158,7 +160,7 @@ export class EnvaraService {
       name: '新环境', group: '', notes: '', engine: 'cloakbrowser',
       platform: this.system.platform === 'darwin' || this.system.platform === 'macos' ? 'macos' : this.system.platform === 'win32' || this.system.platform === 'windows' ? 'windows' : 'linux',
       seed: seed(), locale: 'zh-CN', timezone: 'Asia/Shanghai', width: 1440, height: 900,
-      startUrl: 'about:blank', proxyId: null,
+      startUrl: 'about:blank', proxyId: null, privacy: { mode: 'standard' },
     };
   }
 
@@ -224,6 +226,7 @@ export class EnvaraService {
       return {
         ...profile, status: state.status, lastError: state.lastError,
         dataBytes: await directorySize(this.profileDir(profile.id)),
+        privacyProtection: this.runtime?.privacyForProfile?.(profile.id) ?? null,
         cpuPercent: metric(measurement.cpuPercent), memoryBytes: metric(measurement.memoryBytes),
         ...(state.screenshot ? { screenshot: state.screenshot } : {}),
       };
@@ -442,15 +445,16 @@ export class EnvaraService {
   }
 
   settingsConfig(settings) {
-    allowed(settings, new Set(['closeBrowsersOnExit']), '设置');
+    allowed(settings, new Set(['closeBrowsersOnExit', 'language']), '设置');
     if (typeof settings.closeBrowsersOnExit !== 'boolean') throw failure('退出时关闭浏览器必须是布尔值。');
     if (!settings.closeBrowsersOnExit) throw failure('当前版本退出应用时会关闭所有浏览器会话。');
-    return { closeBrowsersOnExit: settings.closeBrowsersOnExit };
+    if (settings.language != null && !['zh-CN', 'en'].includes(settings.language)) throw failure('界面语言无效。');
+    return { closeBrowsersOnExit: settings.closeBrowsersOnExit, ...(settings.language != null ? { language: settings.language } : {}) };
   }
 
   async saveSettings({ settings }) {
     const config = this.settingsConfig(settings);
-    await this.store.transaction((workspace) => { workspace.settings = config; });
+    await this.store.transaction((workspace) => { workspace.settings = { ...workspace.settings, ...config }; });
     this.changed();
   }
 

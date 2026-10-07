@@ -147,7 +147,7 @@ export class TerminalService {
   }
   active(id) { return [...this.sessions.values()].find(session => session.profileId === id && ['starting', 'running', 'closing'].includes(session.status)); }
   metadata(session) {
-    return { sessionId: session.sessionId, profileId: session.profileId, status: session.status, cwd: session.cwd, timezone: session.timezone ?? null, network: session.network ?? unknownNetwork(), columns: session.columns, rows: session.rows, startedAt: session.startedAt, sequence: session.sequence, replay: session.replay,
+    return { sessionId: session.sessionId, profileId: session.profileId, status: session.status, cwd: session.cwd, timezone: session.timezone ?? null, privacy: session.launchContext?.privacy ?? { mode: 'standard' }, geolocation: session.launchContext?.geolocation ?? null, network: session.network ?? unknownNetwork(), columns: session.columns, rows: session.rows, startedAt: session.startedAt, sequence: session.sequence, replay: session.replay,
       ...(session.exitCode != null ? { exitCode: session.exitCode } : {}), ...(session.error ? { error: session.error } : {}) };
   }
   async snapshot({ id } = {}) {
@@ -194,7 +194,7 @@ export class TerminalService {
     for (const [file, source] of [[history, ''], [path.join(home, '.gitconfig'), '# Envara environment-local Git configuration\n'], [path.join(home, '.npmrc'), ''], [path.join(home, '.zshenv'), zshEnv], [path.join(home, '.zshrc'), zshRC], [path.join(home, '.bashrc'), bashRC]]) await ownedFile(file, source);
     return { root, home, config, cache, data, state, claude, temp, history };
   }
-  childEnvironment(directories, timezone, proxyEndpoint) {
+  childEnvironment(directories, timezone, proxyEndpoint, privacy = { mode: 'standard' }) {
     // Build from scratch: host API keys, SSH agent and author variables are
     // deliberately absent. HOME/TZ here belong only to the new child process.
     const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
@@ -219,6 +219,9 @@ export class TerminalService {
       environment.HOMEDRIVE = drive.slice(0, 2); environment.HOMEPATH = directories.home.slice(2);
     }
     if (proxyEndpoint) for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) environment[key] = proxyEndpoint;
+    // Supported tool opt-outs apply only to this owned shell and its children.
+    if (privacy?.mode !== 'off') Object.assign(environment, { DO_NOT_TRACK: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' });
+    if (privacy?.mode === 'strict') environment.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
     return environment;
   }
   shell(environment) {
@@ -271,7 +274,7 @@ export class TerminalService {
       if (!context || context.id !== id) throw codeError('未找到此环境的终端配置。', 'TERMINAL_PROFILE_NOT_FOUND');
       const timezone = safeTimezone(context.timezone);
       const proxy = checkedProxy(context.proxy);
-      session.launchContext = { id, name: typeof context.name === 'string' ? context.name.slice(0, 100) : null, timezone, timezoneSource: typeof context.timezoneSource === 'string' ? context.timezoneSource.slice(0, 64) : 'unknown', proxy };
+      session.launchContext = { id, name: typeof context.name === 'string' ? context.name.slice(0, 100) : null, timezone, timezoneSource: typeof context.timezoneSource === 'string' ? context.timezoneSource.slice(0, 64) : 'unknown', proxy, privacy: context.privacy ?? { mode: 'standard' }, geolocation: context.geolocation ?? null, networkEgress: context.network ?? context.networkEgress ?? null };
       const directories = await this.directories(id);
       this.assertStarting(session);
       let endpoint;
@@ -288,10 +291,10 @@ export class TerminalService {
         const parsed = new URL(endpoint);
         session.secrets = [...new Set([endpoint, proxy && proxyURL(proxy), proxy?.password, proxy?.password && encodeURIComponent(proxy.password), parsed.password && decodeURIComponent(parsed.password), parsed.username && Buffer.from(`${decodeURIComponent(parsed.username)}:${decodeURIComponent(parsed.password)}`).toString('base64')].filter(value => typeof value === 'string' && value.length >= 4))].sort((a, b) => b.length - a.length);
       }
-      session.timezone = timezone; session.network = publicNetwork(proxy);
+      session.timezone = timezone; session.network = { ...publicNetwork(proxy), ...(session.launchContext.networkEgress?.ok ? { egress: session.launchContext.networkEgress } : {}) };
       this.contexts.set(id, { name: session.launchContext.name, timezone, timezoneSource: session.launchContext.timezoneSource, network: session.network, configDir: directories.config, claudeConfigDir: directories.claude });
       if (source) this.requireDuplicable(source);
-      const shell = this.shell(this.childEnvironment(directories, timezone, endpoint));
+      const shell = this.shell(this.childEnvironment(directories, timezone, endpoint, session.launchContext.privacy));
       this.assertStarting(session);
       const spawned = this.ptyFactory(shell.executable, shell.args, { name: 'xterm-256color', cols: session.columns, rows: session.rows, cwd, env: shell.environment, encoding: 'utf8', handleFlowControl: false });
       const pty = typeof spawned?.then === 'function' ? await spawned : spawned;

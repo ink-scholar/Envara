@@ -64,8 +64,15 @@ export function parseGeoResponse(data, endpoint, proxy) {
   const rawTimezone = endpoint.format === 'ipapi' ? data.timezone : data.timezone?.id;
   if (!isPublicIP(ip) || typeof countryCode !== 'string' || !/^[A-Z]{2}$/.test(countryCode)) throw failure('INVALID_GEO_RESPONSE');
   const secrets = [proxy?.username, proxy?.password];
+  const latitude = data.latitude;
+  const longitude = data.longitude;
+  // These coordinates describe an IP estimate, never a GPS fix or street address.
+  const geolocation = Number.isFinite(latitude) && latitude >= -90 && latitude <= 90 &&
+    Number.isFinite(longitude) && longitude >= -180 && longitude <= 180
+    ? { latitude, longitude, accuracy: 50000 } : null;
   return { ip, countryCode, country: label(endpoint.format === 'ipapi' ? data.country_name : data.country, secrets),
-    region: label(data.region, secrets), city: label(data.city, secrets), timezone: timezone(rawTimezone) };
+    region: label(data.region, secrets), city: label(data.city, secrets), timezone: timezone(rawTimezone),
+    ...(geolocation ? { geolocation, locationSource: 'ip-estimate' } : {}) };
 }
 
 function agentFor(proxy, timeoutMs, tlsOptions, signal) {

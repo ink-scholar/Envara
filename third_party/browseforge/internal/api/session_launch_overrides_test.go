@@ -303,7 +303,7 @@ func TestSessionLaunchRejectsInvalidTimezoneOrConfigurationInjection(t *testing.
 	for _, override := range []string{
 		`null`, `{}`, `[]`, `"UTC"`, `{"timezone":""}`, `{"timezone":null}`, `{"timezone":42}`,
 		`{"timezone":"Local"}`, `{"timezone":"Mars/Olympus"}`, `{"timezone":" Asia/Shanghai"}`,
-		`{"Timezone":"UTC"}`, `{"locale":"en-US"}`, `{"timezone":"UTC","locale":null}`,
+		`{"Timezone":"UTC"}`, `{"locale":"en_US"}`, `{"timezone":"UTC","locale":null}`,
 		`{"timezone":"UTC","target_os":null}`, `{"timezone":"UTC","proxy":null}`,
 	} {
 		t.Run(override, func(t *testing.T) {

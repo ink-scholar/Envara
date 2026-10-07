@@ -1,0 +1,11 @@
+x64/
+ARM64/
+Debug/
+Release/
+*.obj
+*.pdb
+*.sys
+*.cat
+*.cer
+*.pfx
+*.tlog

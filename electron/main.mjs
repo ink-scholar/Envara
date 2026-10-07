@@ -11,10 +11,19 @@ import { TerminalService } from './terminal-service.mjs';
 import { TerminalController, TERMINAL_METHODS } from './terminal-controller.mjs';
 import { resolveTerminalView, terminalViewSnapshot } from './terminal-view.mjs';
 import { ProxyCoreManager } from './proxy-core-manager.mjs';
+import { ApplicationService, inspectLocalApplication } from './application-service.mjs';
+import { NativeApplicationRouting } from './application-routing.mjs';
+import { applicationWorkspaceContext } from './workspace-context.mjs';
+import { ProxyNetworkProbe } from './proxy-network.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const isSmoke = process.env.ENVARA_SMOKE === '1' && !app.isPackaged;
+const isWorkspaceSmoke = process.env.ENVARA_WORKSPACE_SMOKE === '1' && !app.isPackaged;
 if (isSmoke && process.env.ENVARA_SMOKE_DATA) app.setPath('userData', process.env.ENVARA_SMOKE_DATA);
+if (isWorkspaceSmoke && process.env.ENVARA_WORKSPACE_SMOKE_DATA) {
+  if (!path.isAbsolute(process.env.ENVARA_WORKSPACE_SMOKE_DATA)) throw new Error('Workspace smoke data must be absolute');
+  app.setPath('userData', process.env.ENVARA_WORKSPACE_SMOKE_DATA);
+}
 // Development acceptance runs use an owned directory without touching real workspaces.
 if (!isSmoke && !app.isPackaged && process.env.ENVARA_DEV_DATA) {
   if (!path.isAbsolute(process.env.ENVARA_DEV_DATA)) throw new Error('ENVARA_DEV_DATA must be an absolute path');
@@ -29,6 +38,7 @@ let sidecar;
 let terminal;
 let terminalController;
 let proxyCore;
+let applications;
 const views = new Map();
 const terminalWindows = new Map();
 let quitting = false;
@@ -45,7 +55,14 @@ function workspaceSnapshot(value) {
     terminal: { supported: !!terminal, isolation: 'configuration', networkScope: 'proxy-aware-cli' } } };
 }
 
+async function fullWorkspaceSnapshot(value) {
+  if (!value || !Array.isArray(value.profiles) || !Array.isArray(value.proxies) || !value.system) return value;
+  const applicationState = applications ? await applications.snapshot() : { applications: [], applicationRouting: { ready: false, installed: false, authorized: false, status: 'unavailable', message: '应用网络组件尚未安装。' } };
+  return workspaceSnapshot({ ...value, ...applicationState });
+}
+
 async function shutdownOwnedServices() {
+  await applications?.shutdown().catch(() => {});
   await terminal?.shutdown().catch(() => {});
   try {
     if (service) await service.shutdown();
@@ -58,19 +75,55 @@ async function publish() {
   if (publishing) { needsPublish = true; return; }
   publishing = true;
   try {
-    const snapshot = workspaceSnapshot(await service.snapshot());
+    const snapshot = await fullWorkspaceSnapshot(await service.snapshot());
     for (const { window: view, kind } of views.values()) if (!view.isDestroyed()) view.webContents.send('envara:snapshot', kind === 'terminal' ? terminalViewSnapshot(snapshot) : snapshot);
   } catch (error) { console.error('Unable to refresh workspace:', error.message); }
   finally { publishing = false; if (needsPublish) { needsPublish = false; void publish(); } }
 }
 const allowedMethods = new Set(['snapshot','createProfile','updateProfile','cloneProfile','deleteProfile','clearProfile','startProfile','stopProfile','focusProfile','saveProxy','deleteProxy','checkProxy','saveSettings','installEngine','importProfiles','cancelImport','exportProfiles','openDataDirectory','openDocumentation','previewLegacyMigration','migrateLegacy','saveGroup','deleteGroup','clearGroupProxy','bulkProfiles','exportAutomationConfig','openTerminalWindow', ...TERMINAL_METHODS]);
+const applicationMethods = new Set(['saveApplication', 'startApplication', 'stopApplication', 'deleteApplication', 'getApplicationRoutingStatus', 'setupApplicationRouting']);
+for (const method of [...applicationMethods, 'pickApplication', 'checkEnvironmentNetwork']) allowedMethods.add(method);
+
+async function protectApplicationMutation(method, args, operation) {
+  if (!applications) return operation();
+  const profileMutation = ['updateProfile', 'deleteProfile', 'chooseWorkspaceDirectory'].includes(method);
+  const proxyMutation = ['saveProxy', 'deleteProxy'].includes(method);
+  const groupMutation = ['saveGroup', 'deleteGroup', 'clearGroupProxy'].includes(method);
+  const bulkMutation = method === 'bulkProfiles' && ['move', 'delete'].includes(args.action);
+  if (!profileMutation && !proxyMutation && !groupMutation && !bulkMutation) return operation();
+  return applications.serialized(async () => {
+    if (profileMutation) applications.assertProfileIdle(args.id);
+    if (proxyMutation) applications.assertProxyIdle(method === 'saveProxy' ? args.proxy?.id : args.id);
+    if (groupMutation || bulkMutation) {
+      const snapshot = await service.snapshot();
+      for (const profile of snapshot.profiles) if (groupMutation ? profile.group === args.name : args.ids?.includes(profile.id)) applications.assertProfileIdle(profile.id);
+    }
+    return operation();
+  });
+}
 
 async function handleCall(method, args = {}, caller = window) {
   if (quitting) throw Object.assign(new Error('应用正在退出。'), { code: 'APP_CLOSING' });
   if (!allowedMethods.has(method)) throw new Error('不支持的操作');
+  if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('操作参数无效。');
+  if (applicationMethods.has(method)) {
+    if (!applications) throw new Error('附加软件需要完整桌面应用。');
+    return applications[method](args);
+  }
+  if (method === 'pickApplication') {
+    const choice = await dialog.showOpenDialog(caller, { title: '选择本地软件', properties: ['openFile'], filters: process.platform === 'win32' ? [{ name: 'Application', extensions: ['exe'] }] : process.platform === 'darwin' ? [{ name: 'Application', extensions: ['app'] }] : [{ name: 'Application', extensions: ['*'] }] });
+    if (choice.canceled || !choice.filePaths[0]) return null;
+    const selected = await inspectLocalApplication(choice.filePaths[0]);
+    return { path: selected.path, name: selected.name };
+  }
+  if (method === 'checkEnvironmentNetwork') {
+    if (!service.resolveWorkspaceContext) throw new Error('当前后端不支持统一网络环境。');
+    await service.resolveWorkspaceContext(args.id, { force: true });
+    return service.snapshot();
+  }
   if (TERMINAL_METHODS.has(method)) {
     if (!terminalController) throw new Error('当前运行路径尚未启用终端。');
-    return terminalController.dispatch(method, args, { window: caller });
+    return protectApplicationMutation(method, args, () => terminalController.dispatch(method, args, { window: caller }));
   }
   if (method === 'openTerminalWindow') {
     if (!terminalController) throw new Error('当前运行路径尚未启用终端。');
@@ -133,7 +186,15 @@ async function handleCall(method, args = {}, caller = window) {
     }
     return service.call(method, sidecar ? { document: data, proxyMap: args.proxyMap ?? {} } : { profiles: data.profiles });
   }
-  return terminalController ? terminalController.protectMutation(method, args, () => service.call(method, args)) : service.call(method, args);
+  const result = await protectApplicationMutation(method, args, () => terminalController ? terminalController.protectMutation(method, args, () => service.call(method, args)) : service.call(method, args));
+  if (applications && method === 'deleteProfile') {
+    for (const item of (await applications.snapshot()).applications.filter(item => item.profileId === args.id)) await applications.deleteApplication({ id: item.id });
+  }
+  if (applications && method === 'bulkProfiles' && args.action === 'delete') {
+    const deleted = new Set((result?.actionResult?.results ?? result?.results ?? []).filter(item => item.ok).map(item => item.id));
+    for (const item of (await applications.snapshot()).applications.filter(item => deleted.has(item.profileId))) await applications.deleteApplication({ id: item.id });
+  }
+  return result;
 }
 
 function registerView(view, kind, profileId = null) {
@@ -201,6 +262,10 @@ async function createWindow() {
     const { runSmoke } = await import('./smoke.mjs');
     await runSmoke({ app, window, service, runtime: service.runtime });
   }
+  if (isWorkspaceSmoke) {
+    const { runWorkspaceSmoke } = await import('./workspace-smoke.mjs');
+    await runWorkspaceSmoke({ app, window, service, terminal, applications, shutdown: shutdownOwnedServices });
+  }
 }
 
 app.on('second-instance', () => {
@@ -211,6 +276,7 @@ async function quitWhenIdle() {
   if (quitting || views.size) return;
   const snapshot = await terminal?.snapshot();
   if (snapshot?.profiles?.some(profile => profile.sessions?.some(session => ['starting', 'running', 'closing'].includes(session.status)))) return;
+  if ((await applications?.snapshot())?.applications?.some(item => ['starting', 'running', 'stopping'].includes(item.status))) return;
   if (!views.size) app.quit();
 }
 app.on('window-all-closed', () => { void quitWhenIdle().catch(() => app.quit()); });
@@ -239,6 +305,7 @@ if (ownsLock) void app.whenReady().then(async () => {
     await sidecar.initialize();
     service = new BrowseForgeService(dataDir, sidecar.client, { platform: process.platform, appVersion: app.getVersion(), backend: 'BrowseForge (Envara desktop)', upstreamVersion: '2.1.15', localApi: sidecar.baseUrl }, publish, {
       profilesDir: path.join(sidecar.baseDir, 'profiles'), getEngineStates: () => sidecar.getEngineStates(), proxyCore,
+      ...(isWorkspaceSmoke ? { networkProbe: new ProxyNetworkProbe({ transport: async () => ({ success: true, ip: '8.8.8.8', country: 'Philippines', country_code: 'PH', city: 'Manila', latitude: 14.6, longitude: 121, timezone: { id: 'Asia/Manila' } }) }) } : {}),
       installEngine: id => sidecar.installEngine(id), getMetrics: profiles => sidecar.metrics(profiles),
       getConnectionInfo: () => ({ apiUrl: sidecar.baseUrl + '/api', mcpUrl: sidecar.baseUrl + '/mcp', status: sidecar.process ? 'ready' : 'stopped', version: '2.1.15', sourceCommit: 'fa9e0bb670e749706a9c8f2d4095333347d6c521' }),
       cancelInstall: () => sidecar.cancelInstall(),
@@ -254,12 +321,26 @@ if (ownsLock) void app.whenReady().then(async () => {
       },
     });
     terminalController = new TerminalController({ terminal, service, pickDirectory: async ({ currentPath }, context) => {
+      if (isWorkspaceSmoke) {
+        const ownedCwd = process.env.ENVARA_WORKSPACE_SMOKE_CWD;
+        if (!ownedCwd || !path.isAbsolute(ownedCwd)) throw new Error('Workspace smoke directory must be absolute');
+        return { canceled: false, path: ownedCwd };
+      }
       const parent = context?.window ?? window;
       if (!parent || parent.isDestroyed()) throw new Error('终端窗口已关闭。');
       parent.show(); parent.focus();
       const choice = await dialog.showOpenDialog(parent, { title: '选择此境舱的工作目录', properties: ['openDirectory'], ...(currentPath ? { defaultPath: currentPath } : {}) });
       return { canceled: choice.canceled, path: choice.filePaths[0] };
     } });
+    const routingRoot = path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'app-routing');
+    const helperPath = process.platform === 'darwin'
+      ? path.join(routingRoot, 'macos/EnvaraAppRouting.app/Contents/MacOS/EnvaraAppRoutingHelper')
+      : process.platform === 'win32' ? path.join(routingRoot, 'win32', process.arch, 'EnvaraAppRouting.exe') : null;
+    applications = new ApplicationService({ dataDir, routing: new NativeApplicationRouting({ helperPath }),
+      resolveContext: id => applicationWorkspaceContext(id, { service, terminal }),
+      profileExists: async id => (await service.snapshot()).profiles.some(profile => profile.id === id), onEvent: publish });
+    await applications.ready;
+    await applications.getApplicationRoutingStatus();
   }
   ipcMain.handle('envara:call', async (event, request) => {
     try {
@@ -275,7 +356,7 @@ if (ownsLock) void app.whenReady().then(async () => {
           if (!current.profiles?.some(profile => profile.sessions?.some(session => session.sessionId === request.args?.sessionId))) throw new Error('该会话不属于此终端窗口。');
         }
       }
-      const value = workspaceSnapshot(await handleCall(request.method, request.args, source.window));
+      const value = await fullWorkspaceSnapshot(await handleCall(request.method, request.args, source.window));
       return { ok: true, value: source.kind === 'terminal' ? terminalViewSnapshot(value) : value };
     } catch (error) { return { ok: false, error: { message: error.message, code: error.code || 'ACTION_FAILED' } }; }
   });

@@ -1,0 +1,47 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=System
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider=%ProviderName%
+CatalogFile=EnvaraAppRouting.cat
+DriverVer=10/07/2026,0.5.0.0
+PnpLockdown=1
+
+[DefaultInstall.NTamd64]
+CopyFiles=DriverCopy
+
+[DefaultInstall.NTamd64.Services]
+AddService=EnvaraAppRoutingDriver,0x00000002,DriverService
+
+[DefaultInstall.NTarm64]
+CopyFiles=DriverCopy
+
+[DefaultInstall.NTarm64.Services]
+AddService=EnvaraAppRoutingDriver,0x00000002,DriverService
+
+[DestinationDirs]
+DriverCopy=12
+
+[DriverCopy]
+EnvaraAppRouting.sys
+
+[DriverService]
+DisplayName=%DriverName%
+Description=%DriverDescription%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\EnvaraAppRouting.sys
+Dependencies=BFE
+
+[SourceDisksNames]
+1=%DiskName%,,,
+
+[SourceDisksFiles]
+EnvaraAppRouting.sys=1
+
+[Strings]
+ProviderName="Envara"
+DriverName="Envara Application Routing"
+DriverDescription="Routes only Envara-owned process trees; blocks owned direct traffic."
+DiskName="Envara Application Routing Driver"

@@ -1,0 +1,6 @@
+.build/
+.swiftpm/
+*.provisionprofile
+*.mobileprovision
+*.mobileconfig
+*.xcuserstate

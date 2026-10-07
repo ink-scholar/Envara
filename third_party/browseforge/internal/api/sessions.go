@@ -58,6 +58,7 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 		"session_id": sess.ID,
 		"profile_id": sess.ProfileID,
 		"runtime_id": sess.RuntimeID,
+		"privacy":    sess.Privacy.Snapshot(),
 	}})
 }
 
@@ -89,6 +90,7 @@ func (h *handler) listSessions(w http.ResponseWriter, r *http.Request) {
 			"session_id": s.ID,
 			"profile_id": s.ProfileID,
 			"runtime_id": s.RuntimeID,
+			"privacy":    s.Privacy.Snapshot(),
 		})
 	}
 	writeJSON(w, 200, map[string]any{"data": result, "total": len(result)})

@@ -2,29 +2,41 @@
 
 # Envara · 境舱
 
-一个中文优先的浏览器环境桌面管理器。每个环境管理独立浏览资料、指纹、网络出口和终端工作区，在桌面应用内完成浏览器与命令行会话操作。
+一个支持中文和英文的本地桌面工作区。每个境舱管理网络出口、独立浏览资料与终端配置，浏览器、终端和附加软件各有自己的操作页面。
 
-**Envara is an open-source desktop workspace for isolated browser environments.** The local 0.4.0 candidate adds app-managed AnyTLS routing to the multi-engine browser and terminal workspace.
+**Envara is an open-source desktop workspace for isolated browser environments.** The local 0.5.0 candidate separates environments, networks, browsers, terminals, applications and monitoring, with Chinese/English UI and scoped privacy settings. Application bindings and native adapters are implemented; OS-level application routing remains gated until platform deployment and acceptance are complete.
 
-[项目源码](https://github.com/ink-scholar/Envara) · [问题反馈](https://github.com/ink-scholar/Envara/issues) · [能力矩阵](docs/capability-matrix.md) · [架构说明](docs/architecture.md) · [验证记录](docs/verification.md) · [参与贡献](CONTRIBUTING.md)
+[项目源码](https://github.com/ink-scholar/Envara) · [问题反馈](https://github.com/ink-scholar/Envara/issues) · [0.5 工作区与边界](docs/workspace-v05.md) · [能力矩阵](docs/capability-matrix.md) · [架构说明](docs/architecture.md) · [验证记录](docs/verification.md) · [参与贡献](CONTRIBUTING.md)
 
-![Envara 三栏界面预览](docs/envara-preview.png)
+![Envara 0.5 工作区](docs/envara-workspace-0.5.png)
 
-上图为带「界面预览」标识的浏览器工作区预览，使用演示配置。0.3.0 保留三栏布局，底部终端默认高 360 px，可拖动或用键盘调整、放大/恢复，并可在独立窗口中使用。
+上图为 0.5.0 原生 Electron 验收截图，出口地区与 IP 为合成测试数据。新版保留暗色三栏视觉，终端有独立工作页，并保留拖动/键盘调高、放大/恢复和独立窗口。
 
 ## 当前状态
 
-**0.4.0 本地开发候选版，尚未发布。** 既有源码仓库保持公开，安装发行版为草稿；新代码未推送，自动发布暂停。
+**0.5.0 本地开发候选版，尚未发布。** 既有源码仓库保持公开，安装发行版为草稿；新代码未推送，自动发布暂停。完整桌面回归与打包验收分别记录，以下 0.4.0 数字是历史结果，不能代替本轮验收。
+
+0.5.0 当前通过 **223/223** JavaScript 检查、全包 Go 测试、9 项原生桌面交互、8 项真实 CloakBrowser/Camoufox 隐私检查及真实 PTY 验收。地区检测使用离线合成数据，不能当作真实节点或任意软件接管的证明。详细范围与包资源核对见 [验证记录](docs/verification.md)。
 
 本地后端基于固定的 BrowseForge v2.1.15（提交 fa9e0bb670e749706a9c8f2d4095333347d6c521），纳入 third_party/browseforge/ 并增加桌面补丁。应用管理私有本机服务，打包 sidecar、官方 Playwright driver/Node 与原生终端模块；最终安装包用户无需配置 Go 或 Node.js。
 
 | 内核 | 按版本记录的原生证据 |
 | --- | --- |
-| CloakBrowser / Chromium | 0.3.0 macOS arm64 原生回归 11 项通过：手动身份、多环境隔离、Cookie/localStorage 持久化、认证 HTTP 代理和迁移；另有 3 项临时会话时区检查 |
-| Camoufox / Firefox | 0.2.0 macOS arm64 官方安装及可见会话通过，可与 Chromium 同时运行；手动身份、跨内核隔离和 localStorage 重启保留通过。0.3.0 本轮尚未执行该内核 |
-| BrowseForge Chromium | 0.2.0 macOS arm64 Alpha 0.1.6 单项安装、可见会话、手动身份、截图与停止通过；仍为实验性内核，0.3.0 本轮尚未执行 |
+| CloakBrowser / Chromium | 0.5.0 的真实 145 内核已验证标准/严格/关闭模式、请求拦截、自动区域语言/时区、粗略定位及无坐标保护；历史隔离、持久化和代理结果见验证记录 |
+| Camoufox / Firefox | 0.5.0 的真实 135 内核已验证同样的隐私模式与区域资料；无坐标时禁用定位 API。历史跨内核隔离和持久化结果见验证记录 |
+| BrowseForge Chromium | 0.2.0 macOS arm64 Alpha 0.1.6 单项安装、可见会话、手动身份、截图与停止通过；仍为实验性内核，0.5.0 未重新执行 |
 
 macOS Apple Silicon 是当前验证平台。0.4.0 的 **193/193** 项测试、19 项真实 AnyTLS 原生链、20 项包内 AnyTLS 检查及真实 PTY 验收通过。一条真实外部节点在本机 TUN 开启和用户主动关闭后均通过严格证书 HTTPS，并识别 Manila / Asia/Manila 出口，未使用 Clash 本地代理。原生 UI 已验证 ALPN/UDP 保存回读与失败提示，Mac .app/DMG/ZIP 资源和完整性已核对；当前包未签名且未公证，其余 GUI 与其他系统仍分别验收。范围见 [验证记录](docs/verification.md)。
+
+## 0.5.0 工作区与隐私
+
+- **专用工作页：**导航依次为环境、网络出口、浏览器、终端、附加软件、运行监控，设置置底。新建环境默认只需名称和网络；指纹、内核、分组与隐私放进高级设置。
+- **中文 / English：**语言切换立即生效并保存；540 项界面词条覆盖表单、终端与独立窗口、附加软件和监控。自定义名称、目录、程序名与终端输出保留原文。
+- **自动环境资料：**查询真实认证出口，匹配 IANA 时区、粗略地域与浏览器语言。浏览器使用区域定位；终端只接收所属子进程的 `TZ` 和相关配置，不改操作系统时间或定位。
+- **标准 / 严格隐私：**拦截已知第三方追踪域名请求，默认阻止 service worker 绕过请求拦截；严格模式扩大域名集合。CLI 使用遥测退出变量，是否生效取决于工具支持。它不等于拦截所有追踪、解密 TLS 或修改任意软件二进制。
+- **附加软件绑定：**提供「选择境舱 → 添加本地软件 → 启动」流程、配置存储、原生适配器和运行/清理状态。系统组件未安装、未授权或未通过完整验证时，启动被拒绝，不伪造运行状态，也不自动改走直连。
+
+**附加软件的强制网络接管尚不可作为已完成的跨平台功能使用。** 当前优先 Windows，macOS 接管部署暂停；Mac 浏览器和终端继续可用，已有原生模块保留且未启用。Windows 已有 TCP/WFP、BFE 生命周期、受管服务及独立 SOCKS→DoH 解析基础，race、C 生命周期/ABI 与 x64/ARM64 交叉编译通过；任意软件的共享 DNS 适配、WDK 驱动构建/签名/安装和实机验收尚未完成，当前保持 `ready:false`。详见 [本轮工作区说明](docs/workspace-v05.md) 和各平台原生目录。
 
 ## 0.4.0 内置 AnyTLS
 
@@ -87,7 +99,7 @@ npm run build
 npm run test:sites
 ~~~
 
-start 也会准备原生 PTY 和代理核心。test:sites 检查生成的文件，所以先运行 build；test:anytls 执行真实受控 AnyTLS 原生链，test:sidecar 覆盖浏览器服务，终端验收由 scripts/terminal-smoke.mjs 执行。最终结果见验证记录，当前没有公开正式 0.4.0 下载版。
+start 也会准备原生 PTY 和代理核心。test:sites 检查生成的文件，所以先运行 build；test:anytls 执行真实受控 AnyTLS 原生链，test:sidecar 覆盖浏览器服务，终端验收由 scripts/terminal-smoke.mjs 执行。最终结果见验证记录，当前没有公开正式 0.5.0 下载版。
 
 ## 旧工作区与配置导出
 

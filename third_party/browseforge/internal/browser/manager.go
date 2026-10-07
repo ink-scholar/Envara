@@ -29,6 +29,7 @@ type Session struct {
 	ProfileDir     string
 	UserDataDir    string
 	ExecutablePath string
+	Privacy        *PrivacyState
 	closed         atomic.Bool
 	resourcesOnce  sync.Once
 }

@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { binaryInfo, ensureBinary, launchPersistentContext } from 'cloakbrowser';
+import { applyBrowserPrivacy, normalizePrivacy, privacyLaunchArgs, snapshotPrivacy } from './privacy-policy.mjs';
 
 const execFileAsync = promisify(execFile);
 // These are the upstream wrapper's public, freely downloadable baseline builds.
@@ -65,6 +66,7 @@ export function buildLaunchConfig(profile, proxy, profileDir, browserVersion) {
     `--accept-lang=${[profile.locale, profile.locale.split('-')[0]].filter((locale, index, languages) => languages.indexOf(locale) === index).join(',')}`,
     '--no-first-run',
     '--no-default-browser-check',
+    ...privacyLaunchArgs(profile.privacy),
   ];
   // Chromium's own policy blocks direct, non-proxied UDP candidates. This is
   // deliberately not described as a guaranteed WebRTC exit-IP spoof.
@@ -90,7 +92,7 @@ export function buildLaunchConfig(profile, proxy, profileDir, browserVersion) {
     viewport: null,
     browserVersion,
     ...(proxyOption ? { proxy: proxyOption } : {}),
-    launchOptions: { timeout: 45000 },
+    launchOptions: { timeout: 45000, serviceWorkers: normalizePrivacy(profile.privacy).mode === 'off' ? 'allow' : 'block' },
   };
 }
 
@@ -278,6 +280,8 @@ export class BrowserRuntime {
       const executablePath = await this._prepareExecutable(installed.binaryPath, profile);
       const context = await this._native(() => this.launch(config), executablePath);
       const session = { context, profile, profileDir, closed: false, onClose };
+      try { session.privacy = await applyBrowserPrivacy(context, { privacy: profile.privacy, geolocation: profile.geolocation }); }
+      catch (error) { await context.close().catch(() => {}); throw error; }
       const finish = (error) => {
         if (session.closed) return;
         session.closed = true;
@@ -307,6 +311,11 @@ export class BrowserRuntime {
     })();
     this.pending.set(profile.id, promise);
     try { return await promise; } finally { this.pending.delete(profile.id); }
+  }
+
+  privacyForProfile(id) {
+    const state = this.sessions.get(id)?.privacy;
+    return state ? snapshotPrivacy(state) : null;
   }
 
   async stop(id) {

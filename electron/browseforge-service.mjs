@@ -5,8 +5,10 @@ import net from 'node:net';
 import path from 'node:path';
 import { EnvaraStore } from './store.mjs';
 import { ProxyNetworkProbe, proxyFingerprint } from './proxy-network.mjs';
+import { normalizePrivacy } from './privacy-policy.mjs';
+import { localeForCountry } from './workspace-context.mjs';
 
-const PROFILE_KEYS = new Set(['name', 'group', 'notes', 'engine', 'platform', 'seed', 'locale', 'timezone', 'width', 'height', 'startUrl', 'proxyId', 'tags', 'fingerprint']);
+const PROFILE_KEYS = new Set(['name', 'group', 'notes', 'engine', 'platform', 'seed', 'locale', 'timezone', 'width', 'height', 'startUrl', 'proxyId', 'tags', 'fingerprint', 'privacy']);
 const now = () => new Date().toISOString();
 const unwrap = (response) => response?.data;
 const array = (response) => Array.isArray(unwrap(response)) ? unwrap(response) : [];
@@ -236,7 +238,7 @@ export class BrowseForgeService {
       else this.resetPreview(profile.id);
       let bytes = null;
       try { bytes = await dataSize(path.join(await this.checkedDirectory(profile), 'browser-data')); } catch {}
-      return { id: profile.id, name: profile.name, group: profile.group ?? '', tags: profile.tags ?? [], notes: metadata.notes ?? '', engine: profile.runtime_id, platform: launchOverrides.target_os || profile.identity?.target_os || null, seed: profile.fingerprint_seed || null, locale, timezone, localeMode: configured(locale) ? 'fixed' : 'auto', timezoneMode: configured(timezone) ? 'fixed' : 'auto', launchOverrides, resolvedTimezone: currentContext?.timezone ?? fixedTimezone, timezoneSource: currentContext?.timezoneSource ?? (configured(timezone) ? 'manual' : null), network: currentContext?.network ?? null, networkLastError: currentContext?.networkLastError ?? null, width: fingerprint['screen.width'] ?? null, height: fingerprint['screen.height'] ?? null, fingerprint, startUrl: metadata.startUrl ?? 'about:blank', proxyId, profileProxyId: ownProxy ? proxies.find((proxy) => proxy.id === ownProxy.id)?.id ?? proxies.find((proxy) => sameProxy(proxy, ownProxy))?.id ?? null : null, proxySource: effective.source, proxyMode: effective.mode, createdAt: metadata.createdAt ?? profile.created_at, updatedAt: metadata.updatedAt ?? profile.created_at, lastLaunchedAt: metadata.lastLaunchedAt ?? null, status, lastError: health?.alive === null ? health.error : this.lastErrors.get(profile.id) ?? null, dataBytes: bytes, cpuPercent: metric(measurement.cpuPercent), memoryBytes: metric(measurement.memoryBytes), observed: health?.observed ?? null, ...(this.previews.has(profile.id) && status === 'running' ? { screenshot: this.previews.get(profile.id), screenshotCapturedAt: this.previewCapturedAt.get(profile.id) } : {}) };
+      return { id: profile.id, name: profile.name, group: profile.group ?? '', tags: profile.tags ?? [], notes: metadata.notes ?? '', engine: profile.runtime_id, platform: launchOverrides.target_os || profile.identity?.target_os || null, seed: profile.fingerprint_seed || null, locale, timezone, localeMode: configured(locale) ? 'fixed' : 'auto', timezoneMode: configured(timezone) ? 'fixed' : 'auto', launchOverrides, resolvedTimezone: currentContext?.timezone ?? fixedTimezone, timezoneSource: currentContext?.timezoneSource ?? (configured(timezone) ? 'manual' : null), network: currentContext?.network ?? null, networkLastError: currentContext?.networkLastError ?? null, width: fingerprint['screen.width'] ?? null, height: fingerprint['screen.height'] ?? null, fingerprint, privacy: normalizePrivacy(metadata.privacy), privacyProtection: session?.privacy ?? null, geolocation: currentContext?.geolocation ?? null, resolvedLocale: currentContext?.locale ?? null, startUrl: metadata.startUrl ?? 'about:blank', proxyId, profileProxyId: ownProxy ? proxies.find((proxy) => proxy.id === ownProxy.id)?.id ?? proxies.find((proxy) => sameProxy(proxy, ownProxy))?.id ?? null : null, proxySource: effective.source, proxyMode: effective.mode, createdAt: metadata.createdAt ?? profile.created_at, updatedAt: metadata.updatedAt ?? profile.created_at, lastLaunchedAt: metadata.lastLaunchedAt ?? null, status, lastError: health?.alive === null ? health.error : this.lastErrors.get(profile.id) ?? null, dataBytes: bytes, cpuPercent: metric(measurement.cpuPercent), memoryBytes: metric(measurement.memoryBytes), observed: health?.observed ?? null, ...(this.previews.has(profile.id) && status === 'running' ? { screenshot: this.previews.get(profile.id), screenshotCapturedAt: this.previewCapturedAt.get(profile.id) } : {}) };
     }));
     let legacyMigration;
     try { const migration = await this.previewLegacyMigration(); legacyMigration = { available: migration.detected && migration.profiles.some((profile) => !profile.migrated), count: migration.profiles.filter((profile) => !profile.migrated).length, migrated: migration.profiles.filter((profile) => profile.migrated).length, ...migration }; }
@@ -253,6 +255,7 @@ export class BrowseForgeService {
   }
   normalize(input, descriptor, workspace, remote, existing = null) {
     object(input, '环境配置');
+    if (Object.hasOwn(input, 'privacy')) normalizePrivacy(input.privacy);
     for (const key of Object.keys(input)) if (!PROFILE_KEYS.has(key)) throw error(`不支持的环境字段：${key}`);
     const name = text(input.name ?? existing?.name, '环境名称');
     const group = text(input.group ?? existing?.group ?? '', '分组', 100, true);
@@ -287,7 +290,7 @@ export class BrowseForgeService {
   metadata(input, profileId, existing = {}) {
     const startUrl = input.startUrl ?? existing.startUrl ?? 'about:blank';
     if (startUrl !== 'about:blank') { let url; try { url = new URL(startUrl); } catch { throw error('启动网址无效。'); } if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw error('启动网址仅支持不含凭据的 HTTP 或 HTTPS。'); }
-    return { ...existing, id: profileId, ...(Object.hasOwn(input, 'proxyId') ? { proxyId: input.proxyId || null } : {}), notes: text(input.notes ?? existing.notes ?? '', '备注', 4000, true), startUrl, updatedAt: now() };
+    return { ...existing, id: profileId, ...(Object.hasOwn(input, 'proxyId') ? { proxyId: input.proxyId || null } : {}), privacy: normalizePrivacy(input.privacy ?? existing.privacy), notes: text(input.notes ?? existing.notes ?? '', '备注', 4000, true), startUrl, updatedAt: now() };
   }
   async call(method, args = {}) {
     await this.ready;
@@ -327,6 +330,7 @@ export class BrowseForgeService {
     const payload = this.normalize(profile, remote.descriptors.find((item) => item.id === engineId), workspace, remote, existing);
     await this.request('PUT', `/api/profiles/${encoded(profileId)}`, payload);
     await this.store.transaction((next) => { next.profiles = next.profiles.filter((item) => item.id !== profileId); next.profiles.push(metadata); event(next, 'profile', `更新环境「${payload.name}」`, profileId); });
+    this.workspaceContexts.delete(profileId);
   }
   async cloneProfile({ id: profileId }) {
     const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
@@ -358,7 +362,7 @@ export class BrowseForgeService {
     this.changed();
     try {
       const context = await this.resolveWorkspaceContext(profileId, { remote: reservation.remote, force: true });
-      const session = unwrap(await this.request('POST', '/api/sessions', { profile_id: profileId, launch_overrides: { timezone: context.timezone, ...(context.managedProxy ? { proxy: upstreamProxy(context.proxy) } : {}) } }, { timeoutMs: 180000 }));
+      const session = unwrap(await this.request('POST', '/api/sessions', { profile_id: profileId, launch_overrides: { timezone: context.timezone, ...(context.locale ? { locale: context.locale } : {}), privacy: context.privacy, geolocation: context.geolocation, ...(context.managedProxy ? { proxy: upstreamProxy(context.proxy) } : {}) } }, { timeoutMs: 180000 }));
       const metadata = (await this.store.read()).profiles.find((item) => item.id === profileId);
       if (metadata?.startUrl && metadata.startUrl !== 'about:blank') { try { await this.request('POST', `/api/sessions/${encoded(session.session_id)}/navigate`, { url: metadata.startUrl, wait_until: 'domcontentloaded' }); } catch (value) { this.lastErrors.set(profileId, `页面未加载完成：${value.message}`); } }
       await this.store.transaction((next) => { const metadata = next.profiles.find((item) => item.id === profileId); if (metadata) metadata.lastLaunchedAt = now(); event(next, 'browser', `启动环境「${profile.name}」`, profileId); });
@@ -474,6 +478,7 @@ export class BrowseForgeService {
     this.proxyWires.delete(proxyId);
     for (const context of this.workspaceContexts.values()) if (context.managedProxyId === proxyId) {
       context.timezone = null; context.timezoneSource = null;
+      context.geolocation = null; context.locale = null;
       context.networkLastError = 'AnyTLS 网络内核已停止，请重试以恢复连接。';
       context.network = { ok: false, scope: 'egress', ip: null, timezone: null, errorCode: 'PROXY_CORE_STOPPED', message: context.networkLastError, checkedAt: now() };
     }
@@ -518,24 +523,28 @@ export class BrowseForgeService {
     const { wire, managed } = await this.prepareProxy(effective.proxy);
     const signature = this.contextSignature(profile, effective);
     const fixedTimezone = manualTimezone(profileGeoField(profile, 'timezone'));
-    let resolvedTimezone, timezoneSource, network = null, networkLastError = null;
-    if (fixedTimezone) { resolvedTimezone = fixedTimezone; timezoneSource = 'manual'; }
-    else {
-      network = await this.networkProbe.probe(wire, { force });
-      if (managed && revision !== (this.managedProxyRevisions.get(effective.proxy.id) ?? 0)) throw error('AnyTLS 网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
-      if (network.ok) { resolvedTimezone = network.timezone; timezoneSource = effective.proxy ? 'proxy' : 'direct'; }
-      else {
-        networkLastError = network.message;
-        if (effective.proxy) { this.workspaceContexts.set(profileId, { signature, managedProxyId: managed ? effective.proxy.id : null, timezone: null, timezoneSource: null, network, networkLastError }); this.changed(); throw error(`自动时区匹配失败：${network.message} 可保留或选择手动时区后重试。`, 'AUTO_TIMEZONE_FAILED'); }
-        resolvedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        timezoneSource = 'local';
-      }
-    }
+    let resolvedTimezone, timezoneSource, networkLastError = null;
+    const network = await this.networkProbe.probe(wire, { force });
     if (managed && revision !== (this.managedProxyRevisions.get(effective.proxy.id) ?? 0)) throw error('AnyTLS 网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
-    this.workspaceContexts.set(profileId, { signature, managedProxyId: managed ? effective.proxy.id : null, timezone: resolvedTimezone, timezoneSource, network, networkLastError });
+    if (fixedTimezone) { resolvedTimezone = fixedTimezone; timezoneSource = 'manual'; }
+    else if (network.ok) { resolvedTimezone = network.timezone; timezoneSource = effective.proxy ? 'proxy' : 'direct'; }
+    else {
+      networkLastError = network.message;
+      if (effective.proxy) { this.workspaceContexts.set(profileId, { signature, managedProxyId: managed ? effective.proxy.id : null, timezone: null, timezoneSource: null, network, networkLastError }); this.changed(); throw error(`自动时区匹配失败：${network.message} 可保留或选择手动时区后重试。`, 'AUTO_TIMEZONE_FAILED'); }
+      resolvedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      timezoneSource = 'local';
+    }
+    if (!network.ok) networkLastError = network.message;
+    const geolocation = network.ok ? network.geolocation ?? null : null;
+    const fixedLocale = profileGeoField(profile, 'locale');
+    const locale = configured(fixedLocale) ? fixedLocale : network.ok ? localeForCountry(network.countryCode) : null;
+    const metadata = workspace.profiles.find(item => item.id === profileId) ?? {};
+    const privacy = normalizePrivacy(metadata.privacy);
+    const applicationRoute = managed ? { ...wire, protocol: 'socks5', udp: effective.proxy.udp !== false, udpPolicy: effective.proxy.udp === false ? 'block' : 'proxy' } : null;
+    this.workspaceContexts.set(profileId, { signature, managedProxyId: managed ? effective.proxy.id : null, timezone: resolvedTimezone, timezoneSource, locale, geolocation, privacy, network, networkLastError });
     this.changed();
-    return { id: profileId, name: profile.name, timezone: resolvedTimezone, timezoneSource, network, networkLastError,
-      proxy: wire, managedProxy: managed, proxySource: effective.source, proxyMode: effective.mode };
+    return { id: profileId, profileId, name: profile.name, timezone: resolvedTimezone, timezoneSource, locale, geolocation, privacy, network, networkLastError,
+      proxy: wire, proxyEndpoint: applicationRoute, applicationRoute, proxyId: effective.proxy?.id ?? null, managedProxy: managed, proxySource: effective.source, proxyMode: effective.mode };
   }
   async stoppedGroup(name) { const remote = await this.remote(); for (const profile of remote.profiles.filter((item) => item.group === name)) await this.assertStopped(remote, profile.id); }
   async applyGroupProxy(name, proxy, proxyMode = 'default') {
@@ -615,7 +624,13 @@ export class BrowseForgeService {
     await Promise.all(Array.from({ length: Math.min(3, ids.length) }, worker));
     return { results };
   }
-  async saveSettings({ settings }) { object(settings, '设置'); if (settings.closeBrowsersOnExit === false) throw error('当前版本退出会关闭托管会话。'); if (Object.keys(settings).some((key) => key !== 'closeBrowsersOnExit')) throw error('不支持的设置。'); await this.store.transaction((next) => { next.settings.closeBrowsersOnExit = true; }); }
+  async saveSettings({ settings }) {
+    object(settings, '设置');
+    if (settings.closeBrowsersOnExit === false) throw error('当前版本退出会关闭托管会话。');
+    if (Object.keys(settings).some((key) => !['closeBrowsersOnExit', 'language'].includes(key))) throw error('不支持的设置。');
+    if (settings.language != null && !['zh-CN', 'en'].includes(settings.language)) throw error('界面语言无效。');
+    await this.store.transaction((next) => { next.settings.closeBrowsersOnExit = true; if (settings.language != null) next.settings.language = settings.language; });
+  }
   async installEngine({ id: engineId, engine, runtimeId }) {
     const selected = runtimeId ?? engineId ?? engine;
     if (!this.options.installEngine) throw error('本机内核安装服务尚未就绪。', 'ENGINE_INSTALL_UNAVAILABLE');

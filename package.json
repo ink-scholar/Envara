@@ -1,7 +1,7 @@
 {
   "name": "envara",
-  "version": "0.4.0",
-  "description": "Envara \u5883\u8231 \u2014 an open-source desktop workspace for isolated fingerprint browser environments",
+  "version": "0.5.0",
+  "description": "Envara 境舱 — an open-source desktop workspace for isolated fingerprint browser environments",
   "author": "ink-scholar",
   "license": "MIT",
   "main": "electron/main.mjs",
@@ -14,8 +14,8 @@
     "start": "npm run native:prepare && npm run proxy:prepare && electron .",
     "test": "node --test tests/*.test.mjs",
     "test:smoke": "node scripts/native-smoke.mjs",
-    "dist:mac": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run build && electron-builder --mac",
-    "dist:win": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run build && electron-builder --win --x64",
+    "dist:mac": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run routing:build:mac && npm run build && electron-builder --mac",
+    "dist:win": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run routing:build:win && npm run build && electron-builder --win --x64",
     "dist:linux": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run build && electron-builder --linux --x64",
     "test:sites": "node --test tests/sites-worker.test.mjs",
     "backend:prepare": "node scripts/build-sidecar.mjs && node scripts/prepare-playwright-driver.mjs",
@@ -24,7 +24,13 @@
     "native:rebuild": "node scripts/prepare-native.mjs --force-rebuild",
     "postinstall": "node scripts/prepare-native.mjs",
     "proxy:prepare": "node scripts/prepare-proxy-core.mjs",
-    "test:anytls": "node scripts/anytls-smoke.mjs --native"
+    "test:anytls": "node scripts/anytls-smoke.mjs --native",
+    "routing:build:mac": "node scripts/build-macos-app-routing.mjs",
+    "routing:build:win": "node scripts/build-windows-app-routing.mjs",
+    "routing:test:win": "node scripts/test-windows-app-routing.mjs",
+    "test:workspace": "node scripts/workspace-smoke.mjs",
+    "test:privacy:sidecar": "node scripts/privacy-sidecar-smoke.mjs",
+    "test:package:resources": "node scripts/verify-package-resources.mjs"
   },
   "dependencies": {
     "cloakbrowser": "0.5.12",
@@ -50,7 +56,7 @@
   "build": {
     "appId": "io.envara.desktop",
     "productName": "Envara",
-    "copyright": "Copyright \u00a9 2026 ink-scholar",
+    "copyright": "Copyright © 2026 ink-scholar",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -62,7 +68,8 @@
       "build/icon.png",
       "LICENSE",
       "THIRD_PARTY_NOTICES.md",
-      "!electron/smoke.mjs"
+      "!electron/smoke.mjs",
+      "!electron/*-smoke.mjs"
     ],
     "asarUnpack": [
       "node_modules/cloakbrowser/**/*",
@@ -120,6 +127,14 @@
         "to": "proxy-core",
         "filter": [
           "**/*"
+        ]
+      },
+      {
+        "from": "build/app-routing",
+        "to": "app-routing",
+        "filter": [
+          "**/*",
+          "!**/.swift-build/**"
         ]
       }
     ]

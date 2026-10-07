@@ -17,5 +17,5 @@ export function resolveTerminalView(args, workspace, terminalState) {
 export function terminalViewSnapshot(value) {
   if (!Array.isArray(value?.profiles) || !value.system) return value;
   const fields = ['id', 'name', 'group', 'engine', 'status', 'timezone', 'resolvedTimezone', 'timezoneSource'];
-  return { profiles: value.profiles.map(row => Object.fromEntries(fields.filter(key => Object.hasOwn(row, key)).map(key => [key, row[key]]))), proxies: [], engines: [], settings: {}, events: [], system: { appVersion: value.system.appVersion, platform: value.system.platform, terminal: value.system.terminal } };
+  return { profiles: value.profiles.map(row => Object.fromEntries(fields.filter(key => Object.hasOwn(row, key)).map(key => [key, row[key]]))), proxies: [], engines: [], settings: { ...(value.settings?.language ? { language: value.settings.language } : {}) }, events: [], system: { appVersion: value.system.appVersion, platform: value.system.platform, terminal: value.system.terminal } };
 }

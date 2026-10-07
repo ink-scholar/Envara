@@ -57,7 +57,7 @@ test('snapshots and folder selection never resolve the network; creation require
 
 test('duplicates create fresh independent PTYs from the resolved launch context while sharing profile tool configuration', async t => {
   let resolutions = 0;
-  const context = { id: 'profile_a', name: 'Original', timezone: 'Asia/Shanghai', timezoneSource: 'manual', proxy: { protocol: 'https', host: 'proxy.invalid', port: 8443, username: 'fixture-user', password: 'secret-original' } };
+  const context = { id: 'profile_a', name: 'Original', timezone: 'Asia/Shanghai', timezoneSource: 'manual', privacy: { mode: 'strict' }, geolocation: { latitude: 14.6, longitude: 121, accuracy: 50000 }, network: { ok: true, ip: '8.8.8.8', countryCode: 'PH' }, proxy: { protocol: 'https', host: 'proxy.invalid', port: 8443, username: 'fixture-user', password: 'secret-original' } };
   const f = await fixture(t, { resolveContext: async () => { resolutions++; return context; } });
   await f.service.setDirectory({ id: 'profile_a', path: f.cwd });
   const source = await f.service.create({ id: 'profile_a' });
@@ -70,6 +70,10 @@ test('duplicates create fresh independent PTYs from the resolved launch context 
   assert.notEqual(duplicate.sessionId, source.sessionId);
   assert.equal(duplicate.cwd, source.cwd); assert.equal(duplicate.timezone, 'Asia/Shanghai');
   assert.equal(duplicate.columns, 132); assert.equal(duplicate.rows, 44);
+  assert.deepEqual(duplicate.privacy, { mode: 'strict' });
+  assert.deepEqual(duplicate.geolocation, source.geolocation);
+  assert.deepEqual(duplicate.network.egress, source.network.egress);
+  for (const key of ['DO_NOT_TRACK', 'DISABLE_TELEMETRY', 'DISABLE_ERROR_REPORTING', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC']) assert.equal(f.fakes[1].options.env[key], '1');
   assert.equal(duplicate.replay, ''); assert.deepEqual(f.fakes[1].written, []);
   assert.equal(resolutions, 1, 'Copy must use the existing native context without network resolution');
   for (const key of ['HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME', 'HISTFILE', 'CLAUDE_CONFIG_DIR', 'HTTP_PROXY', 'TZ']) assert.equal(f.fakes[1].options.env[key], f.fakes[0].options.env[key]);

@@ -15,11 +15,20 @@ async function fixture(t, options = {}) {
   t.after(() => fs.promises.rm(dir, { recursive: true, force: true }));
   const binaryPath = path.join(dir, 'browser');
   if (options.installed !== false) await fs.promises.writeFile(binaryPath, '#!/bin/sh\n', { mode: 0o755 });
-  const page = { isClosed: () => false, bringToFront: async () => {}, screenshot: async () => Buffer.from('jpeg'), goto: async () => {} };
+  const page = Object.assign(new EventEmitter(), { isClosed: () => false, bringToFront: async () => {}, screenshot: async () => Buffer.from('jpeg'), goto: async () => {} });
   const context = new EventEmitter();
+  const privacyCalls = [];
   context.pages = () => [page];
   context.newPage = async () => page;
-  context.close = async () => context.emit('close');
+  context.clearPermissions = async () => { privacyCalls.push(['clearPermissions']); };
+  context.grantPermissions = async permissions => { privacyCalls.push(['grantPermissions', permissions]); };
+  context.setGeolocation = async geolocation => { privacyCalls.push(['setGeolocation', geolocation]); };
+  context.route = async (pattern, handler) => { privacyCalls.push(['route', pattern]); context.privacyHandler = handler; };
+  context.newCDPSession = async () => ({
+    send: async (method, params) => { privacyCalls.push(['cdp', method, params]); return method === 'Target.getTargetInfo' ? { targetInfo: { browserContextId: 'fixture-owned-context' } } : {}; },
+    detach: async () => { privacyCalls.push(['detach']); },
+  });
+  context.close = async () => { page.emit('close'); context.emit('close'); };
   let config;
   let launches = 0;
   let downloads = 0;
@@ -31,7 +40,7 @@ async function fixture(t, options = {}) {
     ...options,
   });
   t.after(() => runtime.closeAll());
-  return { runtime, context, page, dir, binaryPath, get config() { return config; }, get launches() { return launches; }, get downloads() { return downloads; } };
+  return { runtime, context, page, privacyCalls, dir, binaryPath, get config() { return config; }, get launches() { return launches; }, get downloads() { return downloads; } };
 }
 
 test('persistent launch uses stable native fingerprint flags and separate proxy credentials', () => {
@@ -107,6 +116,8 @@ test('duplicate Start shares one browser, closing notifies once, preview contain
   const profileDir = path.join(f.dir, 'profile');
   await Promise.all([f.runtime.start(profile, null, profileDir, () => closed++), f.runtime.start(profile, null, profileDir)]);
   assert.equal(f.launches, 1);
+  assert.equal(f.privacyCalls.filter(([method]) => method === 'route').length, 1, 'duplicate start installs real production privacy only once');
+  assert.ok(f.privacyCalls.some(([kind, method, params]) => kind === 'cdp' && method === 'Browser.setPermission' && params.setting === 'denied'));
   assert.equal(await f.runtime.screenshot(profile.id), `data:image/jpeg;base64,${Buffer.from('jpeg').toString('base64')}`);
   assert.deepEqual(f.runtime.getMetrics(), { [profile.id]: { cpuPercent: null, memoryBytes: null } });
   await f.runtime.stop(profile.id);

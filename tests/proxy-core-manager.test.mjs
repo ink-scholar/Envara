@@ -150,9 +150,11 @@ test('an aborted readiness wait stops its owned process and a crash never leaves
   controller.abort(); await assert.rejects(starting, code('PROXY_CORE_CANCELLED'));
   assert.deepEqual(calls[0].child.kills, ['SIGTERM']); assert.deepEqual(await dirs(manager), []);
   ready = true; await manager.ensure(node());
-  const before = calls[1]; before.child.exitCode = 1; before.child.emit('exit', 1);
-  await delay(10);
-  assert.equal(manager.snapshot().activeCount, 0); assert.deepEqual(await dirs(manager), []);
+  const before = calls[1], crashed = manager.routes.get(node().id);
+  before.child.exitCode = 1; before.child.emit('exit', 1);
+  assert.equal(manager.snapshot().activeCount, 0);
+  await crashed.cleanupPromise;
+  assert.deepEqual(await dirs(manager), []);
   await manager.ensure(node()); assert.equal(calls.length, 3);
 });
 

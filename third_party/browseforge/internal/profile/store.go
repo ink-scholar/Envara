@@ -29,7 +29,9 @@ type Profile struct {
 	ProfileDir           string           `json:"profile_dir"`
 	// SessionProxy is an ephemeral managed bridge selected for one launch. It
 	// cannot be imported, exported, or written into profile.json.
-	SessionProxy *ProxyConfig `json:"-"`
+	SessionProxy       *ProxyConfig   `json:"-"`
+	SessionPrivacy     *PrivacyConfig `json:"-"`
+	SessionGeolocation *Geolocation   `json:"-"`
 }
 
 type IdentityConfig struct {

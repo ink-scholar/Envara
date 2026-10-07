@@ -199,3 +199,13 @@ test('SOCKS proxy IPv6 literals are passed to socket transport without URL brack
   assert.equal((await probe.probe({ protocol: 'socks5', host: '[::1]', port: 1080 })).ok, true);
   assert.equal(host, '::1');
 });
+
+test('IP coordinates are coarse and invalid coordinates cannot become device location', async () => {
+  for (const [latitude, longitude, expected] of [[0, 0, true], [14.6, 121, true], [91, 121, false], [14.6, -181, false], ['14.6', 121, false]]) {
+    const probe = new ProxyNetworkProbe({ transport: async () => ({ ...geo, latitude, longitude }) });
+    const result = await probe.probe(null);
+    assert.equal(result.ok, true);
+    assert.equal(!!result.geolocation, expected);
+    if (expected) assert.deepEqual(result.geolocation, { latitude, longitude, accuracy: 50000 });
+  }
+});

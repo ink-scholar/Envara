@@ -17,6 +17,10 @@ import (
 )
 
 func (m *Manager) launchFirefox(p *profile.Profile) (*Session, error) {
+	privacyMode, err := browserPrivacyMode(p)
+	if err != nil {
+		return nil, err
+	}
 	desc, err := m.runtimes.ResolveProfile(p)
 	if err != nil {
 		return nil, err
@@ -106,6 +110,12 @@ func (m *Manager) launchFirefox(p *profile.Profile) (*Session, error) {
 		},
 		NoViewport: playwright.Bool(true),
 	}
+	if privacyMode != "off" {
+		opts.ServiceWorkers = playwright.ServiceWorkerPolicyBlock
+	}
+	for key, value := range firefoxPrivacyPrefs(privacyMode, p.SessionGeolocation != nil) {
+		opts.FirefoxUserPrefs[key] = value
+	}
 
 	var relay *SOCKS5Relay
 	if effectiveProxy.Proxy != nil {
@@ -135,6 +145,14 @@ func (m *Manager) launchFirefox(p *profile.Profile) (*Session, error) {
 			relay.Close()
 		}
 		return nil, fmt.Errorf("launch firefox: %w", humanizeError(err))
+	}
+	privacyState, err := installBrowserPrivacy(ctx, p, false)
+	if err != nil {
+		if relay != nil {
+			relay.Close()
+		}
+		ctx.Close()
+		return nil, fmt.Errorf("install browser privacy: %w", err)
 	}
 
 	dlDir := downloadsDir
@@ -169,6 +187,7 @@ func (m *Manager) launchFirefox(p *profile.Profile) (*Session, error) {
 		ProfileDir:     p.ProfileDir,
 		UserDataDir:    userDataDir,
 		ExecutablePath: absPath,
+		Privacy:        privacyState,
 	}, nil
 }
 

@@ -1,286 +1,1300 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Stack, GlobeHemisphereWest, ChartLine, Gear, Plus, MagnifyingGlass, DownloadSimple, UploadSimple, Play, Stop, Copy, PencilSimple, Trash, ArrowsClockwise, FolderOpen, ArrowSquareOut, X, CheckCircle, WarningCircle, Browsers, CaretRight, Cpu, HardDrives, Clock, Eye, EyeSlash, ArrowRight, ShieldCheck, TerminalWindow } from '@phosphor-icons/react';
-import { api } from './client.js';
-import { TerminalDock } from './TerminalPane.jsx';
-import { TerminalWindowApp } from './TerminalWindowApp.jsx';
-import { initialProxyForm, proxyConfig, proxyFormError } from './proxy-form-state.mjs';
-
-const initialSnapshot = { profiles: [], proxies: [], settings: {}, engine: {}, engines: [], groups: [], events: [], system: {} };
-const profileFields = ['name', 'group', 'notes', 'engine', 'platform', 'seed', 'locale', 'timezone', 'width', 'height', 'startUrl', 'proxyId'];
-const profileConfig = (profile) => ({...Object.fromEntries(profileFields.filter((key)=>profile[key] != null || key === 'proxyId').map((key)=>[key,profile[key]])),proxyId:Object.hasOwn(profile,'profileProxyId')?profile.profileProxyId:profile.proxyId});
-const familyLabel = (runtime) => runtime?.family === 'firefox' ? 'Firefox' : runtime?.family === 'chromium' ? 'Chromium' : runtime?.family || '浏览器';
-const runtimeCatalog = (snapshot) => [...(snapshot.engines?.length ? snapshot.engines : [{ id: 'cloakbrowser', displayName: 'CloakBrowser', family: 'chromium', supported: true, capabilities: {}, ...snapshot.engine }])].sort((a,b) => (['cloakbrowser','camoufox','browseforge-chromium'].indexOf(a.id) < 0 ? 99 : ['cloakbrowser','camoufox','browseforge-chromium'].indexOf(a.id)) - (['cloakbrowser','camoufox','browseforge-chromium'].indexOf(b.id) < 0 ? 99 : ['cloakbrowser','camoufox','browseforge-chromium'].indexOf(b.id)));
-const preferredEngine = (engines, configured) => engines.find((item)=>item.id===configured && item.supported!==false && item.installed)?.id || engines.find((item)=>item.supported!==false && item.installed && !item.experimental)?.id || engines.find((item)=>item.supported!==false && !item.experimental)?.id || engines.find((item)=>item.supported!==false)?.id || engines[0]?.id || 'cloakbrowser';
-const allows = (runtime, key) => { const capability={seed:'supports_seed_fingerprint',proxy:'supports_native_proxy'}[key]; return capability && Object.hasOwn(runtime?.capabilities || {},capability) ? runtime.capabilities[capability] !== false : runtime?.capabilities?.[key] !== false; };
-const profileDimensions = (profile) => profile?.width && profile?.height ? `${profile.width} × ${profile.height}` : '内核默认';
-const protocolLabel = (protocol) => protocol === 'anytls' ? 'AnyTLS' : String(protocol || '代理').toUpperCase();
-const networkPlace = (network) => [...new Set([network?.country || network?.countryCode,network?.region,network?.city].filter(Boolean))].join(' · ');
-const timezoneSourceLabel = (source) => ({manual:'固定时区',proxy:'代理出口',direct:'本机出口',local:'本机时区 · 出口未确认'}[source] || '尚未识别');
-const platforms = { macos: 'macOS', windows: 'Windows', linux: 'Linux' };
-const statuses = { stopped: '已停止', starting: '启动中', running: '运行中', error: '异常' };
-const navItems = [{ id: 'profiles', label: '环境', icon: Stack }, { id: 'monitor', label: '运行监控', icon: ChartLine }, { id: 'proxies', label: '网络出口', icon: GlobeHemisphereWest }, { id: 'settings', label: '设置', icon: Gear }];
-
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Stack, GlobeHemisphereWest, ChartLine, Gear, Plus, MagnifyingGlass, DownloadSimple, UploadSimple, Play, Stop, Copy, PencilSimple, Trash, ArrowsClockwise, FolderOpen, ArrowSquareOut, X, CheckCircle, WarningCircle, Browsers, CaretRight, Cpu, HardDrives, Clock, Eye, EyeSlash, ArrowRight, ShieldCheck, TerminalWindow, Desktop, Translate } from "@phosphor-icons/react";
+import { api } from "./client.js";
+import { TerminalDock } from "./TerminalPane.jsx";
+import { TerminalWindowApp } from "./TerminalWindowApp.jsx";
+import { initialProxyForm, proxyConfig, proxyFormError } from "./proxy-form-state.mjs";
+import { useI18n } from "./i18n.jsx";
+import { BrowserWorkspace } from "./BrowserWorkspace.jsx";
+import { ApplicationsWorkspace, ContextDetail, EnvironmentOverview, MonitorWorkspace } from "./workspace-pages.jsx";
+const initialSnapshot = {
+  profiles: [],
+  proxies: [],
+  settings: {},
+  engine: {},
+  engines: [],
+  groups: [],
+  events: [],
+  system: {}
+};
+const profileFields = ["name", "group", "notes", "engine", "platform", "seed", "locale", "timezone", "width", "height", "startUrl", "proxyId", "privacy"];
+const profileConfig = profile => ({
+  ...Object.fromEntries(profileFields.filter(key => profile[key] != null || key === "proxyId").map(key => [key, profile[key]])),
+  proxyId: Object.hasOwn(profile, "profileProxyId") ? profile.profileProxyId : profile.proxyId
+});
+const familyLabel = runtime => runtime?.family === "firefox" ? "Firefox" : runtime?.family === "chromium" ? "Chromium" : runtime?.family || "浏览器";
+const runtimeCatalog = snapshot => [...(snapshot.engines?.length ? snapshot.engines : [{
+  id: "cloakbrowser",
+  displayName: "CloakBrowser",
+  family: "chromium",
+  supported: true,
+  capabilities: {},
+  ...snapshot.engine
+}])].sort((a, b) => (["cloakbrowser", "camoufox", "browseforge-chromium"].indexOf(a.id) < 0 ? 99 : ["cloakbrowser", "camoufox", "browseforge-chromium"].indexOf(a.id)) - (["cloakbrowser", "camoufox", "browseforge-chromium"].indexOf(b.id) < 0 ? 99 : ["cloakbrowser", "camoufox", "browseforge-chromium"].indexOf(b.id)));
+const preferredEngine = (engines, configured) => engines.find(item => item.id === configured && item.supported !== false && item.installed)?.id || engines.find(item => item.supported !== false && item.installed && !item.experimental)?.id || engines.find(item => item.supported !== false && !item.experimental)?.id || engines.find(item => item.supported !== false)?.id || engines[0]?.id || "cloakbrowser";
+const allows = (runtime, key) => {
+  const capability = {
+    seed: "supports_seed_fingerprint",
+    proxy: "supports_native_proxy"
+  }[key];
+  return capability && Object.hasOwn(runtime?.capabilities || {}, capability) ? runtime.capabilities[capability] !== false : runtime?.capabilities?.[key] !== false;
+};
+const profileDimensions = profile => profile?.width && profile?.height ? `${profile.width} × ${profile.height}` : "内核默认";
+const protocolLabel = protocol => protocol === "anytls" ? "AnyTLS" : String(protocol || "代理").toUpperCase();
+const networkPlace = network => [...new Set([network?.country || network?.countryCode, network?.region, network?.city].filter(Boolean))].join(" · ");
+const timezoneSourceLabel = source => ({
+  manual: "固定时区",
+  proxy: "代理出口",
+  direct: "本机出口",
+  local: "本机时区 · 出口未确认"
+})[source] || "尚未识别";
+const platforms = {
+  macos: "macOS",
+  windows: "Windows",
+  linux: "Linux"
+};
+const statuses = {
+  stopped: "已停止",
+  starting: "启动中",
+  running: "运行中",
+  error: "异常"
+};
+const navItems = [{
+  id: "profiles",
+  label: "环境",
+  icon: Stack
+}, {
+  id: "proxies",
+  label: "网络出口",
+  icon: GlobeHemisphereWest
+}, {
+  id: "browsers",
+  label: "浏览器",
+  icon: Browsers
+}, {
+  id: "terminals",
+  label: "终端",
+  icon: TerminalWindow
+}, {
+  id: "applications",
+  label: "附加软件",
+  icon: Desktop
+}, {
+  id: "monitor",
+  label: "运行监控",
+  icon: ChartLine
+}];
 function bytes(value) {
-  if (value == null || !Number.isFinite(Number(value))) return '—';
-  if (Number(value) === 0) return '0 B';
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  if (Number(value) === 0) return "0 B";
   const i = Math.min(Math.floor(Math.log(Number(value)) / Math.log(1024)), 3);
-  return `${(Number(value) / 1024 ** i).toFixed(i > 0 ? 1 : 0)} ${['B', 'KB', 'MB', 'GB'][i]}`;
+  return `${(Number(value) / 1024 ** i).toFixed(i > 0 ? 1 : 0)} ${["B", "KB", "MB", "GB"][i]}`;
 }
 function relativeTime(value) {
-  if (!value) return '尚未启动';
+  if (!value) return "尚未启动";
   const difference = Math.max(0, Date.now() - new Date(value).getTime());
-  if (!Number.isFinite(difference)) return '—';
-  if (difference < 60000) return '刚刚';
+  if (!Number.isFinite(difference)) return "—";
+  if (difference < 60000) return "刚刚";
   if (difference < 3600000) return `${Math.floor(difference / 60000)} 分钟前`;
   if (difference < 86400000) return `${Math.floor(difference / 3600000)} 小时前`;
-  return new Date(value).toLocaleDateString('zh-CN');
+  return new Date(value).toLocaleDateString("zh-CN");
 }
-function Status({ status = 'stopped' }) { return <span className={`status status-${status}`}><span className="status-dot" />{statuses[status] || status}</span>; }
-function Button({ children, icon: Icon, className = '', ...props }) { return <button className={`button ${className}`} {...props}>{Icon && <Icon size={17} />}{children}</button>; }
-function IconButton({ icon: Icon, label, ...props }) { return <button className="icon-button" aria-label={label} title={label} {...props}><Icon size={18} /></button>; }
-function Modal({ title, subtitle, children, onClose, className = '' }) {
-  const panelRef = useRef(null), openerRef=useRef(document.activeElement);
+function Status({
+  status = "stopped"
+}) {
+  const {
+    t
+  } = useI18n();
+  return <span className={`status status-${status}`}><span className="status-dot" />{t(statuses[status] || status)}</span>;
+}
+function Button({
+  children,
+  icon: Icon,
+  className = "",
+  ...props
+}) {
+  const {
+    t
+  } = useI18n();
+  return <button className={`button ${className}`} {...props}>{Icon && <Icon size={17} />}{typeof children === "string" ? t(children) : children}</button>;
+}
+function IconButton({
+  icon: Icon,
+  label,
+  ...props
+}) {
+  const {
+    t
+  } = useI18n();
+  return <button className="icon-button" aria-label={t(label)} title={t(label)} {...props}><Icon size={18} /></button>;
+}
+function Modal({
+  title,
+  subtitle,
+  children,
+  onClose,
+  className = ""
+}) {
+  const {
+    t
+  } = useI18n();
+  const panelRef = useRef(null),
+    openerRef = useRef(document.activeElement);
   useEffect(() => {
     const previous = openerRef.current;
     const panel = panelRef.current;
-    const focusable = () => Array.from(panel.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex="0"]')).filter((element) => element.getClientRects().length > 0);
-    const focusFrame=requestAnimationFrame(()=>(panel.querySelector('input:not(:disabled)') || focusable()[0] || panel).focus());
-    const onKey = (event) => {
-      if (event.key === 'Escape') { event.preventDefault(); onClose(); }
-      if (event.key === 'Tab') {
+    const focusable = () => Array.from(panel.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex=\"0\"]")).filter(element => element.getClientRects().length > 0);
+    const focusFrame = requestAnimationFrame(() => (panel.querySelector("input:not(:disabled)") || focusable()[0] || panel).focus());
+    const onKey = event => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+      if (event.key === "Tab") {
         const elements = focusable();
         if (!elements.length) return;
-        if (!panel.contains(document.activeElement)) { event.preventDefault(); elements[0].focus(); }
-        else if (event.shiftKey && document.activeElement === elements[0]) { event.preventDefault(); elements.at(-1).focus(); }
-        else if (!event.shiftKey && document.activeElement === elements.at(-1)) { event.preventDefault(); elements[0].focus(); }
+        if (!panel.contains(document.activeElement)) {
+          event.preventDefault();
+          elements[0].focus();
+        } else if (event.shiftKey && document.activeElement === elements[0]) {
+          event.preventDefault();
+          elements.at(-1).focus();
+        } else if (!event.shiftKey && document.activeElement === elements.at(-1)) {
+          event.preventDefault();
+          elements[0].focus();
+        }
       }
     };
-    document.addEventListener('keydown', onKey);
-    return () => { document.removeEventListener('keydown', onKey); cancelAnimationFrame(focusFrame); requestAnimationFrame(()=>{if(document.querySelector('[aria-modal=\"true\"]'))return;if(previous?.isConnected&&!previous.disabled)previous.focus?.();else document.querySelector('.page-heading h1')?.focus();}); };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      cancelAnimationFrame(focusFrame);
+      requestAnimationFrame(() => {
+        if (document.querySelector("[aria-modal=\"true\"]")) return;
+        if (previous?.isConnected && !previous.disabled) previous.focus?.();else document.querySelector(".page-heading h1")?.focus();
+      });
+    };
   }, [onClose]);
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className={`modal ${className}`} role="dialog" aria-modal="true" aria-labelledby="modal-title" ref={panelRef} tabIndex={-1}><div className="modal-heading"><div><h2 id="modal-title">{title}</h2>{subtitle && <p>{subtitle}</p>}</div><IconButton icon={X} label="关闭" onClick={onClose} /></div>{children}</section></div>;
+  return <div className="modal-backdrop" onMouseDown={event => {
+    if (event.target === event.currentTarget) onClose();
+  }}><section className={`modal ${className}`} role="dialog" aria-modal="true" aria-labelledby="modal-title" ref={panelRef} tabIndex={-1}><div className="modal-heading"><div><h2 id="modal-title">{t(title)}</h2>{subtitle && <p>{t(subtitle)}</p>}</div><IconButton icon={X} label={t("关闭")} onClick={onClose} /></div>{children}</section></div>;
 }
-function Field({ label, hint, error, errorId, className = '', children }) { return <label className={`field ${className}`}><span className="field-label">{label}</span>{children}{hint && <span className="field-hint">{hint}</span>}{error && <span id={errorId} className="field-error">{error}</span>}</label>; }
-
-function ProfileForm({ profile, proxies, systemPlatform, engines, defaultEngine, groups, groupDescriptors, onSave, onClose, saving }) {
-  const [form, setForm] = useState(() => ({ name: '', group: '', engine: preferredEngine(engines,defaultEngine), platform: ({ darwin: 'macos', win32: 'windows', linux: 'linux' }[systemPlatform] || 'macos'), seed: Math.floor(Math.random() * 2147483646) + 1, locale: 'zh-CN', timezone: '', width: 1440, height: 900, startUrl: 'about:blank', proxyId: '', notes: '', ...Object.fromEntries(Object.entries(profile || {}).filter(([,value])=>value != null)),...(profile ? {locale:profile.locale ?? '',timezone:profile.timezone ?? ''} : {}),...(profile && Object.hasOwn(profile,'profileProxyId') ? {proxyId:profile.profileProxyId || ''} : {}) }));
+function Field({
+  label,
+  hint,
+  error,
+  errorId,
+  className = "",
+  children
+}) {
+  const {
+    t
+  } = useI18n();
+  return <label className={`field ${className}`}><span className="field-label">{t(label)}</span>{children}{hint && <span className="field-hint">{t(hint)}</span>}{error && <span id={errorId} className="field-error">{t(error)}</span>}</label>;
+}
+function ProfileForm({
+  profile,
+  proxies,
+  systemPlatform,
+  engines,
+  defaultEngine,
+  groups,
+  groupDescriptors,
+  onSave,
+  onClose,
+  saving
+}) {
+  const {
+    t
+  } = useI18n();
+  const [form, setForm] = useState(() => ({
+    name: "",
+    group: "",
+    engine: preferredEngine(engines, defaultEngine),
+    platform: {
+      darwin: "macos",
+      win32: "windows",
+      linux: "linux"
+    }[systemPlatform] || "macos",
+    seed: Math.floor(Math.random() * 2147483646) + 1,
+    locale: "",
+    timezone: "",
+    privacy: {
+      mode: "standard"
+    },
+    width: 1440,
+    height: 900,
+    startUrl: "about:blank",
+    proxyId: "",
+    notes: "",
+    ...Object.fromEntries(Object.entries(profile || {}).filter(([, value]) => value != null)),
+    ...(profile ? {
+      locale: profile.locale ?? "",
+      timezone: profile.timezone ?? ""
+    } : {}),
+    ...(profile && Object.hasOwn(profile, "profileProxyId") ? {
+      proxyId: profile.profileProxyId || ""
+    } : {})
+  }));
   const [errors, setErrors] = useState({});
-  const [fixedModes,setFixedModes]=useState({locale:profile ? !!profile.locale : true,timezone:profile ? !!profile.timezone : false});
+  const [fixedModes, setFixedModes] = useState({
+    locale: profile ? !!profile.locale : false,
+    timezone: profile ? !!profile.timezone : false
+  });
   const [advanced, setAdvanced] = useState(false);
-  const formRef = useRef(null), manualValues=useRef({locale:profile?.locale || 'zh-CN',timezone:profile?.timezone || 'Asia/Shanghai'});
-  const runtime = engines.find((item) => item.id === form.engine);
-  const groupDescriptor=groupDescriptors?.find((item)=>typeof item==='object'&&item.name===form.group);
-  const groupProxy=proxies.find((item)=>item.id===groupDescriptor?.proxyId);
-  const groupEnforced=groupDescriptor?.proxy_mode==='enforced'&&!!groupProxy;
-  const effectiveProxy=groupEnforced ? groupProxy : proxies.find((item)=>item.id===form.proxyId) || groupProxy;
-  const change = (key) => (event) => { setForm((value) => ({ ...value, [key]: event.target.value })); setErrors((value) => ({ ...value, [key]: '' })); };
-  const changeMode=(key)=>(event)=>{setFixedModes((value)=>({...value,[key]:event.target.value!=='auto'}));setForm((value)=>{if(event.target.value==='auto'){if(value[key])manualValues.current[key]=value[key];return{...value,[key]:''};}return{...value,[key]:manualValues.current[key]};});setErrors((value)=>({...value,[key]:''}));};
-  const invalid = (key) => ({ name: key, 'aria-invalid': errors[key] ? true : undefined, 'aria-describedby': errors[key] ? `profile-error-${key}` : undefined });
-  const fail = (key, message) => { setErrors({ [key]: message }); if (['seed', 'width', 'height', 'platform'].includes(key)) setAdvanced(true); requestAnimationFrame(() => formRef.current?.elements.namedItem(key)?.focus()); };
-  const submit = (event) => {
+  const formRef = useRef(null),
+    manualValues = useRef({
+      locale: profile?.locale || "zh-CN",
+      timezone: profile?.timezone || "Asia/Shanghai"
+    });
+  const runtime = engines.find(item => item.id === form.engine);
+  const groupDescriptor = groupDescriptors?.find(item => typeof item === "object" && item.name === form.group);
+  const groupProxy = proxies.find(item => item.id === groupDescriptor?.proxyId);
+  const groupEnforced = groupDescriptor?.proxy_mode === "enforced" && !!groupProxy;
+  const effectiveProxy = groupEnforced ? groupProxy : proxies.find(item => item.id === form.proxyId) || groupProxy;
+  const change = key => event => {
+    setForm(value => ({
+      ...value,
+      [key]: event.target.value
+    }));
+    setErrors(value => ({
+      ...value,
+      [key]: ""
+    }));
+  };
+  const changeMode = key => event => {
+    setFixedModes(value => ({
+      ...value,
+      [key]: event.target.value !== "auto"
+    }));
+    setForm(value => {
+      if (event.target.value === "auto") {
+        if (value[key]) manualValues.current[key] = value[key];
+        return {
+          ...value,
+          [key]: ""
+        };
+      }
+      return {
+        ...value,
+        [key]: manualValues.current[key]
+      };
+    });
+    setErrors(value => ({
+      ...value,
+      [key]: ""
+    }));
+  };
+  const invalid = key => ({
+    name: key,
+    "aria-invalid": errors[key] ? true : undefined,
+    "aria-describedby": errors[key] ? `profile-error-${key}` : undefined
+  });
+  const fail = (key, message) => {
+    setErrors({
+      [key]: message
+    });
+    if (["seed", "width", "height", "platform", "locale", "timezone", "engine"].includes(key)) setAdvanced(true);
+    requestAnimationFrame(() => formRef.current?.elements.namedItem(key)?.focus());
+  };
+  const submit = event => {
     event.preventDefault();
-    if (!form.name.trim()) { fail('name', '请为环境填写名称。'); return; }
-    if (!profile && runtime?.supported === false) { fail('engine', runtime.message || '此内核暂不支持当前平台。'); return; }
-    try { const url = new URL(form.startUrl || 'about:blank'); if (!['https:', 'http:'].includes(url.protocol) && url.href !== 'about:blank') throw new Error(); } catch { fail('startUrl', '请输入 http、https 地址或 about:blank。'); return; }
-    if(fixedModes.locale&&!form.locale.trim()){fail('locale','请填写固定语言，或选择自动匹配。');return;}
-    if(fixedModes.timezone&&!form.timezone.trim()){fail('timezone','请填写固定时区，或选择自动匹配。');return;}
-    if(form.locale){try {if(Intl.getCanonicalLocales(form.locale).length!==1)throw new Error();}catch{fail('locale','请输入有效的语言代码，例如 zh-CN。');return;}}
-    if(form.timezone){try {new Intl.DateTimeFormat('en',{timeZone:form.timezone});}catch{fail('timezone','请输入有效的时区，例如 Asia/Shanghai。');return;}}
-    const selectedProxy=groupEnforced ? groupProxy : proxies.find((item)=>item.id===form.proxyId) || groupProxy;
-    if (form.engine==='browseforge-chromium' && selectedProxy && !selectedProxy.region) {fail('proxyId','此内核的代理需要地域标签，请先编辑网络出口，例如 us-ny。');return;}
-    onSave({ name: form.name.trim(), group: form.group.trim(), notes: form.notes, engine: form.engine, platform: form.platform, ...(allows(runtime,'seed') ? {seed:Number(form.seed)} : {}), locale: form.locale, timezone: form.timezone, width: Number(form.width), height: Number(form.height), startUrl: form.startUrl || 'about:blank', proxyId: form.proxyId || null });
+    if (!form.name.trim()) {
+      fail("name", t("请为环境填写名称。"));
+      return;
+    }
+    if (!profile && runtime?.supported === false) {
+      fail("engine", runtime.message || t("此内核暂不支持当前平台。"));
+      return;
+    }
+    try {
+      const url = new URL(form.startUrl || "about:blank");
+      if (!["https:", "http:"].includes(url.protocol) && url.href !== "about:blank") throw new Error();
+    } catch {
+      fail("startUrl", t("请输入 http、https 地址或 about:blank。"));
+      return;
+    }
+    if (fixedModes.locale && !form.locale.trim()) {
+      fail("locale", t("请填写固定语言，或选择自动匹配。"));
+      return;
+    }
+    if (fixedModes.timezone && !form.timezone.trim()) {
+      fail("timezone", t("请填写固定时区，或选择自动匹配。"));
+      return;
+    }
+    if (form.locale) {
+      try {
+        if (Intl.getCanonicalLocales(form.locale).length !== 1) throw new Error();
+      } catch {
+        fail("locale", t("请输入有效的语言代码，例如 zh-CN。"));
+        return;
+      }
+    }
+    if (form.timezone) {
+      try {
+        new Intl.DateTimeFormat("en", {
+          timeZone: form.timezone
+        });
+      } catch {
+        fail("timezone", t("请输入有效的时区，例如 Asia/Shanghai。"));
+        return;
+      }
+    }
+    const selectedProxy = groupEnforced ? groupProxy : proxies.find(item => item.id === form.proxyId) || groupProxy;
+    if (form.engine === "browseforge-chromium" && selectedProxy && !selectedProxy.region) {
+      fail("proxyId", t("此内核的代理需要地域标签，请先编辑网络出口，例如 us-ny。"));
+      return;
+    }
+    onSave({
+      name: form.name.trim(),
+      group: form.group.trim(),
+      notes: form.notes,
+      engine: form.engine,
+      platform: form.platform,
+      ...(allows(runtime, "seed") ? {
+        seed: Number(form.seed)
+      } : {}),
+      locale: form.locale,
+      timezone: form.timezone,
+      width: Number(form.width),
+      height: Number(form.height),
+      startUrl: form.startUrl || "about:blank",
+      proxyId: form.proxyId || null,
+      privacy: form.privacy || {
+        mode: "standard"
+      }
+    });
   };
   const field = (key, label, children, props = {}) => <Field label={label} error={errors[key]} errorId={`profile-error-${key}`} {...props}>{children}</Field>;
-  return <Modal title={profile ? '编辑环境' : '新建环境'} subtitle="先选择浏览器与网络，其他参数可按需调整。" onClose={onClose} className="profile-modal"><form ref={formRef} onSubmit={submit}><div className="modal-body"><div className="form-grid">
-    {field('name', '环境名称', <input required maxLength={80} value={form.name} onChange={change('name')} placeholder="例如：日常工作" {...invalid('name')} />)}
-    {field('group', '分组', <><input maxLength={60} list="profile-groups" value={form.group} onChange={change('group')} placeholder="未分组" /><datalist id="profile-groups">{groups.map((group) => <option key={group} value={group} />)}</datalist></>)}
-    {field('engine', '浏览器内核', <select value={form.engine} onChange={change('engine')} disabled={!!profile} {...invalid('engine')}>{engines.map((item) => <option key={item.id} value={item.id} disabled={item.supported === false}>{item.displayName || item.id}{item.supported === false ? ' · 当前平台不可用' : item.experimental ? ' · 实验性' : ''}</option>)}{!runtime && <option value={form.engine}>{form.engine}</option>}</select>, {className:'span-two',hint:profile ? '现有环境的内核保持不变；需要其他内核时，请新建环境。' : runtime?.message || (!runtime?.installed ? '创建配置后需安装此内核，才能启动会话。' : '此内核已安装，可以创建并启动环境。')})}
-    {field('proxyId', '网络出口', <select value={form.proxyId || ''} onChange={change('proxyId')} disabled={!allows(runtime, 'proxy') || groupEnforced} {...invalid('proxyId')}><option value="">跟随分组 · 未配置时直接连接</option>{proxies.map((proxy) => <option key={proxy.id} value={proxy.id}>{proxy.name} · {protocolLabel(proxy.protocol)}</option>)}</select>, {className:'span-two',hint:!allows(runtime,'proxy') ? '此内核不支持按环境绑定代理。' : groupEnforced ? `分组强制使用 ${groupProxy.name}；需修改分组策略才能选择其他出口。` : groupProxy ? `未指定环境代理时，使用分组出口 ${groupProxy.name}。` : form.engine==='browseforge-chromium' ? '使用代理时，该出口必须填写地域标签。' : undefined})}
-    {field('locale','语言',<><select aria-label="语言模式" value={fixedModes.locale?'fixed':'auto'} onChange={changeMode('locale')}><option value="fixed">固定语言</option><option value="auto">自动匹配网络出口</option></select><input aria-label="固定语言" value={form.locale} onChange={change('locale')} disabled={!fixedModes.locale||!allows(runtime,'locale')} placeholder={fixedModes.locale?'zh-CN':'由网络出口匹配'} {...invalid('locale')}/></>)}
-    {field('timezone','时区',<><select aria-label="时区模式" value={fixedModes.timezone?'fixed':'auto'} onChange={changeMode('timezone')}><option value="fixed">固定时区</option><option value="auto">自动匹配网络出口</option></select><input aria-label="固定时区" value={form.timezone} onChange={change('timezone')} disabled={!fixedModes.timezone||!allows(runtime,'timezone')} placeholder={fixedModes.timezone?'Asia/Shanghai':'由网络出口匹配'} {...invalid('timezone')}/></>,{hint:fixedModes.timezone ? undefined : effectiveProxy?.network?.ok&&effectiveProxy.network.timezone ? `当前检测 ${effectiveProxy.network.timezone} · ${effectiveProxy.network.source}。启动前会重新确认出口。` : effectiveProxy ? '启动前识别代理实际出口；无法识别时区时，会提示并保留配置。' : '启动前识别本机出口；识别失败时使用本机时区，并明确标注来源。'})}
-    {field('startUrl', '启动页面', <input value={form.startUrl} onChange={change('startUrl')} placeholder="about:blank" {...invalid('startUrl')} />, {className:'span-two',hint:'about:blank 打开空白页，也可填写网站地址。'})}
-  </div><details className="advanced-settings" open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}><summary>高级参数<span>指纹平台、种子与屏幕</span></summary><div className="form-grid">
-    {field('platform', '指纹平台', <select value={form.platform} onChange={change('platform')} disabled={!allows(runtime,'platform')} {...invalid('platform')}><option value="macos">macOS</option><option value="windows">Windows</option><option value="linux">Linux</option></select>, {hint:!allows(runtime,'platform') ? '此内核使用本机平台。' : '这是网页识别到的平台，不改变本机系统。'})}
-    {field('seed', '指纹种子', <div className="input-action"><input type="number" min="1" max="4294967295" required readOnly={!!profile} disabled={!allows(runtime,'seed')} value={allows(runtime,'seed') ? form.seed : ''} placeholder="不适用" onChange={change('seed')} {...invalid('seed')} /><IconButton disabled={!!profile || !allows(runtime,'seed')} icon={ArrowsClockwise} label="随机生成种子" type="button" onClick={() => setForm((value) => ({...value,seed:Math.floor(Math.random()*2147483646)+1}))} /></div>, {hint:!allows(runtime,'seed') ? '此内核不提供种子控制。' : profile ? '种子不可修改，克隆可生成新的指纹。' : '自动生成，同一种子保持指纹一致。'})}
-    {field('width','指纹屏幕宽度',<div className="input-unit"><input required type="number" min="800" max="7680" value={form.width} onChange={change('width')} {...invalid('width')} /><span>px</span></div>)}
-    {field('height','指纹屏幕高度',<div className="input-unit"><input required type="number" min="600" max="4320" value={form.height} onChange={change('height')} {...invalid('height')} /><span>px</span></div>)}
-    {field('notes','备注',<textarea rows={2} value={form.notes} maxLength={1000} onChange={change('notes')} placeholder="添加环境用途或说明（选填）" />, {className:'span-two'})}
-  </div></details>{Object.values(errors).some(Boolean) && <div className="form-error" role="alert"><WarningCircle size={16} />请修正标出的配置后再保存。</div>}</div><div className="modal-footer"><span className="modal-footnote"><ShieldCheck size={15} />浏览数据保存在本机</span><Button type="button" onClick={onClose}>取消</Button><Button type="submit" className="primary" disabled={saving}>{saving ? '保存中…' : profile ? '保存更改' : '创建环境'}</Button></div></form></Modal>;
+  return <Modal title={profile ? t("编辑环境") : t("新建环境")} onClose={onClose} className="profile-modal"><form ref={formRef} onSubmit={submit}>
+    <div className="modal-body">
+      <div className="form-grid">
+        {field("name", t("环境名称"), <input required maxLength={80} value={form.name} onChange={change("name")} placeholder={t("例如：日常工作")} {...invalid("name")} />, {
+            className: "span-two"
+          })}
+        {field("proxyId", t("网络出口"), <select value={form.proxyId || ""} onChange={change("proxyId")} disabled={!allows(runtime, "proxy") || groupEnforced} {...invalid("proxyId")}><option value="">{groupProxy ? t("跟随分组 · {value1}", {
+                value1: groupProxy.name
+              }) : t("本机网络")}</option>{proxies.map(proxy => <option key={proxy.id} value={proxy.id}>{proxy.name}</option>)}</select>, {
+            className: "span-two",
+            hint: groupEnforced ? t("分组固定使用 {value1}", {
+              value1: groupProxy.name
+            }) : undefined
+          })}
+      </div>
+      <div className="automatic-context-note"><ShieldCheck size={16} /><span>{t("时区、语言和定位自动跟随实际网络出口")}</span></div>
+      <details className="advanced-settings" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}>
+        <summary>{t("高级设置")}<span>{t("浏览器、指纹与隐私")}</span></summary>
+        <div className="form-grid">
+          {field("engine", t("浏览器内核"), <select value={form.engine} onChange={change("engine")} disabled={!!profile} {...invalid("engine")}>{engines.map(item => <option key={item.id} value={item.id} disabled={item.supported === false}>{item.displayName || item.id}{item.supported === false ? t(" · 不可用") : ""}</option>)}{!runtime && <option value={form.engine}>{form.engine}</option>}</select>, {
+              className: "span-two"
+            })}
+          {field("group", t("分组"), <><input maxLength={60} list="profile-groups" value={form.group} onChange={change("group")} placeholder={t("未分组")} /><datalist id="profile-groups">{groups.map(group => <option key={group} value={group} />)}</datalist></>)}
+          <Field label={t("隐私防护")}><select value={form.privacy?.mode || "standard"} onChange={event => setForm(value => ({
+                ...value,
+                privacy: {
+                  mode: event.target.value
+                }
+              }))}><option value="standard">{t("标准")}</option><option value="strict">{t("严格")}</option><option value="off">{t("停用")}</option></select></Field>
+          {field("locale", t("语言"), <><select aria-label={t("语言模式")} value={fixedModes.locale ? "fixed" : "auto"} onChange={changeMode("locale")}><option value="auto">{t("跟随网络出口")}</option><option value="fixed">{t("固定语言")}</option></select>{fixedModes.locale && <input aria-label={t("固定语言")} value={form.locale} onChange={change("locale")} disabled={!allows(runtime, "locale")} placeholder="zh-CN" {...invalid("locale")} />}</>)}
+          {field("timezone", t("时区"), <><select aria-label={t("时区模式")} value={fixedModes.timezone ? "fixed" : "auto"} onChange={changeMode("timezone")}><option value="auto">{t("跟随网络出口")}</option><option value="fixed">{t("固定时区")}</option></select>{fixedModes.timezone && <input aria-label={t("固定时区")} value={form.timezone} onChange={change("timezone")} disabled={!allows(runtime, "timezone")} placeholder="Asia/Shanghai" {...invalid("timezone")} />}</>)}
+          {field("platform", t("指纹平台"), <select value={form.platform} onChange={change("platform")} disabled={!allows(runtime, "platform")} {...invalid("platform")}><option value="macos">macOS</option><option value="windows">Windows</option><option value="linux">Linux</option></select>)}
+          {field("seed", t("指纹种子"), <div className="input-action"><input type="number" min="1" max="4294967295" required readOnly={!!profile} disabled={!allows(runtime, "seed")} value={allows(runtime, "seed") ? form.seed : ""} placeholder={t("不适用")} onChange={change("seed")} {...invalid("seed")} /><IconButton disabled={!!profile || !allows(runtime, "seed")} icon={ArrowsClockwise} label={t("随机生成种子")} type="button" onClick={() => setForm(value => ({
+                ...value,
+                seed: Math.floor(Math.random() * 2147483646) + 1
+              }))} /></div>)}
+          {field("width", t("屏幕宽度"), <div className="input-unit"><input required type="number" min="800" max="7680" value={form.width} onChange={change("width")} {...invalid("width")} /><span>px</span></div>)}
+          {field("height", t("屏幕高度"), <div className="input-unit"><input required type="number" min="600" max="4320" value={form.height} onChange={change("height")} {...invalid("height")} /><span>px</span></div>)}
+          {field("startUrl", t("启动页面"), <input value={form.startUrl} onChange={change("startUrl")} placeholder="about:blank" {...invalid("startUrl")} />, {
+              className: "span-two"
+            })}
+          {field("notes", t("备注"), <textarea rows={2} value={form.notes} maxLength={1000} onChange={change("notes")} placeholder={t("选填")} />, {
+              className: "span-two"
+            })}
+        </div>
+      </details>
+      {Object.values(errors).some(Boolean) && <div className="form-error" role="alert"><WarningCircle size={16} />{t("请修正标出的配置后再保存。")}</div>}
+    </div>
+    <div className="modal-footer"><Button type="button" onClick={onClose}>{t("取消")}</Button><Button type="submit" className="primary" disabled={saving}>{saving ? t("保存中…") : profile ? t("保存更改") : t("创建环境")}</Button></div>
+  </form></Modal>;
 }
-function GroupForm({ groups, count, onSave, onClose, saving }) {
-  const [group, setGroup] = useState('');
-  return <Modal title="移动到分组" subtitle={`为 ${count} 个已选环境设置分组；留空可移到未分组。`} onClose={onClose} className="confirm-modal"><form onSubmit={(event) => {event.preventDefault();onSave(group.trim());}}><div className="modal-body"><Field label="分组名称"><input maxLength={60} list="bulk-groups" value={group} onChange={(event)=>setGroup(event.target.value)} placeholder="未分组" /></Field><datalist id="bulk-groups">{groups.map((value)=><option key={value} value={value}/>)}</datalist></div><div className="modal-footer"><Button type="button" onClick={onClose}>取消</Button><Button type="submit" className="primary" disabled={saving}>{saving?'处理中…':'移动分组'}</Button></div></form></Modal>;
+function GroupForm({
+  groups,
+  count,
+  onSave,
+  onClose,
+  saving
+}) {
+  const {
+    t
+  } = useI18n();
+  const [group, setGroup] = useState("");
+  return <Modal title={t("移动到分组")} subtitle={t("为 {value1} 个已选环境设置分组；留空可移到未分组。", {
+    value1: count
+  })} onClose={onClose} className="confirm-modal"><form onSubmit={event => {
+      event.preventDefault();
+      onSave(group.trim());
+    }}><div className="modal-body"><Field label={t("分组名称")}><input maxLength={60} list="bulk-groups" value={group} onChange={event => setGroup(event.target.value)} placeholder={t("未分组")} /></Field><datalist id="bulk-groups">{groups.map(value => <option key={value} value={value} />)}</datalist></div><div className="modal-footer"><Button type="button" onClick={onClose}>{t("取消")}</Button><Button type="submit" className="primary" disabled={saving}>{saving ? t("处理中…") : t("移动分组")}</Button></div></form></Modal>;
 }
-function MigrationForm({ migration, onMigrate, onClose, saving }) {
+function MigrationForm({
+  migration,
+  onMigrate,
+  onClose,
+  saving
+}) {
+  const {
+    t
+  } = useI18n();
   const [confirmed, setConfirmed] = useState(false);
-  const candidates=(migration.profiles || []).filter((profile)=>!profile.migrated);
-  return <Modal title="复制迁移旧环境" subtitle="原资料保留，迁移前会创建本机备份。" onClose={onClose}><form onSubmit={(event)=>{event.preventDefault();if(confirmed&&candidates.length)onMigrate(candidates.map((profile)=>profile.id));}}><div className="modal-body"><p className="form-note">{migration.notice || '复制选定环境的配置与浏览资料，旧工作区不会被删除。'}</p><div className="migration-profiles">{(migration.profiles||[]).map((profile)=><div key={profile.id}><strong>{profile.name}</strong><span>{profile.migrated?'已迁移':'等待迁移'}</span></div>)}</div><p className="form-note">本次复制 {candidates.length} 个尚未迁移的环境。{migration.proxyCount ? `同时保留 ${migration.proxyCount} 个旧网络出口的本机绑定。` : ''}</p><label className="migration-confirm"><input type="checkbox" checked={confirmed} onChange={(event)=>setConfirmed(event.target.checked)}/><span>我已关闭旧版本启动的所有浏览器会话</span></label></div><div className="modal-footer"><Button type="button" onClick={onClose}>取消</Button><Button className="primary" type="submit" disabled={saving||!confirmed||!candidates.length}>{saving?'正在复制…':'备份并复制迁移'}</Button></div></form></Modal>;
+  const candidates = (migration.profiles || []).filter(profile => !profile.migrated);
+  return <Modal title={t("复制迁移旧环境")} subtitle={t("原资料保留，迁移前会创建本机备份。")} onClose={onClose}><form onSubmit={event => {
+      event.preventDefault();
+      if (confirmed && candidates.length) onMigrate(candidates.map(profile => profile.id));
+    }}><div className="modal-body"><p className="form-note">{migration.notice || t("复制选定环境的配置与浏览资料，旧工作区不会被删除。")}</p><div className="migration-profiles">{(migration.profiles || []).map(profile => <div key={profile.id}><strong>{profile.name}</strong><span>{profile.migrated ? t("已迁移") : t("等待迁移")}</span></div>)}</div><p className="form-note">{t("本次复制")}{candidates.length}{t("个尚未迁移的环境。")}{migration.proxyCount ? t("同时保留 {value1} 个旧网络出口的本机绑定。", {
+            value1: migration.proxyCount
+          }) : ""}</p><label className="migration-confirm"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} /><span>{t("我已关闭旧版本启动的所有浏览器会话")}</span></label></div><div className="modal-footer"><Button type="button" onClick={onClose}>{t("取消")}</Button><Button className="primary" type="submit" disabled={saving || !confirmed || !candidates.length}>{saving ? t("正在复制…") : t("备份并复制迁移")}</Button></div></form></Modal>;
 }
-function ImportMappingForm({ session, proxies, onImport, onAddProxy, onClose, saving }) {
-  const [proxyMap,setProxyMap]=useState({}), [errors,setErrors]=useState({});
-  const formRef=useRef(null), refs=session.proxyRefs || [];
-  const submit=(event)=>{
+function ImportMappingForm({
+  session,
+  proxies,
+  onImport,
+  onAddProxy,
+  onClose,
+  saving
+}) {
+  const {
+    t
+  } = useI18n();
+  const [proxyMap, setProxyMap] = useState({}),
+    [errors, setErrors] = useState({});
+  const formRef = useRef(null),
+    refs = session.proxyRefs || [];
+  const submit = event => {
     event.preventDefault();
-    const missing=refs.filter((ref)=>!proxies.some((proxy)=>proxy.id===proxyMap[ref.id]));
-    if(missing.length){setErrors(Object.fromEntries(missing.map((ref)=>[ref.id,'请选择一个本机网络出口。'])));requestAnimationFrame(()=>formRef.current?.elements.namedItem(`map-${missing[0].id}`)?.focus());return;}
-    onImport(Object.fromEntries(refs.map((ref)=>[ref.id,proxyMap[ref.id]])));
+    const missing = refs.filter(ref => !proxies.some(proxy => proxy.id === proxyMap[ref.id]));
+    if (missing.length) {
+      setErrors(Object.fromEntries(missing.map(ref => [ref.id, t("请选择一个本机网络出口。")])));
+      requestAnimationFrame(() => formRef.current?.elements.namedItem(`map-${missing[0].id}`)?.focus());
+      return;
+    }
+    onImport(Object.fromEntries(refs.map(ref => [ref.id, proxyMap[ref.id]])));
   };
-  return <Modal title="映射导入的网络出口" subtitle={`即将导入 ${session.profileCount || 0} 个环境。为每个原出口选择本机代理。`} onClose={onClose} className="import-modal"><form ref={formRef} onSubmit={submit}><div className="modal-body"><p className="form-note import-notice">导出文件不含代理密码。确认映射后，导入的环境会绑定你选择的本机出口。</p>{!proxies.length ? <div className="import-empty"><GlobeHemisphereWest size={27}/><strong>请先添加网络出口</strong><p>本机还没有可映射的代理。添加出口及凭据后，再重新导入此文件。</p><Button type="button" icon={Plus} onClick={onAddProxy}>前往网络出口</Button></div> : <div className="import-mappings">{refs.map((ref)=><div className="import-mapping" key={ref.id}><div className="import-source"><strong>{ref.name || '未命名出口'}</strong><span>{(ref.protocol || '代理').toUpperCase()} · {ref.host ? `${ref.host}${ref.port ? `:${ref.port}` : ''}` : '服务器信息已隐藏'}</span>{ref.requiresCredentials&&<small>此出口原本需要认证，请确认本机代理已填写凭据。</small>}</div><Field label="映射到本机出口" error={errors[ref.id]} errorId={`import-error-${ref.id}`}><select name={`map-${ref.id}`} value={proxyMap[ref.id] || ''} aria-label={`映射 ${ref.name || ref.id}`} aria-invalid={errors[ref.id] ? true : undefined} aria-describedby={errors[ref.id] ? `import-error-${ref.id}` : undefined} onChange={(event)=>{setProxyMap((value)=>({...value,[ref.id]:event.target.value}));setErrors((value)=>({...value,[ref.id]:''}));}}><option value="" disabled>请选择本机网络出口</option>{proxies.map((proxy)=><option key={proxy.id} value={proxy.id}>{proxy.name} · {protocolLabel(proxy.protocol)}</option>)}</select></Field></div>)}</div>}</div><div className="modal-footer"><Button type="button" onClick={onClose} disabled={saving}>取消</Button><Button type="submit" className="primary" disabled={saving || !proxies.length || !refs.length}>{saving ? '正在导入…' : '确认映射并导入'}</Button></div></form></Modal>;
+  return <Modal title={t("映射导入的网络出口")} subtitle={t("即将导入 {value1} 个环境。为每个原出口选择本机代理。", {
+    value1: session.profileCount || 0
+  })} onClose={onClose} className="import-modal"><form ref={formRef} onSubmit={submit}><div className="modal-body"><p className="form-note import-notice">{t("导出文件不含代理密码。确认映射后，导入的环境会绑定你选择的本机出口。")}</p>{!proxies.length ? <div className="import-empty"><GlobeHemisphereWest size={27} /><strong>{t("请先添加网络出口")}</strong><p>{t("本机还没有可映射的代理。添加出口及凭据后，再重新导入此文件。")}</p><Button type="button" icon={Plus} onClick={onAddProxy}>{t("前往网络出口")}</Button></div> : <div className="import-mappings">{refs.map(ref => <div className="import-mapping" key={ref.id}><div className="import-source"><strong>{ref.name || t("未命名出口")}</strong><span>{(ref.protocol || t("代理")).toUpperCase()} · {ref.host ? `${ref.host}${ref.port ? `:${ref.port}` : ""}` : t("服务器信息已隐藏")}</span>{ref.requiresCredentials && <small>{t("此出口原本需要认证，请确认本机代理已填写凭据。")}</small>}</div><Field label={t("映射到本机出口")} error={errors[ref.id]} errorId={`import-error-${ref.id}`}><select name={`map-${ref.id}`} value={proxyMap[ref.id] || ""} aria-label={t("映射 {value1}", {
+                value1: ref.name || ref.id
+              })} aria-invalid={errors[ref.id] ? true : undefined} aria-describedby={errors[ref.id] ? `import-error-${ref.id}` : undefined} onChange={event => {
+                setProxyMap(value => ({
+                  ...value,
+                  [ref.id]: event.target.value
+                }));
+                setErrors(value => ({
+                  ...value,
+                  [ref.id]: ""
+                }));
+              }}><option value="" disabled>{t("请选择本机网络出口")}</option>{proxies.map(proxy => <option key={proxy.id} value={proxy.id}>{proxy.name} · {protocolLabel(proxy.protocol)}</option>)}</select></Field></div>)}</div>}</div><div className="modal-footer"><Button type="button" onClick={onClose} disabled={saving}>{t("取消")}</Button><Button type="submit" className="primary" disabled={saving || !proxies.length || !refs.length}>{saving ? t("正在导入…") : t("确认映射并导入")}</Button></div></form></Modal>;
 }
-function NetworkResult({ network, checking = false, compact = false }) {
-  const verified=network?.ok===true && network?.scope==='egress' && !!network.ip;
-  return <div role="status" aria-live="polite" className={`network-result ${compact?'compact':''} ${verified?'verified':network?.ok===false?'failed':''}`}>
-    {checking ? <><ArrowsClockwise size={16} className="spin"/><div><strong>正在识别出口…</strong><small>通过代理访问出口查询服务</small></div></> : verified ? <><CheckCircle size={17}/><div><strong className="mono-value">{network.ip}</strong>{networkPlace(network)&&<small>{networkPlace(network)}</small>}<small>{network.timezone || '时区尚未识别'}</small><span className="network-source">{network.source || '出口查询'}{network.checkedAt?` · ${relativeTime(network.checkedAt)}`:''}</span></div></> : network ? <><WarningCircle size={17}/><div><strong>出口识别失败</strong><small>{network.message || '未获得有效的出口资料，请检查代理参数后重试。'}</small></div></> : <><GlobeHemisphereWest size={17}/><div><strong>尚未识别</strong><small>检测实际出口 IP、地区和时区</small></div></>}
+function NetworkResult({
+  network,
+  checking = false,
+  compact = false
+}) {
+  const {
+    t
+  } = useI18n();
+  const verified = network?.ok === true && network?.scope === "egress" && !!network.ip;
+  return <div role="status" aria-live="polite" className={`network-result ${compact ? "compact" : ""} ${verified ? "verified" : network?.ok === false ? "failed" : ""}`}>
+    {checking ? <><ArrowsClockwise size={16} className="spin" /><div><strong>{t("正在识别出口…")}</strong><small>{t("通过代理访问出口查询服务")}</small></div></> : verified ? <><CheckCircle size={17} /><div><strong className="mono-value">{network.ip}</strong>{networkPlace(network) && <small>{networkPlace(network)}</small>}<small>{network.timezone || t("时区尚未识别")}</small><span className="network-source">{network.source || t("出口查询")}{network.checkedAt ? ` · ${relativeTime(network.checkedAt)}` : ""}</span></div></> : network ? <><WarningCircle size={17} /><div><strong>{t("出口识别失败")}</strong><small>{network.message || t("未获得有效的出口资料，请检查代理参数后重试。")}</small></div></> : <><GlobeHemisphereWest size={17} /><div><strong>{t("尚未识别")}</strong><small>{t("检测实际出口 IP、地区和时区")}</small></div></>}
   </div>;
 }
-function ProxyForm({ proxy, proxyCore, onSave, onClose, saving }) {
-  const [form,setForm]=useState(()=>initialProxyForm(proxy));
-  const [visible,setVisible]=useState(false), [network,setNetwork]=useState(proxy?.network || null), [checking,setChecking]=useState(false), [checkError,setCheckError]=useState('');
-  const anytls = form.protocol === 'anytls';
-  const checkSequence=useRef(0);
-  useEffect(()=>()=>{checkSequence.current++;},[]);
-  const update=(key,value)=>{checkSequence.current++;setChecking(false);setNetwork(null);setCheckError('');setForm((previous)=>({...previous,[key]:value}));};
-  const change=(key)=>(event)=>update(key,event.target.value);
-  const detect=async()=>{
-    if(!api.isDesktop)return;
-    const error=proxyFormError(form);if(error){setCheckError(error);return;}
-    const sequence=++checkSequence.current;setChecking(true);setCheckError('');setNetwork(null);
-    try {const result=await api.call('checkProxy',{proxy:proxyConfig({...form,name:form.name.trim() || '待检测出口'})});if(sequence===checkSequence.current)setNetwork(result);}
-    catch(error){if(sequence===checkSequence.current)setNetwork({ok:false,message:error.message || '出口识别未完成，请重试。'});}
-    finally{if(sequence===checkSequence.current)setChecking(false);}
+function ProxyForm({
+  proxy,
+  proxyCore,
+  onSave,
+  onClose,
+  saving
+}) {
+  const {
+    t
+  } = useI18n();
+  const [form, setForm] = useState(() => initialProxyForm(proxy));
+  const [visible, setVisible] = useState(false),
+    [network, setNetwork] = useState(proxy?.network || null),
+    [checking, setChecking] = useState(false),
+    [checkError, setCheckError] = useState("");
+  const anytls = form.protocol === "anytls";
+  const checkSequence = useRef(0);
+  useEffect(() => () => {
+    checkSequence.current++;
+  }, []);
+  const update = (key, value) => {
+    checkSequence.current++;
+    setChecking(false);
+    setNetwork(null);
+    setCheckError("");
+    setForm(previous => ({
+      ...previous,
+      [key]: value
+    }));
   };
-  return <Modal title={proxy ? '编辑网络出口' : '添加网络出口'} subtitle="选择普通代理或 AnyTLS 节点，供浏览器与终端使用。" onClose={onClose} className="proxy-modal"><form onSubmit={(event)=>{event.preventDefault();const error=proxyFormError(form);if(error){setCheckError(error);return;}onSave(proxyConfig(form));}}><div className="modal-body"><div className="form-grid">
-    <Field label="名称" className="span-two"><input required maxLength={80} value={form.name} onChange={change('name')} placeholder="例如：东京节点" /></Field>
-    <Field label="协议"><select value={form.protocol} onChange={change('protocol')}><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option><option value="anytls">AnyTLS · 内置连接</option></select></Field>
-    <Field label="端口"><input required type="number" min="1" max="65535" value={form.port} onChange={change('port')} placeholder={anytls?'443':'8080'} /></Field>
-    <Field label="服务器地址" className="span-two"><input required value={form.host} onChange={change('host')} placeholder={anytls?'node.example.com':'127.0.0.1 或 proxy.example.com'} /></Field>
-    {!anytls&&<Field label="用户名（选填）"><input value={form.username} onChange={change('username')} autoComplete="off" /></Field>}
-    <Field label={anytls?'节点密码':'密码（选填）'} className={anytls?'span-two':''}><div className="input-action"><input required={anytls} type={visible?'text':'password'} value={form.password} onChange={change('password')} autoComplete="new-password" /><IconButton type="button" icon={visible?EyeSlash:Eye} label={visible?'隐藏密码':'显示密码'} onClick={()=>setVisible(!visible)}/></div></Field>
-    {anytls&&<Field label="TLS 服务器名称 / SNI（选填）" className="span-two" hint="留空时使用服务器地址；如果服务商提供了 SNI，请填写指定值。"><input value={form.serverName || ''} onChange={change('serverName')} placeholder={form.host.trim() || '默认使用服务器地址'} autoComplete="off" /></Field>}
-    <Field label="代理地域（选填）" className="span-two" hint="BrowseForge Chromium 使用代理时必填，例如 us-ny；此标签不会替代实际出口检测。"><input maxLength={64} value={form.region || ''} onChange={change('region')} placeholder="us-ny" /></Field>
+  const change = key => event => update(key, event.target.value);
+  const detect = async () => {
+    if (!api.isDesktop) return;
+    const error = proxyFormError(form);
+    if (error) {
+      setCheckError(error);
+      return;
+    }
+    const sequence = ++checkSequence.current;
+    setChecking(true);
+    setCheckError("");
+    setNetwork(null);
+    try {
+      const result = await api.call("checkProxy", {
+        proxy: proxyConfig({
+          ...form,
+          name: form.name.trim() || t("待检测出口")
+        })
+      });
+      if (sequence === checkSequence.current) setNetwork(result);
+    } catch (error) {
+      if (sequence === checkSequence.current) setNetwork({
+        ok: false,
+        message: error.message || t("出口识别未完成，请重试。")
+      });
+    } finally {
+      if (sequence === checkSequence.current) setChecking(false);
+    }
+  };
+  return <Modal title={proxy ? t("编辑网络出口") : t("添加网络出口")} subtitle={t("选择普通代理或 AnyTLS 节点，供浏览器与终端使用。")} onClose={onClose} className="proxy-modal"><form onSubmit={event => {
+      event.preventDefault();
+      const error = proxyFormError(form);
+      if (error) {
+        setCheckError(error);
+        return;
+      }
+      onSave(proxyConfig(form));
+    }}><div className="modal-body"><div className="form-grid">
+    <Field label={t("名称")} className="span-two"><input required maxLength={80} value={form.name} onChange={change("name")} placeholder={t("例如：东京节点")} /></Field>
+    <Field label={t("协议")}><select value={form.protocol} onChange={change("protocol")}><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option><option value="anytls">{t("AnyTLS · 内置连接")}</option></select></Field>
+    <Field label={t("端口")}><input required type="number" min="1" max="65535" value={form.port} onChange={change("port")} placeholder={anytls ? "443" : "8080"} /></Field>
+    <Field label={t("服务器地址")} className="span-two"><input required value={form.host} onChange={change("host")} placeholder={anytls ? "node.example.com" : t("127.0.0.1 或 proxy.example.com")} /></Field>
+    {!anytls && <Field label={t("用户名（选填）")}><input value={form.username} onChange={change("username")} autoComplete="off" /></Field>}
+    <Field label={anytls ? t("节点密码") : t("密码（选填）")} className={anytls ? "span-two" : ""}><div className="input-action"><input required={anytls} type={visible ? "text" : "password"} value={form.password} onChange={change("password")} autoComplete="new-password" /><IconButton type="button" icon={visible ? EyeSlash : Eye} label={visible ? t("隐藏密码") : t("显示密码")} onClick={() => setVisible(!visible)} /></div></Field>
+    {anytls && <Field label={t("TLS 服务器名称 / SNI（选填）")} className="span-two" hint={t("留空时使用服务器地址；如果服务商提供了 SNI，请填写指定值。")}><input value={form.serverName || ""} onChange={change("serverName")} placeholder={form.host.trim() || t("默认使用服务器地址")} autoComplete="off" /></Field>}
+    <Field label={t("代理地域（选填）")} className="span-two" hint={t("BrowseForge Chromium 使用代理时必填，例如 us-ny；此标签不会替代实际出口检测。")}><input maxLength={64} value={form.region || ""} onChange={change("region")} placeholder="us-ny" /></Field>
     </div>
-    {anytls&&<><div className={`anytls-core-note ${api.isDesktop&&proxyCore?.supported===false?'unavailable':''}`} role={api.isDesktop&&proxyCore?.supported===false?'status':undefined}><ShieldCheck size={17}/><span>{!api.isDesktop?'AnyTLS 由境舱桌面应用内置连接，浏览器与终端共用节点，无需单独运行 Clash。':proxyCore?.supported===false?(proxyCore.message || '当前安装无法使用内置 AnyTLS。可先保存节点配置，检测或启动时会显示具体问题。'):'境舱在应用内连接 AnyTLS 节点，浏览器与终端共用出口，无需单独运行 Clash。'}</span></div>
-      <details className="advanced-settings proxy-tls-settings"><summary>高级节点设置<span>{form.skipCertVerify?'证书验证已关闭':'验证服务器证书'}</span></summary><div className="proxy-tls-options">
-        <label className="proxy-check-option"><input type="checkbox" checked={!form.skipCertVerify} onChange={(event)=>update('skipCertVerify',!event.target.checked)}/><span>验证 TLS 证书</span></label>
-        <p className="field-hint">如果服务商使用自签名证书，可按其配置关闭验证。TLS 客户端指纹使用 Chrome。</p>
-        <Field label="ALPN（选填）" hint="按服务商配置填写，用英文逗号分隔；留空使用内核默认值。"><input value={Array.isArray(form.alpn)?form.alpn.join(', '):form.alpn || ''} onChange={change('alpn')} placeholder="h2, http/1.1" autoComplete="off" /></Field>
-        <div className="proxy-udp-option"><label className="proxy-check-option"><input type="checkbox" checked={form.udp!==false} onChange={(event)=>update('udp',event.target.checked)}/><span>启用节点 UDP</span></label><p className="field-hint">控制此节点的 UDP 转发，不会自动接管本机程序的全部 UDP 流量。</p></div>
+    {anytls && <><div className={`anytls-core-note ${api.isDesktop && proxyCore?.supported === false ? "unavailable" : ""}`} role={api.isDesktop && proxyCore?.supported === false ? "status" : undefined}><ShieldCheck size={17} /><span>{!api.isDesktop ? t("AnyTLS 由境舱桌面应用内置连接，浏览器与终端共用节点，无需单独运行 Clash。") : proxyCore?.supported === false ? proxyCore.message || t("当前安装无法使用内置 AnyTLS。可先保存节点配置，检测或启动时会显示具体问题。") : t("境舱在应用内连接 AnyTLS 节点，浏览器与终端共用出口，无需单独运行 Clash。")}</span></div>
+      <details className="advanced-settings proxy-tls-settings"><summary>{t("高级节点设置")}<span>{form.skipCertVerify ? t("证书验证已关闭") : t("验证服务器证书")}</span></summary><div className="proxy-tls-options">
+        <label className="proxy-check-option"><input type="checkbox" checked={!form.skipCertVerify} onChange={event => update("skipCertVerify", !event.target.checked)} /><span>{t("验证 TLS 证书")}</span></label>
+        <p className="field-hint">{t("如果服务商使用自签名证书，可按其配置关闭验证。TLS 客户端指纹使用 Chrome。")}</p>
+        <Field label={t("ALPN（选填）")} hint={t("按服务商配置填写，用英文逗号分隔；留空使用内核默认值。")}><input value={Array.isArray(form.alpn) ? form.alpn.join(", ") : form.alpn || ""} onChange={change("alpn")} placeholder="h2, http/1.1" autoComplete="off" /></Field>
+        <div className="proxy-udp-option"><label className="proxy-check-option"><input type="checkbox" checked={form.udp !== false} onChange={event => update("udp", event.target.checked)} /><span>{t("启用节点 UDP")}</span></label><p className="field-hint">{t("控制此节点的 UDP 转发，不会自动接管本机程序的全部 UDP 流量。")}</p></div>
       </div></details></>}
-    <div className="proxy-detect-card"><div className="proxy-detect-heading"><strong>实际网络出口</strong><Button type="button" icon={GlobeHemisphereWest} disabled={!api.isDesktop || checking} onClick={detect}>{checking?'识别中…':'识别出口'}</Button></div>{api.isDesktop?<NetworkResult network={network} checking={checking}/>:<p className="native-feature-note">真实出口识别需要境舱桌面应用。</p>}{checkError&&<p className="field-error" role="alert">{checkError}</p>}<p className="field-hint">检测结果用于确认出口与自动时区，不会覆盖手动地域标签。</p></div><div className="form-note">代理凭据仅保存在本机。导出的环境配置不包含密码。</div></div><div className="modal-footer"><Button type="button" onClick={onClose}>取消</Button><Button type="submit" className="primary" disabled={saving}>{saving?'保存中…':api.isDesktop?'保存并识别':'保存网络出口'}</Button></div></form></Modal>;
+    <div className="proxy-detect-card"><div className="proxy-detect-heading"><strong>{t("实际网络出口")}</strong><Button type="button" icon={GlobeHemisphereWest} disabled={!api.isDesktop || checking} onClick={detect}>{checking ? t("识别中…") : t("识别出口")}</Button></div>{api.isDesktop ? <NetworkResult network={network} checking={checking} /> : <p className="native-feature-note">{t("真实出口识别需要境舱桌面应用。")}</p>}{checkError && <p className="field-error" role="alert">{checkError}</p>}<p className="field-hint">{t("检测结果用于确认出口与自动时区，不会覆盖手动地域标签。")}</p></div><div className="form-note">{t("代理凭据仅保存在本机。导出的环境配置不包含密码。")}</div></div><div className="modal-footer"><Button type="button" onClick={onClose}>{t("取消")}</Button><Button type="submit" className="primary" disabled={saving}>{saving ? t("保存中…") : api.isDesktop ? t("保存并识别") : t("保存网络出口")}</Button></div></form></Modal>;
 }
-
+function BrowserDetail({
+  profile,
+  proxy,
+  runtime,
+  pending,
+  busy,
+  onStart,
+  onInstall,
+  onFocus,
+  onStop,
+  onEdit,
+  onClear,
+  editingDisabled,
+  t
+}) {
+  if (!profile) return <div className="detail-empty"><Browsers size={32} /><h2>{t("浏览器详情")}</h2><p>{t("选择一个环境")}</p></div>;
+  const running = profile.status === "running";
+  const starting = profile.status === "starting" || pending[`startProfile:${profile.id}`];
+  return <>
+    <div className="detail-heading"><div className="detail-title-line"><h2 title={profile.name}>{profile.name}</h2><Status status={profile.status} /></div><p>{runtime.displayName || runtime.id}</p></div>
+    <div className={`browser-preview ${profile.screenshot ? "has-screenshot" : ""}`}>{profile.screenshot ? <img src={profile.screenshot} alt={t("{name} 的浏览器窗口", {
+        name: profile.name
+      })} /> : <div className="preview-placeholder"><Browsers size={34} weight="duotone" /><strong>{t(running ? "会话正在运行" : starting ? "正在启动浏览器" : "浏览器待启动")}</strong></div>}</div>
+    <div className="session-controls"><Button className="primary session-primary" icon={running ? ArrowSquareOut : runtime.installed ? Play : DownloadSimple} disabled={starting || busy || runtime.installing || !running && runtime.supported === false} onClick={running ? onFocus : runtime.installed ? onStart : onInstall}>{t(running ? "打开浏览器" : starting ? "启动中…" : runtime.installed ? "启动浏览器" : "安装浏览器内核")}</Button><IconButton icon={Stop} label="停止浏览器" disabled={!running || busy} onClick={onStop} /></div>
+    {profile.lastError && <div className="detail-error"><WarningCircle size={17} /><span>{t(profile.lastError)}</span></div>}
+    {profile.networkLastError && <div className="detail-error network-warning"><GlobeHemisphereWest size={17} /><span>{t(profile.networkLastError)}</span></div>}
+    <dl className="detail-properties">
+      <div><dt>{t("网络出口")}</dt><dd>{proxy?.name || t("本机网络")}</dd></div>
+      <div><dt>{t("指纹平台")}</dt><dd>{allows(runtime, "platform") ? platforms[profile.platform] || t("内核默认") : t("本机平台")}</dd></div>
+      <div><dt>{t("屏幕尺寸")}</dt><dd>{t(profileDimensions(profile))}</dd></div>
+      <div><dt>{t("时区")}</dt><dd>{profile.observed?.timezone || profile.resolvedTimezone || profile.timezone || t("跟随网络出口")}</dd></div>
+      <div><dt>{t("语言")}</dt><dd>{profile.observed?.language || profile.locale || t("跟随网络出口")}</dd></div>
+      <div><dt>{t("隐私防护")}</dt><dd>{t({
+            standard: "标准",
+            strict: "严格",
+            off: "停用"
+          }[profile.privacy?.mode || "standard"])}<small>{t(profile.privacy?.mode === "off" ? "防护已关闭" : "已知追踪请求拦截")}</small></dd></div>
+      {profile.network?.ok && <div><dt>{t("实际出口")}</dt><dd>{profile.network.ip}<small>{networkPlace(profile.network)}</small></dd></div>}
+      <div><dt>{t("资源占用")}</dt><dd>{profile.cpuPercent == null ? "—" : `${Number(profile.cpuPercent).toFixed(0)}% CPU`} · {bytes(profile.memoryBytes)}</dd></div>
+      <div><dt>{t("浏览数据")}</dt><dd>{bytes(profile.dataBytes)}</dd></div>
+    </dl>
+    <div className="detail-actions"><Button icon={PencilSimple} disabled={editingDisabled} onClick={onEdit}>编辑配置</Button></div>
+    <div className="danger-actions"><button disabled={editingDisabled} onClick={onClear}>{t("清空浏览数据…")}</button></div>
+  </>;
+}
 export function App() {
   const route = new URLSearchParams(window.location.search);
-  return route.get('view') === 'terminal'
-    ? <TerminalWindowApp profileId={route.get('profileId')} sessionId={route.get('sessionId')} />
-    : <WorkspaceApp />;
+  return route.get("view") === "terminal" ? <TerminalWindowApp profileId={route.get("profileId")} sessionId={route.get("sessionId")} /> : <WorkspaceApp />;
 }
-
 function WorkspaceApp() {
-  const [snapshot, setSnapshot] = useState(initialSnapshot), [loading, setLoading] = useState(true), [page, setPage] = useState('profiles'), [selectedId, setSelectedId] = useState(null), [query, setQuery] = useState(''), [filter, setFilter] = useState('all'), [groupFilter, setGroupFilter] = useState('*'), [modal, setModal] = useState(null), [pending, setPending] = useState({}), [toast, setToast] = useState(null), [proxyTests, setProxyTests] = useState({}), [checkedIds, setCheckedIds] = useState([]), [bulkResults, setBulkResults] = useState([]), [bulkRunning, setBulkRunning] = useState(false), [resumeId, setResumeId] = useState(null), [migration,setMigration] = useState(null), [terminalVisible,setTerminalVisible] = useState(false), [terminalRequest,setTerminalRequest] = useState(null), [terminalProfiles,setTerminalProfiles] = useState([]);
-  const searchRef = useRef(null), pendingRef = useRef(new Set()), snapshotRef = useRef(initialSnapshot), proxyTestTokens = useRef({}), modalRef=useRef(null);
-  const [terminalExpanded,setTerminalExpanded] = useState(false);
-  const [terminalHeight,setTerminalHeight] = useState(360);
-  const [viewportHeight,setViewportHeight] = useState(window.innerHeight);
-  useEffect(()=>{const resize=()=>setViewportHeight(window.innerHeight);window.addEventListener('resize',resize);return()=>window.removeEventListener('resize',resize);},[]);
-  const terminalMaxHeight=Math.max(320,viewportHeight-180);
-  const resizeTerminalDock=useCallback((height)=>setTerminalHeight(Math.round(Math.max(320,Math.min(height,Math.max(320,window.innerHeight-180))))),[]);
-  modalRef.current=modal;
-  const acceptSnapshot = useCallback((value) => {
-    if (!value || !Array.isArray(value.profiles) || !Array.isArray(value.proxies) || !value.system || typeof value.system !== 'object') return false;
-    const next = { ...initialSnapshot, ...value };
+  const {
+    t,
+    language,
+    setLanguage
+  } = useI18n();
+  const [snapshot, setSnapshot] = useState(initialSnapshot),
+    [loading, setLoading] = useState(true),
+    [page, setPage] = useState("profiles"),
+    [selectedId, setSelectedId] = useState(null),
+    [query, setQuery] = useState(""),
+    [filter, setFilter] = useState("all"),
+    [groupFilter, setGroupFilter] = useState("*"),
+    [modal, setModal] = useState(null),
+    [pending, setPending] = useState({}),
+    [toast, setToast] = useState(null),
+    [proxyTests, setProxyTests] = useState({}),
+    [checkedIds, setCheckedIds] = useState([]),
+    [bulkResults, setBulkResults] = useState([]),
+    [bulkRunning, setBulkRunning] = useState(false),
+    [resumeId, setResumeId] = useState(null),
+    [migration, setMigration] = useState(null),
+    [terminalVisible, setTerminalVisible] = useState(false),
+    [terminalRequest, setTerminalRequest] = useState(null),
+    [terminalProfiles, setTerminalProfiles] = useState([]);
+  const searchRef = useRef(null),
+    pendingRef = useRef(new Set()),
+    snapshotRef = useRef(initialSnapshot),
+    proxyTestTokens = useRef({}),
+    modalRef = useRef(null);
+  const [terminalExpanded, setTerminalExpanded] = useState(false);
+  const [terminalHeight, setTerminalHeight] = useState(360);
+  const [viewportHeight, setViewportHeight] = useState(window.innerHeight);
+  useEffect(() => {
+    const resize = () => setViewportHeight(window.innerHeight);
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
+  const terminalMaxHeight = Math.max(320, viewportHeight - 180);
+  const resizeTerminalDock = useCallback(height => setTerminalHeight(Math.round(Math.max(320, Math.min(height, Math.max(320, window.innerHeight - 180))))), []);
+  modalRef.current = modal;
+  const acceptSnapshot = useCallback(value => {
+    if (!value || !Array.isArray(value.profiles) || !Array.isArray(value.proxies) || !value.system || typeof value.system !== "object") return false;
+    const next = {
+      ...initialSnapshot,
+      ...value
+    };
     snapshotRef.current = next;
     setSnapshot(next);
-    setSelectedId((current) => value.profiles.some((profile) => profile.id === current) ? current : value.profiles[0]?.id || null);
-    setCheckedIds((ids) => ids.filter((id) => value.profiles.some((profile) => profile.id === id)));
+    setSelectedId(current => value.profiles.some(profile => profile.id === current) ? current : value.profiles[0]?.id || null);
+    setCheckedIds(ids => ids.filter(id => value.profiles.some(profile => profile.id === id)));
     return true;
   }, []);
-  const refresh = useCallback(async () => { const value = await api.call('snapshot'); acceptSnapshot(value); return value; }, [acceptSnapshot]);
-  useEffect(() => { refresh().catch((error) => setToast({ type: 'error', message: error.message || '无法读取环境数据。' })).finally(() => setLoading(false)); return api.subscribe((value) => { if (!acceptSnapshot(value)) refresh().catch(() => {}); }); }, [refresh, acceptSnapshot]);
-  useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(null), 6000); return () => clearTimeout(timer); }, [toast]);
-  useEffect(() => { const onKey = (event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'k' && !modal && !event.target?.closest?.('.terminal-dock')) { event.preventDefault(); setPage('profiles'); requestAnimationFrame(() => searchRef.current?.focus()); } }; document.addEventListener('keydown', onKey); return () => document.removeEventListener('keydown', onKey); }, [modal]);
-  const closeModal = useCallback(() => {const session=modalRef.current?.type==='importMapping' ? modalRef.current.session : null;if(session && pendingRef.current.has(`importProfiles:${session.importId}`))return;if(session?.importId)api.call('cancelImport',{importId:session.importId}).catch(()=>{});setModal(null);}, []);
-  const perform = async (method, args = {}, success, key = `${method}:${args.id || args.runtimeId || ''}`, quiet = false) => {
-    if (pendingRef.current.has(key)) return {ok:false,message:'此操作正在进行中。'};
-    pendingRef.current.add(key); setPending((value) => ({...value,[key]:true}));
-    try { const result = await api.call(method, args); if (!acceptSnapshot(result)) await refresh(); if (success && !result?.canceled && !quiet) setToast({ type: 'success', message: success }); return { ok: true, result }; }
-    catch (error) { const message=error.message || '操作未完成，请重试。'; if (!quiet) setToast({ type: 'error', message }); return { ok: false,message }; }
-    finally { pendingRef.current.delete(key); setPending((value) => {const next={...value};delete next[key];return next;}); }
-  };
-  const { profiles, proxies, events, system } = snapshot;
-  const engines = runtimeCatalog(snapshot), runtimeFor = (profile) => engines.find((item) => item.id === profile?.engine) || {id:profile?.engine,displayName:profile?.engine || '未知内核',supported:false,message:'此内核不在当前可用目录中。',capabilities:{}};
-  const groups = [...new Set([...profiles.map((profile)=>profile.group),...(snapshot.groups || []).map((group)=>typeof group === 'string' ? group : group.name)].filter(Boolean))].sort((a,b)=>a.localeCompare(b,'zh-CN'));
-  const selected = profiles.find((profile) => profile.id === selectedId), selectedRuntime = runtimeFor(selected), activeProfiles = profiles.filter((profile) => ['running', 'starting'].includes(profile.status)), runningCount = activeProfiles.length, startingCount=profiles.filter((profile)=>profile.status==='starting').length;
-  const counts = { all: profiles.length, running: runningCount, stopped: profiles.filter((profile) => profile.status === 'stopped').length, error: profiles.filter((profile) => profile.status === 'error').length };
-  const filteredProfiles = profiles.filter((profile) => { const proxy = proxies.find((item) => item.id === profile.proxyId); return (groupFilter === '*' || (profile.group || '') === groupFilter) && (filter === 'all' || profile.status === filter || (filter === 'running' && profile.status === 'starting')) && `${profile.name} ${profile.group || ''} ${proxy?.name || ''} ${proxy?.host || ''}`.toLowerCase().includes(query.toLowerCase()); });
-  const totalBytes = profiles.reduce((sum, profile) => sum + (profile.dataBytes || 0), 0), installedCount=engines.filter((item)=>item.installed).length;
-  const busyProfile = (id) => Object.keys(pending).some((key)=>key.endsWith(`:${id}`));
-  const start = async (profile, quiet=false) => { const runtime=runtimeFor(profile); if (runtime.supported === false) {const message=runtime.message || '当前平台不支持此内核。';if(!quiet)setToast({type:'error',message});return{ok:false,message};} if (!runtime.installed) { const message=`请先安装 ${runtime.displayName || runtime.id}。`; if(!quiet){setResumeId(profile.id);setPage('settings');setToast({type:'info',message});} return{ok:false,message}; } return perform('startProfile',{id:profile.id},undefined,`startProfile:${profile.id}`,quiet); };
-  const saveProfile = async (profile) => { const editing = modal?.type === 'editProfile'; const before=new Set(profiles.map((item)=>item.id)); const response = await perform(editing ? 'updateProfile' : 'createProfile', editing ? { id: modal.profile.id, profile } : { profile }, editing ? '环境配置已更新' : '环境已创建'); if (response.ok) { closeModal(); const next=response.result?.profiles ? response.result : snapshotRef.current; if (!editing) setSelectedId(next.profiles.find((item)=>!before.has(item.id))?.id || selectedId); setFilter('all');setGroupFilter('*');setQuery('');setPage('profiles'); } };
-  const cloneProfile = async (profile) => {const before=new Set(profiles.map((item)=>item.id));const response=await perform('cloneProfile',{id:profile.id},'环境配置已克隆');if(response.ok){const next=response.result?.profiles ? response.result : snapshotRef.current;setSelectedId(next.profiles.find((item)=>!before.has(item.id))?.id || selectedId);setFilter('all');setGroupFilter('*');setQuery('');}};
-  const importProfiles=async(args={})=>{const before=new Set(profiles.map((profile)=>profile.id));const response=await perform('importProfiles',args,undefined,`importProfiles:${args.importId || ''}`);if(!response.ok || response.result?.canceled)return;if(response.result?.needsProxyMapping){setModal({type:'importMapping',session:response.result});return;}if(!Array.isArray(response.result?.profiles)){setToast({type:'error',message:'导入结果不完整，请重新选择文件。'});return;}setModal(null);setPage('profiles');setFilter('all');setGroupFilter('*');setQuery('');setSelectedId(response.result.profiles.find((profile)=>!before.has(profile.id))?.id || selectedId);setToast({type:'success',message:'环境配置已导入'});};
-  const saveProxy = async (proxy) => { const existingIds=new Set(proxies.map((item)=>item.id));if(proxy.id){proxyTestTokens.current[proxy.id]=(proxyTestTokens.current[proxy.id]||0)+1;setProxyTests((value)=>{const next={...value};delete next[proxy.id];return next;});} const response = await perform('saveProxy', { proxy }, '网络出口已保存');if(response.ok){closeModal();const next=response.result?.proxies || snapshotRef.current.proxies;const saved=proxy.id?next.find((item)=>item.id===proxy.id):next.find((item)=>!existingIds.has(item.id));if(api.isDesktop&&saved)checkProxy(saved);} };
-  const confirmAction = async () => { const response = await perform(modal.method, { id: modal.id }, modal.success); if (response.ok) closeModal(); };
-  const confirmDelete = (profile) => setModal({ type: 'confirm', title: `删除「${profile.name}」？`, description: '此环境的配置与本机浏览数据将被删除，删除后无法恢复。', method: 'deleteProfile', id: profile.id, button: '删除环境', success: '环境已删除' });
-  const confirmClear = (profile) => setModal({ type: 'confirm', title: '清空浏览数据？', description: `「${profile.name}」的 Cookie、缓存与浏览历史将被清空，环境配置会保留。`, method: 'clearProfile', id: profile.id, button: '清空数据', success: '浏览数据已清空' });
-  const checkProxy = async (proxy) => {
-    if(!api.isDesktop)return;
-    const token=(proxyTestTokens.current[proxy.id]||0)+1;proxyTestTokens.current[proxy.id]=token;
-    setProxyTests((value)=>({...value,[proxy.id]:{checking:true}}));
+  const refresh = useCallback(async () => {
+    const value = await api.call("snapshot");
+    acceptSnapshot(value);
+    return value;
+  }, [acceptSnapshot]);
+  useEffect(() => {
+    refresh().catch(error => setToast({
+      type: "error",
+      message: error.message || t("无法读取环境数据。")
+    })).finally(() => setLoading(false));
+    return api.subscribe(value => {
+      if (!acceptSnapshot(value)) refresh().catch(() => {});
+    });
+  }, [refresh, acceptSnapshot]);
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 6000);
+    return () => clearTimeout(timer);
+  }, [toast]);
+  useEffect(() => {
+    const onKey = event => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "k" && !modal && !event.target?.closest?.(".terminal-dock")) {
+        event.preventDefault();
+        setPage("profiles");
+        setTerminalVisible(false);
+        setTerminalExpanded(false);
+        requestAnimationFrame(() => searchRef.current?.focus());
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [modal]);
+  const closeModal = useCallback(() => {
+    const session = modalRef.current?.type === "importMapping" ? modalRef.current.session : null;
+    if (session && pendingRef.current.has(`importProfiles:${session.importId}`)) return;
+    if (session?.importId) api.call("cancelImport", {
+      importId: session.importId
+    }).catch(() => {});
+    setModal(null);
+  }, []);
+  const perform = async (method, args = {}, success, key = `${method}:${args.id || args.runtimeId || ""}`, quiet = false) => {
+    if (pendingRef.current.has(key)) return {
+      ok: false,
+      message: t("此操作正在进行中。")
+    };
+    pendingRef.current.add(key);
+    setPending(value => ({
+      ...value,
+      [key]: true
+    }));
     try {
-      const result=await api.call('checkProxy',{id:proxy.id});
-      if(proxyTestTokens.current[proxy.id]!==token)return;
-      setProxyTests((value)=>({...value,[proxy.id]:result}));
-      const verified=result.ok===true&&result.scope==='egress'&&!!result.ip;
-      setToast({type:verified?'success':'error',message:verified?`${proxy.name}：${result.ip}${result.timezone?` · ${result.timezone}`:''}`:result.message || '未获得有效的出口资料。'});
+      const result = await api.call(method, args);
+      if (!acceptSnapshot(result)) await refresh();
+      if (success && !result?.canceled && !quiet) setToast({
+        type: "success",
+        message: success
+      });
+      return {
+        ok: true,
+        result
+      };
+    } catch (error) {
+      const message = error.message || t("操作未完成，请重试。");
+      if (!quiet) setToast({
+        type: "error",
+        message
+      });
+      return {
+        ok: false,
+        message
+      };
+    } finally {
+      pendingRef.current.delete(key);
+      setPending(value => {
+        const next = {
+          ...value
+        };
+        delete next[key];
+        return next;
+      });
+    }
+  };
+  const {
+    profiles,
+    proxies,
+    events,
+    system
+  } = snapshot;
+  const engines = runtimeCatalog(snapshot),
+    runtimeFor = profile => engines.find(item => item.id === profile?.engine) || {
+      id: profile?.engine,
+      displayName: profile?.engine || t("未知内核"),
+      supported: false,
+      message: t("此内核不在当前可用目录中。"),
+      capabilities: {}
+    };
+  const groups = [...new Set([...profiles.map(profile => profile.group), ...(snapshot.groups || []).map(group => typeof group === "string" ? group : group.name)].filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  const selected = profiles.find(profile => profile.id === selectedId),
+    selectedRuntime = runtimeFor(selected),
+    activeProfiles = profiles.filter(profile => ["running", "starting"].includes(profile.status)),
+    runningCount = activeProfiles.length,
+    startingCount = profiles.filter(profile => profile.status === "starting").length;
+  const counts = {
+    all: profiles.length,
+    running: runningCount,
+    stopped: profiles.filter(profile => profile.status === "stopped").length,
+    error: profiles.filter(profile => profile.status === "error").length
+  };
+  const filteredProfiles = profiles.filter(profile => {
+    const proxy = proxies.find(item => item.id === profile.proxyId);
+    return (groupFilter === "*" || (profile.group || "") === groupFilter) && (filter === "all" || profile.status === filter || filter === "running" && profile.status === "starting") && `${profile.name} ${profile.group || ""} ${proxy?.name || ""} ${proxy?.host || ""}`.toLowerCase().includes(query.toLowerCase());
+  });
+  const totalBytes = profiles.reduce((sum, profile) => sum + (profile.dataBytes || 0), 0),
+    installedCount = engines.filter(item => item.installed).length;
+  const busyProfile = id => Object.keys(pending).some(key => key.endsWith(`:${id}`));
+  const start = async (profile, quiet = false) => {
+    const runtime = runtimeFor(profile);
+    if (runtime.supported === false) {
+      const message = runtime.message || t("当前平台不支持此内核。");
+      if (!quiet) setToast({
+        type: "error",
+        message
+      });
+      return {
+        ok: false,
+        message
+      };
+    }
+    if (!runtime.installed) {
+      const message = t("请先安装 {value1}。", {
+        value1: runtime.displayName || runtime.id
+      });
+      if (!quiet) {
+        setResumeId(profile.id);
+        setPage("browsers");
+        setToast({
+          type: "info",
+          message
+        });
+      }
+      return {
+        ok: false,
+        message
+      };
+    }
+    return perform("startProfile", {
+      id: profile.id
+    }, undefined, `startProfile:${profile.id}`, quiet);
+  };
+  const saveProfile = async profile => {
+    const editing = modal?.type === "editProfile";
+    const before = new Set(profiles.map(item => item.id));
+    const response = await perform(editing ? "updateProfile" : "createProfile", editing ? {
+      id: modal.profile.id,
+      profile
+    } : {
+      profile
+    }, editing ? t("环境配置已更新") : t("环境已创建"));
+    if (response.ok) {
+      closeModal();
+      const next = response.result?.profiles ? response.result : snapshotRef.current;
+      if (!editing) setSelectedId(next.profiles.find(item => !before.has(item.id))?.id || selectedId);
+      setFilter("all");
+      setGroupFilter("*");
+      setQuery("");
+      setPage("profiles");
+    }
+  };
+  const cloneProfile = async profile => {
+    const before = new Set(profiles.map(item => item.id));
+    const response = await perform("cloneProfile", {
+      id: profile.id
+    }, t("环境配置已克隆"));
+    if (response.ok) {
+      const next = response.result?.profiles ? response.result : snapshotRef.current;
+      setSelectedId(next.profiles.find(item => !before.has(item.id))?.id || selectedId);
+      setFilter("all");
+      setGroupFilter("*");
+      setQuery("");
+    }
+  };
+  const importProfiles = async (args = {}) => {
+    const before = new Set(profiles.map(profile => profile.id));
+    const response = await perform("importProfiles", args, undefined, `importProfiles:${args.importId || ""}`);
+    if (!response.ok || response.result?.canceled) return;
+    if (response.result?.needsProxyMapping) {
+      setModal({
+        type: "importMapping",
+        session: response.result
+      });
+      return;
+    }
+    if (!Array.isArray(response.result?.profiles)) {
+      setToast({
+        type: "error",
+        message: t("导入结果不完整，请重新选择文件。")
+      });
+      return;
+    }
+    setModal(null);
+    setPage("profiles");
+    setFilter("all");
+    setGroupFilter("*");
+    setQuery("");
+    setSelectedId(response.result.profiles.find(profile => !before.has(profile.id))?.id || selectedId);
+    setToast({
+      type: "success",
+      message: t("环境配置已导入")
+    });
+  };
+  const saveProxy = async proxy => {
+    const existingIds = new Set(proxies.map(item => item.id));
+    if (proxy.id) {
+      proxyTestTokens.current[proxy.id] = (proxyTestTokens.current[proxy.id] || 0) + 1;
+      setProxyTests(value => {
+        const next = {
+          ...value
+        };
+        delete next[proxy.id];
+        return next;
+      });
+    }
+    const response = await perform("saveProxy", {
+      proxy
+    }, t("网络出口已保存"));
+    if (response.ok) {
+      closeModal();
+      const next = response.result?.proxies || snapshotRef.current.proxies;
+      const saved = proxy.id ? next.find(item => item.id === proxy.id) : next.find(item => !existingIds.has(item.id));
+      if (api.isDesktop && saved) checkProxy(saved);
+    }
+  };
+  const confirmAction = async () => {
+    const response = await perform(modal.method, {
+      id: modal.id
+    }, modal.success);
+    if (response.ok) closeModal();
+  };
+  const confirmDelete = profile => setModal({
+    type: "confirm",
+    title: t("删除「{value1}」？", {
+      value1: profile.name
+    }),
+    description: t("此环境的配置与本机浏览数据将被删除，删除后无法恢复。"),
+    method: "deleteProfile",
+    id: profile.id,
+    button: t("删除环境"),
+    success: t("环境已删除")
+  });
+  const confirmClear = profile => setModal({
+    type: "confirm",
+    title: t("清空浏览数据？"),
+    description: t("「{value1}」的 Cookie、缓存与浏览历史将被清空，环境配置会保留。", {
+      value1: profile.name
+    }),
+    method: "clearProfile",
+    id: profile.id,
+    button: t("清空数据"),
+    success: t("浏览数据已清空")
+  });
+  const checkProxy = async proxy => {
+    if (!api.isDesktop) return;
+    const token = (proxyTestTokens.current[proxy.id] || 0) + 1;
+    proxyTestTokens.current[proxy.id] = token;
+    setProxyTests(value => ({
+      ...value,
+      [proxy.id]: {
+        checking: true
+      }
+    }));
+    try {
+      const result = await api.call("checkProxy", {
+        id: proxy.id
+      });
+      if (proxyTestTokens.current[proxy.id] !== token) return;
+      setProxyTests(value => ({
+        ...value,
+        [proxy.id]: result
+      }));
+      const verified = result.ok === true && result.scope === "egress" && !!result.ip;
+      setToast({
+        type: verified ? "success" : "error",
+        message: verified ? `${proxy.name}：${result.ip}${result.timezone ? ` · ${result.timezone}` : ""}` : result.message || t("未获得有效的出口资料。")
+      });
       await refresh();
-    }catch(error){if(proxyTestTokens.current[proxy.id]!==token)return;setProxyTests((value)=>({...value,[proxy.id]:{ok:false,message:error.message || '出口识别未完成，请重试。'}}));setToast({type:'error',message:error.message || '出口识别失败。'});}
+    } catch (error) {
+      if (proxyTestTokens.current[proxy.id] !== token) return;
+      setProxyTests(value => ({
+        ...value,
+        [proxy.id]: {
+          ok: false,
+          message: error.message || t("出口识别未完成，请重试。")
+        }
+      }));
+      setToast({
+        type: "error",
+        message: error.message || t("出口识别失败。")
+      });
+    }
   };
-  const toggleChecked = (id) => setCheckedIds((ids)=>ids.includes(id)?ids.filter((value)=>value!==id):[...ids,id]);
-  const allVisibleChecked=filteredProfiles.length>0 && filteredProfiles.every((profile)=>checkedIds.includes(profile.id));
-  const toggleAllVisible=()=>setCheckedIds((ids)=>allVisibleChecked?ids.filter((id)=>!filteredProfiles.some((profile)=>profile.id===id)):[...new Set([...ids,...filteredProfiles.map((profile)=>profile.id)])]);
-  const runBulk = async (action, group='') => {
-    const chosen=profiles.filter((profile)=>checkedIds.includes(profile.id));if(!chosen.length||bulkRunning)return;
-    setBulkRunning(true);setBulkResults(chosen.map((profile)=>({id:profile.id,name:profile.name,state:'pending',message:'等待处理'})));if(action==='group')closeModal();
-    await Promise.all(chosen.map(async(profile)=>{
-      let response;let message;
-      if(busyProfile(profile.id)){response={ok:false,message:'此环境已有操作正在进行。'};}
-      else if(action==='start'&&['running','starting'].includes(profile.status)){response={ok:true};message=profile.status==='running'?'会话已经运行':'会话正在启动';}
-      else if(action==='stop'&&!['running','starting'].includes(profile.status)){response={ok:true};message='会话已经停止';}
-      else if(action==='group'&&['running','starting'].includes(profile.status)){response={ok:false,message:'请先停止会话，再修改分组。'};}
-      else if(action==='start'){response=await start(profile,true);message='已提交启动';}
-      else if(action==='stop'){response=await perform('stopProfile',{id:profile.id},undefined,`stopProfile:${profile.id}`,true);message='会话已停止';}
-      else {response=await perform('updateProfile',{id:profile.id,profile:{...profileConfig(profile),group,...(!allows(runtimeFor(profile),'seed')?{seed:undefined}:{})}},undefined,`updateProfile:${profile.id}`,true);message=group?`已移到 ${group}`:'已移到未分组';}
-      setBulkResults((rows)=>rows.map((row)=>row.id===profile.id?{...row,state:response.ok?'success':'error',message:response.ok?message:response.message}:row));
-    }));if(action==='group')setGroupFilter('*');setBulkRunning(false);
+  const toggleChecked = id => setCheckedIds(ids => ids.includes(id) ? ids.filter(value => value !== id) : [...ids, id]);
+  const allVisibleChecked = filteredProfiles.length > 0 && filteredProfiles.every(profile => checkedIds.includes(profile.id));
+  const toggleAllVisible = () => setCheckedIds(ids => allVisibleChecked ? ids.filter(id => !filteredProfiles.some(profile => profile.id === id)) : [...new Set([...ids, ...filteredProfiles.map(profile => profile.id)])]);
+  const runBulk = async (action, group = "") => {
+    const chosen = profiles.filter(profile => checkedIds.includes(profile.id));
+    if (!chosen.length || bulkRunning) return;
+    setBulkRunning(true);
+    setBulkResults(chosen.map(profile => ({
+      id: profile.id,
+      name: profile.name,
+      state: "pending",
+      message: t("等待处理")
+    })));
+    if (action === "group") closeModal();
+    await Promise.all(chosen.map(async profile => {
+      let response;
+      let message;
+      if (busyProfile(profile.id)) {
+        response = {
+          ok: false,
+          message: t("此环境已有操作正在进行。")
+        };
+      } else if (action === "start" && ["running", "starting"].includes(profile.status)) {
+        response = {
+          ok: true
+        };
+        message = profile.status === "running" ? t("会话已经运行") : t("会话正在启动");
+      } else if (action === "stop" && !["running", "starting"].includes(profile.status)) {
+        response = {
+          ok: true
+        };
+        message = t("会话已经停止");
+      } else if (action === "group" && ["running", "starting"].includes(profile.status)) {
+        response = {
+          ok: false,
+          message: t("请先停止会话，再修改分组。")
+        };
+      } else if (action === "start") {
+        response = await start(profile, true);
+        message = t("已提交启动");
+      } else if (action === "stop") {
+        response = await perform("stopProfile", {
+          id: profile.id
+        }, undefined, `stopProfile:${profile.id}`, true);
+        message = t("会话已停止");
+      } else {
+        response = await perform("updateProfile", {
+          id: profile.id,
+          profile: {
+            ...profileConfig(profile),
+            group,
+            ...(!allows(runtimeFor(profile), "seed") ? {
+              seed: undefined
+            } : {})
+          }
+        }, undefined, `updateProfile:${profile.id}`, true);
+        message = group ? t("已移到 {value1}", {
+          value1: group
+        }) : t("已移到未分组");
+      }
+      setBulkResults(rows => rows.map(row => row.id === profile.id ? {
+        ...row,
+        state: response.ok ? "success" : "error",
+        message: response.ok ? message : response.message
+      } : row));
+    }));
+    if (action === "group") setGroupFilter("*");
+    setBulkRunning(false);
   };
-  const previewMigration=async()=>{const response=await perform('previewLegacyMigration');if(response.ok){if(response.result?.detected || response.result?.available){setMigration(response.result);setModal({type:'migration'});}else setToast({type:'info',message:'没有发现可迁移的旧工作区。'});}};
-  const migrate=async(ids)=>{const response=await perform('migrateLegacy',{ids,copyBrowserData:true},'旧环境已复制迁移，原资料和备份已保留');if(response.ok){closeModal();setMigration(null);}};
-  const selectedProxy = proxies.find((proxy) => proxy.id === selected?.proxyId);
-  const resumeProfile=profiles.find((profile)=>profile.id===resumeId);
-  const resumeRuntime=runtimeFor(resumeProfile);
-  const installRuntime=async(runtime)=>{const response=await perform('installEngine',{runtimeId:runtime.id},`${runtime.displayName || runtime.id} 已安装`);if(response.ok&&resumeProfile?.engine===runtime.id){setToast({type:'success',message:'内核已就绪，可以启动刚才的环境。'});}};
-
-  const terminalActive = (id) => terminalProfiles.some((profile)=>profile.profileId===id && profile.sessions?.some((session)=>['running','starting','closing'].includes(session.status)));
-  const terminalError=useCallback((message)=>setToast({type:'error',message}),[]);
-  const showTerminal=(id)=>{setTerminalVisible(true);setTerminalRequest({profileId:id,nonce:Date.now()});};
-  return <div className={`app-shell ${api.isDesktop ? 'is-desktop' : ''} ${page === 'profiles' ? 'with-detail' : ''} ${terminalVisible?'terminal-visible':''} ${terminalVisible&&terminalExpanded?'terminal-expanded':''}`} style={{'--terminal-height':`${Math.min(terminalHeight,terminalMaxHeight)}px`}}>
+  const previewMigration = async () => {
+    const response = await perform("previewLegacyMigration");
+    if (response.ok) {
+      if (response.result?.detected || response.result?.available) {
+        setMigration(response.result);
+        setModal({
+          type: "migration"
+        });
+      } else setToast({
+        type: "info",
+        message: t("没有发现可迁移的旧工作区。")
+      });
+    }
+  };
+  const migrate = async ids => {
+    const response = await perform("migrateLegacy", {
+      ids,
+      copyBrowserData: true
+    }, t("旧环境已复制迁移，原资料和备份已保留"));
+    if (response.ok) {
+      closeModal();
+      setMigration(null);
+    }
+  };
+  const selectedProxy = proxies.find(proxy => proxy.id === selected?.proxyId);
+  const resumeProfile = profiles.find(profile => profile.id === resumeId);
+  const resumeRuntime = runtimeFor(resumeProfile);
+  const installRuntime = async runtime => {
+    const response = await perform("installEngine", {
+      runtimeId: runtime.id
+    }, t("{value1} 已安装", {
+      value1: runtime.displayName || runtime.id
+    }));
+    if (response.ok && resumeProfile?.engine === runtime.id) {
+      setToast({
+        type: "success",
+        message: t("内核已就绪，可以启动刚才的环境。")
+      });
+    }
+  };
+  const terminalActive = id => terminalProfiles.some(profile => profile.profileId === id && profile.sessions?.some(session => ["running", "starting", "closing"].includes(session.status)));
+  const terminalError = useCallback(message => setToast({
+    type: "error",
+    message
+  }), []);
+  const showTerminal = id => {
+    setTerminalVisible(true);
+    setTerminalRequest({
+      profileId: id,
+      nonce: Date.now()
+    });
+  };
+  const applications = snapshot.applications || [];
+  const selectedWorkspace = terminalProfiles.find(item => item.profileId === selectedId);
+  const contextualProfiles = profiles.map(profile => ({
+    ...profile,
+    workspace: terminalProfiles.find(item => item.profileId === profile.id)
+  }));
+  const withDetail = ["profiles", "browsers", "applications"].includes(page);
+  const navigate = target => {
+    setPage(target);
+    setTerminalExpanded(false);
+    setTerminalVisible(target === "terminals");
+    if (target === "terminals") setTerminalHeight(Math.max(320, window.innerHeight - 180));
+    if (target === "terminals" && selectedId) setTerminalRequest({
+      profileId: selectedId,
+      nonce: Date.now()
+    });
+  };
+  const editSelected = profile => {
+    if (["running", "starting"].includes(profile.status) || terminalActive(profile.id) || applications.some(item => item.profileId === profile.id && ["running", "starting", "stopping"].includes(item.status))) {
+      setToast({
+        type: "info",
+        message: t("请先停止这个境舱的运行会话。")
+      });
+      return;
+    }
+    setModal({
+      type: "editProfile",
+      profile
+    });
+  };
+  const chooseDirectory = async () => {
+    if (!selected || !api.isDesktop) return;
+    await perform("chooseWorkspaceDirectory", {
+      id: selected.id
+    });
+    const value = await api.call("terminalSnapshot").catch(() => null);
+    if (value?.profiles) setTerminalProfiles(value.profiles);
+  };
+  const pickApplication = async () => {
+    if (!selected || !api.isDesktop) return;
+    const response = await perform("pickApplication");
+    if (response.ok && response.result?.path) await perform("saveApplication", {
+      application: {
+        profileId: selected.id,
+        path: response.result.path,
+        name: response.result.name
+      }
+    }, t("软件已添加"));
+  };
+  const activeInEnvironment = profile => ["running", "starting"].includes(profile?.status) || terminalActive(profile?.id) || applications.some(item => item.profileId === profile?.id && ["running", "starting", "stopping"].includes(item.status));
+  const subtitle = {
+    profiles: t("统一管理网络与工作目录"),
+    proxies: t("设置一次，整个境舱共用"),
+    browsers: t("独立指纹与浏览数据"),
+    terminals: t("本地工具，独立配置与历史"),
+    applications: t("让本地软件使用境舱网络"),
+    monitor: t("浏览器、终端与软件运行状态"),
+    settings: t("语言与应用偏好")
+  }[page];
+  return <div className={`app-shell ${api.isDesktop ? "is-desktop" : ""} ${withDetail ? "with-detail" : ""} ${terminalVisible ? "terminal-visible" : ""} ${terminalVisible && terminalExpanded ? "terminal-expanded" : ""} ${page === "terminals" ? "terminal-workspace" : ""}`} style={{
+    "--terminal-height": `${Math.min(terminalHeight, terminalMaxHeight)}px`
+  }}>
     {api.isDesktop && <div className="desktop-titlebar" aria-hidden="true" />}
-    <aside className="sidebar"><div className="brand"><img className="brand-mark" src={`${import.meta.env.BASE_URL}assets/envara-icon.png`} alt="" /><div><div className="brand-name">Envara<span>境舱</span></div><div className="brand-caption">浏览器环境管理</div></div></div><div className="sidebar-section">工作区</div><nav className="navigation" aria-label="主导航">{navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} onClick={() => {setPage(id);setTerminalExpanded(false);}}><Icon size={20} weight={page === id ? 'fill' : 'regular'} /><span>{label}</span>{id === 'profiles' && <span className="nav-count">{profiles.length}</span>}</button>)}</nav><div className="sidebar-bottom">{terminalRequest&&!terminalVisible&&<button className="terminal-reopen" onClick={()=>setTerminalVisible(true)}><TerminalWindow size={17}/><span>显示终端</span></button>}<button className="engine-indicator" onClick={() => setPage('settings')}><span className={`engine-light ${installedCount ? 'ready' : ''}`} /><span>{installedCount ? `${installedCount} 个内核已就绪` : engines.some((item)=>item.installing) ? '正在安装浏览器内核' : '浏览器内核未安装'}</span><CaretRight size={13} /></button><div className="storage-summary"><span>环境数据</span><span>{bytes(totalBytes)}</span></div><div className="owner"><div className="owner-avatar">境</div><div><strong>本地工作区</strong><span>设备所有者</span></div><span className="local-dot" title="本地数据" /></div></div></aside>
-    <main className="main-panel"><header className="page-header"><div className="page-heading"><div className="heading-line"><h1 tabIndex={-1}>{navItems.find((item) => item.id === page)?.label}</h1>{!api.isDesktop && <span className="preview-badge">界面预览</span>}</div><p>{page === 'profiles' ? `共 ${profiles.length} 个环境 · ${runningCount} 个活跃${startingCount ? `（${startingCount} 个启动中）` : ''}` : page === 'proxies' ? `${proxies.length} 个网络出口 · 独立配置，按需使用` : page === 'monitor' ? '查看浏览会话状态与本机运行记录' : '管理浏览器内核与本地应用'}</p></div>{page === 'profiles' && <div className="header-actions"><div className="search-input"><MagnifyingGlass size={17} /><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、分组、代理" aria-label="搜索环境" /><kbd>⌘ K</kbd></div><Button icon={UploadSimple} onClick={() => importProfiles()} disabled={pending['importProfiles:']}>导入</Button><Button icon={Plus} className="primary" onClick={() => setModal({ type: 'createProfile' })}>新建环境</Button></div>}{page === 'proxies' && <Button icon={Plus} className="primary" onClick={() => setModal({ type: 'createProxy' })}>添加网络出口</Button>}</header>
-      {page === 'profiles' && <>
-        {api.isDesktop && snapshot.legacyMigration?.available && <div className="section-note migration-discovery"><FolderOpen size={19}/><span>发现 {snapshot.legacyMigration.count || 0} 个旧环境，原有资料保留。复制迁移后可在这里继续使用。</span><Button onClick={previewMigration} disabled={pending['previewLegacyMigration:']}>查看旧环境</Button></div>}
-        <div className="environment-toolbar"><div className="filter-tabs" role="tablist" aria-label="环境状态">{[['all','全部'],['running','活跃'],['stopped','已停止'],['error','异常']].map(([id,label])=><button key={id} className={filter===id?'selected':''} role="tab" aria-selected={filter===id} onClick={()=>setFilter(id)}>{label}<span>{counts[id]}</span></button>)}</div><label className="group-filter"><span>分组</span><select aria-label="分组筛选" value={groupFilter} onChange={(event)=>setGroupFilter(event.target.value)}><option value="*">全部分组</option><option value="">未分组</option>{groups.map((group)=><option key={group} value={group}>{group}</option>)}</select></label></div>
-        {checkedIds.length>0 && <div className="bulk-toolbar"><span>已选 {checkedIds.length} 个环境</span><Button icon={Play} disabled={bulkRunning} onClick={()=>runBulk('start')}>批量启动</Button><Button icon={Stop} disabled={bulkRunning} onClick={()=>runBulk('stop')}>批量停止</Button><Button icon={FolderOpen} disabled={bulkRunning} onClick={()=>setModal({type:'moveGroup'})}>移动分组</Button><Button disabled={bulkRunning} onClick={()=>setCheckedIds([])}>取消选择</Button></div>}
-        {bulkResults.length>0 && <details className="bulk-results" open><summary>{bulkRunning?'正在处理':`批量结果：${bulkResults.filter((row)=>row.state==='success').length} 成功 · ${bulkResults.filter((row)=>row.state==='error').length} 失败`}</summary>{bulkResults.map((row)=><div key={row.id} className={`bulk-result-row ${row.state}`}><strong>{row.name}</strong><span>{row.message}</span></div>)}{!bulkRunning&&<Button onClick={()=>setBulkResults([])}>收起结果</Button>}</details>}
-        <div className="environment-table"><div className="table-head profile-grid"><span className="table-select-cell"><input type="checkbox" className="row-checkbox" aria-label="选择当前筛选下的全部环境" checked={allVisibleChecked} ref={(input)=>{if(input)input.indeterminate=!allVisibleChecked&&filteredProfiles.some((profile)=>checkedIds.includes(profile.id));}} onChange={toggleAllVisible} disabled={!filteredProfiles.length}/></span><span>名称</span><span>内核</span><span>指纹画像</span><span>网络出口</span><span>状态</span><span>CPU · 内存</span></div><div className="table-body">{loading?<div className="table-loading">正在读取环境…</div>:filteredProfiles.length?filteredProfiles.map((profile)=>{const proxy=proxies.find((item)=>item.id===profile.proxyId),runtime=runtimeFor(profile);return <div key={profile.id} className={`profile-row profile-grid ${selectedId===profile.id?'selected':''}`} onClick={()=>setSelectedId(profile.id)} onDoubleClick={()=>{if(!busyProfile(profile.id))profile.status==='running'?perform('focusProfile',{id:profile.id}):start(profile);}}><span className="table-select-cell" onClick={(event)=>event.stopPropagation()} onDoubleClick={(event)=>event.stopPropagation()}><input className="row-checkbox" type="checkbox" aria-label={`批量选择 ${profile.name}`} checked={checkedIds.includes(profile.id)} onChange={()=>toggleChecked(profile.id)}/></span><button className="profile-name-cell profile-open" aria-label={`查看环境 ${profile.name}`} aria-pressed={selectedId===profile.id} onClick={()=>setSelectedId(profile.id)}><span className={`row-indicator ${profile.status==='running'?'online':''}`}/><span className="cell-stack"><strong>{profile.name}</strong><small>{profile.group||'未分组'}</small></span></button><span className="cell-stack"><span>{runtime.displayName||runtime.id}</span><small>{familyLabel(runtime)} 内核</small></span><span className="cell-stack"><span>{allows(runtime,'platform')?platforms[profile.platform]||profile.platform:'本机平台'} · {familyLabel(runtime)}</span><small>{profileDimensions(profile)} · {profile.locale || '自动'}</small></span><span className="cell-stack"><span>{proxy?.name||'直接连接'}</span><small>{proxy?`${protocolLabel(proxy.protocol)} · ${proxy.host}`:'使用本机网络'}</small></span><Status status={pending[`startProfile:${profile.id}`]?'starting':profile.status}/><span className="resource-cell"><span>{profile.cpuPercent==null?'—':`${Number(profile.cpuPercent).toFixed(0)}%`}</span><small>{bytes(profile.memoryBytes)}</small></span></div>;}):<div className="empty-environments"><div className="empty-icon"><Stack size={31} weight="duotone"/></div><h2>{profiles.length?'没有找到符合条件的环境':'创建你的第一个环境'}</h2><p>{profiles.length?'试试其他关键词，或切换分组与状态。':'每个环境拥有独立的配置、Cookie 和浏览数据。'}</p>{profiles.length?<Button onClick={()=>{setQuery('');setFilter('all');setGroupFilter('*');}}>重置筛选</Button>:<Button icon={Plus} className="primary" onClick={()=>setModal({type:'createProfile'})}>新建环境</Button>}</div>}</div></div><div className="table-footer"><span>{filteredProfiles.length} 个环境</span><span>单击查看详情 · 双击启动或打开会话</span></div>{!api.isDesktop&&<div className="preview-note"><Browsers size={16}/><span>当前为界面预览。独立浏览会话与内核安装请在境舱桌面应用中使用。</span></div>}
+    <aside className="sidebar">
+      <div className="brand"><img className="brand-mark" src={`${import.meta.env.BASE_URL}assets/envara-icon.png`} alt="" /><div><div className="brand-name">Envara{language !== "en" && <span>境舱</span>}</div><div className="brand-caption">{t("独立工作空间")}</div></div></div>
+      <div className="sidebar-section">{t("工作区")}</div>
+      <nav className="navigation" aria-label={t("主导航")}>{navItems.map(({
+          id,
+          label,
+          icon: Icon
+        }) => <button key={id} className={`nav-item ${page === id ? "active" : ""}`} onClick={() => navigate(id)}><Icon size={20} weight={page === id ? "fill" : "regular"} /><span>{t(label)}</span>{id === "profiles" && <span className="nav-count">{profiles.length}</span>}</button>)}</nav>
+      <div className="sidebar-bottom"><button className={`nav-item settings-navigation ${page === "settings" ? "active" : ""}`} onClick={() => navigate("settings")}><Gear size={20} weight={page === "settings" ? "fill" : "regular"} /><span>{t("设置")}</span></button><div className="storage-summary"><span>{t("环境数据")}</span><span>{bytes(totalBytes)}</span></div><div className="owner"><div className="owner-avatar">{t("境")}</div><div><strong>{t("本地工作区")}</strong><span>{t("设备所有者")}</span></div><span className="local-dot" /></div></div>
+    </aside>
+    <main className="main-panel">
+      <header className="page-header"><div className="page-heading"><div className="heading-line"><h1 tabIndex={-1}>{t(page === "settings" ? "设置" : navItems.find(item => item.id === page)?.label)}</h1>{!api.isDesktop && <span className="preview-badge">{t("界面预览")}</span>}</div><p>{t(subtitle)}</p></div>
+        {page === "profiles" && <div className="header-actions"><Button icon={UploadSimple} onClick={() => importProfiles()} disabled={pending["importProfiles:"]}>{t("导入")}</Button><Button icon={Plus} className="primary" onClick={() => setModal({
+            type: "createProfile"
+          })}>{t("新建环境")}</Button></div>}
+        {page === "proxies" && <Button icon={Plus} className="primary" onClick={() => setModal({
+          type: "createProxy"
+        })}>{t("添加网络出口")}</Button>}
+      </header>
+      {page === "profiles" && <>
+        {api.isDesktop && snapshot.legacyMigration?.available && <div className="section-note migration-discovery"><FolderOpen size={18} /><span>{t("发现 {count} 个旧环境", {
+              count: snapshot.legacyMigration.count || 0
+            })}</span><Button onClick={previewMigration} disabled={pending["previewLegacyMigration:"]}>{t("查看旧环境")}</Button></div>}
+        <div className="environment-toolbar"><div className="search-input"><MagnifyingGlass size={17} /><input ref={searchRef} value={query} onChange={event => setQuery(event.target.value)} placeholder={t("搜索环境")} aria-label={t("搜索环境")} /><kbd>⌘ K</kbd></div><label className="group-filter"><select aria-label={t("分组筛选")} value={groupFilter} onChange={event => setGroupFilter(event.target.value)}><option value="*">{t("全部分组")}</option><option value="">{t("未分组")}</option>{groups.map(group => <option key={group} value={group}>{group}</option>)}</select></label></div>
+        {checkedIds.length > 0 && <div className="bulk-toolbar"><span>{t("已选 {count} 个环境", {
+              count: checkedIds.length
+            })}</span><Button icon={Play} disabled={bulkRunning} onClick={() => runBulk("start")}>{t("启动浏览器")}</Button><Button icon={Stop} disabled={bulkRunning} onClick={() => runBulk("stop")}>{t("停止浏览器")}</Button><Button icon={FolderOpen} disabled={bulkRunning} onClick={() => setModal({
+            type: "moveGroup"
+          })}>{t("移动分组")}</Button><Button disabled={bulkRunning} onClick={() => setCheckedIds([])}>{t("取消选择")}</Button></div>}
+        {bulkResults.length > 0 && <details className="bulk-results" open><summary>{t("批量结果")}</summary>{bulkResults.map(row => <div key={row.id} className={`bulk-result-row ${row.state}`}><strong>{row.name}</strong><span>{row.message}</span></div>)}{!bulkRunning && <Button onClick={() => setBulkResults([])}>{t("收起结果")}</Button>}</details>}
+        <EnvironmentOverview profiles={contextualProfiles.filter(profile => filteredProfiles.some(item => item.id === profile.id))} proxies={proxies} selectedId={selectedId} onSelect={setSelectedId} checkedIds={checkedIds} onToggleChecked={toggleChecked} onToggleAll={toggleAllVisible} allChecked={allVisibleChecked} loading={loading} onCreate={() => setModal({
+          type: "createProfile"
+        })} onEdit={editSelected} t={t} hasProfiles={profiles.length > 0} onReset={() => {
+          setQuery("");
+          setGroupFilter("*");
+        }} />
+        <div className="table-footer"><span>{t("{count} 个环境", {
+              count: filteredProfiles.length
+            })}</span></div>
       </>}
-      {page === 'proxies' && <div className="page-content"><div className="section-note"><ShieldCheck size={18}/><span>{api.isDesktop?'通过代理查询实际出口 IP、地区和时区。自动时区在启动前重新识别。':'真实出口识别需要境舱桌面应用；预览中可管理示例代理配置。'}</span></div>{proxies.length?<div className="proxy-table"><div className="proxy-grid table-head"><span>网络出口</span><span>服务器</span><span>实际出口</span><span>操作</span></div>{proxies.map((proxy)=><div className="proxy-grid proxy-row" key={proxy.id}><div className="proxy-name"><div className="proxy-icon"><GlobeHemisphereWest size={20}/></div><div><strong>{proxy.name}</strong><small>{profiles.filter((profile)=>profile.proxyId===proxy.id).length} 个环境使用{snapshot.groups?.some((group)=>group.proxyId===proxy.id)&&` · ${snapshot.groups.filter((group)=>group.proxyId===proxy.id).length} 个分组绑定`}</small></div></div><div className="proxy-server"><span className="server-address">{proxy.host}:{proxy.port}</span><span className="protocol-tag">{protocolLabel(proxy.protocol)}</span></div><NetworkResult compact network={proxyTests[proxy.id]?.checking?null:proxyTests[proxy.id] || proxy.network} checking={proxyTests[proxy.id]?.checking}/><div className="row-actions"><Button onClick={()=>checkProxy(proxy)} disabled={!api.isDesktop || proxyTests[proxy.id]?.checking} title={api.isDesktop?'识别实际网络出口':'出口识别需要桌面应用'}>识别</Button><IconButton icon={PencilSimple} label="编辑网络出口" onClick={()=>setModal({type:'editProxy',proxy})}/><IconButton icon={Trash} label="删除网络出口" onClick={()=>setModal({type:'confirm',title:`删除「${proxy.name}」？`,description:'请先解除环境或分组对该网络出口的绑定，再删除。',method:'deleteProxy',id:proxy.id,button:'删除出口',success:'网络出口已删除'})}/></div></div>)}</div>:<div className="page-empty"><div className="empty-icon"><GlobeHemisphereWest size={31}/></div><h2>还没有网络出口</h2><p>添加代理后，可在环境配置中选择对应的网络出口。</p><Button icon={Plus} className="primary" onClick={()=>setModal({type:'createProxy'})}>添加网络出口</Button></div>}</div>}
-      {page === 'monitor' && <div className="page-content monitor-content"><div className="monitor-summary"><div><span><Browsers size={19} />活跃浏览会话（含启动中）</span><strong>{runningCount}<small>个</small></strong></div><div><span><Stack size={19} />环境总数</span><strong>{profiles.length}<small>个</small></strong></div><div><span><HardDrives size={19} />本地浏览数据</span><strong className="size-stat">{bytes(totalBytes)}</strong></div></div><div className="section-heading"><h2>当前浏览会话</h2><span>{activeProfiles.length} 个活跃浏览会话</span></div>{activeProfiles.length ? <div className="session-list">{activeProfiles.map((profile) => <div className="session-row" key={profile.id}><div className="session-icon"><Browsers size={23} /></div><div className="session-name"><strong>{profile.name}</strong><span>{platforms[profile.platform]} · {profile.group || '未分组'}</span></div><Status status={profile.status} /><span className="session-resource"><Cpu size={16} />{profile.cpuPercent == null ? '—' : `${Number(profile.cpuPercent).toFixed(0)}%`}<HardDrives size={16} />{bytes(profile.memoryBytes)}</span><Button icon={ArrowSquareOut} disabled={profile.status !== 'running'} onClick={() => perform('focusProfile', { id: profile.id })}>打开</Button><IconButton icon={Stop} label="停止会话" disabled={profile.status === 'starting' || busyProfile(profile.id)} onClick={() => perform('stopProfile', { id: profile.id }, '会话已停止')} /></div>)}</div> : <div className="empty-session"><Browsers size={26} /><div><strong>当前没有运行中的浏览会话</strong><span>在环境页面启动浏览器后，可在这里查看状态。</span></div><Button onClick={() => setPage('profiles')} icon={ArrowRight}>前往环境</Button></div>}<div className="section-heading activity-heading"><h2>运行记录</h2><span>最近的本机活动</span></div><div className="activity-list">{events.length ? [...events].sort((a, b) => new Date(b.time) - new Date(a.time)).slice(0, 80).map((event) => <div className="activity-row" key={event.id}><span className={`activity-dot ${event.type === 'error' ? 'failure' : ''}`} /><span className="activity-message">{event.message}</span><time>{new Date(event.time).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time></div>) : <div className="empty-activity"><Clock size={21} />暂无运行记录</div>}</div></div>}
-      {page === 'settings' && <div className="page-content settings-content">{!api.isDesktop && <div className="section-note"><Browsers size={18}/><span>{snapshot.runtime?.message || '此目录为界面预览样例，未安装或连接浏览器内核。'}</span></div>}<div className="section-heading first"><h2>浏览器内核</h2><span>{installedCount} / {engines.length} 已就绪</span></div>{resumeProfile&&<div className="section-note"><Browsers size={18}/><span>准备启动「{resumeProfile.name}」：{resumeRuntime.installed?'内核已就绪。':`请先安装 ${resumeRuntime.displayName||resumeRuntime.id}。`}</span><Button className={resumeRuntime.installed?'primary':''} disabled={!resumeRuntime.installed||busyProfile(resumeProfile.id)} onClick={()=>{setPage('profiles');setSelectedId(resumeProfile.id);setResumeId(null);start(resumeProfile);}}>启动此环境</Button><IconButton icon={X} label="取消待启动环境" onClick={()=>setResumeId(null)}/></div>}<div className="engine-catalog">{engines.map((runtime)=><div key={runtime.id} className={`settings-card engine-card ${runtime.supported===false?'engine-unsupported':''}`}><div className="settings-card-icon"><Browsers size={28} weight="duotone"/></div><div className="engine-copy"><h3>{runtime.displayName||runtime.id}</h3><div className="engine-badges"><span className="protocol-tag">{familyLabel(runtime)}</span>{runtime.experimental&&<span className="protocol-tag">实验性</span>}{runtime.capabilities?.supports_seed_fingerprint===false && runtime.capabilities?.supports_structured_config===false&&<span className="protocol-tag">标准浏览器</span>}</div><div className={`engine-state ${runtime.installed?'success-text':''}`}><span className={`engine-light ${runtime.installed?'ready':''}`}/>{runtime.supported===false?'当前平台不可用':runtime.installed?`已安装${runtime.version?` · ${runtime.version}`:''}`:runtime.installing?typeof runtime.progress==='number'?`${Math.round(runtime.progress)}%`:runtime.progress||'正在下载…':'尚未安装'}</div></div><Button className={runtime.installed||runtime.supported===false?'':'primary'} icon={runtime.installed?CheckCircle:DownloadSimple} onClick={()=>installRuntime(runtime)} disabled={runtime.installed||runtime.installing||runtime.supported===false||pending[`installEngine:${runtime.id}`]}>{runtime.installed?'已就绪':runtime.supported===false?'不可用':runtime.installing||pending[`installEngine:${runtime.id}`]?'安装中…':'安装内核'}</Button>{runtime.message&&<div className="engine-message">{runtime.message}</div>}{runtime.error&&<div className="engine-error" role="alert"><WarningCircle size={16}/>{runtime.error}</div>}</div>)}</div><p className="settings-help">内核独立安装。标准浏览器提供数据隔离；指纹能力以每个内核实际支持的参数为准。</p><div className="runtime-license-note"><span>Envara 采用 MIT 许可。浏览器内核分别遵循自己的许可；CloakBrowser 包装层为 MIT，其二进制另有专有许可。</span><Button onClick={()=>perform('openDocumentation',{target:'runtime-license'})}>查看内核许可</Button></div>{api.isDesktop && snapshot.legacyMigration?.available && <><div className="section-heading"><h2>旧版本工作区</h2></div><div className="settings-card settings-rows"><div className="settings-row"><div><strong>发现 {snapshot.legacyMigration.count || 0} 个旧环境</strong><span>复制迁移之前创建备份，原环境与资料保留。请先关闭旧版本的浏览器。</span></div><Button onClick={previewMigration} disabled={pending['previewLegacyMigration:']}>查看迁移内容</Button></div></div></>}<div className="section-heading"><h2>本地数据</h2><span>所有环境保存在这台设备</span></div><div className="settings-card settings-rows"><div className="settings-row"><div><strong>数据目录</strong><span className="path-label">{system.dataDir||'桌面应用中可查看数据位置'}</span></div><Button icon={FolderOpen} onClick={()=>perform('openDataDirectory')}>打开目录</Button></div><div className="settings-row"><div><strong>导出环境配置</strong><span>备份配置参数，不包含 Cookie 与代理密码</span></div><Button icon={DownloadSimple} onClick={()=>perform('exportProfiles',{},'环境配置已导出')} disabled={pending['exportProfiles:']||!profiles.length}>导出全部</Button></div><div className="settings-row"><div><strong>会话退出行为</strong><span>退出境舱时，关闭所有由境舱启动的浏览器会话</span></div><span className="setting-fixed"><CheckCircle size={16}/>已启用</span></div></div>{(snapshot.integration?.mcp?.supported || !api.isDesktop) && <><div className="section-heading"><h2>自动化连接</h2></div><div className="settings-card settings-rows"><div className="settings-row"><div><strong>本机 MCP 服务</strong><span>{api.isDesktop ? '连接支持 MCP 的客户端时，请保持境舱桌面应用运行。' : '浏览器预览不提供本机自动化服务，请在桌面应用中连接。'}</span>{api.isDesktop && snapshot.integration.mcp.mcpUrl && <span className="path-label">{snapshot.integration.mcp.mcpUrl}</span>}</div><span className="protocol-tag">{api.isDesktop ? snapshot.integration.mcp.status==='ready'?'已就绪':'未连接' : '桌面功能'}</span></div><div className="settings-row"><div><strong>连接配置</strong><span>导出的文件包含本机连接凭据，请妥善保管。</span></div><Button icon={DownloadSimple} disabled={!api.isDesktop || pending['exportAutomationConfig:']} onClick={()=>perform('exportAutomationConfig',{},'MCP 连接配置已导出')}>导出 MCP 连接配置</Button></div></div></>}<div className="section-heading"><h2>关于境舱</h2></div><div className="settings-card settings-rows"><div className="settings-row"><div><strong>Envara · 境舱</strong><span>开源的本地浏览器环境管理器</span></div><div className="about-actions"><span className="version-label">v{system.appVersion||'0.1.0'}</span><Button icon={ArrowSquareOut} onClick={()=>perform('openDocumentation',{target:'project'})}>源代码</Button></div></div><div className="settings-row"><div><strong>运行平台</strong><span>{api.isDesktop?({darwin:'macOS',win32:'Windows',linux:'Linux'}[system.platform]||system.platform||'桌面应用'):'浏览器界面预览'}</span></div><span className="protocol-tag">本地运行</span></div></div></div>}
+      {page === "browsers" && <BrowserWorkspace profiles={profiles} proxies={proxies} engines={engines} selectedId={selectedId} onSelect={setSelectedId} onStart={start} onStop={profile => perform("stopProfile", {
+        id: profile.id
+      }, t("会话已停止"))} onFocus={profile => perform("focusProfile", {
+        id: profile.id
+      })} onEdit={editSelected} onCreate={() => setModal({
+        type: "createProfile"
+      })} onInstall={installRuntime} busyProfile={busyProfile} editingDisabled={id => terminalActive(id) || applications.some(item => item.profileId === id && ["running", "starting", "stopping"].includes(item.status))} pending={pending} t={t} />}
+      {page === "terminals" && <div className="terminal-page-context"><TerminalWindow size={18} /><span>{t("选择境舱和工作目录，打开终端即可使用本地工具。")}</span></div>}
+      {page === "applications" && <ApplicationsWorkspace profiles={profiles} proxies={proxies} applications={applications} routing={snapshot.applicationRouting} selectedId={selectedId} onSelect={setSelectedId} onPick={pickApplication} onStart={application => perform("startApplication", {
+        id: application.id
+      })} onStop={application => perform("stopApplication", {
+        id: application.id
+      }, t("软件已停止"))} onDelete={application => setModal({
+        type: "confirm",
+        title: t("移除「{value1}」？", {
+          value1: application.name
+        }),
+        description: t("只移除境舱绑定，软件与本地文件会保留。"),
+        method: "deleteApplication",
+        id: application.id,
+        button: t("移除软件"),
+        success: t("软件已移除")
+      })} onSetup={() => perform("setupApplicationRouting")} pending={pending} t={t} desktop={api.isDesktop} />}
+      {page === "proxies" && <div className="page-content"><div className="section-note"><ShieldCheck size={18} /><span>{api.isDesktop ? t("通过代理查询实际出口 IP、地区和时区。自动时区在启动前重新识别。") : t("真实出口识别需要境舱桌面应用；预览中可管理示例代理配置。")}</span></div>{proxies.length ? <div className="proxy-table"><div className="proxy-grid table-head"><span>{t("网络出口")}</span><span>{t("服务器")}</span><span>{t("实际出口")}</span><span>{t("操作")}</span></div>{proxies.map(proxy => <div className="proxy-grid proxy-row" key={proxy.id}><div className="proxy-name"><div className="proxy-icon"><GlobeHemisphereWest size={20} /></div><div><strong>{proxy.name}</strong><small>{profiles.filter(profile => profile.proxyId === proxy.id).length}{t("个环境使用")}{snapshot.groups?.some(group => group.proxyId === proxy.id) && t(" · {value1} 个分组绑定", {
+                    value1: snapshot.groups.filter(group => group.proxyId === proxy.id).length
+                  })}</small></div></div><div className="proxy-server"><span className="server-address">{proxy.host}:{proxy.port}</span><span className="protocol-tag">{protocolLabel(proxy.protocol)}</span></div><NetworkResult compact network={proxyTests[proxy.id]?.checking ? null : proxyTests[proxy.id] || proxy.network} checking={proxyTests[proxy.id]?.checking} /><div className="row-actions"><Button onClick={() => checkProxy(proxy)} disabled={!api.isDesktop || proxyTests[proxy.id]?.checking} title={api.isDesktop ? t("识别实际网络出口") : t("出口识别需要桌面应用")}>{t("识别")}</Button><IconButton icon={PencilSimple} label={t("编辑网络出口")} onClick={() => setModal({
+                type: "editProxy",
+                proxy
+              })} /><IconButton icon={Trash} label={t("删除网络出口")} onClick={() => setModal({
+                type: "confirm",
+                title: t("删除「{value1}」？", {
+                  value1: proxy.name
+                }),
+                description: t("请先解除环境或分组对该网络出口的绑定，再删除。"),
+                method: "deleteProxy",
+                id: proxy.id,
+                button: t("删除出口"),
+                success: t("网络出口已删除")
+              })} /></div></div>)}</div> : <div className="page-empty"><div className="empty-icon"><GlobeHemisphereWest size={31} /></div><h2>{t("还没有网络出口")}</h2><p>{t("添加代理后，可在环境配置中选择对应的网络出口。")}</p><Button icon={Plus} className="primary" onClick={() => setModal({
+            type: "createProxy"
+          })}>{t("添加网络出口")}</Button></div>}</div>}
+
+      {page === "monitor" && <MonitorWorkspace profiles={profiles} terminalProfiles={terminalProfiles} applications={applications} events={events} onNavigate={navigate} t={t} language={language} />}
+      {page === "settings" && <div className="page-content settings-content">
+        <div className="section-heading first"><h2>{t("偏好设置")}</h2></div>
+        <div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("界面语言")}</strong></div><select className="language-select" value={language} onChange={event => setLanguage(event.target.value)} aria-label={t("界面语言")}><option value="zh-CN">{t("简体中文")}</option><option value="en">English</option></select></div><div className="settings-row"><div><strong>{t("退出时关闭浏览器")}</strong></div><input type="checkbox" className="row-checkbox" aria-label={t("退出时关闭浏览器")} checked={snapshot.settings?.closeBrowsersOnExit !== false} onChange={event => perform("saveSettings", {
+              settings: {
+                ...snapshot.settings,
+                closeBrowsersOnExit: event.target.checked
+              }
+            })} /></div><div className="settings-row"><div><strong>{t("本地数据")}</strong><span className="path-label">{t(system.dataDir)}</span></div><Button icon={FolderOpen} disabled={!api.isDesktop} onClick={() => perform("openDataDirectory")}>{t("打开目录")}</Button></div></div>
+        {api.isDesktop && snapshot.legacyMigration?.available && <div className="settings-card settings-rows migration-settings"><div className="settings-row"><div><strong>{t("旧版本工作区")}</strong></div><Button onClick={previewMigration} disabled={pending["previewLegacyMigration:"]}>{t("迁移旧环境")}</Button></div></div>}
+        <div className="section-heading"><h2>{t("关于")}</h2></div><div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("Envara 境舱")}</strong><span>{t("开源的本地独立工作空间")}</span></div><span className="version-label">{system.appVersion || "—"}</span></div><div className="settings-row"><div><strong>{t("浏览器内核许可")}</strong></div><Button onClick={() => perform("openDocumentation", {
+              target: "runtime-license"
+            })}>{t("查看许可")}</Button></div><div className="settings-row"><div><strong>GitHub</strong></div><Button icon={ArrowSquareOut} onClick={() => perform("openDocumentation", {
+              target: "project"
+            })}>{t("项目主页")}</Button></div></div>
+      </div>}
     </main>
-    {page === 'profiles' && <aside className="detail-panel">{selected ? <><div className="detail-heading"><div className="detail-title-line"><h2 title={selected.name}>{selected.name}</h2><Status status={selected.status} /></div><p>{selected.group || '未分组'}<span>·</span>{selectedRuntime.displayName || selectedRuntime.id}</p></div><div className={`browser-preview ${selected.screenshot ? 'has-screenshot' : ''}`}>{selected.screenshot ? <img src={selected.screenshot} alt={`${selected.name} 的浏览器窗口预览`} /> : <><div className="preview-placeholder"><Browsers size={34} weight="duotone" /><strong>{selected.status === 'running' ? '会话正在运行' : selected.status === 'starting' ? '正在启动浏览器' : '环境待启动'}</strong><span>{selected.status === 'running' ? '打开会话以查看浏览器窗口' : selected.status === 'starting' ? '首次启动可能需要一点时间' : '启动后在独立窗口中浏览'}</span></div></>}</div><div className="session-controls"><Button className="primary session-primary" icon={selected.status === 'running' ? ArrowSquareOut : Play} disabled={selected.status === 'starting' || busyProfile(selected.id)} onClick={() => selected.status === 'running' ? perform('focusProfile', { id: selected.id }) : start(selected)}>{selected.status === 'running' ? '打开会话' : selected.status === 'starting' || pending[`startProfile:${selected.id}`] ? '正在启动…' : selectedRuntime.installed ? '启动环境' : '安装浏览器内核'}</Button><Button icon={Stop} disabled={selected.status !== 'running' || busyProfile(selected.id)} onClick={() => perform('stopProfile', { id: selected.id }, '会话已停止')}>停止</Button></div><Button icon={TerminalWindow} className="terminal-launch" onClick={()=>showTerminal(selected.id)}>打开终端</Button>{selected.lastError && <div className="detail-error"><WarningCircle size={17} /><span>{selected.lastError}</span></div>}{selected.networkLastError && <div className="detail-error network-warning"><GlobeHemisphereWest size={17}/><span>{selected.networkLastError}{selected.timezoneSource==='local'?'；当前采用本机时区，出口尚未确认。':''}</span></div>}<dl className="detail-properties"><div><dt>指纹画像</dt><dd>{allows(selectedRuntime,'platform') ? platforms[selected.platform] || '内核默认' : '本机平台'} · {familyLabel(selectedRuntime)}</dd></div><div><dt>语言设置</dt><dd>{selected.locale || '自动匹配出口'}{selected.status==='running' && <small>实际：{selected.observed?.language || '尚未读取'}</small>}</dd></div><div><dt>时区设置</dt><dd>{selected.timezone || '自动匹配出口'}{!selected.timezone && <small>{selected.resolvedTimezone || '启动时识别'}{selected.resolvedTimezone?` · ${timezoneSourceLabel(selected.timezoneSource)}`:''}</small>}{selected.status==='running' && <small>浏览器：{selected.observed?.timezone || '尚未读取'}</small>}</dd></div><div><dt>屏幕尺寸</dt><dd>{profileDimensions(selected)}</dd></div>{allows(selectedRuntime,'seed') && <div><dt>指纹种子</dt><dd className="mono-value">{selected.seed || '内核默认'}</dd></div>}<div><dt>网络出口</dt><dd>{selectedProxy?.name || '直接连接'}{selectedProxy && <small>{protocolLabel(selectedProxy.protocol)}{selected.proxySource==='group'?` · 分组${selected.proxyMode==='enforced'?'强制':''}`:''}</small>}</dd></div>{selected.network?.ok===true && selected.network.scope==='egress' && selected.network.ip && <div><dt>实际出口</dt><dd className="mono-value">{selected.network.ip}<small>{networkPlace(selected.network)}</small><small>{selected.network.source || '出口查询'}{selected.network.checkedAt?` · ${relativeTime(selected.network.checkedAt)}`:''}</small></dd></div>}<div><dt>资源占用</dt><dd>{selected.cpuPercent == null ? '—' : `${Number(selected.cpuPercent).toFixed(0)}% CPU`} · {bytes(selected.memoryBytes)}</dd></div><div><dt>数据大小</dt><dd>{bytes(selected.dataBytes)}</dd></div><div><dt>上次启动</dt><dd>{relativeTime(selected.lastLaunchedAt)}</dd></div></dl>{selected.notes && <div className="profile-notes"><span>备注</span><p>{selected.notes}</p></div>}<div className="detail-actions"><Button icon={PencilSimple} onClick={() => setModal({ type: 'editProfile', profile: selected })} disabled={['running', 'starting'].includes(selected.status) || terminalActive(selected.id)}>编辑</Button><Button icon={Copy} onClick={() => cloneProfile(selected)} disabled={busyProfile(selected.id)}>克隆</Button><Button icon={DownloadSimple} onClick={() => perform('exportProfiles', { id: selected.id }, '环境配置已导出')} disabled={busyProfile(selected.id)}>导出</Button></div><div className="danger-actions"><button disabled={['running', 'starting'].includes(selected.status) || terminalActive(selected.id)} onClick={() => confirmClear(selected)}>清空浏览数据…</button><button disabled={['running', 'starting'].includes(selected.status) || terminalActive(selected.id)} onClick={() => confirmDelete(selected)}>删除环境…</button></div>{(['running','starting'].includes(selected.status) || terminalActive(selected.id)) && <p className="detail-footnote">停止浏览会话并关闭终端后，可编辑配置或清理数据。</p>}</> : <div className="detail-empty"><Stack size={34} weight="duotone" /><h2>环境详情</h2><p>选择一个环境，查看配置与会话状态。</p></div>}</aside>}
-    <TerminalDock profiles={profiles} visible={terminalVisible} onHide={()=>{setTerminalVisible(false);setTerminalExpanded(false);}} expanded={terminalExpanded} onToggleExpanded={()=>setTerminalExpanded((value)=>!value)} onHeightChange={resizeTerminalDock} minHeight={320} maxHeight={terminalMaxHeight} openRequest={terminalRequest} onError={terminalError} onProfilesChange={setTerminalProfiles}/>
-    {(modal?.type === 'createProfile' || modal?.type === 'editProfile') && <ProfileForm profile={modal.profile} proxies={proxies} systemPlatform={system.platform} engines={engines} defaultEngine={snapshot.settings?.defaultEngine} groups={groups} groupDescriptors={snapshot.groups} onSave={saveProfile} onClose={closeModal} saving={pending[`updateProfile:${modal.profile?.id}`] || pending['createProfile:']} />}{(modal?.type === 'createProxy' || modal?.type === 'editProxy') && <ProxyForm proxy={modal.proxy} proxyCore={system.proxyCore} onSave={saveProxy} onClose={closeModal} saving={pending['saveProxy:']} />}{modal?.type === 'importMapping' && <ImportMappingForm session={modal.session} proxies={proxies} onImport={(proxyMap)=>importProfiles({importId:modal.session.importId,proxyMap})} onAddProxy={()=>{closeModal();setPage('proxies');}} onClose={closeModal} saving={pending[`importProfiles:${modal.session.importId}`]} />}{modal?.type === 'migration' && migration && <MigrationForm migration={migration} onMigrate={migrate} onClose={closeModal} saving={pending['migrateLegacy:']} />}{modal?.type === 'moveGroup' && <GroupForm groups={groups} count={checkedIds.length} onSave={(group)=>runBulk('group',group)} onClose={closeModal} saving={bulkRunning} />}{modal?.type === 'confirm' && <Modal title={modal.title} onClose={closeModal} className="confirm-modal"><div className="modal-body"><div className="confirm-warning"><WarningCircle size={23} /><p>{modal.description}</p></div></div><div className="modal-footer"><Button onClick={closeModal}>取消</Button><Button className="danger" onClick={confirmAction} disabled={pending[`${modal.method}:${modal.id}`]}>{pending[`${modal.method}:${modal.id}`] ? '处理中…' : modal.button}</Button></div></Modal>}{toast && <div className={`toast toast-${toast.type}`} role="status">{toast.type === 'error' ? <WarningCircle size={19} /> : toast.type === 'success' ? <CheckCircle size={19} /> : <Browsers size={19} />}<span>{toast.message}</span><IconButton icon={X} label="关闭通知" onClick={() => setToast(null)} /></div>}
+    {withDetail && <aside className="detail-panel">{page === "browsers" ? <BrowserDetail profile={selected} proxy={selectedProxy} runtime={selectedRuntime} pending={pending} busy={selected && busyProfile(selected.id)} onStart={() => start(selected)} onInstall={() => installRuntime(selectedRuntime)} onFocus={() => perform("focusProfile", {
+        id: selected.id
+      })} onStop={() => perform("stopProfile", {
+        id: selected.id
+      }, t("会话已停止"))} onEdit={() => editSelected(selected)} onClear={() => confirmClear(selected)} editingDisabled={activeInEnvironment(selected)} t={t} /> : <ContextDetail profile={selected} proxy={selectedProxy} workspace={selectedWorkspace} onEdit={() => editSelected(selected)} onDirectory={chooseDirectory} directoryDisabled={!api.isDesktop || !selected || activeInEnvironment(selected) || !!pending[`chooseWorkspaceDirectory:${selected?.id}`]} onNavigate={navigate} onClone={() => cloneProfile(selected)} onExport={() => perform("exportProfiles", {
+        id: selected.id
+      }, t("环境配置已导出"))} onDelete={() => confirmDelete(selected)} editingDisabled={activeInEnvironment(selected)} t={t} />}</aside>}
+    <TerminalDock profiles={profiles} visible={terminalVisible} onHide={() => {
+      setTerminalVisible(false);
+      setTerminalExpanded(false);
+      if (page === "terminals") setPage("profiles");
+    }} expanded={terminalExpanded} onToggleExpanded={() => setTerminalExpanded(value => !value)} onHeightChange={resizeTerminalDock} minHeight={320} maxHeight={terminalMaxHeight} openRequest={terminalRequest} onError={terminalError} onProfilesChange={setTerminalProfiles} />
+    {(modal?.type === "createProfile" || modal?.type === "editProfile") && <ProfileForm profile={modal.profile} proxies={proxies} systemPlatform={system.platform} engines={engines} defaultEngine={snapshot.settings?.defaultEngine} groups={groups} groupDescriptors={snapshot.groups} onSave={saveProfile} onClose={closeModal} saving={pending[`updateProfile:${modal.profile?.id}`] || pending["createProfile:"]} />}{(modal?.type === "createProxy" || modal?.type === "editProxy") && <ProxyForm proxy={modal.proxy} proxyCore={system.proxyCore} onSave={saveProxy} onClose={closeModal} saving={pending["saveProxy:"]} />}{modal?.type === "importMapping" && <ImportMappingForm session={modal.session} proxies={proxies} onImport={proxyMap => importProfiles({
+      importId: modal.session.importId,
+      proxyMap
+    })} onAddProxy={() => {
+      closeModal();
+      setPage("proxies");
+    }} onClose={closeModal} saving={pending[`importProfiles:${modal.session.importId}`]} />}{modal?.type === "migration" && migration && <MigrationForm migration={migration} onMigrate={migrate} onClose={closeModal} saving={pending["migrateLegacy:"]} />}{modal?.type === "moveGroup" && <GroupForm groups={groups} count={checkedIds.length} onSave={group => runBulk("group", group)} onClose={closeModal} saving={bulkRunning} />}{modal?.type === "confirm" && <Modal title={modal.title} onClose={closeModal} className="confirm-modal"><div className="modal-body"><div className="confirm-warning"><WarningCircle size={23} /><p>{modal.description}</p></div></div><div className="modal-footer"><Button onClick={closeModal}>{t("取消")}</Button><Button className="danger" onClick={confirmAction} disabled={pending[`${modal.method}:${modal.id}`]}>{pending[`${modal.method}:${modal.id}`] ? t("处理中…") : modal.button}</Button></div></Modal>}{toast && <div className={`toast toast-${toast.type}`} role="status">{toast.type === "error" ? <WarningCircle size={19} /> : toast.type === "success" ? <CheckCircle size={19} /> : <Browsers size={19} />}<span>{t(toast.message)}</span><IconButton icon={X} label={t("关闭通知")} onClick={() => setToast(null)} /></div>}
   </div>;
 }

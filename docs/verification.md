@@ -1,6 +1,36 @@
 # 验证记录
 
-记录日期：2026-10-07。当前开发 0.4.0 本地候选版，发布暂停。结果按版本与运行路径区分，旧结果不自动代表新增代码已验收。状态见 [能力矩阵](capability-matrix.md)。
+记录日期：2026-10-07。当前开发 0.5.0 本地候选版，发布暂停。结果按版本与运行路径区分，旧结果不自动代表新增代码已验收。状态见 [能力矩阵](capability-matrix.md)。
+
+## 0.5.0：专用工作页、语言与隐私
+
+| 检查 | 本轮证据与范围 |
+| --- | --- |
+| JavaScript | 223/223 通过、0 跳过；包含指定已有 Chromium 可执行文件的真实请求拦截/定位及顶层导航测试 |
+| Go 服务 | 全包 go test ./... 通过；保留 BrowseForge Chromium 原生身份参数，仅 Mac Cloak 添加已实测的 Intl locale 兼容选项 |
+| 构建 | Vite/桌面渲染产物生成，Sites 4 项通过；未发布站点或 GitHub 发行版 |
+| 原生桌面 | 9 项通过：六页中文导航、英语保存及重载、自动地域上下文、真 PTY、复制新进程、放大/还原、独立窗口、权限范围与关闭清理 |
+| 桌面视觉 | 10 张原生 PNG；截图等待实际 compositor presentation 后再次目视检查，环境、浏览器、软件与放大终端均为对应页面 |
+| 两种真实浏览器 | 8 项通过：headed CloakBrowser 145 / Camoufox 135 的标准/严格/关闭模式，正常 HTTP 200、追踪请求中止与实际计数差异 |
+| 自动语言与区域定位 | 两内核 navigator.language 与 Intl locale=en-PH、时区 Asia/Manila；定位 14.6,121、精度 50000m。出口由离线合成 PH 数据提供，不是公网节点证明 |
+| 无坐标保护 | Cloak 原标签及 2 个新标签均权限 denied、getCurrentPosition 错误码 1；Camoufox 3 个标签均禁用定位 API。两机制分开验证，不把本机位置用作回退 |
+| 真实终端 | Electron PTY 验收通过：本地工具、私有 HOME/Claude/历史、代理感知 CLI、本地 SOCKS 认证/远端 DNS、同境舱复制及进程清理；网络范围仍为 proxy-aware-cli |
+| 包内终端 | 3 项通过：app.asar 内 TerminalService/原生 node-pty、打包 Node、输入输出/resize、自然退出/重开/关闭；所属进程剩余 0 |
+| 最终包资源 | 27 份 archive 文件、155 份资源文件及 41 个目录全量清单/SHA/权限一致；含完整后端、Playwright、核心对应源码/许可证与各原生候选组件，开发 harness/开发签名输出不进入包；原生 helper 真实 ready=false |
+| 浏览器误拦回归 | 同服务兄弟域 API 保留，外站仍拦；顶层导航按目标站点识别，不按旧页面误拦。真实 Chromium 仅访问 loopback proxy，验证导航可到 fixture、前后第三方 fetch 均被中止 |
+| Mac 原生模块（暂停部署） | 默认/开发宏 release 编译、18 项 Swift、3 项 Node、两个 helper 共 6 项真实 RPC 拒启动检查通过；开发输出隔离，unsigned 清签名/profile/receipt 残留。未签名、未激活、无正向 Apple profile 验收，ready=false；不是系统分流验收 |
+| Windows 原生模块（优先） | race/host/Windows vet、便携 C 生产生命周期/ABI、x64/ARM64 PE 交叉编译通过；BFE 撤销/过滤重建、认证 SOCKS→TLS→DoH 成功/证书拒绝/TTL Age 已本地检查。共享 DNS 适配、WDK 构建、签名及 Windows 网络/BFE 故障时序未完成，ready=false |
+| 软件绑定与启动保护 | 原生桌面绑定本机 TextEdit，组件未就绪时真实拒绝启动，无 PID/会话或直连回退；组件丢失会话时标异常并清理，未确认清理时保留配置修改锁 |
+
+桌面报告为 `test-artifacts/workspace-smoke/workspace-smoke.json`，最终浏览器报告为 `test-artifacts/privacy-sidecar-smoke/run-Dbl8JJ/proof.json`，终端为 `test-artifacts/terminal-smoke/run-jyL5ev/proof.json`，包内终端为 `test-artifacts/packaged-terminal/latest-proof.json`。测试数据与进程均为隔离工作区；没有使用用户节点、Claude 登录或远端账号，没有要求关闭 TUN。
+
+全包 JavaScript 检查曾发现旧核心测试以固定 10ms 等待异步目录删除，在并行编译期间误报。断线状态立即失效的断言保留，目录清理改为等待真实 cleanupPromise；223 项最终全部通过。这个修正没有更改生产核心的停止策略。
+
+最终全量包核验为 `test-artifacts/package-verification/0.5.0-darwin-arm64.json`；复核命令为 `npm run test:package:resources -- /absolute/path/Envara.app`。它核对当前源码与所有配置资源；权限按已核对的 electron-builder 规则记录两端原始值与规范化后的预期值，ASAR 只验证可执行标志，不伪称完整 POSIX mode 或 Windows ACL 验收。最终包内 PTY 记录为 `test-artifacts/packaged-terminal/run-iCjJLY/proof.json`，3 项通过且所属进程剩余 0。
+
+本地 DMG `Envara-0.5.0-mac-arm64.dmg` 为 230332478 字节，SHA-256 `d4d849d6a9bea38067e5a7b25701ab08b8901047f450574a6bfa062f509eb8a0`，hdiutil verify 有效；ZIP `Envara-0.5.0-mac-arm64.zip` 为 228193560 字节，SHA-256 `39f4556fd341fbb5eabc4a22d8135d3817f1cec8cd4fcaa43d4bf535a4a4c426`，unzip -tq 通过。候选包未签名、未公证；Mac 附加软件未启用，Windows 组件不可用。没有推送或公开发行版。
+
+本轮没有重新验证真实节点出口、Alpha 内核、全部检测器、Windows GUI、签名后 Mac 扩展的进程/DNS/断线行为或所有应用的系统定位。已知域名拦截及工具遥测退出变量不能保证消除全部追踪，也不能保证账号不会被关联。附加软件强制分流仍是未完成模块，不能用浏览器与终端的成功结果替代。
 
 ## 0.4.0：内置 AnyTLS
 
@@ -136,4 +166,4 @@ npm run test:anytls
 
 AnyTLS 检查需要已准备后端/核心与可显示窗口的桌面环境，使用独立测试工作区。浏览器服务由 test:sidecar 检查，启用 Camoufox 选项后才覆盖两家族；旧 test:smoke 覆盖直接驱动，Alpha 单项单独记录。更新结果应注明后端、内核、系统以及是否运行打包应用。
 
-GitHub 安装发行版处于草稿，自动发布暂停；本轮新代码未推送，不提供公开正式 0.4.0 版本。新增 AnyTLS 的结果需使用本轮冻结源码与原生/包证据更新。
+GitHub 安装发行版处于草稿，自动发布暂停；本轮新代码未推送，不提供公开正式 0.5.0 版本。新增能力的结果需使用对应冻结源码与原生/包证据更新。

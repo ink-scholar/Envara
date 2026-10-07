@@ -3,6 +3,7 @@ dist/
 release/
 build/backend/
 build/native/
+build/proxy-core/
 .DS_Store
 *.log
 .env*

@@ -119,6 +119,185 @@ func TestSessionLaunchWithoutOverridesKeepsLegacyBehavior(t *testing.T) {
 	}
 }
 
+func TestSessionManagedProxyIsEphemeralAndPreservesStoredProxyAndPersona(t *testing.T) {
+	for _, timezone := range []string{"", "Asia/Singapore"} {
+		t.Run("timezone="+timezone, func(t *testing.T) {
+			h, stored, captured, calls := newSessionLaunchHandler(t, &profile.LaunchOverrides{Timezone: "UTC", Locale: "zh-CN", TargetOS: "windows"})
+			if _, err := h.store.Update(stored.ID, map[string]any{"group": "Enforced group"}); err != nil {
+				t.Fatal(err)
+			}
+			stored, _ = h.store.Get(stored.ID)
+			path := filepath.Join(stored.ProfileDir, "profile.json")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			overrides := map[string]any{"proxy": map[string]any{"type": "http", "host": "127.0.0.1", "port": 19427, "username": "managed-user", "password": "managed-password", "region": "us-ca"}}
+			if timezone != "" {
+				overrides["timezone"] = timezone
+			}
+			body, err := json.Marshal(map[string]any{"profile_id": stored.ID, "launch_overrides": overrides})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			h.createSession(rec, httptest.NewRequest(http.MethodPost, "/api/sessions", bytes.NewReader(body)))
+			if rec.Code != http.StatusCreated || *calls != 1 {
+				t.Fatalf("managed launch=%d calls=%d %s", rec.Code, *calls, rec.Body.String())
+			}
+			launch := *captured
+			if launch == stored || launch.SessionProxy == nil || launch.SessionProxy.Type != "http" || launch.SessionProxy.Host != "127.0.0.1" || launch.SessionProxy.Port != 19427 || launch.SessionProxy.Username != "managed-user" || launch.SessionProxy.Password != "managed-password" || launch.SessionProxy.Region != "us-ca" {
+				t.Fatal("managed bridge was not applied to a separate launch profile")
+			}
+			wantTimezone := "UTC"
+			if timezone != "" {
+				wantTimezone = timezone
+			}
+			if launch.Group != stored.Group || launch.LaunchOverrides.Timezone != wantTimezone || launch.LaunchOverrides.Locale != "zh-CN" || launch.LaunchOverrides.TargetOS != "windows" || !reflect.DeepEqual(launch.Proxy, stored.Proxy) || !reflect.DeepEqual(launch.Fingerprint, stored.Fingerprint) {
+				t.Fatal("managed proxy replaced stored group, upstream proxy, timezone policy, or persona")
+			}
+			exported, err := json.Marshal(launch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(exported, []byte("managed-password")) || bytes.Contains(exported, []byte("19427")) || bytes.Contains(rec.Body.Bytes(), []byte("managed-password")) {
+				t.Fatal("transient proxy credentials appeared in profile export or session response")
+			}
+			launch.SessionProxy.Password = "changed"
+			launch.Proxy.Password = "changed"
+			launch.LaunchOverrides.Locale = "en-US"
+			launch.Fingerprint["nested"].(map[string]any)["keep"] = "changed"
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inMemory, err := json.MarshalIndent(stored, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.SessionProxy != nil || !bytes.Equal(before, after) || !bytes.Equal(before, inMemory) {
+				t.Fatal("managed proxy changed persisted or in-memory profile configuration")
+			}
+		})
+	}
+}
+
+func TestSessionManagedProxyRejectsUnsupportedOrUnsafeFields(t *testing.T) {
+	h, stored, _, calls := newSessionLaunchHandler(t, nil)
+	for _, proxy := range []string{
+		`null`, `{}`, `[]`, `"proxy"`,
+		`{"type":"anytls","host":"127.0.0.1","port":19427}`,
+		`{"type":"socks5","host":"127.0.0.1","port":19427}`,
+		`{"type":"https","host":"127.0.0.1","port":19427}`,
+		`{"type":"http","host":"localhost","port":19427}`,
+		`{"type":"http","host":"::1","port":19427}`,
+		`{"type":"http","host":"127.0.0.2","port":19427}`,
+		`{"type":"http","host":"proxy.example","port":19427}`,
+		`{"type":"http","host":"127.0.0.1","port":null}`,
+		`{"type":"http","host":"127.0.0.1","port":0}`,
+		`{"type":"http","host":"127.0.0.1","port":65536}`,
+		`{"type":"http","host":"127.0.0.1","port":1.5}`,
+		`{"type":"http","host":"127.0.0.1","port":"19427"}`,
+		`{"type":"http","host":"127.0.0.1"}`,
+		`{"type":"http","host":"127.0.0.1","port":19427,"username":null}`,
+		`{"type":"http","host":"127.0.0.1","port":19427,"password":false}`,
+		`{"type":"http","host":"127.0.0.1","port":19427,"password":"secret\r\nInjected: value"}`,
+		`{"type":"http","host":"127.0.0.1","port":19427,"username":"secret\u0000"}`,
+		`{"type":"http","host":"127.0.0.1","port":19427,"password":"secret\u007f"}`,
+		`{"type":"http","host":"127.0.0.1","port":19427,"password":"` + strings.Repeat("x", 4097) + `"}`,
+		`{"type":"http","host":"127.0.0.1","port":19427,"region":null}`,
+		`{"type":"http","host":"127.0.0.1","port":19427,"region":"https://proxy.example/secret"}`,
+		`{"type":"http","host":"127.0.0.1","port":19427,"region":"` + strings.Repeat("x", 65) + `"}`,
+		`{"type":"http","host":"127.0.0.1","port":19427,"server_name":"injected.example"}`,
+		`{"type":"http","host":"127.0.0.1","port":19427,"Password":"secret"}`,
+	} {
+		rec := httptest.NewRecorder()
+		h.createSession(rec, httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"profile_id":"`+stored.ID+`","launch_overrides":{"proxy":`+proxy+`}}`)))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"code":"INVALID_LAUNCH_OVERRIDES"`) || *calls != 0 {
+			t.Fatalf("invalid managed proxy reached launcher: %d calls=%d %s", rec.Code, *calls, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "secret") {
+			t.Fatal("invalid proxy response exposed credentials")
+		}
+	}
+}
+
+func TestSessionManagedProxyCloneDoesNotShareOverrideCredentials(t *testing.T) {
+	overrides := &sessionLaunchOverrides{Proxy: &profile.ProxyConfig{Type: "http", Host: "127.0.0.1", Port: 19427, Password: "managed-password"}}
+	stored := &profile.Profile{RuntimeID: "cloakbrowser", SessionProxy: &profile.ProxyConfig{Password: "stale-ephemeral-password"}}
+	launch, err := profileForSessionLaunch(stored, overrides)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch.SessionProxy.Password = "changed"
+	if overrides.Proxy.Password != "managed-password" || stored.SessionProxy.Password != "stale-ephemeral-password" {
+		t.Fatal("launch shares transient proxy pointer with request or stored profile")
+	}
+	legacy, err := profileForSessionLaunch(stored, nil)
+	if err != nil || legacy.SessionProxy != nil {
+		t.Fatal("legacy launch inherited stale transient state")
+	}
+}
+
+func TestManagedProxySessionCannotLaunchDirectThroughREST(t *testing.T) {
+	for _, runtimeID := range []string{"cloakbrowser", "browseforge-chromium", "camoufox"} {
+		t.Run(runtimeID, func(t *testing.T) {
+			h, stored, captured, calls := newSessionLaunchHandler(t, nil)
+			if _, err := h.store.Update(stored.ID, map[string]any{"runtime_id": runtimeID, "proxy": nil, "managed_proxy_required": true}); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(stored.ProfileDir, "profile.json")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, extra := range []string{"", `,"launch_overrides":{"timezone":"Asia/Tokyo"}`} {
+				rec := httptest.NewRecorder()
+				h.createSession(rec, httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"profile_id":"`+stored.ID+`"`+extra+`}`)))
+				if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), `"code":"MANAGED_PROXY_REQUIRED"`) || *calls != 0 {
+					t.Fatalf("raw managed session reached launcher: %d calls=%d %s", rec.Code, *calls, rec.Body.String())
+				}
+			}
+			rec := httptest.NewRecorder()
+			h.createSession(rec, httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"profile_id":"`+stored.ID+`","launch_overrides":{"timezone":"Asia/Tokyo","proxy":{"type":"http","host":"127.0.0.1","port":19427,"username":"managed-user","password":"managed-password"}}}`)))
+			if rec.Code != http.StatusCreated || *calls != 1 || !(*captured).ManagedProxyRequired || (*captured).SessionProxy == nil {
+				t.Fatalf("validated managed bridge failed launch: %d calls=%d %s", rec.Code, *calls, rec.Body.String())
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) || !bytes.Contains(after, []byte(`"managed_proxy_required": true`)) || bytes.Contains(after, []byte("managed-password")) || stored.SessionProxy != nil {
+				t.Fatal("REST launch changed durable managed flag or persisted transient credentials")
+			}
+		})
+	}
+}
+
+func TestRESTProfileCreateAndUpdateAcceptManagedProxyBoolean(t *testing.T) {
+	h := newDesktopHandler(t)
+	rec := httptest.NewRecorder()
+	h.createProfile(rec, httptest.NewRequest(http.MethodPost, "/api/profiles", strings.NewReader(`{"name":"Managed draft","runtime_id":"cloakbrowser","managed_proxy_required":true,"proxy":null}`)))
+	if rec.Code != http.StatusCreated || len(h.store.List("", "")) != 1 {
+		t.Fatalf("managed profile create=%d %s", rec.Code, rec.Body.String())
+	}
+	p := h.store.List("", "")[0]
+	if !p.ManagedProxyRequired || !strings.Contains(rec.Body.String(), `"managed_proxy_required":true`) {
+		t.Fatal("REST create ignored managed proxy boolean")
+	}
+	for _, want := range []bool{false, true} {
+		body, err := json.Marshal(map[string]any{"managed_proxy_required": want})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec = httptest.NewRecorder()
+		h.updateProfile(rec, requestWithProfileID(http.MethodPut, "/api/profiles/"+p.ID, p.ID, bytes.NewReader(body)))
+		if rec.Code != http.StatusOK || p.ManagedProxyRequired != want {
+			t.Fatalf("managed profile update(%v)=%d %s", want, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestSessionLaunchRejectsInvalidTimezoneOrConfigurationInjection(t *testing.T) {
 	h, stored, _, calls := newSessionLaunchHandler(t, &profile.LaunchOverrides{Locale: "zh-CN"})
 	for _, override := range []string{

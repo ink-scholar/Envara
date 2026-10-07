@@ -1,10 +1,25 @@
 # Envara 境舱能力与验收矩阵
 
-记录日期：2026-10-07。当前为 **0.3.0 本地开发候选版**，新增真实代理出口时区与每环境终端。BrowseForge 固定版本源码纳入 `third_party/browseforge/`，由 Envara 桌面应用自动管理本地服务；新增终端和出口解析是 Envara 的桌面扩展，不代表上游已有相同产品入口。
+记录日期：2026-10-07。当前为 **0.4.0 本地开发候选版**，新增软件内置 AnyTLS。BrowseForge 固定版本源码纳入 `third_party/browseforge/`，由 Envara 桌面应用自动管理本地服务；终端、出口解析与受管 AnyTLS 是 Envara 扩展，不代表上游已有相同产品入口。
 
 状态含义：**源码已接入**表示实现或适配代码已纳入仓库；**Mac 后端已验证**表示所注明版本在 macOS Apple Silicon 上有真实执行证据；**待验证**表示当前路径还需测试；**计划中**表示尚未形成可验收的产品能力。中间阶段测试不代表冻结源码已通过，后端测试不代表 Electron 界面已验收，历史版本结果不自动转移到新增代码。
 
-## 0.3.0 新增能力
+## 0.4.0 AnyTLS 能力
+
+| 能力 | 实现范围 | 当前验收状态 |
+| --- | --- | --- |
+| 软件内置 AnyTLS | 固定 Mihomo v1.19.32 独立进程处理原始节点，不依赖用户另开 Clash | 19 项真实原生链、20 项包内链及一条真实供应商节点通过 |
+| 每节点私有入口 | 127.0.0.1 随机认证 mixed 监听，MATCH 仅指向选定节点，无直连回退、无系统代理/TUN写入 | 私有入口认证、错误证书/密码、不可达与服务停止的拒绝回退通过；17 个所属进程清理通过 |
+| 浏览器/终端共享路由 | 真实 HTTPS 经受管入口；临时 session proxy 不改原节点绑定，终端使用同一上下文 | 真实可见 Cloak/PTY与合成 Geo 时区联动通过；原始绑定重启保留，缺少入口的直接 REST/MCP 拒启动通过 |
+| 核心意外退出与恢复 | 旧 Geo 失效，恢复保持原入口端口/认证 | 原有浏览器与 PTY再次HTTPS通过，不需重建这两个会话 |
+| AnyTLS TLS 设置 | 密码、SNI默认host、严格证书默认开、chrome、ALPN数组与默认UDP true | 受控/真实节点严格HTTPS通过；源码原生 UI 的 ALPN/UDP/SNI保存回读、默认TLS/密码掩码与不可达失败通过。HTTP 入口不表示通用 UDP |
+| 许可与源码分发 | 独立 Mihomo 保留 GPLv3、对应源码/vendor 及来源，原创应用保留 MIT | 9 资源测试、GOPROXY=off 离线重建及最终包内副本 SHA 一致通过 |
+| 外部节点与 TUN | 单节点严格HTTPS与真实出口，Mac只读物理接口供节点/AliDNS IPDoH | 一条节点在 TUN 开启和用户主动关闭后均 example.com200、PH/Manila/Asia/Manila；无系统写入、环境覆盖或外部 Clash，不覆盖其他供应商/平台 |
+| Mac arm64 最终本地包 | .app、DMG、ZIP，保留所有核心/source/license资源 | 30 文件SHA及元数据一致、包内真实AnyTLS/PTY、归档完整性通过；未签名/未公证，完整新包 GUI未逐项验收 |
+
+0.4.0 的 npm test **193/193** 通过。原生链为 `test-artifacts/anytls-smoke/run-SIdTv5/proof.json`；包内链与终端分别为 `test-artifacts/anytls-packaged/run-HIooJP/proof.json`、`test-artifacts/packaged-terminal/run-EWQLtE/proof.json`。真实节点为 `test-artifacts/anytls-private-node/run-dWdWBT/proof.json` 与 `run-v2ajQf/proof.json`，资源为 `test-artifacts/package-verification/0.4.0-mac-arm64.json`，源码原生 UI 为 `test-artifacts/native-ui-0.4/run-NN5VHj/proof.json`。完整 GUI、Claude 登录/远端请求、其他供应商与平台未扩大结论。
+
+## 0.3.0 工作区历史基线
 
 | 能力 | 实现范围 | 当前验收状态 |
 | --- | --- | --- |
@@ -59,9 +74,9 @@ BrowseForge Chromium 上游有 macOS、Linux 与 Windows 的 Alpha 产物，但�
 
 ## 平台与许可
 
-- **macOS Apple Silicon：**0.2.0 新服务真实浏览器与基本打包 UI 已验收，范围见历史基线。0.3.0 真实多 PTY、临时时区、实际直连出口链、旧字段兼容、包资源与列出的原生多窗口核心操作已验证；原位已有会话复用及完整 GUI 未逐项验收。版本与路径分别见 [验证记录](verification.md)。
+- **macOS Apple Silicon：**0.2.0/0.3.0 结果保留为历史。0.4.0 的 AnyTLS/Cloak/PTY、核心恢复、真实节点出口、包内链/资源与源码原生高级字段通过；新包完整 GUI 未逐项验收。版本与路径分别见 [验证记录](verification.md)。
 - **macOS Intel、Windows、Linux：**Envara 本地服务、终端与安装包未完成实机验收。上游的平台矩阵与 CI 构建目标分别说明源码/产物范围，不能作为 Envara 已可用的证明。
-- **源码许可：**Envara 与纳入的 BrowseForge 代码采用 MIT，保留上游归属和许可证。[固定版本 BrowseForge License](https://github.com/nczz/BrowseForge/blob/fa9e0bb670e749706a9c8f2d4095333347d6c521/LICENSE)。
+- **源码许可：**Envara 原创应用与纳入的 BrowseForge 代码保留 MIT；独立 Mihomo 核心保留 GPLv3 及对应源码/vendor 和来源记录，应用 MIT 不替代核心许可。见 [第三方声明](../THIRD_PARTY_NOTICES.md) 与 [固定版本 BrowseForge License](https://github.com/nczz/BrowseForge/blob/fa9e0bb670e749706a9c8f2d4095333347d6c521/LICENSE)。
 - **CloakBrowser：**包装层为 MIT，编译浏览器适用独立专有许可。Envara 不把该内核打入安装包；用户须从官方渠道获取，版本与订阅条件以其条款为准。[包装层 License](https://github.com/CloakHQ/CloakBrowser/blob/5fa65172f0612b3ea3efbee719be0cb618594285/LICENSE)、[Binary License](https://github.com/CloakHQ/CloakBrowser/blob/5fa65172f0612b3ea3efbee719be0cb618594285/BINARY-LICENSE.md)。
 
 上游对照基线为 BrowseForge `fa9e0bb670e749706a9c8f2d4095333347d6c521`（v2.1.15）：[provider registry](https://github.com/nczz/BrowseForge/blob/fa9e0bb670e749706a9c8f2d4095333347d6c521/internal/runtime/runtime.go)、[平台与版本定义](https://github.com/nczz/BrowseForge/blob/fa9e0bb670e749706a9c8f2d4095333347d6c521/internal/runtime/support.go)、[Chromium 启动逻辑](https://github.com/nczz/BrowseForge/blob/fa9e0bb670e749706a9c8f2d4095333347d6c521/internal/browser/launch_chromium.go)。后续只有补丁后的实际验证通过，才更新对应状态。
@@ -70,4 +85,4 @@ BrowseForge Chromium 上游有 macOS、Linux 与 Windows 的 Alpha 产物，但�
 
 0.2.0 服务 SHA-256 为 `915faddfe43506aa2cc4887e2b1b7e386d1399a1e1847c08ecfb085cb52d8acd`，源码树 SHA-256 为 `ddde9f2114ccef3e7f7a2c4cea1fb583e0b4f617483cc6bdb05c0fed073ccdc3`，对应该轮最终资源构建记录。隔离测试产物不提交至公开仓库，不构成浏览器包签名或发布完整性认证。构建资源包含匹配的 Node/Playwright 驱动与许可证；0.3.0 还准备原生 PTY 资源，目标是桌面用户无需系统 Go 或 Node。
 
-发布继续暂停，新代码尚未推送，当前没有公开的 0.3.0 正式下载版。其他系统、全部 MCP、完整指纹、其他地理服务与外部代理供应商结果、全部代理协议完整流程及完整浏览资料备份保持未验收。
+发布继续暂停，新代码尚未推送，当前没有公开的 0.4.0 正式下载版。其他系统、全部 MCP、完整指纹、其他地理服务与未测试供应商、全部代理协议完整流程及完整浏览资料备份保持未验收。

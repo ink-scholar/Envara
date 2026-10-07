@@ -12,20 +12,24 @@ import (
 )
 
 type Profile struct {
-	ID              string           `json:"id"`
-	Name            string           `json:"name"`
-	RuntimeID       string           `json:"runtime_id"` // concrete runtime provider, e.g. "camoufox" | "cloakbrowser"
-	Identity        *IdentityConfig  `json:"identity,omitempty"`
-	LaunchOverrides *LaunchOverrides `json:"launch_overrides,omitempty"`
-	Group           string           `json:"group,omitempty"`
-	Tags            []string         `json:"tags,omitempty"`
-	CreatedAt       time.Time        `json:"created_at"`
-	LastUsed        time.Time        `json:"last_used"`
-	Fingerprint     map[string]any   `json:"fingerprint,omitempty"`
-	FingerprintSeed uint32           `json:"fingerprint_seed,omitempty"` // CloakBrowser seed
-	Proxy           *ProxyConfig     `json:"proxy,omitempty"`
-	ContainerID     string           `json:"container_id,omitempty"`
-	ProfileDir      string           `json:"profile_dir"`
+	ID                   string           `json:"id"`
+	Name                 string           `json:"name"`
+	RuntimeID            string           `json:"runtime_id"` // concrete runtime provider, e.g. "camoufox" | "cloakbrowser"
+	Identity             *IdentityConfig  `json:"identity,omitempty"`
+	LaunchOverrides      *LaunchOverrides `json:"launch_overrides,omitempty"`
+	Group                string           `json:"group,omitempty"`
+	Tags                 []string         `json:"tags,omitempty"`
+	CreatedAt            time.Time        `json:"created_at"`
+	LastUsed             time.Time        `json:"last_used"`
+	Fingerprint          map[string]any   `json:"fingerprint,omitempty"`
+	FingerprintSeed      uint32           `json:"fingerprint_seed,omitempty"` // CloakBrowser seed
+	Proxy                *ProxyConfig     `json:"proxy,omitempty"`
+	ManagedProxyRequired bool             `json:"managed_proxy_required,omitempty"`
+	ContainerID          string           `json:"container_id,omitempty"`
+	ProfileDir           string           `json:"profile_dir"`
+	// SessionProxy is an ephemeral managed bridge selected for one launch. It
+	// cannot be imported, exported, or written into profile.json.
+	SessionProxy *ProxyConfig `json:"-"`
 }
 
 type IdentityConfig struct {

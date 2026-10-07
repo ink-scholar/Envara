@@ -1,4 +1,4 @@
-# Envara 0.3.0 候选版架构
+# Envara 0.4.0 候选版架构
 
 当前架构面向本机单用户桌面工作区。Electron 管理窗口、本地 BrowseForge Go 服务与真实 PTY；React 管理三栏界面、可调高度底部 xterm 与独立终端视图。浏览器与终端从同一环境解析网络与时区，终端使用用户选择的本地工作目录。会话与视图独立：一个境舱可有多个 PTY，一个会话可在底部或独立窗口查看。实现与验收分开记录，状态见 [能力矩阵](capability-matrix.md)。
 
@@ -11,6 +11,8 @@ flowchart LR
   Adapter --> Client[带令牌的本机 REST]
   Adapter --> Network[认证代理 HTTPS 出口检测]
   Adapter --> Context[环境网络与时区解析]
+  Context --> ProxyCore[受管 Mihomo 私有入口]
+  ProxyCore --> AnyTLS[选定 AnyTLS 节点]
   Context --> Terminal[每环境 node-pty]
   UI --> Xterm[可折叠 xterm 面板]
   Xterm --> Bridge
@@ -29,7 +31,9 @@ flowchart LR
 
 BrowseForge v2.1.15、提交 fa9e0bb670e749706a9c8f2d4095333347d6c521 纳入 third_party/browseforge/，原 MIT 许可保留。本轮添加桌面生命周期、空内核工作区和手动身份优先级等补丁。
 
-Playwright Go 模块固定于 v0.6100.0，配套官方 driver 1.61.1 及 Node.js 24.18.0。backend:prepare 编译 Go sidecar 并准备资源；native:prepare 在 Electron 44.6.0 上实际验证 node-pty，失败才从源码重建该模块。完整 node-pty 目录在 app.asar 外展开。桌面用户无需系统 Go 或 Node.js；当前 0.3.0 包内真实 PTY、资源匹配、DMG/ZIP 完整性与桌面终端核心操作已验证，范围见验证记录；0.2.0 包结果保留为历史基线。
+Playwright Go 模块固定于 v0.6100.0，配套官方 driver 1.61.1 及 Node.js 24.18.0。backend:prepare 编译 Go sidecar 并准备资源；native:prepare 在 Electron 44.6.0 上实际验证 node-pty，失败才从源码重建该模块。完整 node-pty 目录在 app.asar 外展开。桌面用户无需系统 Go 或 Node.js；0.3.0 的包内真实 PTY、资源匹配、归档完整性与桌面核心操作保留为历史，范围见验证记录。
+
+0.4.0 使用独立、未修改的 Mihomo v1.19.32（提交 88dcbf7f1614a67c3b36b848ee3592dfa92ada36）。官方二进制按固定摘要校验；同目录包含 GPLv3、来源/provenance、完整固定源码与校验过的 Go vendor 依赖归档。proxy:prepare 准备 build/proxy-core/，安装包完整复制到 proxy-core/。9 项资源准备、实际离线源码重建及最终包内摘要一致性通过。Mihomo 许可不由应用 MIT 替代，细节见 third_party/proxy-core/SOURCE.md。
 
 ## 代码边界
 
@@ -43,6 +47,7 @@ Playwright Go 模块固定于 v0.6100.0，配套官方 driver 1.61.1 及 Node.js
 | electron/browseforge-service.mjs | 环境/会话映射、分组策略、迁移及配置导入导出 |
 | electron/store.mjs | 本地元数据校验与原子写入 |
 | electron/proxy-network.mjs | 固定 HTTPS 地理服务、认证代理请求、公网 IP/IANA 时区校验和缓存 |
+| electron/proxy-core-manager.mjs | Mihomo 校验、每 AnyTLS 节点私有监听、限定配置与所属进程生命周期 |
 | electron/terminal-controller.mjs | 原生目录选择与终端 IPC，阻止活跃终端的冲突配置修改 |
 | electron/terminal-service.mjs、terminal-process.mjs | 真实 PTY、独立配置目录、输入输出和所属进程退出清理 |
 | electron/terminal-proxy-bridge.mjs | SOCKS5 到本机随机认证 HTTP 代理桥 |
@@ -50,6 +55,7 @@ Playwright Go 模块固定于 v0.6100.0，配套官方 driver 1.61.1 及 Node.js
 | src/TerminalPane.jsx、TerminalWindowApp.jsx | 底部面板、拖动/键盘尺寸、放大恢复、多会话与独立窗口视图 |
 | third_party/browseforge/ | 固定 Go 后端与 Envara 桌面补丁 |
 | scripts/build-sidecar.mjs、scripts/prepare-playwright-driver.mjs | 后端和官方 driver/Node 资源构建准备 |
+| scripts/prepare-proxy-core.mjs、third_party/proxy-core/ | 固定 Mihomo 二进制、对应源码/vendor、许可与构建来源准备 |
 | electron/service.mjs、electron/runtime.mjs | 旧直接驱动路径及旧内核缓存兼容 |
 | worker/、.openai/ | Sites 构建适配 |
 
@@ -91,6 +97,14 @@ Camoufox 补丁对齐语言、Intl、时区、Accept-Language 与对应系统字
 
 代理支持 HTTP、HTTPS、SOCKS5 及分组策略；分组代理受上游协议范围限制。0.3.0 的检查通过认证代理访问主进程固定允许的 ipwho.is 或 ipapi.co HTTPS 地址，不接受渲染进程传入查询网址，不跟随跳转，并限制时限与响应体。结果必须包含有效公网 IP 与 IANA 时区，城市只是 IP 地理估算；不使用代理入口地址代替出口。缓存按包含认证信息的代理配置签名管理，修改配置使其失效。失败不降级为直接请求。VLESS 经外部客户端转换为 HTTP/SOCKS5。
 
+### 0.4.0 AnyTLS 受管路由
+
+原始节点保留 host、port、password、serverName、skipCertVerify、clientFingerprint、alpn 数组与 udp；SNI 默认 host、证书验证默认开启、指纹默认 chrome、UDP 默认 true。ProxyCoreManager 为每节点管理独立 Mihomo 进程与随机认证的 127.0.0.1 mixed 入口，禁止该核心的 LAN、控制 API、TUN、系统时间写入与订阅更新；规则只含 MATCH 到该 AnyTLS 节点，无直连回退。HTTP 入口不表示对所有程序提供通用 UDP 代理。
+
+workspace resolver 把私有 HTTP 入口提供给真实 HTTPS 出口检测、终端和浏览器。本机 Go 服务接受本次 session 的临时 loopback proxy，永久环境仍保留原始节点绑定 ID 与受管代理标记，不写入动态端口或桥认证；缺少临时入口时，直接 REST/MCP 启动受管环境会被拒绝。新路由需先通过资源与监听认证检查，代理检测失败按既有自动时区规则拒绝启动。
+
+核心意外退出使旧地理结果失效；恢复保留入口端口与认证，使现有浏览器和 PTY 可继续请求。macOS 只读识别默认物理接口（如 en0、bridge、bond），仅为所选节点和 AliDNS IP DoH 绑定该接口；无可用接口则报错，不写系统代理、VPN、DNS 或 TUN 设置，也不加入 DIRECT。一条真实节点在原有 TUN 开启、以及用户主动关闭 TUN 后均通过 HTTPS/出口检测；其他平台没有该 Mac 接口适配且尚未原生验收。用户无需启动外部 Clash；CLI 仍须尊重代理变量与 localhost NO_PROXY。
+
 ### 自动时区与共享解析
 
 固定时区保持手动配置。自动时区由同一 workspace resolver 根据环境及分组的有效代理解析；有代理时检测失败拒绝启动，无代理时可回退本机 IANA 时区并显示 local 来源。解析结果临时传入 Go sessions 的 launch_overrides，不把自动解析值写回永久手动配置。
@@ -116,6 +130,8 @@ HTTP/HTTPS 代理直接写入该 PTY 的代理变量；SOCKS5 使用只绑定 12
 截图由真实浏览器返回。CPU 和内存来自系统进程采样；RSS 合计可能重复计入共享页，当前 Windows 没有该采样。无法取得的数值保持不可用。
 
 ## 当前边界
+
+0.4.0 的 193 项 npm 测试、19 项真实 AnyTLS fixture 原生链、20 项包内 AnyTLS、3 项包内 PTY、9 项资源准备与离线源码重建通过。合成 HTTPS Geo fixture 证明浏览器/终端共用解析时区；真实节点另行证明严格 HTTPS 与 Manila / Asia/Manila 出口。核心恢复、原浏览器/PTY再次请求、17 个所属进程清理通过。30 份包资源 SHA、元数据与 DMG/ZIP 完整性已核对。源码运行的原生 UI 完成 ALPN/UDP/SNI保存回读、默认 TLS/掩码密码和失败提示；它不代表新包全部 GUI 已验收。包为本地未签名/未公证候选版，远端 CLI 账号、完整 GUI 和其他系统未扩大结论。以下 0.3.0 结果为历史基线。
 
 0.1.x 与 0.2.0 的多内核与包验收保留为历史。0.3.0 的 npm test 145/145 项、终端 12 项真实 PTY、原生模块预检与 15 份许可证准备通过；总测试包含 36 项终端单元/本地测试。Cloak 11 项原生回归和 3 项临时会话时区检查通过，Camoufox/Alpha 本轮尚未执行。实际 ipwho.is 直连出口到默认 PTY 的 TZ/Intl、旧指纹字段兼容共 7 项，以及最终包真实终端 3 项通过；19 份资源 SHA 与 package.json 语义已核对。Web 拖动/键盘高度/8 标签交互通过；原生桌面真实命令、放大恢复、复制、独立窗口、关闭副本与关闭视图保留原会话通过。原位已有会话复用尚未独立 GUI 验收。外部代理供应商、其他地理服务、全部 GUI、其他系统、Claude 登录/远端请求、全部 MCP、完整指纹和完整浏览资料备份未验收。Alpha 的历史单项结果保持实验性范围。
 

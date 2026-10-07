@@ -39,7 +39,7 @@ class FakeClient {
     if (session?.[2] === 'navigate' || session?.[2] === 'focus') return { data: 'ok' };
     if (session && method === 'DELETE') { this.sessions = this.sessions.filter((item) => item.session_id !== session[1]); return { data: 'closed' }; }
     const group = route.match(/^\/api\/groups\/(.+?)(\/proxy)?$/);
-    if (group) { const name = decodeURIComponent(group[1]); if (method === 'PUT') { this.groups = this.groups.filter((item) => item.name !== name); this.groups.push({ name, ...body }); return { data: { name, ...body, restart_required: this.sessions.length > 0 } }; } if (group[2]) { const existing = this.groups.find((item) => item.name === name); if (existing) existing.proxy = null; } else this.groups = this.groups.filter((item) => item.name !== name); return { data: 'deleted' }; }
+    if (group) { const name = decodeURIComponent(group[1]); if (method === 'PUT') { this.groups = this.groups.filter((item) => item.name !== name); this.groups.push({ name, ...body }); return { data: { name, ...body, restart_required: this.sessions.length > 0 } }; } if (group[2]) { const existing = this.groups.find((item) => item.name === name); if (existing) existing.proxy = null; } else { this.groups = this.groups.filter((item) => item.name !== name); for (const profile of this.profiles) if (profile.group === name) profile.group = ''; } return { data: 'deleted' }; }
     if (route === '/api/shutdown') { this.sessions = []; return { data: 'shutting down' }; }
     throw new Error(`Unexpected fake route: ${method} ${route}`);
   }
@@ -568,4 +568,391 @@ test('migration requires stopped-session confirmation and a failed migration lea
   assert.equal(client.profiles.length, 0);
   assert.equal((await service.store.read()).proxies.length, 0);
   assert.equal((await readdir(path.join(directory, 'migration-backups'))).length, 1);
+});
+
+const anytlsConfig = (patch = {}) => ({ name: '内置 AnyTLS', protocol: 'anytls', host: 'node.example.test', port: 443, password: 'fixture-raw-password', region: 'jp-tokyo', serverName: 'tls.example.test', skipCertVerify: false, clientFingerprint: 'chrome', ...patch });
+function managedProxyFixture() {
+  const calls = [], releases = [], wires = new Map(), probes = [];
+  let count = 0;
+  const proxyCore = {
+    async ensure(proxy) { calls.push(structuredClone(proxy)); if (this.failure) throw Object.assign(new Error(`fixture failure ${proxy.password}`), { code: 'PROXY_CORE_FAILED' }); if (!wires.has(proxy.id)) wires.set(proxy.id, { protocol: 'http', host: '127.0.0.1', port: 20000 + ++count, username: `wire-user-${count}`, password: `wire-secret-${count}`, region: proxy.region }); return structuredClone(wires.get(proxy.id)); },
+    async release(id) { releases.push(id); wires.delete(id); },
+    async close() { this.closed = true; wires.clear(); },
+  };
+  const networkProbe = {
+    peek() { return null; }, invalidate() {}, close() {},
+    async probe(proxy, options) { probes.push({ proxy: structuredClone(proxy), options }); return this.failure ? { ok: false, message: 'fixture egress unavailable', timezone: null } : { ok: true, timezone: 'Asia/Tokyo', ip: '203.0.113.8', city: 'fixture', checkedAt: new Date().toISOString() }; },
+  };
+  return { proxyCore, networkProbe, calls, releases, wires, probes };
+}
+
+test('AnyTLS raw configuration and stable profile bindings survive reopen without native wire credentials', async (t) => {
+  const managed = managedProxyFixture();
+  const { service, client, directory, profilesDir } = await fixture(t, managed);
+  const proxy = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const profile = await create(service, { proxyId: proxy.id, timezone: '' });
+  assert.equal(profile.proxyId, proxy.id); assert.equal(profile.profileProxyId, proxy.id);
+  assert.equal(client.profiles[0].proxy, null); assert.equal(managed.calls.length, 0);
+  const persisted = await service.store.read();
+  assert.equal(persisted.proxies[0].password, 'fixture-raw-password');
+  assert.equal(persisted.profiles[0].proxyId, proxy.id);
+  await service.shutdown();
+  const reopened = new BrowseForgeService(directory, client, {}, () => {}, { profilesDir, ...managed });
+  assert.equal((await reopened.snapshot()).profiles[0].proxyId, proxy.id);
+  await reopened.shutdown();
+  assert.equal(JSON.stringify(client.profiles).includes('wire-secret'), false);
+});
+
+test('AnyTLS browser and terminal contexts use the same authenticated internal HTTP bridge and transient timezone', async (t) => {
+  const managed = managedProxyFixture();
+  const { service, client } = await fixture(t, managed);
+  const proxy = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const profile = await create(service, { proxyId: proxy.id, timezone: '' });
+  const context = await service.resolveWorkspaceContext(profile.id);
+  assert.equal(context.managedProxy, true); assert.equal(context.timezone, 'Asia/Tokyo');
+  assert.equal(context.timezoneSource, 'proxy'); assert.equal(context.proxy.protocol, 'http');
+  assert.equal(context.proxy.host, '127.0.0.1'); assert.notEqual(context.proxy.password, proxy.password);
+  await service.call('startProfile', { id: profile.id });
+  const request = client.requests.find((row) => row.route === '/api/sessions' && row.method === 'POST');
+  assert.deepEqual(request.body.launch_overrides, { timezone: context.timezone, proxy: { type: 'http', host: context.proxy.host, port: context.proxy.port, username: context.proxy.username, password: context.proxy.password, region: 'jp-tokyo' } });
+  assert.ok(managed.probes.every((row) => row.proxy.protocol === 'http' && row.proxy.port === context.proxy.port && row.proxy.password === context.proxy.password));
+  assert.equal(client.profiles[0].proxy, null);
+  const persisted = JSON.stringify(await service.store.read());
+  assert.equal(persisted.includes(context.proxy.password), false); assert.equal(persisted.includes(context.proxy.username), false);
+  const snapshot = JSON.stringify(await service.snapshot());
+  assert.equal(snapshot.includes(context.proxy.password), false); assert.equal(snapshot.includes(context.proxy.username), false);
+  assert.ok(managed.calls.every((row) => row.id === proxy.id && row.protocol === 'anytls'));
+});
+
+test('AnyTLS group policy keeps enforced/default semantics across ordinary policy replacement and reopen', async (t) => {
+  const managed = managedProxyFixture();
+  const { service, client, directory, profilesDir } = await fixture(t, managed);
+  const ordinary = await savedProxy(service);
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies.find((row) => row.protocol === 'anytls');
+  const own = await create(service, { group: '团队', proxyId: ordinary.id, timezone: '' });
+  const inherits = await create(service, { name: '继承', group: '团队', timezone: '', proxyId: null });
+  await service.call('saveGroup', { name: '团队', proxyId: ordinary.id, proxyMode: 'enforced' });
+  assert.equal(client.groups[0].proxy.type, 'http');
+  const enforced = await service.call('saveGroup', { name: '团队', proxyId: raw.id, proxyMode: 'enforced' });
+  assert.ok(client.groups.every((row) => !row.proxy), 'old native policy must be cleared rather than storing a local wire');
+  assert.ok(enforced.profiles.every((row) => row.proxyId === raw.id && row.proxySource === 'group' && row.proxyMode === 'enforced'));
+  assert.equal(enforced.profiles.find((row) => row.id === own.id).profileProxyId, ordinary.id);
+  await service.call('saveGroup', { name: '团队', proxyId: raw.id, proxyMode: 'default' });
+  const defaultRows = (await service.snapshot()).profiles;
+  assert.equal(defaultRows.find((row) => row.id === own.id).proxyId, ordinary.id);
+  assert.equal(defaultRows.find((row) => row.id === inherits.id).proxyId, raw.id);
+  await service.shutdown();
+  const reopened = new BrowseForgeService(directory, client, {}, () => {}, { profilesDir, ...managed });
+  assert.equal((await reopened.snapshot()).groups.find((row) => row.name === '团队').proxyId, raw.id);
+  await reopened.call('clearGroupProxy', { name: '团队' });
+  assert.equal((await reopened.snapshot()).profiles.find((row) => row.id === inherits.id).proxyId, null);
+  await reopened.shutdown();
+});
+
+test('AnyTLS clone and credential-free export/import preserve explicit stable node mappings', async (t) => {
+  const managed = managedProxyFixture();
+  const { service, client } = await fixture(t, managed);
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const profile = await create(service, { proxyId: raw.id });
+  const clone = await service.call('cloneProfile', { id: profile.id });
+  assert.equal(clone.profiles.find((row) => row.id === clone.actionResult.createdId).proxyId, raw.id);
+  assert.ok(client.profiles.every((row) => row.proxy === null));
+  await service.resolveWorkspaceContext(profile.id);
+  const document = await service.call('exportProfiles');
+  const serialized = JSON.stringify(document);
+  assert.equal(serialized.includes('fixture-raw-password'), false); assert.equal(serialized.includes('wire-secret'), false);
+  assert.deepEqual(document.proxies[0], { id: raw.id, name: raw.name, protocol: 'anytls', host: raw.host, port: raw.port, region: raw.region, serverName: raw.serverName, skipCertVerify: false, clientFingerprint: 'chrome', alpn: [], udp: true, requiresCredentials: true });
+  await assert.rejects(service.call('importProfiles', { document }), { code: 'PROXY_MAPPING_REQUIRED' });
+  const imported = await service.call('importProfiles', { document, proxyMap: { [raw.id]: raw.id } });
+  assert.ok(imported.actionResult.createdIds.every((id) => imported.profiles.find((row) => row.id === id).proxyId === raw.id));
+});
+
+test('AnyTLS draft check releases only its temporary node; saved checks cannot close a live shared core', async (t) => {
+  const managed = managedProxyFixture();
+  const { service } = await fixture(t, managed);
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const profile = await create(service, { proxyId: raw.id });
+  const context = await service.resolveWorkspaceContext(profile.id);
+  await service.call('checkProxy', { id: raw.id });
+  assert.equal(managed.releases.length, 0);
+  await service.call('checkProxy', { proxy: anytlsConfig() });
+  assert.equal(managed.releases.length, 1); assert.match(managed.releases[0], /^draft_/);
+  assert.equal(managed.wires.get(raw.id).password, context.proxy.password);
+  managed.proxyCore.failure = true;
+  await assert.rejects(service.call('checkProxy', { proxy: anytlsConfig() }), (value) => value.code === 'PROXY_CORE_FAILED' && !value.message.includes('fixture-raw-password'));
+  assert.equal(managed.releases.length, 2); assert.ok(managed.releases.every((id) => id !== raw.id));
+});
+
+test('AnyTLS proxy edits and deletion respect active browser bindings and release old core only after a successful edit', async (t) => {
+  const managed = managedProxyFixture();
+  const { service, client } = await fixture(t, managed);
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const profile = await create(service, { proxyId: raw.id });
+  await service.call('startProfile', { id: profile.id });
+  await assert.rejects(service.call('saveProxy', { proxy: { ...raw, password: 'new-fixture-password' } }), { code: 'PROFILE_RUNNING' });
+  await assert.rejects(service.call('deleteProxy', { id: raw.id }), { code: 'PROXY_IN_USE' });
+  assert.equal(managed.releases.length, 0);
+  await service.call('stopProfile', { id: profile.id });
+  const edited = await service.call('saveProxy', { proxy: { ...raw, protocol: 'http' } });
+  assert.equal(edited.profiles[0].proxyId, raw.id); assert.equal(client.profiles[0].proxy.type, 'http');
+  assert.deepEqual(managed.releases, [raw.id]);
+  await service.call('saveProxy', { proxy: { ...raw, password: 'new-fixture-password' } });
+  assert.equal(client.profiles[0].proxy, null);
+  await service.call('updateProfile', { id: profile.id, profile: { proxyId: null } });
+  await service.call('deleteProxy', { id: raw.id });
+  assert.equal((await service.snapshot()).proxies.length, 0);
+});
+
+test('AnyTLS core and actual egress failures block automatic browser launch without any direct fallback', async (t) => {
+  const managed = managedProxyFixture();
+  const { service, client } = await fixture(t, managed);
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const profile = await create(service, { proxyId: raw.id, timezone: '' });
+  managed.proxyCore.failure = true;
+  await assert.rejects(service.call('startProfile', { id: profile.id }), { code: 'PROXY_CORE_FAILED' });
+  assert.equal(managed.probes.length, 0); assert.equal(client.sessions.length, 0);
+  assert.equal(JSON.stringify(await service.snapshot()).includes('fixture failure fixture-raw-password'), false);
+  managed.proxyCore.failure = false; managed.networkProbe.failure = true;
+  await assert.rejects(service.call('startProfile', { id: profile.id }), { code: 'AUTO_TIMEZONE_FAILED' });
+  assert.equal(client.sessions.length, 0); assert.ok(managed.probes.every((row) => row.proxy && row.proxy.host === '127.0.0.1'));
+  await service.call('updateProfile', { id: profile.id, profile: { timezone: 'Asia/Tokyo' } });
+  await service.call('startProfile', { id: profile.id });
+  assert.equal(client.sessions.length, 1); assert.equal(client.requests.filter((row) => row.route === '/api/sessions' && row.method === 'POST').length, 1);
+});
+
+test('AnyTLS configuration validation rejects credentials, TLS options and host control injection before saving', async (t) => {
+  const { service } = await fixture(t, managedProxyFixture());
+  for (const patch of [{ password: '' }, { username: 'unsupported-user' }, { password: 'p\r\nq' }, { serverName: 'https://wrong.example' }, { serverName: 'tls.example\n.test' }, { skipCertVerify: 'true' }, { clientFingerprint: 'unknown' }, { host: 'node.example\r\n.test' }, { port: 65536 }, { region: 'jp/tokyo' }, { alpn: ['h2', 'http/1.1', 'bad\nprotocol'] }, { alpn: ['h2', 'h2'] }, { udp: 'true' }]) {
+    await assert.rejects(service.call('saveProxy', { proxy: anytlsConfig(patch) }), { code: 'VALIDATION_ERROR' });
+  }
+  assert.equal((await service.snapshot()).proxies.length, 0);
+});
+
+test('AnyTLS stable IDs stay distinct even when two nodes have identical endpoint settings', async (t) => {
+  const { service } = await fixture(t, managedProxyFixture());
+  await service.call('saveProxy', { proxy: anytlsConfig({ name: '节点 A' }) });
+  const saved = await service.call('saveProxy', { proxy: anytlsConfig({ name: '节点 B' }) });
+  const selected = saved.proxies.find((row) => row.name === '节点 B');
+  const profile = await create(service, { proxyId: selected.id });
+  assert.equal(profile.proxyId, selected.id); assert.equal(profile.profileProxyId, selected.id);
+  await service.call('saveGroup', { name: '分组 B', proxyId: selected.id, proxyMode: 'enforced' });
+  assert.equal((await service.snapshot()).groups.find((row) => row.name === '分组 B').proxyId, selected.id);
+});
+
+test('AnyTLS group edits protect every running member and preserve local bindings on rejected changes', async (t) => {
+  const managed = managedProxyFixture();
+  const { service } = await fixture(t, managed);
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig({ alpn: ['h2', 'http/1.1'], udp: false }) })).proxies[0];
+  const profile = await create(service, { group: '托管组', proxyId: null });
+  await service.call('saveGroup', { name: '托管组', proxyId: raw.id, proxyMode: 'enforced' });
+  await service.call('startProfile', { id: profile.id });
+  await assert.rejects(service.call('saveGroup', { name: '托管组', proxyId: raw.id, proxyMode: 'default' }), { code: 'PROFILE_RUNNING' });
+  await assert.rejects(service.call('clearGroupProxy', { name: '托管组' }), { code: 'PROFILE_RUNNING' });
+  await assert.rejects(service.call('deleteGroup', { name: '托管组' }), { code: 'PROFILE_RUNNING' });
+  await assert.rejects(service.call('saveProxy', { proxy: { ...raw, alpn: ['http/1.1'] } }), { code: 'PROFILE_RUNNING' });
+  assert.deepEqual((await service.store.read()).groups, [{ name: '托管组', proxyId: raw.id, proxyMode: 'enforced' }]);
+  assert.deepEqual((await service.store.read()).proxies[0].alpn, ['h2', 'http/1.1']);
+  assert.equal((await service.store.read()).proxies[0].udp, false);
+});
+
+test('AnyTLS stale or unavailable managed bindings fail closed even with a fixed manual timezone', async (t) => {
+  const { service, client } = await fixture(t);
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const profile = await create(service, { proxyId: raw.id, timezone: 'Asia/Tokyo' });
+  await assert.rejects(service.call('startProfile', { id: profile.id }), { code: 'PROXY_CORE_UNAVAILABLE' });
+  assert.equal(client.sessions.length, 0);
+  await service.store.transaction((workspace) => { workspace.proxies = []; });
+  await assert.rejects(service.resolveWorkspaceContext(profile.id), { code: 'PROXY_NOT_FOUND' });
+  assert.equal(client.requests.filter((row) => row.route === '/api/sessions' && row.method === 'POST').length, 0);
+});
+
+test('AnyTLS TLS settings participate in context invalidation without replacing other identical node IDs', async (t) => {
+  const managed = managedProxyFixture();
+  const { service } = await fixture(t, managed);
+  const first = (await service.call('saveProxy', { proxy: anytlsConfig({ name: '节点 A' }) })).proxies[0];
+  const second = (await service.call('saveProxy', { proxy: anytlsConfig({ name: '节点 B' }) })).proxies.find((row) => row.name === '节点 B');
+  const profile = await create(service, { proxyId: second.id, timezone: '' });
+  await service.call('saveGroup', { name: 'A', proxyId: first.id, proxyMode: 'enforced' });
+  await service.call('saveGroup', { name: 'B', proxyId: second.id, proxyMode: 'enforced' });
+  await service.resolveWorkspaceContext(profile.id);
+  const previous = service.workspaceContexts.get(profile.id).signature;
+  await service.call('saveProxy', { proxy: { ...second, serverName: 'other.example.test', alpn: ['h2'], udp: false } });
+  const snapshot = await service.snapshot();
+  assert.equal(snapshot.profiles[0].resolvedTimezone, null);
+  assert.equal(snapshot.groups.find((row) => row.name === 'A').proxyId, first.id);
+  assert.equal((await service.store.read()).proxies.find((row) => row.id === first.id).serverName, first.serverName);
+  await service.resolveWorkspaceContext(profile.id);
+  assert.notEqual(service.workspaceContexts.get(profile.id).signature, previous);
+  assert.deepEqual(managed.releases, [second.id]);
+});
+
+test('AnyTLS managed launch marker follows create, clone, import, explicit proxy clearing and group moves', async (t) => {
+  const { service, client } = await fixture(t, managedProxyFixture());
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const own = await create(service, { proxyId: raw.id });
+  assert.equal(client.profiles.find((row) => row.id === own.id).managed_proxy_required, true);
+  const cloned = await service.call('cloneProfile', { id: own.id });
+  assert.equal(client.profiles.find((row) => row.id === cloned.actionResult.createdId).managed_proxy_required, true);
+  const document = await service.call('exportProfiles', { id: own.id });
+  const imported = await service.call('importProfiles', { document, proxyMap: { [raw.id]: raw.id } });
+  assert.equal(client.profiles.find((row) => row.id === imported.actionResult.createdIds[0]).managed_proxy_required, true);
+  await service.call('updateProfile', { id: own.id, profile: { proxyId: null } });
+  assert.equal(client.profiles.find((row) => row.id === own.id).managed_proxy_required, false);
+  await service.call('saveGroup', { name: '托管移动组', proxyId: raw.id, proxyMode: 'enforced' });
+  await service.call('bulkProfiles', { action: 'move', ids: [own.id], group: '托管移动组' });
+  assert.equal(client.profiles.find((row) => row.id === own.id).managed_proxy_required, true);
+  await service.call('bulkProfiles', { action: 'move', ids: [own.id], group: '' });
+  assert.equal(client.profiles.find((row) => row.id === own.id).managed_proxy_required, false);
+});
+
+test('AnyTLS group managed markers track effective precedence and are installed before native policy clearing', async (t) => {
+  const { service, client } = await fixture(t, managedProxyFixture());
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const ordinary = await savedProxy(service);
+  const ownRaw = await create(service, { name: '专属 AnyTLS', group: '策略组', proxyId: raw.id });
+  const ownNormal = await create(service, { name: '专属普通', group: '策略组', proxyId: ordinary.id });
+  const inherits = await create(service, { name: '直接组成员', group: '策略组', proxyId: null });
+  const flags = () => [ownRaw, ownNormal, inherits].map(({ id }) => client.profiles.find((row) => row.id === id).managed_proxy_required);
+  assert.deepEqual(flags(), [true, false, false]);
+  await service.call('saveGroup', { name: '策略组', proxyId: raw.id, proxyMode: 'default' });
+  assert.deepEqual(flags(), [true, false, true]);
+  await service.call('saveGroup', { name: '策略组', proxyId: raw.id, proxyMode: 'enforced' });
+  assert.deepEqual(flags(), [true, true, true]);
+  await service.call('saveGroup', { name: '策略组', proxyId: ordinary.id, proxyMode: 'enforced' });
+  assert.deepEqual(flags(), [false, false, false]);
+  const cursor = client.requests.length;
+  await service.call('clearGroupProxy', { name: '策略组' });
+  assert.deepEqual(flags(), [true, false, false]);
+  const changes = client.requests.slice(cursor).filter((row) => row.method !== 'GET');
+  assert.ok(changes.findIndex((row) => row.method === 'PUT' && row.body.managed_proxy_required === true) < changes.findIndex((row) => row.method === 'DELETE' && row.route.endsWith('/proxy')));
+  await service.call('saveGroup', { name: '策略组', proxyId: raw.id, proxyMode: 'enforced' });
+  await service.call('deleteGroup', { name: '策略组' });
+  assert.deepEqual(flags(), [true, false, false]);
+  assert.ok(client.profiles.every((row) => row.group === ''));
+});
+
+test('AnyTLS proxy protocol conversion updates inherited group member managed markers', async (t) => {
+  const { service, client } = await fixture(t, managedProxyFixture());
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const profile = await create(service, { group: '转换组', proxyId: null });
+  await service.call('saveGroup', { name: '转换组', proxyId: raw.id, proxyMode: 'enforced' });
+  assert.equal(client.profiles[0].managed_proxy_required, true);
+  await service.call('saveProxy', { proxy: { ...raw, protocol: 'http' } });
+  assert.equal(client.profiles[0].managed_proxy_required, false); assert.equal(client.groups[0].proxy.type, 'http');
+  await service.call('saveProxy', { proxy: raw });
+  assert.equal(client.profiles[0].managed_proxy_required, true); assert.ok(client.groups.every((row) => !row.proxy));
+  assert.equal((await service.snapshot()).profiles.find((row) => row.id === profile.id).proxyId, raw.id);
+});
+
+test('AnyTLS missing local metadata cannot turn a previously marked profile into a direct terminal context', async (t) => {
+  const managed = managedProxyFixture();
+  const { service, client } = await fixture(t, managed);
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const profile = await create(service, { proxyId: raw.id });
+  assert.equal(client.profiles[0].managed_proxy_required, true);
+  await service.store.transaction((workspace) => { workspace.profiles = []; workspace.groups = []; });
+  await assert.rejects(service.resolveWorkspaceContext(profile.id), { code: 'MANAGED_PROXY_BINDING_MISSING' });
+  assert.equal(managed.calls.length, 0); assert.equal(managed.probes.length, 0);
+  assert.equal(client.profiles[0].managed_proxy_required, true);
+});
+
+test('AnyTLS group metadata storage failure restores old native policy and managed markers', async (t) => {
+  const { service, client } = await fixture(t, managedProxyFixture());
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const ordinary = await savedProxy(service);
+  await create(service, { group: '回滚组', proxyId: null });
+  await service.call('saveGroup', { name: '回滚组', proxyId: ordinary.id, proxyMode: 'enforced' });
+  const previous = await service.store.read();
+  const transaction = service.store.transaction;
+  service.store.transaction = async () => { throw new Error('fixture disk failure'); };
+  await assert.rejects(service.call('saveGroup', { name: '回滚组', proxyId: raw.id, proxyMode: 'enforced' }), /fixture disk failure/);
+  service.store.transaction = transaction;
+  assert.equal(client.profiles[0].managed_proxy_required, false);
+  assert.equal(client.groups[0].proxy.type, 'http'); assert.equal(client.groups[0].proxy.host, ordinary.host);
+  assert.deepEqual((await service.store.read()).groups, previous.groups);
+});
+
+test('AnyTLS runtime failure invalidates only affected wire/geolocation contexts and focus restores the same client route', async (t) => {
+  const managed = managedProxyFixture();
+  const invalidated = [];
+  managed.networkProbe.invalidate = (proxy) => invalidated.push(structuredClone(proxy));
+  const { service, client } = await fixture(t, managed);
+  const first = (await service.call('saveProxy', { proxy: anytlsConfig({ name: '节点 A' }) })).proxies[0];
+  const second = (await service.call('saveProxy', { proxy: anytlsConfig({ name: '节点 B', host: 'other.example.test' }) })).proxies.find((row) => row.name === '节点 B');
+  const affected = await create(service, { proxyId: first.id, timezone: '' });
+  const unrelated = await create(service, { name: '不受影响', proxyId: second.id, timezone: '' });
+  await service.call('startProfile', { id: affected.id });
+  await service.resolveWorkspaceContext(unrelated.id);
+  const original = structuredClone(managed.wires.get(first.id));
+  service.invalidateManagedProxy(first.id);
+  const failed = await service.snapshot();
+  assert.equal(failed.profiles.find((row) => row.id === affected.id).network.ok, false);
+  assert.equal(failed.profiles.find((row) => row.id === affected.id).network.ip, null);
+  assert.equal(failed.profiles.find((row) => row.id === affected.id).resolvedTimezone, null);
+  assert.match(failed.profiles.find((row) => row.id === affected.id).networkLastError, /AnyTLS/);
+  assert.equal(failed.profiles.find((row) => row.id === unrelated.id).network.ok, true);
+  assert.deepEqual(invalidated, [original]);
+  const before = managed.calls.length;
+  await service.call('focusProfile', { id: affected.id });
+  assert.equal(managed.calls.length, before + 1);
+  assert.deepEqual(service.proxyWires.get(first.id), original);
+  assert.equal((await service.snapshot()).profiles.find((row) => row.id === affected.id).network.ok, true);
+  assert.equal(client.requests.filter((row) => row.route === '/api/sessions' && row.method === 'POST').length, 1, 'recovery must retain the running browser rather than creating another session');
+});
+
+test('AnyTLS runtime failure during an in-flight lookup cannot resurrect a successful workspace context', async (t) => {
+  const managed = managedProxyFixture();
+  const { service } = await fixture(t, managed);
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const profile = await create(service, { proxyId: raw.id, timezone: '' });
+  await service.resolveWorkspaceContext(profile.id);
+  let release, entered;
+  const started = new Promise((resolve) => { entered = resolve; });
+  managed.networkProbe.probe = async () => { entered(); return new Promise((resolve) => { release = () => resolve({ ok: true, timezone: 'Asia/Tokyo', ip: '203.0.113.8' }); }); };
+  const pending = service.resolveWorkspaceContext(profile.id, { force: true });
+  await started;
+  service.invalidateManagedProxy(raw.id);
+  release();
+  await assert.rejects(pending, { code: 'PROXY_CORE_STOPPED' });
+  const snapshot = await service.snapshot();
+  assert.equal(snapshot.profiles[0].network.ok, false); assert.equal(snapshot.profiles[0].network.ip, null);
+  assert.equal(snapshot.profiles[0].resolvedTimezone, null);
+});
+
+test('AnyTLS saved proxy check cannot report an old successful egress after a runtime failure', async (t) => {
+  const managed = managedProxyFixture();
+  const { service } = await fixture(t, managed);
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  let release, entered;
+  const started = new Promise((resolve) => { entered = resolve; });
+  managed.networkProbe.probe = async () => { entered(); return new Promise((resolve) => { release = () => resolve({ ok: true, timezone: 'Asia/Tokyo', ip: '203.0.113.8' }); }); };
+  const pending = service.call('checkProxy', { id: raw.id });
+  await started; service.invalidateManagedProxy(raw.id); release();
+  await assert.rejects(pending, { code: 'PROXY_CORE_STOPPED' });
+  assert.equal(service.proxyWires.has(raw.id), false); assert.equal(managed.releases.length, 0);
+});
+
+test('AnyTLS old failed lookup cannot overwrite a recovered successful context after runtime invalidation', async (t) => {
+  const managed = managedProxyFixture();
+  const { service } = await fixture(t, managed);
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  const profile = await create(service, { proxyId: raw.id, timezone: '' });
+  await service.resolveWorkspaceContext(profile.id);
+  let release, entered, requests = 0;
+  const started = new Promise((resolve) => { entered = resolve; });
+  managed.networkProbe.probe = async () => {
+    requests++;
+    if (requests === 1) { entered(); return new Promise((resolve) => { release = () => resolve({ ok: false, timezone: null, message: 'obsolete failed lookup' }); }); }
+    return { ok: true, timezone: 'Asia/Tokyo', ip: '203.0.113.9' };
+  };
+  const obsolete = service.resolveWorkspaceContext(profile.id, { force: true });
+  await started;
+  service.invalidateManagedProxy(raw.id);
+  const recovered = await service.resolveWorkspaceContext(profile.id, { force: true });
+  assert.equal(recovered.network.ok, true); assert.equal(recovered.network.ip, '203.0.113.9');
+  release();
+  await assert.rejects(obsolete, { code: 'PROXY_CORE_STOPPED' });
+  const current = (await service.snapshot()).profiles[0];
+  assert.equal(current.network.ok, true); assert.equal(current.network.ip, '203.0.113.9');
+  assert.equal(current.resolvedTimezone, 'Asia/Tokyo'); assert.equal(current.networkLastError, null);
 });

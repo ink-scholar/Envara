@@ -1,8 +1,34 @@
 # 验证记录
 
-记录日期：2026-10-07。当前开发 0.3.0 本地候选版，发布暂停。结果按版本与运行路径区分，旧结果不自动代表新增代码已验收。状态见 [能力矩阵](capability-matrix.md)。
+记录日期：2026-10-07。当前开发 0.4.0 本地候选版，发布暂停。结果按版本与运行路径区分，旧结果不自动代表新增代码已验收。状态见 [能力矩阵](capability-matrix.md)。
 
-## 0.3.0：出口时区与每环境终端
+## 0.4.0：内置 AnyTLS
+
+| 检查 | 当前证据 |
+| --- | --- |
+| JavaScript 测试 | npm test 193/193 项通过，记录见 test-artifacts/runtime-0.4-full-tests.log |
+| 独立代理核心资源 | 固定 Mihomo v1.19.32 / commit 88dcbf7f1614a67c3b36b848ee3592dfa92ada36，官方 Mac arm64 二进制摘要与原生版本执行已核对 |
+| 许可与对应源码 | 完整 GPLv3、固定源码/vendor 与 provenance 已准备；9 项资源测试、GOPROXY=off / -mod=vendor 实际离线重建与最终包内副本 SHA 核对通过 |
+| AnyTLS 原生链 | 19/19 项通过：真实 Mihomo/TLS认证、默认拒绝不可信证书、私有入口认证、错误密码/节点不可达/服务停止均无 DIRECT 回退 |
+| 浏览器/终端联动 | 真实 Cloak 可见会话与 Electron PTY 经同一路由访问 HTTPS，使用明确合成 Geo JSON 的一致时区；目标站点不收到节点或桥凭据 |
+| 受管绑定与恢复 | 直接 REST/MCP 缺少临时入口时拒绝启动；后端重启保留原节点/分组绑定而无动态凭据。杀掉核心后使旧 Geo 失效，聚焦恢复相同端口/认证，原浏览器与 PTY再次HTTPS成功 |
+| 清理 | 17 个观测到的所属进程全部退出，端口关闭、synthetic credential文件清理；不影响无关进程 |
+| 一条真实外部节点 | 原始域名、产品默认行为、严格证书和 SNI/ALPN/chrome/UDP 下，example.com 200、ipwho.is 检测 PH / Philippines / Manila / Asia/Manila。本机 TUN 开启与用户主动关闭后均通过；没有外部 Clash 本地代理，凭据未保存到工作区 |
+| TUN 兼容范围 | Mac 只读识别物理接口并仅用于节点与 AliDNS IP DoH，未改系统网络设置。测试者关闭 TUN 后仍使用默认管理器/no override，经 en0 成功；其他平台接口适配与原生运行未验证 |
+| 包内 AnyTLS 链 | 20/20 项通过，实际 App Electron 从 app.asar 加载 5 个运行模块，使用打包核心/后端/Node/PTY；浏览器与终端、恢复及拒绝回退通过，17 个所属进程全退出 |
+| 包内终端 | 3/3 项通过：真实输入输出/resize、私有目录/时区、自然退出/重开/关闭/应用退出；剩余所属进程为 0 |
+| 原生高级字段 UI | 源码运行的 Electron 保存 ALPN h2,http/1.1 与 UDP false 后编辑回读一致；SNI 恢复、TLS 默认开、密码掩码、不可达节点显示失败通过。不覆盖全部 GUI 或新包 GUI |
+| 最终包资源 | 30 份源码/前端/许可证/核心及完整对应源码/provenance/后端文件 SHA 逐字匹配，package 元数据匹配、Node 可执行；DMG/ZIP 完整性通过。本地 Mac arm64 包未签名且未公证，发布仍暂停 |
+
+新增链路只控制所属本机进程，原始节点密码、域名和随机桥认证不进入公开文档。原生 fixture 的地理 JSON 明确为合成数据，不是公网出口证明；真实供应商节点的出口另有独立 HTTPS 证据。该单节点结果不代表所有供应商、远端账号或所有 CLI 已验证。ALPN 是数组、UDP 默认 true，但私有 HTTP 入口不等于通用 UDP 转发。
+
+原生链为 `test-artifacts/anytls-smoke/run-SIdTv5/proof.json`，真实节点/TUN 开启与关闭分别为 `test-artifacts/anytls-private-node/run-dWdWBT/proof.json`、`run-v2ajQf/proof.json`，资源为 `test-artifacts/proxy-core-preparation/proof.json`。官方 Mihomo SHA-256 为 `94a386ec0149080deadd86b1f667363bde3c70f7489dba3258e52c56fc9a6d66`；对应源码归档为 `6859f30fa7ef47eea24a535e52711d91026adeac905768443aaf1d6f5955dddb`，包含 9007 条目、7754 vendor 条目及 152 份许可/归属文件。源码重建不宣称与官方二进制字节一致。
+
+包内链为 `test-artifacts/anytls-packaged/run-HIooJP/proof.json`，PTY 为 `test-artifacts/packaged-terminal/run-EWQLtE/proof.json`，资源为 `test-artifacts/package-verification/0.4.0-mac-arm64.json`。最终 Go 后端 SHA-256 为 `7e89f026d2d220068bc2f1bbc49f446904aee06d3c3c3621e38a9beec9c33191`，源码树为 `04a48b6ebb0badf76f6f370920722ad3d25e3a3f6ee564bc7a541baec0866759`。原生 UI 证据为 `test-artifacts/native-ui-0.4/run-NN5VHj/proof.json`、`anytls-advanced.png` 与 `anytls-roundtrip.png`。这些资料留在本机，不含公开节点凭据。
+
+本地 DMG `Envara-0.4.0-mac-arm64.dmg` 为 225250056 字节，SHA-256 `c3b129e7237a1c0bfef9f1cdb48843d234a85874f685f8474c6f811a1e8f616a`，hdiutil verify 有效；ZIP `Envara-0.4.0-mac-arm64.zip` 为 223119351 字节，SHA-256 `5d68d044619ae5a73720b8615406d2da775f20945303ef8c0a17e112155ddd38`，unzip -tq 通过。它们不是公开发行版，也没有应用签名或公证。
+
+## 0.3.0：出口时区与每环境终端历史基线
 
 | 检查 | 当前证据 |
 | --- | --- |
@@ -97,7 +123,7 @@
 
 0.1.x/0.2.0 的代理原生证据覆盖本地认证 HTTP 代理，不能据此宣称 HTTPS、SOCKS5 relay 或外部供应商出口已通过。0.2.0 的界面检查只验证 TCP 连通性；0.3.0 替换为实际 HTTPS 出口检测，并为终端增加 SOCKS5 桥。冻结终端的真实 PTY 已覆盖本地认证 SOCKS5 请求及独立副本的路由；外部供应商验证仍单独记录。
 
-0.2.0 打包 UI 验收为只读：未迁移、新增或启停真实用户环境。0.3.0 的终端写操作使用独立测试资料，包内真实终端与列出的原生核心操作已通过；原位会话复用及全部 GUI 未逐项验收。外部代理供应商结果、其他地理服务、全部 MCP 工具、完整指纹、检测网站、字体/WebGL/硬件组合、异常恢复和完整浏览资料备份仍未验收。Alpha 历史单项未验证归档的官方发布摘要。Web 演示配置不作为原生证据，也没有无法检测或自动通过验证码的保证。
+0.2.0 打包 UI 验收为只读：未迁移、新增或启停真实用户环境。0.3.0 的终端写操作使用独立测试资料，包内真实终端与列出的原生核心操作已通过；原位会话复用及全部 GUI 未逐项验收。0.4.0 的真实供应商节点单独记录，未测供应商、其他地理服务、全部 MCP 工具、完整指纹、检测网站、字体/WebGL/硬件组合、一般异常恢复和完整浏览资料备份仍未验收。Alpha 历史单项未验证归档的官方发布摘要。Web 演示配置不作为原生证据，也没有无法检测或自动通过验证码的保证。
 
 基础检查先生成构建文件：
 
@@ -105,9 +131,9 @@
 npm test
 npm run build
 npm run test:sites
-npm run test:sidecar -- --install-camoufox
+npm run test:anytls
 ~~~
 
-sidecar 检查需要已准备后端、联网与可显示窗口的桌面环境，使用独立测试工作区；启用 Camoufox 选项后才覆盖两家族。旧 test:smoke 覆盖直接驱动路径，Alpha 单项证据单独记录。更新结果时应注明后端、内核版本、系统以及是否运行打包应用。
+AnyTLS 检查需要已准备后端/核心与可显示窗口的桌面环境，使用独立测试工作区。浏览器服务由 test:sidecar 检查，启用 Camoufox 选项后才覆盖两家族；旧 test:smoke 覆盖直接驱动，Alpha 单项单独记录。更新结果应注明后端、内核、系统以及是否运行打包应用。
 
-GitHub 安装发行版处于草稿，自动发布暂停；本轮新代码未推送，不提供公开正式 0.3.0 版本。0.3.0 验收结果需使用新的冻结源码与原生/包证据更新。
+GitHub 安装发行版处于草稿，自动发布暂停；本轮新代码未推送，不提供公开正式 0.4.0 版本。新增 AnyTLS 的结果需使用本轮冻结源码与原生/包证据更新。

@@ -10,6 +10,7 @@ import { BrowseForgeService } from './browseforge-service.mjs';
 import { TerminalService } from './terminal-service.mjs';
 import { TerminalController, TERMINAL_METHODS } from './terminal-controller.mjs';
 import { resolveTerminalView, terminalViewSnapshot } from './terminal-view.mjs';
+import { ProxyCoreManager } from './proxy-core-manager.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const isSmoke = process.env.ENVARA_SMOKE === '1' && !app.isPackaged;
@@ -27,6 +28,7 @@ let service;
 let sidecar;
 let terminal;
 let terminalController;
+let proxyCore;
 const views = new Map();
 const terminalWindows = new Map();
 let quitting = false;
@@ -36,13 +38,19 @@ const pendingImports = new Map();
 
 function workspaceSnapshot(value) {
   if (!value || !Array.isArray(value.profiles) || !Array.isArray(value.proxies) || !value.system) return value;
-  return { ...value, system: { ...value.system, terminal: { supported: !!terminal, isolation: 'configuration', networkScope: 'proxy-aware-cli' } } };
+  const core = proxyCore?.snapshot();
+  return { ...value, system: { ...value.system,
+    proxyCore: { supported: core?.available === true, version: core?.version ?? null, protocols: core?.protocols ?? [],
+      errorCode: core?.error ?? null, message: core?.available ? '内置 AnyTLS 内核已就绪。' : '内置 AnyTLS 内核不可用，请使用完整安装包。' },
+    terminal: { supported: !!terminal, isolation: 'configuration', networkScope: 'proxy-aware-cli' } } };
 }
 
 async function shutdownOwnedServices() {
   await terminal?.shutdown().catch(() => {});
-  if (service) await service.shutdown();
-  else await sidecar?.shutdown();
+  try {
+    if (service) await service.shutdown();
+    else await sidecar?.shutdown();
+  } finally { await proxyCore?.close(); }
 }
 
 async function publish() {
@@ -208,7 +216,7 @@ async function quitWhenIdle() {
 app.on('window-all-closed', () => { void quitWhenIdle().catch(() => app.quit()); });
 app.on('activate', () => { if (!quitting && (!window || window.isDestroyed())) void createWindow(); });
 app.on('before-quit', event => {
-  if (quitting || (!service && !sidecar && !terminal)) return;
+  if (quitting || (!service && !sidecar && !terminal && !proxyCore)) return;
   event.preventDefault();
   quitting = true;
   void shutdownOwnedServices().finally(() => app.quit());
@@ -222,10 +230,15 @@ if (ownsLock) void app.whenReady().then(async () => {
     const runtime = new BrowserRuntime({ cacheDir: isSmoke && process.env.ENVARA_SMOKE_ENGINE_DIR ? process.env.ENVARA_SMOKE_ENGINE_DIR : path.join(dataDir, 'engines'), onChange: publish });
     service = new EnvaraService(dataDir, runtime, { platform: process.platform, appVersion: app.getVersion() }, publish);
   } else {
+    proxyCore = new ProxyCoreManager({ dataDir, resourcesDir: app.isPackaged ? path.join(process.resourcesPath, 'proxy-core') : path.join(root, 'build/proxy-core'), onChange: event => {
+      if (event?.id && event.status === 'failed') service?.invalidateManagedProxy?.(event.id);
+      return publish();
+    } });
+    await proxyCore.initialize().catch(() => {});
     sidecar = new SidecarManager({ dataDir, resourcesDir: app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.join(root, 'build/backend'), onChange: publish });
     await sidecar.initialize();
     service = new BrowseForgeService(dataDir, sidecar.client, { platform: process.platform, appVersion: app.getVersion(), backend: 'BrowseForge (Envara desktop)', upstreamVersion: '2.1.15', localApi: sidecar.baseUrl }, publish, {
-      profilesDir: path.join(sidecar.baseDir, 'profiles'), getEngineStates: () => sidecar.getEngineStates(),
+      profilesDir: path.join(sidecar.baseDir, 'profiles'), getEngineStates: () => sidecar.getEngineStates(), proxyCore,
       installEngine: id => sidecar.installEngine(id), getMetrics: profiles => sidecar.metrics(profiles),
       getConnectionInfo: () => ({ apiUrl: sidecar.baseUrl + '/api', mcpUrl: sidecar.baseUrl + '/mcp', status: sidecar.process ? 'ready' : 'stopped', version: '2.1.15', sourceCommit: 'fa9e0bb670e749706a9c8f2d4095333347d6c521' }),
       cancelInstall: () => sidecar.cancelInstall(),

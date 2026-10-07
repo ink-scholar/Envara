@@ -4,7 +4,7 @@
 
 一个中文优先的浏览器环境桌面管理器。每个环境管理独立浏览资料、指纹、网络出口和终端工作区，在桌面应用内完成浏览器与命令行会话操作。
 
-**Envara is an open-source desktop workspace for isolated browser environments.** The local 0.3.0 candidate adds per-environment terminals, working directories and authenticated proxy egress detection to the multi-engine BrowseForge backend.
+**Envara is an open-source desktop workspace for isolated browser environments.** The local 0.4.0 candidate adds app-managed AnyTLS routing to the multi-engine browser and terminal workspace.
 
 [项目源码](https://github.com/ink-scholar/Envara) · [问题反馈](https://github.com/ink-scholar/Envara/issues) · [能力矩阵](docs/capability-matrix.md) · [架构说明](docs/architecture.md) · [验证记录](docs/verification.md) · [参与贡献](CONTRIBUTING.md)
 
@@ -14,7 +14,7 @@
 
 ## 当前状态
 
-**0.3.0 本地开发候选版，尚未发布。** 既有源码仓库保持公开，安装发行版为草稿；新代码未推送，自动发布暂停。
+**0.4.0 本地开发候选版，尚未发布。** 既有源码仓库保持公开，安装发行版为草稿；新代码未推送，自动发布暂停。
 
 本地后端基于固定的 BrowseForge v2.1.15（提交 fa9e0bb670e749706a9c8f2d4095333347d6c521），纳入 third_party/browseforge/ 并增加桌面补丁。应用管理私有本机服务，打包 sidecar、官方 Playwright driver/Node 与原生终端模块；最终安装包用户无需配置 Go 或 Node.js。
 
@@ -24,7 +24,15 @@
 | Camoufox / Firefox | 0.2.0 macOS arm64 官方安装及可见会话通过，可与 Chromium 同时运行；手动身份、跨内核隔离和 localStorage 重启保留通过。0.3.0 本轮尚未执行该内核 |
 | BrowseForge Chromium | 0.2.0 macOS arm64 Alpha 0.1.6 单项安装、可见会话、手动身份、截图与停止通过；仍为实验性内核，0.3.0 本轮尚未执行 |
 
-macOS Apple Silicon 是当前验证平台。0.3.0 的 npm test **145/145** 通过，终端在 Electron 44.6.0 上完成 12 项真实 PTY 验收；直连实际出口、旧指纹兼容与包内终端检查亦通过。打包桌面已验证真实命令、放大恢复、复制 PTY、独立窗口、关闭副本保留原会话，以及关闭视图保留输出。Cloak 浏览器回归与临时会话时区有原生证据。0.2.0 的其他内核与并行启动结果保留为历史基线；其余 GUI、外部代理供应商和其他操作系统仍分别验收，范围见 [验证记录](docs/verification.md)。
+macOS Apple Silicon 是当前验证平台。0.4.0 的 **193/193** 项测试、19 项真实 AnyTLS 原生链、20 项包内 AnyTLS 检查及真实 PTY 验收通过。一条真实外部节点在本机 TUN 开启和用户主动关闭后均通过严格证书 HTTPS，并识别 Manila / Asia/Manila 出口，未使用 Clash 本地代理。原生 UI 已验证 ALPN/UDP 保存回读与失败提示，Mac .app/DMG/ZIP 资源和完整性已核对；当前包未签名且未公证，其余 GUI 与其他系统仍分别验收。范围见 [验证记录](docs/verification.md)。
+
+## 0.4.0 内置 AnyTLS
+
+应用管理独立的 Mihomo v1.19.32 进程，直接接收 AnyTLS 节点地址、端口、密码和 TLS 参数，无需另外运行 Clash 或手动提供本地代理端口。SNI 留空时使用节点主机，证书验证默认开启，客户端指纹默认 chrome；高级设置支持 ALPN 列表和默认开启的 UDP。私有 HTTP 入口不等于面向任意程序的通用 UDP 转发。
+
+每个原始节点使用只绑定本机、带随机认证的私有入口。出口检测、浏览器和终端通过同一境舱上下文使用该节点；配置保留原节点绑定，不保存动态入口或运行认证。路由只指向选定节点，失败不转直连，不修改系统代理或开启 TUN。macOS 会只读识别物理出口接口供该核心使用；缺少可用接口时明确失败。支持代理变量的 CLI 才使用终端路由，localhost 仍按 NO_PROXY 直连。
+
+当前只接入 AnyTLS；Mihomo 的上游协议清单不等于 Envara 已支持全部协议。应用原创代码与代理核心的许可分别保留，详见下方与第三方声明。
 
 ## 0.3.0 新增工作区能力
 
@@ -44,7 +52,7 @@ SOCKS5 环境为支持 HTTP 代理的 CLI 提供本机随机认证 HTTP 桥。�
 - 环境创建、编辑、克隆、删除，分组、标签、搜索和批量操作。
 - 独立持久化浏览器目录，会话启动、停止、聚焦和真实截图。
 - 按内核能力配置种子或结构化指纹，手动指定系统画像、语言、时区和屏幕尺寸。
-- HTTP、HTTPS、SOCKS5 代理，以及分组代理策略。
+- HTTP、HTTPS、SOCKS5 代理、内置 AnyTLS 节点，以及分组代理策略。
 - 配置导入导出、旧工作区备份与复制迁移。
 - 上游的本机 REST、MCP、Playwright 连接与工作流能力；桌面入口和完整联动仍在验证。
 
@@ -61,7 +69,7 @@ npm ci
 npm run desktop
 ~~~
 
-desktop 会先运行 native:prepare 验证 Electron 原生 PTY，再运行 backend:prepare 构建后端与 driver，然后打开开发界面。首次准备需要联网；浏览器内核另由用户主动安装。原生模块不兼容时从源码重建，需要目标平台的编译工具。
+desktop 会先验证原生 PTY、构建后端/driver，再运行 proxy:prepare 准备固定代理核心与对应源码，然后打开开发界面。首次准备需要联网；浏览器内核另由用户主动安装。原生模块不兼容时从源码重建，需要目标平台的编译工具。
 
 构建后运行桌面应用：
 
@@ -79,7 +87,7 @@ npm run build
 npm run test:sites
 ~~~
 
-start 也会执行原生 PTY 准备。test:sites 检查生成的文件，所以先运行 build。旧 test:smoke 覆盖直接驱动路径，test:sidecar 覆盖本地浏览器服务；真实 PTY 验收由 scripts/terminal-smoke.mjs 执行。最终结果见验证记录，当前没有公开正式 0.3.0 下载版。
+start 也会准备原生 PTY 和代理核心。test:sites 检查生成的文件，所以先运行 build；test:anytls 执行真实受控 AnyTLS 原生链，test:sidecar 覆盖浏览器服务，终端验收由 scripts/terminal-smoke.mjs 执行。最终结果见验证记录，当前没有公开正式 0.4.0 下载版。
 
 ## 旧工作区与配置导出
 
@@ -93,4 +101,4 @@ v2 配置导出包含指纹配置和脱敏后的代理描述与引用，不包�
 
 Electron + React + Vite + Phosphor Icons，配合由应用管理的 BrowseForge Go 本地服务和 Playwright driver。浏览器二进制由用户主动从对应官方渠道安装，不随应用重新分发。
 
-Envara 源码采用 [MIT](LICENSE)。纳入的 BrowseForge 源码采用 MIT，保留 [原始许可证](third_party/browseforge/LICENSE) 和 [固定版本记录](third_party/browseforge/ENVARA_UPSTREAM.md)。CloakBrowser 编译内核适用独立 [Binary License](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md)，最新版本访问可能需要上游订阅，不属于 Envara 的 MIT 授权。归属见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+Envara 原创应用代码采用 [MIT](LICENSE)。纳入的 BrowseForge 代码保留 [MIT 许可证](third_party/browseforge/LICENSE) 和 [固定版本记录](third_party/browseforge/ENVARA_UPSTREAM.md)。独立 Mihomo 核心保留 [GPLv3](third_party/proxy-core/LICENSE)，资源准备同时提供对应源码与依赖 vendor 归属，见 [来源记录](third_party/proxy-core/SOURCE.md)。CloakBrowser 编译内核适用独立 [Binary License](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md)，不属于应用 MIT 授权。完整归属见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

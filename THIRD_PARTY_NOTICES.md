@@ -1,6 +1,6 @@
 # Third-party notices
 
-Envara's original application code is licensed under the MIT License. Third-party software retains its own copyright and license. JavaScript versions are recorded in `package-lock.json`; the vendored Go backend and its dependencies are pinned in `third_party/browseforge/ENVARA_UPSTREAM.md`, `go.mod`, and `go.sum`. This document describes the local 0.3.0 development candidate; public releases are paused.
+Envara's original application code is licensed under the MIT License. Third-party software retains its own copyright and license. JavaScript versions are recorded in `package-lock.json`; the vendored Go backend and its dependencies are pinned in `third_party/browseforge/ENVARA_UPSTREAM.md`, `go.mod`, and `go.sum`. This document describes the local 0.4.0 development candidate; public releases are paused.
 
 ## Main dependencies
 
@@ -12,6 +12,7 @@ Envara's original application code is licensed under the MIT License. Third-part
 | @vitejs/plugin-react | MIT | 2019–present Yuxi (Evan) You and Vite contributors · [source](https://github.com/vitejs/vite-plugin-react) |
 | Phosphor Icons | MIT | 2020 Phosphor Icons · [source](https://github.com/phosphor-icons/react) |
 | BrowseForge vendored backend | MIT | 2026 BrowseForge contributors · [preserved license](third_party/browseforge/LICENSE) |
+| Mihomo v1.19.32 proxy core | GPLv3 | Upstream authors and contributors · [preserved license](third_party/proxy-core/LICENSE) · [fixed source record](third_party/proxy-core/SOURCE.md) |
 | Playwright Go binding | MIT | 2020 Max Schmitt · [license](https://github.com/mxschmitt/playwright-go/blob/main/LICENSE) |
 | CloakBrowser JavaScript wrapper | MIT | 2026 CloakHQ · [license](https://github.com/CloakHQ/CloakBrowser/blob/main/LICENSE) |
 | Playwright client and official driver | Apache-2.0 | Microsoft Corporation · [license](https://github.com/microsoft/playwright/blob/main/LICENSE) |
@@ -30,6 +31,14 @@ Electron includes Chromium, Node.js and additional components with their own lic
 BrowseForge v2.1.15 is incorporated at commit `fa9e0bb670e749706a9c8f2d4095333347d6c521`. Its original MIT copyright and license are preserved under `third_party/browseforge/`. Envara applies local desktop lifecycle, manual identity, and integration patches. The source baseline is recorded in [ENVARA_UPSTREAM.md](third_party/browseforge/ENVARA_UPSTREAM.md).
 
 The prepared backend resources include a compiled Go sidecar, the official Playwright driver 1.61.1 and its Node.js runtime. The Go standard library uses the Go project's BSD-style license; Node.js carries its own MIT and third-party notices. The resource builders retain the Go runtime and module licenses in `build/backend/licenses/`, and the driver, binding, Node and bundled dependency notices beside the prepared driver. Build provenance records exact versions and checksums. These generated resources are excluded from the source repository and are separate from browser-engine binaries.
+
+## Separately managed Mihomo proxy core
+
+Envara 0.4.0 prepares the unmodified official Mihomo v1.19.32 executable at commit `88dcbf7f1614a67c3b36b848ee3592dfa92ada36`, launched as an independent owned process. Its GPLv3 license and the licenses of its dependencies are retained; Envara's original application MIT notice does not replace them.
+
+`build/proxy-core/` contains the executable, complete `LICENSE`, `SOURCE.md`, `provenance.json` and `mihomo-corresponding-source.tar.gz`. The latter contains the fixed full upstream source, original build scripts/copyright notices, checksum-verified Go `vendor/` dependencies and the release CA input. Its SHA-256 is `6859f30fa7ef47eea24a535e52711d91026adeac905768443aaf1d6f5955dddb`. An Envara helper has successfully built those sources with `GOPROXY=off` and `-mod=vendor`; it does not promise byte-identical release reproduction. Distribution retains this complete directory beside the core under `proxy-core/`; the actual local 0.4.0 package copy is verified separately in the verification record.
+
+The source baseline, official archive/executable checksums and build details are recorded in [third_party/proxy-core/SOURCE.md](third_party/proxy-core/SOURCE.md) and generated provenance. No upstream source patches are applied to the supplied executable. These records describe component attribution and prepared distribution contents, not a legal conclusion about the combined application.
 
 ## Terminal and proxy dependency notices
 

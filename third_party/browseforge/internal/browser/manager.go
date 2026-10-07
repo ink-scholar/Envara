@@ -113,6 +113,9 @@ func (m *Manager) LaunchSession(p *profile.Profile) (*Session, error) {
 	if p == nil {
 		return nil, fmt.Errorf("profile is nil")
 	}
+	if err := validateManagedProxyLaunch(p); err != nil {
+		return nil, err
+	}
 	release, err := m.reserveProfile(p.ID)
 	if err != nil {
 		return nil, err
@@ -301,6 +304,9 @@ func (m *Manager) removeClosedSession(session *Session) {
 }
 
 func (m *Manager) launchProfile(p *profile.Profile) (*Session, error) {
+	if err := validateManagedProxyLaunch(p); err != nil {
+		return nil, err
+	}
 	desc, err := m.runtimes.ResolveProfile(p)
 	if err != nil {
 		return nil, err
@@ -316,6 +322,13 @@ func (m *Manager) launchProfile(p *profile.Profile) (*Session, error) {
 	default:
 		return nil, fmt.Errorf("runtime %q is registered but has no launcher", desc.ID)
 	}
+}
+
+func validateManagedProxyLaunch(p *profile.Profile) error {
+	if p != nil && p.ManagedProxyRequired && p.SessionProxy == nil {
+		return codedError{code: "MANAGED_PROXY_REQUIRED", err: fmt.Errorf("this profile requires an Envara-managed proxy; start it through Envara so its managed node is connected")}
+	}
+	return nil
 }
 
 const defaultEndpointHealthTimeoutMS = 5000
@@ -436,6 +449,11 @@ func (m *Manager) closeSessionResources(s *Session, reason string) {
 }
 
 func (m *Manager) effectiveProxy(p *profile.Profile) groups.EffectiveProxy {
+	// The desktop adapter has already resolved group policy before creating a
+	// managed bridge. Reapplying the stored policy would bypass that bridge.
+	if p != nil && p.SessionProxy != nil {
+		return groups.EffectiveProxy{Proxy: p.SessionProxy, Source: "session", Mode: groups.ProxyModeDefault}
+	}
 	if m.groupStore != nil {
 		return m.groupStore.EffectiveProxy(p)
 	}

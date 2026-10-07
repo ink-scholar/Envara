@@ -4,7 +4,7 @@
 
 ## 当前开发阶段
 
-本轮本地开发 0.3.0 多内核与终端候选版，公开发布暂停。源码接入、受控测试、真实浏览器/PTY 测试和打包验收分别记录，不用上游清单推断产品已经可用。
+本轮本地开发 0.4.0 内置 AnyTLS 候选版，公开发布暂停。源码接入、受控测试、真实浏览器/PTY 测试和打包验收分别记录，不用上游清单推断产品已经可用。
 
 开发需要 Node.js 24 LTS 或 22.12+、npm 和 Go 1.25+：
 
@@ -13,7 +13,7 @@ npm ci
 npm run desktop
 ~~~
 
-desktop 自动执行 native:prepare 验证 node-pty，再执行 backend:prepare 构建固定 Go 后端并准备官方 Playwright driver/Node。原生模块需要重建时须有目标平台编译工具；最终桌面用户无需安装这些开发工具。
+desktop 自动执行 native:prepare、backend:prepare 与 proxy:prepare，准备 node-pty、固定 Go 后端、官方 driver/Node 和 Mihomo/对应源码。原生模块需要重建时须有目标平台编译工具；最终桌面用户无需安装这些开发工具。
 
 界面位于 src/，服务管理与适配位于 electron/，固定上游及补丁位于 third_party/browseforge/。修改前阅读 [AGENTS.md](AGENTS.md)、[架构说明](docs/architecture.md) 和 [能力矩阵](docs/capability-matrix.md)。
 
@@ -30,6 +30,8 @@ npm run test:sites
 终端改动验证真实 PTY 输入输出、尺寸、选定 cwd、跨境舱配置分离与同境舱历史共用。复制必须生成独立 PTY/代理桥，不复制命令、临时环境变量或 shell 手动 cd 后的目录；关闭源不影响副本。分别验证拖动/键盘高度、放大恢复、独立窗口，以及关闭视图保留会话和明确结束会话清理所属进程。出口检测验证认证 HTTPS 路由、公网 IP、IANA 时区及失败路径，不用代理入口或默认值代替成功。旧指纹固定字段切自动必须由用户明确操作。不要把配置隔离描述为 OS 沙箱，也不要声称全部程序强制代理、住宅地址或防封效果。
 
 旧资料迁移先备份再复制，保留原文件；验证代理绑定、指纹、浏览资料与失败回滚。v2 导入要求明确代理映射，不允许把缺失代理静默改为直接连接。配置导出不携带凭据或浏览资料。
+
+AnyTLS 修改用 test:anytls 验证真实 TLS/auth fixture、Cloak/PTY、REST/MCP 缺少入口拒启动、节点故障无直连回退、核心恢复与清理；合成 Geo 不能作为公网地域证据，外部节点单独记录。Mac 接口选择只读，不关闭已有 TUN 或改系统网络；HTTP 桥不代表通用 UDP。准备/打包 Mihomo 时保留独立 GPLv3、固定对应源码/vendor、原有归属和 provenance，不能只附二进制；遵循 [来源记录](third_party/proxy-core/SOURCE.md)，不改用应用 MIT 覆盖核心许可。
 
 改动限定在具体问题。修改上游时保留归属与许可，更新固定版本和补丁记录。界面截图清楚标记演示数据。不要提交个人浏览资料、Cookie、登录信息、代理凭据、本机令牌、浏览器内核或生成的安装包。
 

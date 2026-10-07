@@ -34,7 +34,7 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "INVALID_BODY", "request body must contain one JSON object")
 		return
 	}
-	timezone, err := decodeSessionLaunchTimezone(req.LaunchOverrides)
+	overrides, err := decodeSessionLaunchOverrides(req.LaunchOverrides)
 	if err != nil {
 		writeError(w, 400, "INVALID_LAUNCH_OVERRIDES", err.Error())
 		return
@@ -44,7 +44,7 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "PROFILE_NOT_FOUND", err.Error())
 		return
 	}
-	launchProfile, err := profileForSessionLaunch(p, timezone)
+	launchProfile, err := profileForSessionLaunch(p, overrides)
 	if err != nil {
 		writeError(w, 500, "PREPARE_LAUNCH_FAILED", err.Error())
 		return

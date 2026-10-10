@@ -26,6 +26,11 @@ jobs:
           cache-dependency-path: third_party/browseforge/go.sum
       - run: npm ci
       - run: npm run build
+      - name: Prepare pinned core for loopback-only protocol tests
+        run: |
+          npm run proxy:prepare
+          mkdir -p build/app-routing/macos-pf test-artifacts/mac-pf-routing
+          cp build/proxy-core/mihomo build/app-routing/macos-pf/mihomo
       - run: node --test --test-concurrency=2 tests/*.test.mjs
       - run: npm run test:sites
       - run: go test ./...

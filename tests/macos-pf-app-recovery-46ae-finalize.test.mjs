@@ -89,11 +89,16 @@ test('finalizer entry can archive only and never replay completed PF or group op
   const main = text.slice(text.indexOf('#ifndef FINALIZER_INERT'));
   assert.deepEqual([...main.matchAll(/strcmp\(argv\[1\],"([^"]+)"\)/g)].map(match => match[1]),
     ['--plan', '--inspect-fixed-root', '--cleanup-fixed-root']);
-  const prior = await readFile(priorFile);
-  assert.equal(createHash('sha256').update(prior).digest('hex'), priorSHA);
   const header = await readFile(path.join(native, 'recovery-app-46ae-run904-finalize-prior.h'), 'utf8');
   const bytes = Buffer.from([...header.matchAll(/0x([0-9a-f]{2})/g)].map(match => parseInt(match[1], 16)));
-  assert.deepEqual(bytes, prior);
+  // The sealed source bytes are present in a clean checkout. A private local
+  // receipt, when available, must still match; its absence is not authority.
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), priorSHA);
+  const prior = await readFile(priorFile).catch(error => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (prior !== null) assert.deepEqual(bytes, prior);
 });
 
 test('standalone finalizer plan has exact fixed role with no operation or cleanup claims', async () => {

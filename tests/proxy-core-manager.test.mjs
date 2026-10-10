@@ -9,7 +9,7 @@ import { mkdtemp, mkdir, readdir, stat, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { anyTlsSettings, anyTlsCoreConfig, ProxyCoreManager, probeCoreListener, PROXY_CORE_VERSION, PROXY_CORE_BOOTSTRAP_DNS,
-  physicalInterfaceFromRoute, detectMacPhysicalInterface } from '../electron/proxy-core-manager.mjs';
+  physicalInterfaceFromRoute, detectMacPhysicalInterface, bootstrapLocalAddress } from '../electron/proxy-core-manager.mjs';
 
 const node = (extra = {}) => ({ id: 'fixture-node', protocol: 'anytls', host: 'node.example.test', port: 443,
   password: 'only-the-owned-config-may-contain-this-secret', serverName: 'tls.example.test',
@@ -22,6 +22,7 @@ async function fixture(t, overrides = {}) {
   const calls = []; let nextPort = 42000;
   const spawn = (binary, args, options) => {
     const child = new EventEmitter();
+    child.pid = 50000 + calls.length;
     child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.kills = [];
     child.kill = signal => {
       child.kills.push(signal);
@@ -34,11 +35,30 @@ async function fixture(t, overrides = {}) {
   };
   const manager = new ProxyCoreManager({ dataDir: directory, resourcesDir: directory,
     resolveBinary: async () => process.execPath, spawn, choosePort: async () => nextPort++,
-    probeListener: async () => {}, detectInterface: async () => 'en0', startupTimeoutMs: 2000, retryDelayMs: 1, stopTimeoutMs: 5, ...overrides });
+    probeListener: async () => {}, detectInterface: async () => 'en0', resolveBootstrapHost: async () => '93.184.215.14',
+    bootstrapAddress: () => '192.0.2.10', startupTimeoutMs: 2000, retryDelayMs: 1, stopTimeoutMs: 5, ...overrides });
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
   return { directory, manager, calls };
 }
 async function dirs(manager) { try { return await readdir(manager.baseDir); } catch (error) { if (error.code === 'ENOENT') return []; throw error; } }
+
+test('private managed route identity expires on core death and rotates on recovery', async t => {
+  const { manager, calls } = await fixture(t);
+  assert.equal(manager.routingIdentity(node().id), null);
+  const wire = await manager.ensure(node());
+  const original = manager.routingIdentity(node().id);
+  assert.equal(original.nodeType, 'anytls'); assert.equal(original.corePid, calls[0].child.pid);
+  assert.equal(JSON.stringify(original).includes(wire.password), false);
+  assert.equal(JSON.stringify(original).includes(node().password), false);
+  await manager.ensure(node()); assert.deepEqual(manager.routingIdentity(node().id), original);
+  calls[0].child.exitCode = 1; calls[0].child.emit('exit', 1);
+  assert.equal(manager.routingIdentity(node().id), null);
+  await manager.ensure(node());
+  const recovered = manager.routingIdentity(node().id);
+  assert.notEqual(recovered.coreGeneration, original.coreGeneration);
+  assert.notEqual(recovered.routeIdentity, original.routeIdentity);
+  await manager.release(node().id); assert.equal(manager.routingIdentity(node().id), null);
+});
 
 test('AnyTLS only accepts bounded node fields and keeps secure defaults', () => {
   assert.deepEqual(anyTlsSettings(node({ serverName: '' })), {
@@ -269,6 +289,52 @@ test('owned remote nodes and bootstrap DoH bind to the detected physical interfa
   const unavailable = await fixture(t, { platform: 'darwin', detectInterface: async () => { throw new Error('no-default-interface'); } });
   await assert.rejects(unavailable.manager.ensure(node()), code('PROXY_CORE_INTERFACE_UNAVAILABLE'));
   assert.equal(unavailable.calls.length, 0); assert.deepEqual(await dirs(unavailable.manager), []);
+});
+
+test('new Mac node cores use a private verified bootstrap answer while retaining immutable node and TLS settings', async t => {
+  const lookups = [], original = node({ alpn: ['h2', 'http/1.1'], udp: false });
+  const before = structuredClone(original);
+  const { manager, calls } = await fixture(t, { platform: 'darwin', resolveBootstrapHost: async (host, options) => {
+    lookups.push({ host, localAddress: options.localAddress, signal: options.signal }); return '93.184.215.14';
+  } });
+  const wire = await manager.ensure(original); await manager.ensure(original);
+  assert.equal(lookups.length, 1); assert.equal(calls.length, 1); assert.equal(lookups[0].host, original.host);
+  assert.equal(lookups[0].localAddress, '192.0.2.10');
+  const { config } = calls[0]; assert.equal(config.proxies[0].server, '93.184.215.14');
+  assert.equal(config.proxies[0].sni, original.serverName); assert.equal(config.proxies[0]['skip-cert-verify'], false);
+  assert.equal(config.proxies[0]['client-fingerprint'], 'chrome'); assert.deepEqual(config.proxies[0].alpn, original.alpn);
+  assert.equal(config.proxies[0].udp, false); assert.equal(config.proxies[0]['interface-name'], 'en0');
+  assert.deepEqual(config.dns.fallback, []); assert.equal(config.dns.listen, ''); assert.equal(config.tun.enable, false);
+  assert.deepEqual(original, before);
+  for (const privateValue of ['93.184.215.14', original.host, original.serverName, original.password, wire.username, wire.password]) assert.equal(JSON.stringify(manager.snapshot()).includes(privateValue), false);
+  await manager.release(original.id); await manager.ensure(original); assert.equal(lookups.length, 2);
+});
+
+test('failed, unsafe or cancelled bootstrap answers reject before a core config or child is created', async t => {
+  for (const answer of [null, '127.0.0.1', '198.18.0.1', '203.0.113.42', '::1', 'node.example.test']) {
+    const { manager, calls } = await fixture(t, { platform: 'darwin', resolveBootstrapHost: async () => answer });
+    await assert.rejects(manager.ensure(node()), code('PROXY_CORE_BOOTSTRAP_UNAVAILABLE'));
+    assert.equal(calls.length, 0); assert.deepEqual(await dirs(manager), []); assert.equal(manager.snapshot().activeCount, 0);
+  }
+  const failed = await fixture(t, { platform: 'darwin', resolveBootstrapHost: async () => { throw new Error('private hostname and secret'); } });
+  await assert.rejects(failed.manager.ensure(node()), error => error.code === 'PROXY_CORE_BOOTSTRAP_UNAVAILABLE' && !error.message.includes('secret'));
+  assert.equal(failed.calls.length, 0);
+  const controller = new AbortController();
+  const cancelled = await fixture(t, { platform: 'darwin', resolveBootstrapHost: async () => { controller.abort(); return '93.184.215.14'; } });
+  await assert.rejects(cancelled.manager.ensure(node(), { signal: controller.signal }), code('PROXY_CORE_CANCELLED')); assert.equal(cancelled.calls.length, 0);
+});
+
+test('bootstrap binds only the validated physical IPv4 source and never expands IP or loopback fixtures', async t => {
+  const interfaces = { en0: [{ family: 'IPv6', address: '2001:db8::1', internal: false }, { family: 'IPv4', address: '192.0.2.10', internal: false }],
+    lo0: [{ family: 'IPv4', address: '127.0.0.1', internal: true }] };
+  assert.equal(bootstrapLocalAddress('en0', interfaces), '192.0.2.10');
+  for (const name of ['lo0', 'utun6', 'en9', 'en0#evil']) assert.throws(() => bootstrapLocalAddress(name, interfaces), code('PROXY_CORE_INTERFACE_UNAVAILABLE'));
+  assert.throws(() => bootstrapLocalAddress('en0', { en0: interfaces.en0.slice(0, 1) }), code('PROXY_CORE_INTERFACE_UNAVAILABLE'));
+  for (const host of ['127.0.0.1', 'localhost', '::1', '93.184.215.14']) {
+    const { manager, calls } = await fixture(t, { platform: 'darwin', resolveBootstrapHost: async () => { throw new Error('unexpected-bootstrap'); }, bootstrapAddress: () => { throw new Error('unexpected-address'); } });
+    await manager.ensure(node({ host })); assert.equal(calls[0].config.proxies[0].server, host);
+  }
+  assert.throws(() => anyTlsCoreConfig(anyTlsSettings(node()), { port: 40000, username: 'owned', password: 'local' }, { resolvedServer: '198.18.0.1' }), code('PROXY_CORE_BOOTSTRAP_UNAVAILABLE'));
 });
 
 test('loopback fixtures and non-macOS routes skip physical interface detection', async t => {

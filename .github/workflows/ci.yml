@@ -11,7 +11,9 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # The full suite includes inert native fixtures linking Apple frameworks.
+    # This job does not authorize or activate system routing.
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -24,7 +26,7 @@ jobs:
           cache-dependency-path: third_party/browseforge/go.sum
       - run: npm ci
       - run: npm run build
-      - run: npm test
+      - run: node --test --test-concurrency=2 tests/*.test.mjs
       - run: npm run test:sites
       - run: go test ./...
         working-directory: third_party/browseforge

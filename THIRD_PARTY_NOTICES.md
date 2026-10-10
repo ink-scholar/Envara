@@ -1,6 +1,6 @@
 # Third-party notices
 
-Envara's original application code is licensed under the MIT License. Third-party software retains its own copyright and license. JavaScript versions are recorded in `package-lock.json`; the vendored Go backend and its dependencies are pinned in `third_party/browseforge/ENVARA_UPSTREAM.md`, `go.mod`, and `go.sum`. This document describes local development candidates; public releases are paused.
+Envara's original application code is licensed under the MIT License. Third-party software retains its own copyright and license. JavaScript versions are recorded in `package-lock.json`; the vendored Go backend and its dependencies are pinned in `third_party/browseforge/ENVARA_UPSTREAM.md`, `go.mod`, and `go.sum`. This document describes local development candidates. GitHub upload is authorized after macOS implementation and native acceptance are complete; automatic releases remain disabled.
 
 ## Main dependencies
 
@@ -71,6 +71,32 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Original signed macOS routing dependency
+
+The macOS PF backend is Envara's separate implementation of process-group routing and an owned utun transport. VPNonly's MIT app-engine at commit `5f4a12c84f2ee9f575ae045e116a74c85edb7f31` was an architecture reference; its proprietary GUI and WireGuard runtime are not bundled. The PF component reuses the unmodified pinned Mihomo executable and complete corresponding source described above. Its independently staged official Node.js 24.18.0 runtime retains Node's original license and third-party notices. No upstream Network Extension signature is reused to sign Envara's code. See [PF backend](native/macos-pf-routing/README.md) for the installation and acceptance boundary.
+
+The independent PF ABI diagnostics reference the generated field layout in
+[Mullvad pfctl-rs 0.7.0](https://github.com/mullvad/pfctl-rs/tree/273e96bec0f5b983f16cfd43b6512f4c97a3f848),
+commit `273e96bec0f5b983f16cfd43b6512f4c97a3f848`; no pfctl-rs runtime is bundled.
+Its MIT notice is retained in
+[PFCTL_RS_LICENSE_MIT.txt](native/macos-pf-routing/PFCTL_RS_LICENSE_MIT.txt).
+Desktop packages also include this notice at `licenses/PFCTL_RS_LICENSE_MIT.txt`.
+The diagnostics also compare fixed public Apple XNU sources with the current
+system's original `pfctl` and `pfd`; those system executables are not copied or modified.
+
+Envara prepares the original, unmodified **mitmproxy-macos 0.12.11** Redirector
+from its official PyPI wheel, corresponding to mitmproxy_rs tag `v0.12.11`,
+commit `40f1dfb5dca7b03ff7793d3c90f23b8bdf873889`. Its Developer ID signature,
+original application identifier, Team identity and notarization are preserved.
+The certificate-truster from that wheel is excluded. The MIT copyright and
+license are retained in
+[Mitmproxy-LICENSE](native/macos-local-routing/Mitmproxy-LICENSE); exact artifact
+hashes and original identities are in
+[dependency-lock.json](native/macos-local-routing/dependency-lock.json).
+Envara's Node stream bridge and native peer verifier are separate implementations.
+Bundled dependency verification does not imply installation, OS authorization,
+DNS attribution, application compatibility or fault protection.
 
 ## Separately downloaded browser runtimes
 

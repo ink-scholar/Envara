@@ -5,12 +5,13 @@ import { TerminalWindow, FolderOpen, Plus, X, CaretDown, ArrowsOutSimple, Arrows
 import { api } from './client.js';
 import { useI18n } from './i18n.jsx';
 import { TerminalStreamStore, splitTerminalInput, terminalHeightForPointer, terminalHeightForKey } from './terminal-state.mjs';
+import { terminalTimezonePresentation } from './network-flow-state.mjs';
 import '@xterm/xterm/css/xterm.css';
 import './terminal.css';
 
 const activeStatuses = new Set(['starting', 'running', 'closing']);
 const statusLabels = { starting: '启动中', running: '运行中', closing: '关闭中', exited: '已退出', closed: '已关闭', error: '启动失败' };
-const timezoneSources = { proxy: '代理出口检测', direct: '直连出口检测', manual: '手动设置', local: '本机时区回退', unknown: '来源未确认' };
+const timezoneSources = { proxy: '代理出口检测', 'proxy-egress': '代理出口检测', 'saved-configuration': '已保存配置', direct: '直连出口检测', manual: '手动设置', local: '本机时区回退', unknown: '来源未确认' };
 const bounds = (value, low, high) => Math.max(low, Math.min(high, value));
 
 function TerminalSession({ session, active, visible, focusRequest, preserveTabFocusRef, register, onError }) {
@@ -369,8 +370,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
   const selectedSession = activeSessions[activeProfileId] ? sessions.find(session => session.sessionId === activeSessions[activeProfileId]) : sessions.find(session => activeStatuses.has(session.status)) ?? sessions.at(-1);
   const sessionUnavailable = Boolean(activeSessions[activeProfileId] && !selectedSession && !loading && !storeRef.current.getSession(activeSessions[activeProfileId]));
   const hasLiveSession = sessions.some(session => activeStatuses.has(session.status));
-  const timezone = selectedMetadata?.timezone || selectedProfile?.resolvedTimezone;
-  const timezoneSource = selectedMetadata?.timezoneSource && selectedMetadata.timezoneSource !== 'unknown' ? selectedMetadata.timezoneSource : selectedProfile?.timezoneSource || 'unknown';
+  const { timezone, source: timezoneSource } = terminalTimezonePresentation({ profile: selectedProfile, metadata: selectedMetadata, session: selectedSession, hasLiveSession });
   const timezoneLabel = timezone ? `${timezone} · ${t(timezoneSources[timezoneSource] || '来源未确认')}` : t('时区待确认');
   const rawNetworkDescription = selectedMetadata?.network?.description || selectedSession?.network?.description || '启动后读取环境网络设置。';
   const proxyDescription = /^([A-Z0-9]+) 代理，仅支持代理配置的命令行工具生效；本机地址直连。$/.exec(rawNetworkDescription);

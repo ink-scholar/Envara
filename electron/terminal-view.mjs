@@ -16,6 +16,12 @@ export function resolveTerminalView(args, workspace, terminalState) {
 // Independent terminal views need environment labels, not proxy credentials.
 export function terminalViewSnapshot(value) {
   if (!Array.isArray(value?.profiles) || !value.system) return value;
-  const fields = ['id', 'name', 'group', 'engine', 'status', 'timezone', 'resolvedTimezone', 'timezoneSource'];
-  return { profiles: value.profiles.map(row => Object.fromEntries(fields.filter(key => Object.hasOwn(row, key)).map(key => [key, row[key]]))), proxies: [], engines: [], settings: { ...(value.settings?.language ? { language: value.settings.language } : {}) }, events: [], system: { appVersion: value.system.appVersion, platform: value.system.platform, terminal: value.system.terminal } };
+  const fields = ['id', 'name', 'group', 'engine', 'status', 'timezone', 'resolvedTimezone', 'timezoneSource', 'timezoneOrigin'];
+  return { profiles: value.profiles.map(row => {
+    const profile = Object.fromEntries(fields.filter(key => Object.hasOwn(row, key)).map(key => [key, row[key]]));
+    const savedTimezone = row.selectedLocation?.timezone;
+    if (row.selectedLocation?.confirmed === true && typeof savedTimezone === 'string' && savedTimezone.length <= 128) profile.savedNetworkTimezone = savedTimezone;
+    if (row.network?.ok === false || row.networkLastError) profile.networkContextUnavailable = true;
+    return profile;
+  }), proxies: [], engines: [], settings: { ...(value.settings?.language ? { language: value.settings.language } : {}) }, events: [], system: { appVersion: value.system.appVersion, platform: value.system.platform, terminal: value.system.terminal } };
 }

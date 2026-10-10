@@ -8,6 +8,7 @@
   <key>CFBundleVersion</key><string>1</string>
   <key>CFBundleShortVersionString</key><string>0.5.0</string>
   <key>NetworkExtension</key><dict>
+    <key>NEMachServiceName</key><string>group.io.envara.app-routing.service</string>
     <key>NEProviderClasses</key><dict>
       <key>com.apple.networkextension.app-proxy</key><string>EnvaraAppProxyProvider</string>
     </dict>

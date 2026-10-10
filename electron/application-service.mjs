@@ -189,7 +189,8 @@ export class ApplicationService {
         const geolocation = publicGeo(context.geolocation);
         const workspace = { cwd, timezone, timezoneSource: context.timezoneSource ?? 'unknown', locale: context.locale ?? null,
           geolocation, privacy: { mode: ['standard', 'strict', 'off'].includes(context.privacy?.mode) ? context.privacy.mode : 'standard' } };
-        const prepared = await this.routing.prepareRoute({ application: { ...application }, workspace, route });
+        const prepared = await this.routing.prepareRoute({ application: { ...application }, workspace, route,
+          ...(context.managedRoute ? { managedRoute: { ...context.managedRoute } } : {}) });
         if (typeof prepared?.routeId === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(prepared.routeId)) session.routeId = prepared.routeId;
         if (!session.routeId || prepared.ready !== true || prepared.failClosed !== true || !APPLICATION_ROUTING_CHECKS.every(key => prepared.capabilities?.[key] === true) ||
             prepared.verification?.passed !== true || !APPLICATION_ROUTING_CHECKS.every(key => prepared.verification.checks?.[key] === true)) throw applicationRoutingError({ code: 'APPLICATION_ROUTING_NOT_READY' });

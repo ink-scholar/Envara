@@ -5,11 +5,14 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import EnvaraStore from './store.mjs';
 import { normalizePrivacy } from './privacy-policy.mjs';
+import { isInterfaceLanguage } from '../shared/interface-languages.mjs';
+import { ProxyNetworkProbe, proxyFingerprint } from './proxy-network.mjs';
+import { assertNetworkLocationMatchesEgress, confirmNetworkLocation, networkLocationGeolocation, normalizeNetworkLocation, recommendNetworkLocation } from '../shared/network-location.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROFILE_FIELDS = new Set(['name', 'group', 'notes', 'engine', 'platform', 'seed', 'locale', 'timezone', 'width', 'height', 'startUrl', 'proxyId', 'privacy']);
 const IMPORT_FIELDS = new Set([...PROFILE_FIELDS, 'id', 'createdAt', 'updatedAt', 'lastLaunchedAt']);
-const PROXY_FIELDS = new Set(['id', 'name', 'protocol', 'host', 'port', 'username', 'password']);
+const PROXY_FIELDS = new Set(['id', 'name', 'protocol', 'host', 'port', 'username', 'password', 'location']);
 const MAX_PROFILES = 500;
 const now = () => new Date().toISOString();
 const seed = () => randomInt(1, 2147483647);
@@ -142,11 +145,13 @@ function metric(value) {
 
 /** Local application service. Renderer callers only get the whitelisted call API. */
 export class EnvaraService {
-  constructor(dataDir, runtime, system = {}, onChange = () => {}) {
+  constructor(dataDir, runtime, system = {}, onChange = () => {}, options = {}) {
     this.store = new EnvaraStore(dataDir);
     this.runtime = runtime;
     this.system = { platform: system.platform ?? process.platform, appVersion: system.appVersion ?? '0.1.0', dataDir: this.store.dataDir };
     this.onChange = onChange;
+    this.networkProbe = options.networkProbe ?? new ProxyNetworkProbe();
+    this.locationPreviews = new Map();
     this.states = new Map();
     this.pendingStarts = new Set();
     this.installPromise = null;
@@ -172,6 +177,7 @@ export class EnvaraService {
       if (proxyIds.has(proxy.id)) throw failure('本地数据包含重复的网络出口标识。');
       proxyIds.add(proxy.id);
       proxyConfig(proxy);
+      if (proxy.location?.confirmed === true) normalizeNetworkLocation(proxy.location);
     }
     const profileIds = new Set();
     for (const profile of workspace.profiles) {
@@ -238,11 +244,11 @@ export class EnvaraService {
     await this.ready;
     if (this.closed) throw failure('应用正在退出。', 'APP_CLOSING');
     record(args, '操作参数');
-    const methods = new Set(['createProfile', 'updateProfile', 'cloneProfile', 'deleteProfile', 'clearProfile', 'startProfile', 'stopProfile', 'focusProfile', 'saveProxy', 'deleteProxy', 'checkProxy', 'saveSettings', 'installEngine', 'importProfiles', 'exportProfiles']);
+    const methods = new Set(['createProfile', 'updateProfile', 'cloneProfile', 'deleteProfile', 'clearProfile', 'startProfile', 'stopProfile', 'focusProfile', 'saveProxy', 'deleteProxy', 'checkProxy', 'previewProxyNetwork', 'saveSettings', 'installEngine', 'importProfiles', 'exportProfiles']);
     if (method === 'getSnapshot' || method === 'snapshot') return this.snapshot();
     if (!methods.has(method)) throw failure('不支持的操作。', 'UNKNOWN_METHOD');
     const result = await this[method](args);
-    return ['checkProxy', 'exportProfiles'].includes(method) ? result : this.snapshot();
+    return ['checkProxy', 'previewProxyNetwork', 'exportProfiles'].includes(method) ? result : this.snapshot();
   }
 
   async createProfile({ profile }) {
@@ -333,7 +339,15 @@ export class EnvaraService {
   async launch(profile, proxy, state) {
     try {
       await mkdir(this.profileDir(profile.id), { recursive: true, mode: 0o700 });
-      await this.runtime.start(profile, proxy, this.profileDir(profile.id), (error) => {
+      let scopedProfile = profile;
+      if (proxy?.location?.confirmed === true) {
+        const selectedLocation = normalizeNetworkLocation(proxy.location);
+        const network = await this.networkProbe.probe(proxy, { force: true });
+        assertNetworkLocationMatchesEgress(selectedLocation, network);
+        const confirmedTimezone = selectedLocation.timezone ?? selectedLocation.egressTimezone;
+        scopedProfile = { ...profile, ...(confirmedTimezone ? { timezone: confirmedTimezone } : {}), geolocation: networkLocationGeolocation(selectedLocation) };
+      }
+      await this.runtime.start(scopedProfile, proxy, this.profileDir(profile.id), (error) => {
         if (this.states.get(profile.id) !== state) return;
         state.status = error ? 'error' : 'stopped';
         state.lastError = error ? String(error.message ?? error) : null;
@@ -393,22 +407,51 @@ export class EnvaraService {
     this.capture(profileId, state);
   }
 
-  async saveProxy({ proxy }) {
+  async saveProxy({ proxy, locationPreviewToken }) {
     const config = proxyConfig(proxy);
+    const requestedLocation = Object.hasOwn(proxy, 'location') ? normalizeNetworkLocation(proxy.location) : undefined;
     await this.store.transaction((workspace) => {
+      const previous = proxy.id != null ? workspace.proxies.find((item) => item.id === proxy.id) : null;
+      const sameRoute = previous && proxyFingerprint(previous) === proxyFingerprint(config);
+      const previousLocation = sameRoute && previous.location?.confirmed === true ? normalizeNetworkLocation(previous.location) : null;
+      const unchanged = requestedLocation && previousLocation && JSON.stringify(requestedLocation) === JSON.stringify(previousLocation);
+      if (requestedLocation && (!unchanged || locationPreviewToken != null)) {
+        const preview = this.locationPreviews.get(locationPreviewToken);
+        if (!preview || preview.expiresAt <= Date.now() || preview.fingerprint !== proxyFingerprint(config)) throw failure('请先检测当前代理，再确认网络环境的位置。', 'NETWORK_LOCATION_NOT_VERIFIED');
+        config.location = confirmNetworkLocation(proxy.location, preview.network);
+      } else if (requestedLocation === null) config.location = null;
+      else if (requestedLocation || previousLocation) config.location = requestedLocation ?? previousLocation;
       if (proxy.id != null) {
         id(proxy.id);
         const existing = workspace.proxies.find((item) => item.id === proxy.id);
         if (!existing) throw failure('网络出口不存在。', 'PROXY_NOT_FOUND');
         for (const profile of workspace.profiles.filter((item) => item.proxyId === proxy.id)) this.assertStopped(profile.id);
         Object.assign(existing, config);
+        if (!Object.hasOwn(config, 'location')) delete existing.location;
       } else {
         if (workspace.proxies.length >= 500) throw failure('最多支持 500 个网络出口。');
         workspace.proxies.push({ id: randomUUID(), ...config });
       }
       event(workspace, 'proxy', `保存网络出口「${config.name}」`);
     });
+    if (locationPreviewToken) this.locationPreviews.delete(locationPreviewToken);
     this.changed();
+  }
+
+  async previewProxyNetwork({ proxy }) {
+    await this.ready;
+    if (this.closed) throw failure('应用正在退出。', 'APP_CLOSING');
+    const config = proxyConfig({ ...proxy, name: proxy?.name || '网络出口', location: undefined });
+    const network = await this.networkProbe.probe(config, { force: true });
+    const locationRecommendation = recommendNetworkLocation(network);
+    let locationPreviewToken = null;
+    if (locationRecommendation) {
+      for (const [token, preview] of this.locationPreviews) if (preview.expiresAt <= Date.now()) this.locationPreviews.delete(token);
+      if (this.locationPreviews.size >= 128) this.locationPreviews.delete(this.locationPreviews.keys().next().value);
+      locationPreviewToken = randomUUID();
+      this.locationPreviews.set(locationPreviewToken, { fingerprint: proxyFingerprint(config), network: structuredClone(network), expiresAt: Date.now() + 15 * 60 * 1000 });
+    }
+    return { network, locationRecommendation, locationPreviewToken };
   }
 
   async deleteProxy({ id: proxyId }) {
@@ -448,7 +491,7 @@ export class EnvaraService {
     allowed(settings, new Set(['closeBrowsersOnExit', 'language']), '设置');
     if (typeof settings.closeBrowsersOnExit !== 'boolean') throw failure('退出时关闭浏览器必须是布尔值。');
     if (!settings.closeBrowsersOnExit) throw failure('当前版本退出应用时会关闭所有浏览器会话。');
-    if (settings.language != null && !['zh-CN', 'en'].includes(settings.language)) throw failure('界面语言无效。');
+    if (settings.language != null && !isInterfaceLanguage(settings.language)) throw failure('界面语言无效。');
     return { closeBrowsersOnExit: settings.closeBrowsersOnExit, ...(settings.language != null ? { language: settings.language } : {}) };
   }
 
@@ -512,6 +555,8 @@ export class EnvaraService {
   async shutdown() {
     await this.ready;
     this.closed = true;
+    this.networkProbe.close?.();
+    this.locationPreviews.clear();
     await Promise.allSettled([...this.pendingStarts]);
     if (this.runtime?.closeAll) await this.runtime.closeAll();
     else await Promise.allSettled([...this.states].filter(([, state]) => state.status === 'running').map(([profileId]) => this.runtime.stop(profileId)));

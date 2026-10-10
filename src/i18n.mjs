@@ -1,6 +1,45 @@
-export const languages = ['zh-CN', 'en'];
+export { languages, languageOptions } from '../shared/interface-languages.mjs';
+import traditionalChinese from './locales/zh-TW.json' with { type: 'json' };
+import japanese from './locales/ja.json' with { type: 'json' };
+import korean from './locales/ko.json' with { type: 'json' };
+import spanish from './locales/es.json' with { type: 'json' };
+import french from './locales/fr.json' with { type: 'json' };
+import german from './locales/de.json' with { type: 'json' };
+import portuguese from './locales/pt-BR.json' with { type: 'json' };
+import { networkFlowEnglish } from './network-flow-english.mjs';
+import { networkFlowTranslations } from './network-flow-translations.mjs';
 
 export const english = {
+  "首次错误": "Initial failure",
+  "清理错误": "Cleanup failure",
+  "上次试运行": "Previous trial",
+  "导出诊断": "Export diagnostics",
+
+  "欢迎使用 Envara": "Welcome to Envara",
+  "选择界面语言": "Choose your language",
+  "首次设置": "First launch",
+  "系统推荐": "Recommended",
+  "开始使用": "Get started",
+  "正在保存…": "Saving…",
+  "以后可以在设置中随时更改。": "You can change this anytime in Settings.",
+  "界面语言不会更改境舱的浏览器语言或网络。": "Interface language does not change an environment’s browser locale or network.",
+  "无法保存语言，请重试。": "Could not save your language. Please try again.",
+  "无法读取设置，请重试。": "Could not load settings. Please try again.",
+  "重新加载": "Reload",
+  "选择语言": "Select a language",
+  "网络组件已准备": "Network component prepared",
+  "组件已准备，等待安装与系统授权。": "The component is prepared. Installation and system approval are pending.",
+  "查看验证进度": "View verification progress",
+  "TCP 转发": "TCP forwarding",
+  "UDP 转发或阻断": "UDP forwarding or blocking",
+  "DNS 出口": "DNS route",
+  "子进程接管": "Child process routing",
+  "断线阻断": "Block on failure",
+  "守护进程保护": "Guard process protection",
+  "其他软件网络": "Other applications’ network",
+  "实机验证": "Native device verification",
+  "已验证": "Verified",
+  "待验证": "Pending verification",
   " · {value1} 个分组绑定": " · {value1} linked groups",
   " · 不可用": " · Unavailable",
   " · 退出码 {code}": " · Exit code {code}",
@@ -287,7 +326,7 @@ export const english = {
   "请先停止这个境舱的运行会话。": "Stop this environment’s running sessions first.",
   "请先为此境舱选择工作目录。": "Choose a working directory for this environment first.",
   "请先为此境舱选择网络出口。": "Choose a network for this environment first.",
-  "请先在系统中授权应用网络组件。": "Authorize the application network component in system settings first.",
+  "请先在系统中授权应用网络组件。": "Authorize the application network component first.",
   "请修正标出的配置后再保存。": "Correct the highlighted settings before saving.",
   "请选择本地软件的绝对路径。": "Select an absolute path to a local application.",
   "请选择本机网络出口": "Choose a local network",
@@ -540,12 +579,26 @@ export const english = {
   "English": "English",
   "Envara 境舱": "Envara",
   "TLS 服务器名称": "TLS server name",
-  "TLS 服务器名称 / SNI（选填）": "TLS server name / SNI (optional)"
+  "TLS 服务器名称 / SNI（选填）": "TLS server name / SNI (optional)",
+  ...networkFlowEnglish,
 };
+
+export const translationCatalog = Object.freeze({
+  'zh-CN': Object.freeze(Object.fromEntries(Object.keys(english).map(key => [key, key]))),
+  'zh-TW': Object.freeze({ ...traditionalChinese, ...networkFlowTranslations['zh-TW'] }),
+  en: Object.freeze(english),
+  ja: Object.freeze({ ...japanese, ...networkFlowTranslations.ja }),
+  ko: Object.freeze({ ...korean, ...networkFlowTranslations.ko }),
+  es: Object.freeze({ ...spanish, ...networkFlowTranslations.es }),
+  fr: Object.freeze({ ...french, ...networkFlowTranslations.fr }),
+  de: Object.freeze({ ...german, ...networkFlowTranslations.de }),
+  'pt-BR': Object.freeze({ ...portuguese, ...networkFlowTranslations['pt-BR'] }),
+});
 
 export function translate(value, language = 'zh-CN', vars = {}) {
   if (typeof value !== 'string') return value;
-  let result = language === 'en' ? (english[value] ?? value) : value;
+  const dictionary = Object.hasOwn(translationCatalog, language) ? translationCatalog[language] : english;
+  let result = Object.hasOwn(dictionary, value) ? dictionary[value] : Object.hasOwn(english, value) ? english[value] : value;
   for (const [key, replacement] of Object.entries(vars ?? {})) result = result.replaceAll(`{${key}}`, String(replacement));
   return result;
 }

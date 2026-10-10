@@ -1,0 +1,23 @@
+name: "功能建议 / Feature request"
+description: "提出具体使用场景 / Suggest a concrete use case"
+title: "[Feature] "
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: "使用场景 / Use case"
+      description: "你要完成什么，现在遇到什么困难？ / What are you trying to do, and what gets in the way?"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "建议行为 / Proposed behavior"
+      description: "说明所在页面与最少的操作步骤 / Describe the page and the shortest useful flow"
+    validations:
+      required: true
+  - type: input
+    id: scope
+    attributes:
+      label: "相关系统、语言或内核 / Platform, language or provider"
+      description: "可选；不要提交账号或代理凭据 / Optional; do not include account or proxy credentials"

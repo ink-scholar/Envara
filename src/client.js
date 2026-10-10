@@ -1,3 +1,6 @@
+import { isInterfaceLanguage } from '../shared/interface-languages.mjs';
+import { parseGoogleMapsLocation } from '../shared/network-location.mjs';
+
 const now = new Date().toISOString();
 const catalogNotice = '内核目录为界面预览样例；当前预览未安装或连接任何浏览器内核。';
 const sharedCapabilities = { supports_native_proxy: true, supports_webrtc_masking: true, supports_persistent_context: true, supports_playwright_bind: true, requires_external_binary: true };
@@ -70,7 +73,9 @@ const preview = {
       case 'deleteProxy':
         if (state.profiles.some(item => item.proxyId === args.id)) throw new Error('请先解除使用此代理的环境绑定');
         state.proxies = state.proxies.filter(item => item.id !== args.id); break;
-      case 'saveSettings': Object.assign(state.settings, args.settings); break;
+      case 'saveSettings':
+        if (args.settings?.language != null && !isInterfaceLanguage(args.settings.language)) throw new Error('界面语言无效。');
+        Object.assign(state.settings, args.settings); break;
       case 'exportProfiles': {
         const rows = args.id ? state.profiles.filter(item => item.id === args.id) : state.profiles;
         const profiles = rows.map(({ name, group, notes, engine, platform, seed, locale, timezone, width, height, startUrl, privacy }) => ({ name, group, notes, engine, platform, seed, locale, timezone, width, height, startUrl, privacy, proxyId: null }));
@@ -84,11 +89,19 @@ const preview = {
         window.open(urls[args.target], '_blank', 'noopener,noreferrer');
         return { ok: true };
       }
+      case 'openNetworkLocationMap': {
+        const location = parseGoogleMapsLocation(args.url);
+        if (!location) throw new Error('请先选择网络位置。');
+        window.open(location.mapsUrl, '_blank', 'noopener,noreferrer');
+        return { ok: true };
+      }
       case 'terminalSnapshot': case 'chooseWorkspaceDirectory': case 'openTerminal': case 'writeTerminal': case 'resizeTerminal': case 'closeTerminal': case 'duplicateTerminal': case 'openTerminalWindow':
         throw new Error('内置终端与本地工作目录需要境舱桌面应用。');
       case 'pickApplication': case 'saveApplication': case 'startApplication': case 'stopApplication': case 'deleteApplication': case 'getApplicationRoutingStatus': case 'setupApplicationRouting':
         throw new Error('本地软件与网络接管需要境舱桌面应用。');
-      case 'checkEnvironmentNetwork':
+      case 'listLocalApplications':
+        return { applications: [], platform: 'preview', available: false, scanComplete: true, truncated: false };
+      case 'checkEnvironmentNetwork': case 'previewProxyNetwork':
         throw new Error('真实网络出口检测需要境舱桌面应用。');
       case 'installEngine': case 'startProfile': case 'stopProfile': case 'focusProfile': case 'checkProxy': case 'openDataDirectory':
         throw new Error('当前是界面预览，未安装或连接浏览器内核；请打开 Envara 桌面 App 使用浏览器与本地功能。');

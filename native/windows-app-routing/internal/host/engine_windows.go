@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -78,6 +79,10 @@ type sessionState struct {
 	creationTime uint64
 	exitCode     *int
 	connections  map[net.Conn]bool
+	// LookupRelay is a one-shot native claim. Retain its already verified
+	// provenance only while this admitted connection lives; querying it again
+	// would not establish the original identity or later revocation.
+	relayRecords map[net.Conn]captureRelayResult
 }
 
 type engine struct {
@@ -130,14 +135,13 @@ func (engine *engine) startCaptureLocked() error {
 		capture.close()
 		return err
 	}
-	if err = capture.activate(port); err == nil {
-		err = capture.refresh()
-	}
-	if err != nil || !capture.status.Running || !capture.status.SocketReady || !capture.status.NetworkReady {
+	startErr := capture.activate(port)
+	statusErr := capture.refresh()
+	if startErr != nil || statusErr != nil || !capture.status.Running || !capture.status.SocketReady || !capture.status.NetworkReady {
 		_ = listener4.Close()
 		_ = listener6.Close()
 		capture.close()
-		return errors.New("capture setup did not produce healthy handles")
+		return fmt.Errorf("capture setup did not produce healthy handles (start=%v, status=%v, native error=%d)", startErr, statusErr, capture.status.LastError)
 	}
 	engine.capture, engine.listener4, engine.listener6, engine.port = capture, listener4, listener6, port
 	go engine.accept(listener4)
@@ -806,11 +810,16 @@ func (engine *engine) relay(client *net.TCPConn) {
 	}
 	transport := route.route
 	session.connections[client] = true
+	if session.relayRecords == nil {
+		session.relayRecords = map[net.Conn]captureRelayResult{}
+	}
+	session.relayRecords[client] = destination
 	engine.mu.Unlock()
 	defer func() {
 		_ = engine.policy.CloseFlowInstance(flow)
 		engine.mu.Lock()
 		delete(session.connections, client)
+		delete(session.relayRecords, client)
 		engine.mu.Unlock()
 	}()
 	// The managed loopback core is the sole dial target. There are no redirect

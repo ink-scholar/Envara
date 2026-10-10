@@ -1,6 +1,6 @@
 # Envara 境舱能力与验收矩阵
 
-记录日期：2026-10-07。当前为 **0.5.0 本地开发候选版**，新增独立工作页、界面语言、浏览器隐私/出口定位与附加软件接管门禁。BrowseForge 固定版本源码纳入 `third_party/browseforge/`，由 Envara 桌面应用自动管理本地服务；终端、出口解析、受管 AnyTLS 与附加软件是 Envara 扩展，不代表上游已有相同产品入口。
+记录日期：2026-10-08。当前为 **0.5.0 本地开发候选版**，新增独立工作页、界面语言、浏览器隐私/出口定位与附加软件接管门禁。BrowseForge 固定版本源码纳入 `third_party/browseforge/`，由 Envara 桌面应用自动管理本地服务；终端、出口解析、受管 AnyTLS 与附加软件是 Envara 扩展，不代表上游已有相同产品入口。
 
 状态含义：**源码已接入**表示实现或适配代码已纳入仓库；**Mac 后端已验证**表示所注明版本在 macOS Apple Silicon 上有真实执行证据；**待验证**表示当前路径还需测试；**计划中**表示尚未形成可验收的产品能力。中间阶段测试不代表冻结源码已通过，后端测试不代表 Electron 界面已验收，历史版本结果不自动转移到新增代码。
 
@@ -9,7 +9,7 @@
 | 能力 | 实现范围 | 验收边界 |
 | --- | --- | --- |
 | 六个工作页与简化配置 | 环境、网络出口、浏览器、终端、附加软件、运行监控依次排列，设置置底；保留暗色三栏，详细指纹放高级配置 | 新界面已接入；冻结源码的本轮桌面与浏览器证据见 [验证记录](verification.md) |
-| 中文/英文界面 | 540 项静态界面翻译，设置保存语言；用户命名、路径和终端输出保留原文 | 界面语言与境舱浏览器 locale 分开，不自动翻译软件输出 |
+| 九种界面语言 | 简体中文、繁體中文、English、日本語、한국어、Español、Français、Deutsch、Português (Brasil)；首次启动推荐系统语言并要求确认，设置可更改，保留已有选择 | 九语言与首次确认已有原生桌面检查；界面语言与境舱浏览器 locale 分开，用户命名、路径和终端输出保留原文 |
 | 共享出口上下文 | 浏览器、终端与附加软件私有上下文共用实际出口、时区、语言及粗略定位 | 固定时区/语言也检测出口定位；失败保留手动字段、geolocation=null，代理自动时区失败拒启动，不伪造出口或住宅地址 |
 | Cloak 区域语言 | 原生语言参数结合 persistent context 的 opts.Locale，对齐 en-PH 等语言与 native Intl 默认地区 | 新增补丁需本轮实际浏览器证据；历史 provider 验收不自动转移 |
 | 浏览器定位边界 | 使用 IP 地理服务返回的粗略经纬度/精度；缺少定位时拒绝宿主位置来源 | CDP 仅使用 Target.getBrowserContexts 清单内的有效 ID，默认 persistent context 省略无效 ID，拒绝策略维持到页面关闭；不修改系统定位 |
@@ -17,8 +17,10 @@
 | 终端与 CLI 隐私 | 原有真实 PTY、目录/配置/历史、拖高、放大恢复、独立窗口与独立进程复制保留；提供 CLI opt-out 变量 | 网络范围仍为 proxy-aware-cli，不能强制全部 TCP/UDP；工具是否尊重 opt-out 需分别验证 |
 | 附加软件绑定 | 原生选择本地软件，按身份绑定境舱，白名单原子存储，运行时状态不持久化 | 添加与管理绑定已接入；应用网络接管未就绪时启动明确拒绝，不以代理变量替代 |
 | 附加软件启动与失败清理 | 私有 launch context、严格原生能力/验收门禁、主进程串行活跃配置锁；状态缺失转 error 并尝试清理 | 未确认停止/撤销时保留 route/session 归属及修改锁，不假报 stopped，不释放保护后继续运行 |
-| macOS 应用接管 | Network Extension App Proxy 与 helper RPC 源码已接入 | 缺 Developer ID/provisioning、安装授权/扩展激活和系统验收，ready=false；源码编译/测试不代表原生可用 |
+| macOS 应用接管 | PF／独立进程 GID／自有 utun，经认证 SOCKS 接入管理节点；已安装 46ae，c37 监听身份修复候选已编译打包但未安装。保留自有 AppProxy 和原版 Redirector 的独立诊断路线 | 历史 6f8 自有夹具五项流量与清理通过；最新 Notion 运行在传输准备失败，未启动应用，完整清理尚未确认。源码新增启动前失败的严格回收证据，未追溯清理旧运行。无需 Apple Developer 身份，需本机管理员授权。源码加入一次性 creator 的内核 socket UID/GID 校验及 PF 入站身份规则，243 项检查通过；本机 loopback、同端口复用及整个 guard 故障保护仍未原生验收；通用系统 DNS、外部辅助进程、已有状态、IPv6／原始协议及 Notion 真实生命周期仍未验收，ready=false |
+| macOS 受控试验清理 | 单 FILTER 事务已接入受控流程，旧记录仍保留原样封存 | 6f8 真实五项流量之后，进程／组／隧道／入口退出，自有 namespace 为 absent，回执退休，原 PF／DNS／路由恢复。`cleanupConfirmed=true`、`cleanupUncertain=false`；生产保护仍为 false，见 [验证记录](verification.md) |
 | Windows 应用接管 | WinDivert 官方签名 x64 依赖、capture DLL、TCP NAT/认证 relay、实际 PID/创建时间/Job、撤销、UDP 阻断与独立 DoH broker 源码已接入 | 共享 DNS、整个 guard 崩溃阻断、无关应用既有连接保留及安装/实机验收未完成，ready=false；ARM64 helper 不等于捕获支持 |
+| Windows 桌面候选包 | 独立 Windows x64 source stage、官方 Electron/Node/Mihomo、Go 后端、原 npm PTY prebuild 与 NSIS | Mac 主机上实际生成完整安装包，158 项资源核对与 PE 平台拒绝检查通过；没有混入 Mac runtime。Windows GUI、PTY、浏览器及驱动真实运行仍待验证 |
 
 0.5.0 的实际测试与桌面证据单独记录，以上不预填最终通过计数。终端代理、浏览器隐私与原生软件接管是不同范围；源码纳入完整上游不等于全部 BrowseForge 工作流均已在桌面逐项验收。以下为历史基线。
 
@@ -92,8 +94,8 @@ BrowseForge Chromium 上游有 macOS、Linux 与 Windows 的 Alpha 产物，但�
 
 ## 平台与许可
 
-- **macOS Apple Silicon：**0.2.0/0.3.0/0.4.0 结果保留为历史；0.5.0 的冻结源码证据见 [验证记录](verification.md)。附加软件 App Proxy 部署暂停，源码保留；尚无签名扩展激活或系统接管验收，拒绝启动附加软件。
-- **Windows：**附加软件当前优先；源码交叉编译、BFE 生命周期与 DNS broker 本地测试不代表内核驱动已运行。共享 DNS 调用适配、WDK 构建/签名与真实机器验收未完成，原生 ready=false。Envara 浏览器、终端与安装包亦未完成 Windows 实机验收。
+- **macOS Apple Silicon：**当前优先实现；已安装 46ae，最新离线包为 c37，Notion 失败运行的完整清理仍未确认。历史 6f8 自有流量和清理、新候选源码与包检查分别见 [验证记录](verification.md)。非 NE 路线不要求 Apple Developer 身份。正式软件启动、DNS 与故障保护仍需接入并实测；仍拒绝保护启动。原版诊断组件与自有 AppProxy 的历史结果不提升 PF 就绪状态。
+- **Windows：**用户另安排测试条件，本机VM与Windows测试已暂停；源码交叉编译和DNS broker本地测试不代表原版WinDivert驱动已运行。共享DNS调用适配、whole-guard故障保护、无关应用和真实机器验收未完成，ready=false。浏览器、终端与安装包亦未完成Windows实机验收。
 - **macOS Intel、Linux：**Envara 本地服务、终端与安装包未完成实机验收。上游的平台矩阵与 CI 构建目标分别说明源码/产物范围，不能作为 Envara 已可用的证明。
 - **源码许可：**Envara 原创应用与纳入的 BrowseForge 代码保留 MIT；独立 Mihomo 核心保留 GPLv3 及对应源码/vendor 和来源记录，应用 MIT 不替代核心许可。见 [第三方声明](../THIRD_PARTY_NOTICES.md) 与 [固定版本 BrowseForge License](https://github.com/nczz/BrowseForge/blob/fa9e0bb670e749706a9c8f2d4095333347d6c521/LICENSE)。
 - **CloakBrowser：**包装层为 MIT，编译浏览器适用独立专有许可。Envara 不把该内核打入安装包；用户须从官方渠道获取，版本与订阅条件以其条款为准。[包装层 License](https://github.com/CloakHQ/CloakBrowser/blob/5fa65172f0612b3ea3efbee719be0cb618594285/LICENSE)、[Binary License](https://github.com/CloakHQ/CloakBrowser/blob/5fa65172f0612b3ea3efbee719be0cb618594285/BINARY-LICENSE.md)。

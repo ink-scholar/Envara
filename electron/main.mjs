@@ -12,9 +12,16 @@ import { TerminalController, TERMINAL_METHODS } from './terminal-controller.mjs'
 import { resolveTerminalView, terminalViewSnapshot } from './terminal-view.mjs';
 import { ProxyCoreManager } from './proxy-core-manager.mjs';
 import { ApplicationService, inspectLocalApplication } from './application-service.mjs';
+import { LocalApplicationCatalog } from './local-application-catalog.mjs';
 import { NativeApplicationRouting } from './application-routing.mjs';
+import { MacOSApplicationRouting } from './macos-application-routing.mjs';
+import { MacOSPFApplicationRouting } from './macos-pf-application-routing.mjs';
+import { exportPFNotionTrialDiagnostics } from './macos-pf-notion-trial.mjs';
+import { NotionDiagnosticsStore } from './notion-diagnostics-store.mjs';
+import { verifyPFInstallation } from '../native/macos-pf-routing/controller.mjs';
 import { applicationWorkspaceContext } from './workspace-context.mjs';
 import { ProxyNetworkProbe } from './proxy-network.mjs';
+import { parseGoogleMapsLocation } from '../shared/network-location.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const isSmoke = process.env.ENVARA_SMOKE === '1' && !app.isPackaged;
@@ -39,6 +46,12 @@ let terminal;
 let terminalController;
 let proxyCore;
 let applications;
+let notionTrialAvailability = null;
+let notionTrialAvailabilityAt = 0;
+let notionTrialAvailabilityPending = null;
+let notionTrialReserved = false;
+let notionDiagnostics;
+const localApplications = new LocalApplicationCatalog();
 const views = new Map();
 const terminalWindows = new Map();
 let quitting = false;
@@ -58,11 +71,48 @@ function workspaceSnapshot(value) {
 async function fullWorkspaceSnapshot(value) {
   if (!value || !Array.isArray(value.profiles) || !Array.isArray(value.proxies) || !value.system) return value;
   const applicationState = applications ? await applications.snapshot() : { applications: [], applicationRouting: { ready: false, installed: false, authorized: false, status: 'unavailable', message: '应用网络组件尚未安装。' } };
+  if (typeof applications?.routing?.controlledNotionTrialAvailability === 'function') {
+    const availability = await getNotionTrialAvailability();
+    applicationState.applicationRouting = { ...applicationState.applicationRouting,
+      controlledNotionTrialAvailable: availability.controlledNotionTrialAvailable === true,
+      controlledNotionTrialErrorCode: availability.errorCode ?? null,
+      ...(!applicationState.applicationRouting.ready ? {
+        message: '应用网络组件尚未通过完整验证，软件暂不能启动。',
+        status: 'incomplete',
+      } : {}) };
+    applicationState.applications = await Promise.all(applicationState.applications.map(async item => item.identity === 'bundle:notion.id'
+      ? { ...item, notionTrial: applications.routing.controlledNotionTrialSnapshot({ applicationId: item.id }),
+        notionTrialHistory: await notionDiagnostics?.read(item.id).catch(() => null) ?? null } : item));
+  }
   return workspaceSnapshot({ ...value, ...applicationState });
 }
 
+async function getNotionTrialAvailability({ force = false } = {}) {
+  if (!force && notionTrialAvailability && Date.now() - notionTrialAvailabilityAt < 30000) return notionTrialAvailability;
+  if (notionTrialAvailabilityPending) return notionTrialAvailabilityPending;
+  notionTrialAvailabilityPending = applications.routing.controlledNotionTrialAvailability().then(value => {
+    notionTrialAvailability = value; notionTrialAvailabilityAt = Date.now(); return value;
+  }).finally(() => { notionTrialAvailabilityPending = null; });
+  return notionTrialAvailabilityPending;
+}
+
+function findNotionTrialApplication(args) {
+  if (!args || Object.keys(args).length !== 1 || typeof args.id !== 'string' || !applications ||
+      typeof applications.routing?.controlledNotionTrial !== 'function') throw Object.assign(new Error('当前桌面版本不支持 Notion 试运行。'), { code: 'PF_NOTION_TRIAL_NOT_ENABLED' });
+  const application = applications.find(args.id);
+  if (application.path !== '/Applications/Notion.app' || application.identity !== 'bundle:notion.id') throw Object.assign(new Error('试运行仅支持已添加的 Notion。'), { code: 'PF_NOTION_TRIAL_REQUEST_INVALID' });
+  return application;
+}
+
+function assertNotionTrialContextIdle({ allowReservation = false } = {}) {
+  const state = applications?.routing?.controlledNotionTrialSnapshot?.() ?? null;
+  if ((!allowReservation && notionTrialReserved) || state?.active === true || state?.cleanupUncertain === true) throw Object.assign(new Error('请先结束试运行并确认清理，再修改环境。'), { code: 'PF_OWNED_RUNTIME_NOT_EMPTY' });
+}
+
 async function shutdownOwnedServices() {
-  await applications?.shutdown().catch(() => {});
+  // Preserve the managed route if native cleanup remains uncertain.
+  try { await applications?.shutdown(); }
+  finally { await notionDiagnostics?.pending.catch(() => {}); }
   await terminal?.shutdown().catch(() => {});
   try {
     if (service) await service.shutdown();
@@ -82,7 +132,8 @@ async function publish() {
 }
 const allowedMethods = new Set(['snapshot','createProfile','updateProfile','cloneProfile','deleteProfile','clearProfile','startProfile','stopProfile','focusProfile','saveProxy','deleteProxy','checkProxy','saveSettings','installEngine','importProfiles','cancelImport','exportProfiles','openDataDirectory','openDocumentation','previewLegacyMigration','migrateLegacy','saveGroup','deleteGroup','clearGroupProxy','bulkProfiles','exportAutomationConfig','openTerminalWindow', ...TERMINAL_METHODS]);
 const applicationMethods = new Set(['saveApplication', 'startApplication', 'stopApplication', 'deleteApplication', 'getApplicationRoutingStatus', 'setupApplicationRouting']);
-for (const method of [...applicationMethods, 'pickApplication', 'checkEnvironmentNetwork']) allowedMethods.add(method);
+for (const method of [...applicationMethods, 'pickApplication', 'listLocalApplications', 'previewProxyNetwork', 'checkEnvironmentNetwork', 'openNetworkLocationMap']) allowedMethods.add(method);
+for (const method of ['runNotionTrial', 'stopNotionTrial', 'notionTrialSnapshot', 'exportNotionDiagnostics']) allowedMethods.add(method);
 
 async function protectApplicationMutation(method, args, operation) {
   if (!applications) return operation();
@@ -92,6 +143,7 @@ async function protectApplicationMutation(method, args, operation) {
   const bulkMutation = method === 'bulkProfiles' && ['move', 'delete'].includes(args.action);
   if (!profileMutation && !proxyMutation && !groupMutation && !bulkMutation) return operation();
   return applications.serialized(async () => {
+    assertNotionTrialContextIdle();
     if (profileMutation) applications.assertProfileIdle(args.id);
     if (proxyMutation) applications.assertProxyIdle(method === 'saveProxy' ? args.proxy?.id : args.id);
     if (groupMutation || bulkMutation) {
@@ -106,8 +158,60 @@ async function handleCall(method, args = {}, caller = window) {
   if (quitting) throw Object.assign(new Error('应用正在退出。'), { code: 'APP_CLOSING' });
   if (!allowedMethods.has(method)) throw new Error('不支持的操作');
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('操作参数无效。');
+  if (['runNotionTrial', 'stopNotionTrial', 'notionTrialSnapshot', 'exportNotionDiagnostics'].includes(method)) {
+    const application = findNotionTrialApplication(args);
+    if (method === 'notionTrialSnapshot') return { applicationId: application.id,
+      notionTrial: applications.routing.controlledNotionTrialSnapshot({ applicationId: application.id }) };
+    if (method === 'exportNotionDiagnostics') {
+      const current = applications.routing.controlledNotionTrialSnapshot({ applicationId: application.id });
+      const report = exportPFNotionTrialDiagnostics(current) ?? await notionDiagnostics?.read(application.id);
+      if (!report) throw Object.assign(new Error('尚无可导出的试运行诊断。'), { code: 'PF_NOTION_DIAGNOSTICS_UNAVAILABLE' });
+      const choice = await dialog.showSaveDialog(caller, { title: '导出试运行诊断',
+        defaultPath: `Envara-Notion-${report.runId}.json`, filters: [{ name: 'JSON', extensions: ['json'] }] });
+      if (choice.canceled || !choice.filePath) return { canceled: true };
+      await writeFile(choice.filePath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+      return { exported: true };
+    }
+    // Stop must not wait behind the long-lived trial reservation.
+    if (method === 'stopNotionTrial') return applications.routing.stopControlledNotionTrial({ applicationId: application.id });
+    assertNotionTrialContextIdle();
+    notionTrialReserved = true;
+    return applications.serialized(async () => {
+      const application = findNotionTrialApplication(args);
+      assertNotionTrialContextIdle({ allowReservation: true });
+      await applications.checkProfile(application.profileId);
+      applications.assertProfileIdle(application.profileId);
+      const available = await getNotionTrialAvailability({ force: true });
+      if (available.controlledNotionTrialAvailable !== true) throw Object.assign(new Error('Notion 试运行组件尚未就绪。'), { code: available.errorCode ?? 'PF_NOTION_TRIAL_NOT_ENABLED' });
+      // A renderer provides only the saved binding id. Network credentials and
+      // activation intent are constructed by this main-process action.
+      let context;
+      try { context = await applicationWorkspaceContext(application.profileId, { service, terminal }); }
+      catch (error) {
+        if (error.code !== 'APPLICATION_DIRECTORY_REQUIRED') throw error;
+        await terminalController.dispatch('chooseWorkspaceDirectory', { id: application.profileId }, { window: caller });
+        context = await applicationWorkspaceContext(application.profileId, { service, terminal });
+      }
+      return applications.routing.controlledNotionTrial({ application: { ...application, args: [...application.args] }, context, activationAuthorized: true });
+    }).finally(() => {
+      notionTrialReserved = false;
+      if (!views.size) void quitWhenIdle().catch(() => {});
+    });
+  }
+  if (method === 'listLocalApplications') return localApplications.list(args);
+  if (method === 'openNetworkLocationMap') {
+    const location = parseGoogleMapsLocation(args.url);
+    if (!location) throw new Error('请先选择网络位置。');
+    await shell.openExternal(location.mapsUrl);
+    return { ok: true };
+  }
+  if (method === 'previewProxyNetwork') {
+    if (typeof service?.previewProxyNetwork !== 'function') throw new Error('当前后端不支持网络位置预览。');
+    return service.previewProxyNetwork(args);
+  }
   if (applicationMethods.has(method)) {
     if (!applications) throw new Error('附加软件需要完整桌面应用。');
+    if (['saveApplication', 'deleteApplication', 'setupApplicationRouting'].includes(method)) assertNotionTrialContextIdle();
     return applications[method](args);
   }
   if (method === 'pickApplication') {
@@ -274,18 +378,25 @@ app.on('second-instance', () => {
 });
 async function quitWhenIdle() {
   if (quitting || views.size) return;
+  const trial = applications?.routing?.controlledNotionTrialSnapshot?.();
+  if (notionTrialReserved || trial?.active === true || trial?.cleanupUncertain === true) return;
   const snapshot = await terminal?.snapshot();
   if (snapshot?.profiles?.some(profile => profile.sessions?.some(session => ['starting', 'running', 'closing'].includes(session.status)))) return;
   if ((await applications?.snapshot())?.applications?.some(item => ['starting', 'running', 'stopping'].includes(item.status))) return;
   if (!views.size) app.quit();
 }
-app.on('window-all-closed', () => { void quitWhenIdle().catch(() => app.quit()); });
+app.on('window-all-closed', () => { void quitWhenIdle().catch(() => {}); });
 app.on('activate', () => { if (!quitting && (!window || window.isDestroyed())) void createWindow(); });
 app.on('before-quit', event => {
   if (quitting || (!service && !sidecar && !terminal && !proxyCore)) return;
   event.preventDefault();
   quitting = true;
-  void shutdownOwnedServices().finally(() => app.quit());
+  void shutdownOwnedServices().then(() => app.quit()).catch(() => {
+    quitting = false;
+    if (window && !window.isDestroyed()) { window.show(); window.focus(); }
+    else void createWindow();
+    dialog.showErrorBox('附加软件清理未确认', '网络会话仍保留。请先停止附加软件并完成清理，再退出境舱。');
+  });
 });
 // Electron waits for the entry module to settle before emitting ready.
 // Waiting for ready with top-level await would deadlock app startup.
@@ -333,10 +444,30 @@ if (ownsLock) void app.whenReady().then(async () => {
       return { canceled: choice.canceled, path: choice.filePaths[0] };
     } });
     const routingRoot = path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'app-routing');
+    notionDiagnostics = new NotionDiagnosticsStore(path.join(dataDir, 'notion-trial-diagnostics'));
     const helperPath = process.platform === 'darwin'
       ? path.join(routingRoot, 'macos/EnvaraAppRouting.app/Contents/MacOS/EnvaraAppRoutingHelper')
       : process.platform === 'win32' ? path.join(routingRoot, 'win32', process.arch, 'EnvaraAppRouting.exe') : null;
-    applications = new ApplicationService({ dataDir, routing: new NativeApplicationRouting({ helperPath }),
+    let pfHelperPath = path.join(routingRoot, 'macos-pf/EnvaraPFHelper');
+    if (process.platform === 'darwin') {
+      const installedPFHelper = '/Library/PrivilegedHelperTools/io.envara.pf-routing/EnvaraPFHelper';
+      const installedPF = await verifyPFInstallation();
+      if (installedPF.verified === true && installedPF.manifestVerified === true) pfHelperPath = installedPFHelper;
+    }
+    const applicationRouting = process.platform === 'darwin'
+      ? process.env.ENVARA_MAC_ROUTING_BACKEND === 'app-proxy'
+        ? new MacOSApplicationRouting({
+        helperPath,
+        peerVerifierPath: path.join(routingRoot, 'macos-local/EnvaraPeerVerifier'),
+        bundledAppPath: path.join(routingRoot, 'macos-local/Resources/Mitmproxy Redirector.app'),
+      }) : new MacOSPFApplicationRouting({ helperPath: pfHelperPath, installerPath: path.join(routingRoot, 'macos-pf/EnvaraPFInstall'),
+        notionAuthorizerPath: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'),
+          'local-authorization/EnvaraPFAuthorization-4b9f859585a1-scope-recovery-r2-20261010.app/Contents/Resources/app-routing/macos-pf/EnvaraPFInstall'),
+        onNotionTrialEvent: event => { console.info('Envara Notion trial', JSON.stringify(event)); void publish(); },
+        onNotionTrialDiagnostics: report => notionDiagnostics.save(report),
+      })
+      : new NativeApplicationRouting({ helperPath });
+    applications = new ApplicationService({ dataDir, routing: applicationRouting,
       resolveContext: id => applicationWorkspaceContext(id, { service, terminal }),
       profileExists: async id => (await service.snapshot()).profiles.some(profile => profile.id === id), onEvent: publish });
     await applications.ready;

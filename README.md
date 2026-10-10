@@ -1,116 +1,91 @@
-<p align="center"><img src="build/icon.png" width="96" alt="Envara icon" /></p>
+<p align="center">
+  <img src="build/icon.png" width="88" alt="Envara 境舱" />
+</p>
+<h1 align="center">Envara · 境舱</h1>
+<p align="center"><strong>多个环境，一个工作台。</strong><br />A local workspace for browsers, terminals and network contexts.</p>
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原创代码许可证：MIT" /></a>
+  <a href="docs/verification.md"><img src="https://img.shields.io/badge/0.5.0-local_candidate-475569" alt="0.5.0 本地候选版" /></a>
+  <a href="docs/readme/en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 种 README 语言" /></a>
+</p>
+<p align="center">
+  <strong>简体中文</strong> · <a href="docs/readme/zh-TW.md">繁體中文</a> · <a href="docs/readme/en.md">English</a> · <a href="docs/readme/ja.md">日本語</a> · <a href="docs/readme/ko.md">한국어</a> · <a href="docs/readme/es.md">Español</a> · <a href="docs/readme/fr.md">Français</a> · <a href="docs/readme/de.md">Deutsch</a> · <a href="docs/readme/pt-BR.md">Português (Brasil)</a>
+</p>
+<p align="center">
+  <a href="docs/capability-matrix.md">功能与边界</a> · <a href="docs/verification.md">验证记录</a> · <a href="CONTRIBUTING.md">参与贡献</a> · <a href="docs/SUPPORT.md">支持项目</a>
+</p>
 
-# Envara · 境舱
+![Envara 中文原生工作区](docs/media/workspace-zh-CN.png)
 
-一个支持中文和英文的本地桌面工作区。每个境舱管理网络出口、独立浏览资料与终端配置，浏览器、终端和附加软件各有自己的操作页面。
+<p align="center"><sub>原生 Electron 候选界面，网络为隔离测试夹具中的合成数据；不是实际出口或附加软件分流的证明。<a href="docs/envara-workspace-0.5.png">此前的原生 Electron 截图</a>也使用合成出口数据。</sub></p>
 
-**Envara is an open-source desktop workspace for isolated browser environments.** The local 0.5.0 candidate separates environments, networks, browsers, terminals, applications and monitoring, with Chinese/English UI and scoped privacy settings. Application bindings and native adapters are implemented; OS-level application routing remains gated until platform deployment and acceptance are complete.
+## 境舱能做什么
 
-[项目源码](https://github.com/ink-scholar/Envara) · [问题反馈](https://github.com/ink-scholar/Envara/issues) · [0.5 工作区与边界](docs/workspace-v05.md) · [能力矩阵](docs/capability-matrix.md) · [架构说明](docs/architecture.md) · [验证记录](docs/verification.md) · [参与贡献](CONTRIBUTING.md)
+Envara 将 BrowseForge 的浏览器环境能力带进本地桌面工作台。按「环境 → 网络出口 → 浏览器 → 终端 → 附加软件 → 运行监控」安排工作，常用操作保持简洁，详细配置放在高级设置。
 
-![Envara 0.5 工作区](docs/envara-workspace-0.5.png)
-
-上图为 0.5.0 原生 Electron 验收截图，出口地区与 IP 为合成测试数据。新版保留暗色三栏视觉，终端有独立工作页，并保留拖动/键盘调高、放大/恢复和独立窗口。
-
-## 当前状态
-
-**0.5.0 本地开发候选版，尚未发布。** 既有源码仓库保持公开，安装发行版为草稿；新代码未推送，自动发布暂停。完整桌面回归与打包验收分别记录，以下 0.4.0 数字是历史结果，不能代替本轮验收。
-
-0.5.0 当前通过 **223/223** JavaScript 检查、全包 Go 测试、9 项原生桌面交互、8 项真实 CloakBrowser/Camoufox 隐私检查及真实 PTY 验收。地区检测使用离线合成数据，不能当作真实节点或任意软件接管的证明。详细范围与包资源核对见 [验证记录](docs/verification.md)。
-
-本地后端基于固定的 BrowseForge v2.1.15（提交 fa9e0bb670e749706a9c8f2d4095333347d6c521），纳入 third_party/browseforge/ 并增加桌面补丁。应用管理私有本机服务，打包 sidecar、官方 Playwright driver/Node 与原生终端模块；最终安装包用户无需配置 Go 或 Node.js。
-
-| 内核 | 按版本记录的原生证据 |
+| 工作区 | 能力 |
 | --- | --- |
-| CloakBrowser / Chromium | 0.5.0 的真实 145 内核已验证标准/严格/关闭模式、请求拦截、自动区域语言/时区、粗略定位及无坐标保护；历史隔离、持久化和代理结果见验证记录 |
-| Camoufox / Firefox | 0.5.0 的真实 135 内核已验证同样的隐私模式与区域资料；无坐标时禁用定位 API。历史跨内核隔离和持久化结果见验证记录 |
-| BrowseForge Chromium | 0.2.0 macOS arm64 Alpha 0.1.6 单项安装、可见会话、手动身份、截图与停止通过；仍为实验性内核，0.5.0 未重新执行 |
+| 环境 | 独立浏览资料、分组与标签；创建、克隆、搜索和配置导入导出 |
+| 网络出口 | HTTP、HTTPS、SOCKS5 与内置 AnyTLS；通过认证请求检测实际出口、粗略地域和时区 |
+| 浏览器 | CloakBrowser / Chromium、Camoufox / Firefox，以及实验性的 BrowseForge Chromium |
+| 终端 | 真实本机 PTY、选择工作目录、调整大小、独立窗口与同环境多会话 |
+| 附加软件 | 绑定本地程序和境舱；系统接管仍在验收，未就绪时拒绝受保护启动 |
 
-macOS Apple Silicon 是当前验证平台。0.4.0 的 **193/193** 项测试、19 项真实 AnyTLS 原生链、20 项包内 AnyTLS 检查及真实 PTY 验收通过。一条真实外部节点在本机 TUN 开启和用户主动关闭后均通过严格证书 HTTPS，并识别 Manila / Asia/Manila 出口，未使用 Clash 本地代理。原生 UI 已验证 ALPN/UDP 保存回读与失败提示，Mac .app/DMG/ZIP 资源和完整性已核对；当前包未签名且未公证，其余 GUI 与其他系统仍分别验收。范围见 [验证记录](docs/verification.md)。
+浏览器和终端共用境舱的网络与时区上下文。每个境舱有独立工具配置和历史；复制终端会创建新的进程，不重放正在执行的命令。内置 AnyTLS 使用应用管理的核心，无需另外配置 Clash。
 
-## 0.5.0 工作区与隐私
+## 用自己的语言开始
 
-- **专用工作页：**导航依次为环境、网络出口、浏览器、终端、附加软件、运行监控，设置置底。新建环境默认只需名称和网络；指纹、内核、分组与隐私放进高级设置。
-- **中文 / English：**语言切换立即生效并保存；540 项界面词条覆盖表单、终端与独立窗口、附加软件和监控。自定义名称、目录、程序名与终端输出保留原文。
-- **自动环境资料：**查询真实认证出口，匹配 IANA 时区、粗略地域与浏览器语言。浏览器使用区域定位；终端只接收所属子进程的 `TZ` 和相关配置，不改操作系统时间或定位。
-- **标准 / 严格隐私：**拦截已知第三方追踪域名请求，默认阻止 service worker 绕过请求拦截；严格模式扩大域名集合。CLI 使用遥测退出变量，是否生效取决于工具支持。它不等于拦截所有追踪、解密 TLS 或修改任意软件二进制。
-- **附加软件绑定：**提供「选择境舱 → 添加本地软件 → 启动」流程、配置存储、原生适配器和运行/清理状态。系统组件未安装、未授权或未通过完整验证时，启动被拒绝，不伪造运行状态，也不自动改走直连。
+候选界面支持 **简体中文、繁體中文、English、日本語、한국어、Español、Français、Deutsch、Português (Brasil)**。首次打开提供语言选择，之后可以在设置中修改。
 
-**附加软件的强制网络接管尚不可作为已完成的跨平台功能使用。** 当前优先 Windows，默认改用未修改的官方已签名 WinDivert x64 驱动、Envara 捕获 DLL 与 Go 服务，无需先申请自己的内核驱动签名。TCP 多境舱路由、进程/Job 归属、撤销、UDP 阻断及独立 SOCKS→DoH 基础已落入源码；共享 DNS 适配、整个服务崩溃后的持续阻断、安装及 Windows 实机验收尚未完成，保持 `ready:false`。ARM64 仅有 helper 交叉构建，尚无驱动支持。Mac 接管部署暂停，浏览器和终端继续可用；外部已签名组件路线见 [方案说明](docs/application-routing-options.md)。
+![原生首次启动语言选择](docs/media/first-launch.png)
 
-## 0.4.0 内置 AnyTLS
+<p align="center"><sub>英文界面的原生 Electron 首次启动截图；语言选择、确认保存、重启保留与独立终端窗口同步已单独验证。</sub></p>
 
-应用管理独立的 Mihomo v1.19.32 进程，直接接收 AnyTLS 节点地址、端口、密码和 TLS 参数，无需另外运行 Clash 或手动提供本地代理端口。SNI 留空时使用节点主机，证书验证默认开启，客户端指纹默认 chrome；高级设置支持 ALPN 列表和默认开启的 UDP。私有 HTTP 入口不等于面向任意程序的通用 UDP 转发。
+界面语言与浏览器环境语言分开。切换菜单语言不会修改既有浏览器语言、时区、节点、工作目录或终端输出。
 
-每个原始节点使用只绑定本机、带随机认证的私有入口。出口检测、浏览器和终端通过同一境舱上下文使用该节点；配置保留原节点绑定，不保存动态入口或运行认证。路由只指向选定节点，失败不转直连，不修改系统代理或开启 TUN。macOS 会只读识别物理出口接口供该核心使用；缺少可用接口时明确失败。支持代理变量的 CLI 才使用终端路由，localhost 仍按 NO_PROXY 直连。
+## 安装与当前状态
 
-当前只接入 AnyTLS；Mihomo 的上游协议清单不等于 Envara 已支持全部协议。应用原创代码与代理核心的许可分别保留，详见下方与第三方声明。
+**0.5.0 为开发候选版，当前没有公开正式下载。** 最新源码进展已获授权上传；安装发行版仍为草稿，自动发行保持禁用。Notion 启动与清理尚未验收，见 [当前诊断交接](docs/notion-launch-handoff-20261010.md)。
 
-## 0.3.0 新增工作区能力
+| 平台 | 当前范围 |
+| --- | --- |
+| macOS Apple Silicon | 当前优先验证平台；浏览器、AnyTLS、真实终端有分版本原生证据。本地候选包未签名、未公证 |
+| Windows | 已有源码与构建候选；浏览器、终端和驱动接管的真实机器验收待完成 |
+| macOS Intel / Linux | 有开发或构建路径，尚未完成本项目实机验收 |
 
-- **真实网络出口与时区：**通过配置的认证 HTTP、HTTPS 或 SOCKS5 代理发出 HTTPS 请求，读取实际出口 IP、粗略城市和 IANA 时区；不把代理入口地址当出口。配置变化会让相关检测缓存失效。
-- **共用环境上下文：**浏览器与终端使用同一环境的网络、固定/自动时区解析规则。自动模式有代理时检测失败会拒绝启动；无代理时可明确使用本地时区回退，并显示来源。自动解析不会覆盖保存的手动配置。
-- **每环境终端：**可折叠 xterm 面板连接真实 PTY，支持本地工作目录、可调高度、放大/恢复、独立窗口和同环境多会话。终端原生操作仅在桌面模式使用，Web 预览禁用。
-- **独立工具配置与历史：**每环境拥有独立 HOME、XDG、Claude 配置目录和 shell 历史。不会直接继承宿主 API 密钥、SSH agent 或 shell/Node 启动钩子。
+**附加软件的完整强制分流在 Mac 和 Windows 上均未就绪。** Mac 当前接入不依赖自有 Network Extension 的 PF／进程分组／独立 utun 后端，使用 Envara 管理的认证节点；系统安装需要本机管理员授权。独立 DNS、故障保护及真实应用分流仍在验收，Notion 尚未以受保护模式运行。Windows 原生接管保留独立验证门槛。进展见 [附加软件方案](docs/application-routing-options.md) 和 [验证记录](docs/verification.md)。
 
-SOCKS5 环境为支持 HTTP 代理的 CLI 提供本机随机认证 HTTP 桥。代理变量只对支持它们的命令行工具生效；localhost 明确直连，不代表强制路由全部程序。Claude 配置路径已接入，Claude 本身的安装、登录和远端请求尚未测试。
+追踪保护使用可审计的域名规则和内核支持的隐私控制，不能消除全部追踪。配置隔离使用同一操作系统用户权限，不是 OS 沙箱；IP 定位仅估算地域，不提供住宅地址，也不保证避免账号封禁。
 
-复制终端会创建独立 PTY，沿用原会话启动时选择的工作目录、网络与时区；同一境舱共享工具配置和历史。它不追踪 shell 中手动 cd 后的目录，也不复制正在运行的命令或临时环境变量。折叠面板或关闭独立窗口只关闭视图，会话继续运行；「关闭会话」或退出应用才结束所属进程。
+## 从源码开发
 
-配置隔离仍使用同一个操作系统用户的权限，不是文件或进程沙箱。IP 地理定位只能估算地域，不能得到住宅街道地址；环境或账号隔离也不保证避免服务封禁。
+需要 Node.js 24 LTS 或 22.12+、npm、Go 1.25+，以及必要的目标平台编译工具。
 
-## 本轮接入范围
-
-- 环境创建、编辑、克隆、删除，分组、标签、搜索和批量操作。
-- 独立持久化浏览器目录，会话启动、停止、聚焦和真实截图。
-- 按内核能力配置种子或结构化指纹，手动指定系统画像、语言、时区和屏幕尺寸。
-- HTTP、HTTPS、SOCKS5 代理、内置 AnyTLS 节点，以及分组代理策略。
-- 配置导入导出、旧工作区备份与复制迁移。
-- 上游的本机 REST、MCP、Playwright 连接与工作流能力；桌面入口和完整联动仍在验证。
-
-原生后端的已通过项目见上表；分组、批量操作及其他桌面联动仍按 [验证记录](docs/verification.md) 分项验收。当前不能宣称已实现 BrowseForge 的完整功能对等。
-
-0.3.0 的出口检查使用实际 HTTPS 请求，成功需得到有效公网 IP 与时区；失败不会伪造成功或转为直连。内置 VLESS 客户端、多人协作和云同步尚未实现；VLESS 等协议可由外部客户端提供 HTTP/SOCKS5 端口。指纹效果取决于内核、系统、字体、硬件和目标网站，Envara 不承诺通过所有检测站点。
-
-## 本地开发
-
-需要 Node.js **24 LTS** 或 **22.12+**、npm 和 Go **1.25+**。Go 仅用于从源码构建 sidecar；桌面运行使用准备好的 sidecar 和官方 Playwright driver 1.61.1 / Node。
-
-~~~bash
+```bash
 npm ci
 npm run desktop
-~~~
+```
 
-desktop 会先验证原生 PTY、构建后端/driver，再运行 proxy:prepare 准备固定代理核心与对应源码，然后打开开发界面。首次准备需要联网；浏览器内核另由用户主动安装。原生模块不兼容时从源码重建，需要目标平台的编译工具。
+该命令准备本地服务、原生终端模块与固定代理核心，再启动桌面开发界面。首次准备需要联网；浏览器内核由用户主动从对应官方渠道安装。准备好的桌面包包含运行依赖，用户无需自行安装 Go 或 Node.js。
 
-构建后运行桌面应用：
-
-~~~bash
-npm run backend:prepare
-npm run build
-npm start
-~~~
-
-开发者可用 npm run dev 查看 Web 界面，Web 预览不能启动本机浏览器。基础检查：
-
-~~~bash
+```bash
 npm test
 npm run build
 npm run test:sites
-~~~
+```
 
-start 也会准备原生 PTY 和代理核心。test:sites 检查生成的文件，所以先运行 build；test:anytls 执行真实受控 AnyTLS 原生链，test:sidecar 覆盖浏览器服务，终端验收由 scripts/terminal-smoke.mjs 执行。最终结果见验证记录，当前没有公开正式 0.5.0 下载版。
+Web 预览用于界面开发；真实浏览器、PTY 与系统路由需要桌面模式。更多开发与原生验证要求见 [贡献指南](CONTRIBUTING.md)。
 
-## 旧工作区与配置导出
+## 了解更多与支持
 
-0.1.x 的 `workspace.json` 和 `profiles/<ID>/` 按**先备份、再复制**的方式迁移。源配置和浏览资料保持原样；默认复制选定环境的完整浏览资料，并记录旧 ID 到新 ID 的对应关系。迁移前需要停止旧会话；代理绑定和凭据在本机迁移中保留。本机原生测试已验证真实 Cookie/localStorage 复制、备份及原配置字节不变；其他机器、系统或个人环境仍需分别确认。
+- [功能矩阵与 BrowseForge 固定版本对照](docs/capability-matrix.md)
+- [工作区设计](docs/workspace-v05.md) · [架构说明](docs/architecture.md)
+- [验证范围和剩余门槛](docs/verification.md)
+- [反馈问题](https://github.com/ink-scholar/Envara/issues) · [参与贡献](CONTRIBUTING.md)
+- [支持 Envara](docs/SUPPORT.md)：Star、反馈、翻译和代码贡献都很有帮助；自愿打赏渠道尚未启用
 
-v2 配置导出包含指纹配置和脱敏后的代理描述与引用，不包含代理用户名、密码、Cookie 或浏览资料。导入有代理绑定的环境时必须明确映射到现有本地代理；缺少映射会取消导入，不会自动变成直接连接。配置导出不是浏览器备份。
+## 开源与许可
 
-运行资料保存在 Electron userData 下，新后端使用 browseforge/，迁移备份放在 migration-backups/。不要将用户目录、凭据或浏览资料提交到 Git。
+Envara 原创应用代码采用 [MIT](LICENSE)，纳入的 BrowseForge 保留其 [MIT 许可证](third_party/browseforge/LICENSE) 和 [固定版本记录](third_party/browseforge/ENVARA_UPSTREAM.md)。独立 Mihomo 核心保留 [GPLv3](third_party/proxy-core/LICENSE) 及 [对应源码来源](third_party/proxy-core/SOURCE.md)。浏览器内核适用各自许可，CloakBrowser 编译内核的 [Binary License](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md) 不属于应用 MIT 授权。
 
-## 技术与许可
-
-Electron + React + Vite + Phosphor Icons，配合由应用管理的 BrowseForge Go 本地服务和 Playwright driver。浏览器二进制由用户主动从对应官方渠道安装，不随应用重新分发。
-
-Envara 原创应用代码采用 [MIT](LICENSE)。纳入的 BrowseForge 代码保留 [MIT 许可证](third_party/browseforge/LICENSE) 和 [固定版本记录](third_party/browseforge/ENVARA_UPSTREAM.md)。独立 Mihomo 核心保留 [GPLv3](third_party/proxy-core/LICENSE)，资源准备同时提供对应源码与依赖 vendor 归属，见 [来源记录](third_party/proxy-core/SOURCE.md)。CloakBrowser 编译内核适用独立 [Binary License](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md)，不属于应用 MIT 授权。完整归属见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+完整归属见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

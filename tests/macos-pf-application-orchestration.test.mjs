@@ -1,0 +1,781 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash, randomUUID } from 'node:crypto';
+import { MacOSPFController, MacOSPFExecutor, validatePFAppBoundLease, validatePFRootHookLease, validatePFApplicationPrestageAbort, validatePFApplicationPreflightAbort, PF_APP_BOUND_LEASE_SCHEMA, PF_ROOT_HOOK_LEASE_SCHEMA, PF_INSTALL_ROOT, PF_RUNTIME_ROOT, dispatchPFRequest } from '../native/macos-pf-routing/controller.mjs';
+import { pfRoutingAnchor } from '../native/macos-pf-routing/policy.mjs';
+import * as fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { PassThrough } from 'node:stream';
+import { EventEmitter } from 'node:events';
+import { parseNativeApplicationEnvelope } from '../native/macos-pf-routing/helper-production-native.mjs';
+import { safeNotionResponse } from '../scripts/accept-macos-pf-notion.mjs';
+
+const sha = value => createHash('sha256').update(value).digest('hex');
+function hook(runId) { const leaseId = randomUUID(); return { schema: PF_ROOT_HOOK_LEASE_SCHEMA, runId, leaseId,
+  anchor: pfRoutingAnchor(runId), owner: pfRoutingAnchor(runId), label: `envara.hook.v2.${sha(`${runId}|${leaseId}`).slice(0, 32)}`,
+  ticket: '1', rootBeforeSHA256: 'a'.repeat(64), rootBeforeTextSHA256: 'b'.repeat(64) }; }
+function lease() { const runId = randomUUID(); return { schema: PF_APP_BOUND_LEASE_SCHEMA, runId, environmentId: randomUUID(), realmId: randomUUID(),
+  leaseId: randomUUID(), generation: randomUUID(), registrationId: randomUUID(), versionId: randomUUID(), consoleUID: 501, gid: 7100,
+  cwd: '/tmp/owned-workspace', timezone: 'Asia/Manila', locale: 'en-PH', issuedMonotonicMs: 5000, expiresMonotonicMs: 35000,
+  bootTimeSeconds: 1000, controllerPid: 321, controllerBirth: '100:000001', ipv4Address: '198.18.1.1', rootHookLease: hook(runId) }; }
+test('sealed app context is exact, native-clock bounded, immutable copy and strictly binds root hook', () => {
+  const source = lease(), copy = validatePFAppBoundLease(source); source.rootHookLease.ticket = '2'; assert.equal(copy.rootHookLease.ticket, '1');
+  for (const edit of [v => { v.extra = true; }, v => { delete v.locale; }, v => { v.gid = true; }, v => { v.consoleUID = 0; },
+    v => { v.expiresMonotonicMs = v.issuedMonotonicMs + 180001; }, v => { v.expiresMonotonicMs = v.issuedMonotonicMs; },
+    v => { v.bootTimeSeconds = true; }, v => { v.controllerBirth = 'invalid'; }, v => { v.timezone = 'invalid'; },
+    v => { v.cwd = 'relative'; }, v => { v.locale = 'en\n'; }, v => { v.ipv4Address = '127.0.0.1'; }, v => { v.rootHookLease.runId = randomUUID(); }]) {
+    const value = lease(); edit(value); assert.throws(() => validatePFAppBoundLease(value), { code: 'APPLICATION_APP_CONTEXT_REFUSED' });
+  }
+});
+const proxy = { protocol: 'socks5', host: '127.0.0.1', port: 20101, username: 'fixture-only-user', password: 'fixture-only-password', udpPolicy: 'proxy' };
+const baseline = { digest: 'base', routeDigest: 'routes', dnsDigest: 'dns', pfDigest: 'pf' };
+function fixture(overrides = {}, extra = {}) {
+  const calls = [], identities = new Map(), managedPid = 710, child = { pid: 999, birth: '123:000005' };
+  identities.set(managedPid, { uid: 501, path: '/owned/proxy-core/mihomo', birth: '123:000003' });
+  identities.set(process.pid, { uid: 0, realUID: 0, savedUID: 0, path: `${PF_INSTALL_ROOT}/node`, birth: '123:000001' });
+  const executor = { kind: 'fixture', readOnlyStatus: async () => ({ consoleUID: 501, noStateNativeAvailable: true,
+    pf: { lo0SkipVerified: true }, ownedRootHook: { canCreateOwnedHook: true, pfDisabled: true, pinsVerified: true, originalRootCompatible: true } }),
+    identify: async pid => { calls.push(`identity:${pid}`); return identities.get(pid); }, acquireLock: async () => calls.push('lock'),
+    snapshotUnrelatedNetwork: async () => { calls.push('network-snapshot'); return baseline; }, persistRun: async () => calls.push('persist'),
+    installOwnedRootHook: async runId => { calls.push('hook'); return hook(runId); }, requireEmptyOwnedAnchor: async () => calls.push('empty'),
+    allocateGroup: async () => { calls.push('group'); return { gid: 7100, groupPath: '/Groups/_envara_pf_7100' }; },
+    applicationContextClock: async () => ({ schema: 'envara.macos-pf-app-context-clock/v1', ok: true, bootTimeSeconds: 1000, nowMonotonicMilliseconds: 5000 }),
+    sealApplicationLease: async value => { calls.push('seal'); executor.sealed = validatePFAppBoundLease(value); return { leaseSHA256: 'a'.repeat(64) }; },
+    verifyApplicationLease: async () => calls.push('verify-lease'), enableOwnedReference: async () => { calls.push('enable'); return { existingForeignPFStatesAbsentBeforeEnable: true }; },
+    startApplicationTransport: async () => { calls.push('transport'); return { keeperPID: 700, corePID: 701, frontPID: 702, ownsOriginalUTunFD: true, ownsOriginalListenerFD: true }; },
+    applicationTransportControl: async (runId, operation) => { calls.push(`control:${operation}`);
+      if (operation === 'L') return { ...child, stoppedBeforeExec: true, persistentDenyObserved: true };
+      if (operation === 'B') return { ...child, executedIdentityVerified: true, seatbeltAppliedByFixedExec: true, frontAdmissionVerified: true, profile: 'seatbelt-front-only' };
+      if (operation === 'S') return { persistentDenyObserved: true };
+      if (operation === 'R') return { childAbsent: false, ...Object.fromEntries(['coreReaped', 'frontReaped', 'childReaped', 'scopeQuiescentObserved', 'originalUTunClosed', 'originalListenerClosed', 'filterEmptyVerified', 'privateJournalRetired'].map(key => [key, true])) };
+    }, confirmApplicationTransportExited: async () => calls.push('transport-exit'),
+    assertNoOwnedGroupProcesses: async () => calls.push('process-absence'), releaseOwnedReference: async () => calls.push('release-reference'),
+    removeOwnedRootHook: async value => { validatePFRootHookLease(value, executor.sealed.runId);
+      assert.deepEqual(value, executor.sealed.rootHookLease); calls.push('remove-hook');
+      return { ownedRootHookRemoved: true, originalRootRestored: true, namespaceReclaimed: true, receiptRetired: true }; },
+    removeGroups: async () => calls.push('remove-groups'), retireApplicationLease: async () => calls.push('retire-lease'), releaseLock: async () => calls.push('unlock'), ...overrides };
+  const commands = { register: async input => { calls.push('register'); return { ...input, applicationIdentityVerified: true }; } };
+  const controller = new MacOSPFController({ executor, applicationCommands: commands, inspectInstallation: async () => ({ verified: true, runtimeVerified: true }),
+    authenticateProxy: async () => {}, identity: { uid: 0, euid: 0, callerUID: 501, controlledSession: true }, ...extra });
+  const prepareRoute = async (change = {}) => controller.prepareRoute({ application: { id: 'notion', profileId: 'profile', executablePath: '/Applications/Notion.app' },
+    workspace: { cwd: '/tmp/owned-workspace', timezone: 'Asia/Manila', locale: 'en-PH' }, route: proxy,
+    managedRoute: { profileId: 'profile', proxyId: 'node', nodeType: 'anytls', corePid: managedPid, routeIdentity: randomUUID(), coreGeneration: randomUUID(), coreVersion: 'v1.19.32' }, ...change });
+  return { controller, executor, calls, prepareRoute, commands, identities, child };
+}
+const input = routeId => ({ routeId, runId: randomUUID(), environmentId: randomUUID(), lifetimeSeconds: 30, activationAuthorized: true });
+test('successful stop passes only the issued lease through the real executor validator, DELETE and independent STATUS before complete cleanup', async () => {
+  const f = fixture(), route = await f.prepareRoute(), request = input(route.routeId);
+  await f.controller.prepareNotionApplication(request);
+  const native = new MacOSPFExecutor(), issuedLease = structuredClone(f.executor.sealed.rootHookLease), nativeCalls = [];
+  native.runtimeRunId = request.runId; native.rootHookLease = issuedLease;
+  native.nativeRootHookRequest = async (operation, params) => {
+    assert.deepEqual(params, { lease: issuedLease });
+    nativeCalls.push(operation); f.calls.push(operation);
+    return { readOnly: operation === 'hook-status', ticketSource: 'this-INSERT-return-only',
+      ownedRootHookRemoved: true, originalRootRestored: true, receiptRetired: true, pinsVerified: true, pfDisabled: true,
+      namespaceState: 'absent', namespaceReclaimed: true, namespaceExists: false, cleanupPending: false,
+      originalRootSHA256: issuedLease.rootBeforeSHA256, originalRootTextSHA256: issuedLease.rootBeforeTextSHA256 };
+  };
+  const run = f.controller.appRuns.get(request.runId);
+  await assert.rejects(native.removeOwnedRootHook(run), { code: 'APPLICATION_ROUTING_NOT_READY' });
+  assert.deepEqual(nativeCalls, [], 'The orchestration object must fail before any native DELETE or STATUS.');
+  f.executor.removeOwnedRootHook = value => native.removeOwnedRootHook(value);
+  const cleanupStart = f.calls.length, clean = await f.controller.stopNotionApplication({ runId: request.runId });
+  assert.deepEqual(f.calls.slice(cleanupStart).filter(value => value !== 'persist'), [
+    'control:S', 'control:R', 'transport-exit', 'process-absence', 'release-reference',
+    'delete-owned-root-hook', 'hook-status', 'remove-groups', 'network-snapshot', 'retire-lease', 'unlock']);
+  const evidence = clean.cleanupEvidence, keys = ['coreReaped', 'frontReaped', 'childReaped', 'scopeQuiescentObserved',
+    'originalUTunClosed', 'originalListenerClosed', 'filterEmptyVerified', 'privateJournalRetired', 'transportExitConfirmed',
+    'ownedGIDProcessesAbsent', 'ownedGroupsRemoved', 'ownedRootHookRemoved', 'originalRootRestored', 'namespaceReclaimed',
+    'receiptRetired', 'ownedPFReferenceReleased', 'unrelatedPFUnchanged', 'unrelatedRoutesUnchanged', 'hostDNSUnchanged',
+    'sealedContextRetired', 'registryReleased'];
+  assert.equal(evidence.runId, request.runId); assert.equal(evidence.environmentId, request.environmentId);
+  assert.equal(evidence.complete, true); assert.equal(evidence.cleanupUncertain, false);
+  assert.equal(clean.cleanupComplete, true); assert.equal(keys.length, 21); assert.ok(keys.every(key => evidence[key] === true));
+  assert.ok(['ready', 'protected', 'productionReady', 'genericApplicationRouting', 'udpSupported'].every(key => clean[key] === false));
+  assert.deepEqual(nativeCalls, ['delete-owned-root-hook', 'hook-status']);
+  await f.controller.shutdown();
+});
+test('actual orchestration orders signed snapshot, sealed clock context, same native transport and one-time cold ticket before native resume', async () => {
+  const { controller, executor, calls, prepareRoute } = fixture(); const route = await prepareRoute(), request = input(route.routeId);
+  const prepared = await controller.prepareNotionApplication(request);
+  assert.equal(prepared.staged, true); assert.equal(prepared.resumed, false); assert.equal(prepared.ready, false);
+  assert.ok(calls.indexOf('register') < calls.indexOf('lock')); assert.ok(calls.indexOf('hook') < calls.indexOf('seal'));
+  assert.ok(calls.indexOf('seal') < calls.indexOf('transport')); assert.ok(calls.indexOf('transport') < calls.indexOf('control:L'));
+  assert.equal(executor.sealed.rootHookLease.runId, request.runId); assert.equal(executor.sealed.consoleUID, 501);
+  const running = await controller.resumeNotionApplication({ runId: request.runId, activationAuthorized: true });
+  assert.equal(running.resumed, true); assert.equal(running.profile, 'seatbelt-front-only'); assert.equal(running.protected, false); assert.equal(running.udpSupported, false);
+  await assert.rejects(controller.resumeNotionApplication({ runId: request.runId, activationAuthorized: true }));
+  assert.equal(calls.filter(value => value === 'control:B').length, 1);
+  const publicText = JSON.stringify(await controller.status()); assert.ok(!publicText.includes(proxy.password)); assert.ok(!publicText.includes('/tmp/owned-workspace')); assert.ok(!publicText.includes('rootHookLease'));
+  const clean = await controller.stopNotionApplication({ runId: request.runId }); assert.equal(clean.cleanupComplete, true); assert.equal(clean.protected, false);
+  assert.equal(clean.cleanupEvidence.source, 'simulated-notion-controller'); assert.equal(clean.cleanupEvidence.runId, request.runId);
+  assert.equal(clean.cleanupEvidence.registryReleased, true); assert.equal(clean.cleanupEvidence.privateJournalRetired, true);
+  assert.ok(['ready', 'protected', 'productionReady', 'genericApplicationRouting', 'udpSupported'].every(key => clean[key] === false));
+  assert.ok(calls.indexOf('control:R') < calls.indexOf('release-reference')); assert.ok(calls.indexOf('transport-exit') < calls.indexOf('remove-hook'));
+  assert.ok(calls.indexOf('retire-lease') < calls.indexOf('unlock')); await controller.shutdown();
+});
+for (const kind of ['no-root', 'no-runtime', 'no-activation', 'lo-skipped', 'wrong-app', 'injected-proof']) test(`Notion ${kind} refuses before native mutation`, async () => {
+  const options = kind === 'no-root' ? { identity: { uid: 501, euid: 501, callerUID: 501, controlledSession: true } } :
+    kind === 'no-runtime' ? { inspectInstallation: async () => ({ verified: true, runtimeVerified: false }) } : {};
+  const f = fixture({}, options), route = await f.prepareRoute(kind === 'wrong-app' ? { application: { id: 'other', profileId: 'profile', executablePath: '/Applications/Other.app' } } : {});
+  const request = input(route.routeId); if (kind === 'no-activation') request.activationAuthorized = false;
+  if (kind === 'injected-proof') request.nativeVerified = true;
+  if (kind === 'lo-skipped') f.executor.readOnlyStatus = async () => ({ consoleUID: 501, pf: { lo0SkipVerified: false } });
+  await assert.rejects(f.controller.prepareNotionApplication(request)); assert.ok(!f.calls.includes('register') && !f.calls.includes('lock'));
+  await f.controller.shutdown();
+});
+test('lost stage proof permanently retains sealed state and cannot resume or report cleanup', async () => {
+  const f = fixture({ applicationTransportControl: async () => { throw new Error('private fixture detail'); } }); const route = await f.prepareRoute(), request = input(route.routeId);
+  await assert.rejects(f.controller.prepareNotionApplication(request), { code: 'APPLICATION_ROUTING_NOT_READY' });
+  const state = f.controller.applicationSnapshot({ runId: request.runId }); assert.equal(state.cleanupUncertain, true); assert.equal(state.cleanupComplete, false);
+  await assert.rejects(f.controller.resumeNotionApplication({ runId: request.runId, activationAuthorized: true }));
+  assert.equal(f.calls.includes('unlock'), false); assert.equal((await f.controller.shutdown()).cleanupRequired, true);
+});
+test('final transport receipt missing original listener close cannot release PF or erase its private lease', async () => {
+  const f = fixture(); const route = await f.prepareRoute(), request = input(route.routeId); await f.controller.prepareNotionApplication(request);
+  const original = f.executor.applicationTransportControl; f.executor.applicationTransportControl = async (runId, op) => {
+    const value = await original(runId, op); if (op === 'R') value.originalListenerClosed = false; return value; };
+  await assert.rejects(f.controller.stopNotionApplication({ runId: request.runId }), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+  assert.ok(!f.calls.includes('release-reference') && !f.calls.includes('retire-lease') && !f.calls.includes('unlock'));
+  assert.equal((await f.controller.shutdown()).cleanupRequired, true);
+});
+test('forged resume booleans and a changed child birth poison the one-time stage rather than permit a second resume', async () => {
+  const f = fixture(); const route = await f.prepareRoute(), request = input(route.routeId); await f.controller.prepareNotionApplication(request);
+  const original = f.executor.applicationTransportControl; f.executor.applicationTransportControl = async (runId, op) => {
+    const value = await original(runId, op); if (op === 'B') value.birth = '999:000000'; return value; };
+  await assert.rejects(f.controller.resumeNotionApplication({ runId: request.runId, activationAuthorized: true }), { code: 'APPLICATION_APP_RESUME_UNCONFIRMED' });
+  await assert.rejects(f.controller.resumeNotionApplication({ runId: request.runId, activationAuthorized: true }));
+  assert.equal(f.controller.applicationSnapshot({ runId: request.runId }).cleanupUncertain, true); await f.controller.shutdown();
+});
+test('new public RPC names are concrete controller methods and do not permit arbitrary native commands', async () => {
+  const f = fixture(); await assert.rejects(dispatchPFRequest(f.controller, { protocol: 'envara.application-routing', version: 1, id: 'fixture', method: 'applicationTransportControl', params: {} }));
+  const executor = new MacOSPFExecutor(); assert.equal(executor.allowedCommand(`${PF_INSTALL_ROOT}/envara-pf-native`, ['app-context-clock']), true);
+  assert.equal(executor.allowedCommand(`${PF_INSTALL_ROOT}/envara-pf-native`, ['app-context-clock', 'callerproof']), false);
+  await f.controller.shutdown();
+});
+test('production sealed-file writer detects same-size content, replaced inode, hardlink and permissions using actual own-temp files', async t => {
+  for (const tamper of ['bytes', 'inode', 'hardlink', 'permissions', 'symlink']) await t.test(tamper, async () => {
+    const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'envara-app-seal-'));
+    const value = lease();
+    // Redirect the fixed production pathname to only this test-owned tmp.
+    // UID metadata is injected for this unprivileged fixture; actual nofollow,
+    // inode/links/mode/content and durable writes use the filesystem itself.
+    const translate = target => target.replace('/Library/PrivilegedHelperTools/io.envara.pf-runtime', temporary);
+    const rootOwner = info => { info.uid = 0; return info; };
+    const system = { ...fs, lstat: async target => rootOwner(await fs.lstat(translate(target))),
+      open: async (target, ...args) => { const handle = await fs.open(translate(target), ...args), stat = handle.stat.bind(handle);
+        handle.stat = async () => rootOwner(await stat()); return handle; },
+      unlink: async target => fs.unlink(translate(target)) };
+    const executor = new MacOSPFExecutor({ fileSystem: system }); executor.runtimeRunId = value.runId;
+    executor.assertRuntimeRootHeld = async () => {}; executor.inspectRuntimeDirectory = async (target, handle) => {
+      const info = rootOwner(await fs.lstat(translate(target)));
+      if (handle) { const held = await handle.stat(); assert.equal(info.dev, held.dev); assert.equal(info.ino, held.ino); }
+      return info;
+    };
+    executor.createRunDirectory = async (run, realm) => { await fs.mkdir(path.join(temporary, run, realm), { mode: 0o700, recursive: true });
+      const handle = await fs.open(path.join(temporary, run), 'r'); executor.runDirectories.set(`/Library/PrivilegedHelperTools/io.envara.pf-runtime/${run}`, handle); };
+    try {
+      const receipt = await executor.sealApplicationLease(value); assert.match(receipt.leaseSHA256, /^[0-9a-f]{64}$/);
+      const target = path.join(temporary, value.runId, 'app-bound-lease.json'), contents = await fs.readFile(target);
+      const binding = await executor.applicationTransportBinding(value.runId, value.environmentId, receipt.leaseSHA256);
+      const actualFile = await fs.stat(target), actualDirectory = await fs.stat(path.dirname(target));
+      assert.equal(binding.leaseInode, String(actualFile.ino)); assert.equal(binding.runDirectoryInode, String(actualDirectory.ino));
+      assert.equal(binding.realmId, value.realmId); assert.equal(binding.controllerBirth, value.controllerBirth);
+      await assert.rejects(executor.sealApplicationLease(value), { code: 'APPLICATION_APP_CONTEXT_REFUSED' });
+      if (tamper === 'bytes') { const changed = Buffer.from(contents); changed[10] = changed[10] === 32 ? 33 : 32; await fs.writeFile(target, changed); }
+      if (tamper === 'inode') { await fs.rename(target, `${target}.old`); await fs.writeFile(target, contents, { mode: 0o600 }); }
+      if (tamper === 'hardlink') await fs.link(target, `${target}.extra`);
+      if (tamper === 'permissions') await fs.chmod(target, 0o644);
+      if (tamper === 'symlink') { await fs.rename(target, `${target}.old`); await fs.symlink(`${target}.old`, target); }
+      await assert.rejects(executor.verifyApplicationLease(value.runId), { code: 'APPLICATION_APP_CONTEXT_REFUSED' });
+      await assert.rejects(executor.applicationTransportBinding(value.runId, value.environmentId, receipt.leaseSHA256), { code: 'APPLICATION_APP_CONTEXT_REFUSED' });
+      await assert.rejects(executor.retireApplicationLease(value.runId), { code: 'APPLICATION_APP_CONTEXT_REFUSED' });
+      assert.equal((await fs.lstat(target)).isSymbolicLink(), tamper === 'symlink');
+    } finally { for (const entry of executor.appLeases.values()) await entry.handle.close();
+      for (const handle of executor.runDirectories.values()) await handle.close(); await fs.rm(temporary, { recursive: true, force: true }); }
+  });
+});
+function streamFixture({ forked = false, wrongParent = false, malformed = false, missingListener = false, nativeRefusal = null,
+  cleanupReady = null, cleanupStopping = null, cleanupRelease = null, controlRefusal = null, controlRefusalCommand = 'L', coldStageDelay = 0, resumeDelay = 0,
+  abort = null, abortExit = 1, abortSignal = null, abortTrailing = '', refusalStage = 'factory-open', fragmentAbort = false, omitAbort = false, omitRefusal = false,
+  preflightAbort = null, preflightBeforeIdentity = false, unavailableIdentity = false, preflightRefusalStage = 'preflight', duplicatePreflightKey = false } = {}) {
+  const context = lease(), keeperPID = forked ? 8991 : 8990;
+  context.controllerPid = process.pid;
+  const child = Object.assign(new EventEmitter(), { pid: 8990, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() });
+  const metadata = inode => ({ isFile: () => true, isSymbolicLink: () => false, uid: 0, gid: 0, mode: 0o100755, nlink: 1, dev: 1, ino: inode, size: 32, mtimeMs: 1, ctimeMs: 1 });
+  const executor = new MacOSPFExecutor({ fileSystem: { realpath: async filename => filename, lstat: async filename => {
+    if (filename === `${PF_INSTALL_ROOT}/envara-pf-native`) return metadata(4);
+    if (filename === `${PF_INSTALL_ROOT}/node`) return metadata(5);
+    throw Object.assign(new Error(), { code: 'ENOENT' });
+  } }, spawnChild: (executable, argv, options) => {
+    assert.equal(executable, `${PF_INSTALL_ROOT}/envara-pf-native`); assert.deepEqual(argv, ['app-tunnel-bootstrap', context.runId, context.environmentId]);
+    assert.equal(options.shell, false); assert.ok(!JSON.stringify(options).includes(proxy.password)); return child;
+  } });
+  executor.appLeases.set(context.runId, { bytes: Buffer.from(JSON.stringify(context)) }); executor.verifyApplicationLease = async () => ({ leaseSHA256: 'a'.repeat(64) });
+  const binding = { runId: context.runId, environmentId: context.environmentId, realmId: context.realmId, gid: context.gid, leaseSHA256: 'a'.repeat(64),
+    controllerPID: context.controllerPid, controllerBirth: context.controllerBirth, leaseDevice: '1', leaseInode: '2', runDirectoryDevice: '1', runDirectoryInode: '3' };
+  executor.applicationTransportBinding = async () => Object.freeze({ ...binding });
+  executor.identify = async pid => { if (preflightBeforeIdentity) emitPreflight(); if (unavailableIdentity) throw new Error('fixture child already exited');
+    return { ok: true, pid, uid: 0, realUID: 0, savedUID: 0, birth: `${pid}:000001`,
+    parentPid: pid === child.pid && forked ? process.pid : pid === keeperPID ? wrongParent ? 7777 : forked ? child.pid : process.pid : keeperPID,
+    path: pid === child.pid && forked ? '/bin/launchctl' : pid === 8992 ? `${PF_INSTALL_ROOT}/mihomo` : pid === 8993 ? `${PF_INSTALL_ROOT}/node` : `${PF_INSTALL_ROOT}/envara-pf-native` }; };
+  const emit = event => child.stdout.write(`${JSON.stringify(event)}\n`);
+  let preflightEmitted = false;
+  const emitPreflight = () => {
+    if (preflightEmitted) return; preflightEmitted = true;
+    const report = { schema: 'envara.macos-pf-app-transport/v1', event: 'preflight-aborted', stage: 'preflight', ...binding,
+      bootstrapPID: child.pid, bootstrapBirth: `${child.pid}:000001`, bootstrapParentPID: context.controllerPid, bootstrapParentBirth: context.controllerBirth,
+      bootstrapDevice: '1', bootstrapInode: '4', bootstrapParentDevice: '1', bootstrapParentInode: '5', proofNonce: '0'.repeat(32), exitStatus: 1,
+      ...Object.fromEntries(['sealedContextVerified', 'privateChildrenAbsent', 'gidScopeAbsent', 'filterJournalAbsent', 'ownedFilterClassesEmpty'].map(key => [key, true])),
+      ...Object.fromEntries(['bootstrapAttempted', 'transportAttempted', 'filterWriteAttempted', 'coldStageAttempted', 'ready', 'protected'].map(key => [key, false])), ...preflightAbort };
+    executor.expectedPreflightAbort = report;
+    const refusal = { schema: 'envara.macos-pf-app-transport/v1', event: 'transport-refused', runId: context.runId,
+      environmentId: context.environmentId, stage: preflightRefusalStage, reason: 'NATIVE_OPERATION_REFUSED', error: 13, ready: false, protected: false };
+    let terminal = JSON.stringify(report);
+    if (duplicatePreflightKey) terminal = terminal.replace('"sealedContextVerified":true', '"sealedContextVerified":false,"sealedContextVerified":true');
+    const output = `${omitRefusal ? '' : `${JSON.stringify(refusal)}\n`}${omitAbort ? '' : `${terminal}\n`}${abortTrailing}`;
+    if (fragmentAbort) { child.stdout.write(output.slice(0, 53)); child.stdout.write(output.slice(53)); } else child.stdout.write(output);
+    setImmediate(() => child.emit('close', abortExit, abortSignal));
+  };
+  let commands = '', ticket;
+  const controlCommands = [];
+  const emitKeeper = (event, changes = {}) => emit({ schema: 'envara.pf-app-keeper/v1', event, ticketId: ticket,
+    registrationId: context.registrationId, versionId: context.versionId, environmentId: context.environmentId, runId: context.runId,
+    pid: 8994, birth: '8994:000001', keeperPID, profile: 'seatbelt-front-only', persistentDenyObserved: true,
+    stoppedBeforeExec: false, childReaped: false, scopeQuiescentObserved: false, resumeSent: false, resumed: false, cancelSent: true,
+    executedIdentityVerified: false, seatbeltAppliedByFixedExec: false, frontAdmissionVerified: false, ready: false, protected: false, ...changes });
+  child.stdin.on('data', bytes => { commands += bytes; let newline;
+    while ((newline = commands.indexOf('\n')) >= 0) {
+      const command = commands.slice(0, newline); commands = commands.slice(newline + 1);
+      if (!command.startsWith('{')) controlCommands.push(command);
+      if (controlRefusal && command.split(' ')[0] === controlRefusalCommand) {
+        emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-refused', runId: context.runId,
+          environmentId: context.environmentId, stage: 'guardian', reason: 'NATIVE_OPERATION_REFUSED', error: 13, ready: false, protected: false, ...controlRefusal });
+        continue;
+      }
+      if (command.startsWith('{')) { const route = JSON.parse(command); assert.equal(route.password, proxy.password);
+        if (preflightAbort) { emitPreflight(); continue; }
+        if (abort) {
+          const report = { schema: 'envara.macos-pf-app-transport/v1', event: 'prestage-aborted', stage: 'factory-open', ...binding,
+            keeperPID, keeperBirth: `${keeperPID}:000001`, keeperParentPID: forked ? child.pid : context.controllerPid,
+            keeperParentBirth: forked ? `${child.pid}:000001` : context.controllerBirth, corePID: 8992, coreBirth: '8992:000001', frontPID: 8993, frontBirth: '8993:000001',
+            utunName: 'utun90', utunDevice: '4', utunInode: '5', utunControlId: 1, utunControlUnit: 91,
+            listenerHost: '127.0.0.1', listenerPort: 29999, listenerDevice: '4', listenerInode: '6', exitStatus: 1,
+            ...Object.fromEntries(['originalUTunVerified', 'originalListenerVerified', 'coreReaped', 'frontReaped', 'gidScopeAbsent', 'filterJournalAbsent', 'originalUTunClosed', 'originalListenerClosed'].map(key => [key, true])),
+            ...Object.fromEntries(['denyAttempted', 'filterWriteAttempted', 'launchCommandAccepted', 'coldStageAttempted', 'ready', 'protected'].map(key => [key, false])) };
+          Object.assign(report, abort); executor.expectedAbort = report;
+          const refusal = { schema: 'envara.macos-pf-app-transport/v1', event: 'transport-refused', runId: context.runId,
+            environmentId: context.environmentId, stage: refusalStage, reason: 'NATIVE_OPERATION_REFUSED', error: 13, ready: false, protected: false };
+          const output = `${omitRefusal ? '' : `${JSON.stringify(refusal)}\n`}${omitAbort ? '' : `${JSON.stringify(report)}\n`}${abortTrailing}`;
+          if (fragmentAbort) { child.stdout.write(output.slice(0, 57)); child.stdout.write(output.slice(57)); } else child.stdout.write(output);
+          setImmediate(() => child.emit('close', abortExit, abortSignal)); continue;
+        }
+        if (nativeRefusal) { emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-refused', runId: context.runId,
+          environmentId: context.environmentId, stage: 'front-handshake', reason: 'NATIVE_OPERATION_REFUSED', error: 35, ready: false, protected: false, ...nativeRefusal });
+          if (cleanupReady) emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-cleanup-ready', runId: context.runId,
+            environmentId: context.environmentId, interfaceName: 'utun90', corePID: 8992, coreBirth: '8992:000001', frontPID: 8993, frontBirth: '8993:000001',
+            frontPort: 29999, keeperPID, ownsOriginalUTunFD: true, ownsOriginalListenerFD: true, ready: false, protected: false,
+            stage: nativeRefusal.stage, cleanupOnly: true, ...cleanupReady });
+          continue; }
+        emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-started', runId: context.runId, environmentId: context.environmentId,
+          interfaceName: 'utun90', corePID: 8992, coreBirth: '8992:000001', frontPID: 8993, frontBirth: '8993:000001', frontPort: 29999, keeperPID,
+          ownsOriginalUTunFD: true, ownsOriginalListenerFD: !missingListener, ready: false, protected: false, ...(malformed ? { callerProof: true } : {}) });
+      } else if (command.startsWith('L ')) { ticket = command.slice(2); const stopped = { schema: 'envara.pf-app-keeper/v1', event: 'stopped', ticketId: ticket,
+        registrationId: context.registrationId, versionId: context.versionId, runId: context.runId, environmentId: context.environmentId,
+        keeperPID, pid: 8994, birth: '8994:000001', profile: 'seatbelt-front-only', persistentDenyObserved: true, stoppedBeforeExec: true,
+        ...Object.fromEntries(['childReaped', 'scopeQuiescentObserved', 'resumeSent', 'resumed', 'cancelSent', 'executedIdentityVerified', 'seatbeltAppliedByFixedExec', 'frontAdmissionVerified'].map(key => [key, false])), ready: false, protected: false };
+        if (coldStageDelay) setTimeout(() => emit(stopped), coldStageDelay); else emit(stopped);
+      } else if (command === 'B') {
+        const resumed = { schema: 'envara.pf-app-keeper/v1', event: 'resumed', ticketId: ticket,
+          registrationId: context.registrationId, versionId: context.versionId, runId: context.runId, environmentId: context.environmentId,
+          keeperPID, pid: 8994, birth: '8994:000001', executedIdentityVerified: true, seatbeltAppliedByFixedExec: true,
+          frontAdmissionVerified: true, profile: 'seatbelt-front-only', persistentDenyObserved: false, stoppedBeforeExec: false, childReaped: false, scopeQuiescentObserved: false, resumeSent: true, resumed: true, cancelSent: false, ready: false, protected: false };
+        if (resumeDelay) setTimeout(() => emit(resumed), resumeDelay); else emit(resumed);
+      } else if (command === 'S') {
+        if (executor.appTransports.get(context.runId).cleanupOnly) emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-cleanup-stopping',
+          runId: context.runId, environmentId: context.environmentId, keeperPID, keeperBirth: `${keeperPID}:000001`,
+          childReaped: !!executor.appTransports.get(context.runId).stoppedIdentity, childAbsent: !executor.appTransports.get(context.runId).stoppedIdentity,
+          scopeQuiescentObserved: true, persistentDenyObserved: true, ready: false, protected: false, ...cleanupStopping });
+        else emitKeeper('stopping');
+      }
+      else if (command === 'R') { emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-released', runId: context.runId, environmentId: context.environmentId,
+        keeperPID, ready: false, protected: false, ...Object.fromEntries(['coreReaped', 'frontReaped', 'scopeQuiescentObserved', 'originalUTunClosed', 'originalListenerClosed', 'filterEmptyVerified', 'privateJournalRetired'].map(key => [key, true])),
+        childReaped: executor.appTransports.get(context.runId).cleanupOnly ? !!executor.appTransports.get(context.runId).stoppedIdentity : true,
+        childAbsent: executor.appTransports.get(context.runId).cleanupOnly ? !executor.appTransports.get(context.runId).stoppedIdentity : false, ...cleanupRelease }); setImmediate(() => child.emit('close', 0, null)); }
+    }
+  });
+  return { executor, child, context, binding, emitKeeper, controlCommands };
+}
+test('actual persistent transport parser binds exec or one verified launchctl fork, then waits for a new stop frame and confirmed outer exit', async () => {
+  for (const forked of [false, true]) {
+    const f = streamFixture({ forked });
+    const started = await f.executor.startApplicationTransport({ runId: f.context.runId, environmentId: f.context.environmentId, proxy, udpPolicy: 'block', leaseSHA256: 'a'.repeat(64), consoleUID: 501 });
+    assert.equal(started.ownsOriginalListenerFD, true);
+    const stopped = await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID()); assert.equal(stopped.event, 'stopped');
+    const stopping = await f.executor.applicationTransportControl(f.context.runId, 'S'); assert.equal(stopping.event, 'stopping');
+    await f.executor.applicationTransportControl(f.context.runId, 'R'); assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+  }
+});
+test('a signed cold stage completing after the former 15-second deadline remains bound and accepted', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ coldStageDelay: 44000 });
+  await f.executor.startApplicationTransport({ runId: f.context.runId, environmentId: f.context.environmentId, proxy, udpPolicy: 'block', leaseSHA256: 'a'.repeat(64), consoleUID: 501 });
+  const control = f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(15001);
+  assert.equal(f.executor.appTransports.get(f.context.runId).uncertain, false);
+  t.mock.timers.tick(28999);
+  assert.equal((await control).event, 'stopped');
+  assert.equal(f.executor.appTransports.get(f.context.runId).phase, 'stopped');
+  await f.executor.applicationTransportControl(f.context.runId, 'S');
+  await f.executor.applicationTransportControl(f.context.runId, 'R');
+  assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+});
+test('the bounded cold-stage deadline reports its cause and cannot admit a late stopped frame or resume', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ coldStageDelay: 61000 });
+  await f.executor.startApplicationTransport({ runId: f.context.runId, environmentId: f.context.environmentId, proxy, udpPolicy: 'block', leaseSHA256: 'a'.repeat(64), consoleUID: 501 });
+  const control = f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  const refused = assert.rejects(control, { code: 'APPLICATION_APP_STAGE_TIMEOUT' });
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(60000); await refused;
+  t.mock.timers.tick(1000);
+  const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(entry.uncertain, true); assert.equal(entry.phase, 'recovery-required');
+  assert.equal(entry.events.some(event => event.event === 'stopped'), false);
+  assert.equal(f.child.stdin.writableEnded, true);
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'B'));
+});
+for (const fault of ['wrongParent', 'malformed', 'missingListener']) test(`actual native transport ${fault} poisons without sending a cold-stage ticket`, async () => {
+  const f = streamFixture({ [fault]: true });
+  await assert.rejects(f.executor.startApplicationTransport({ runId: f.context.runId, environmentId: f.context.environmentId, proxy, udpPolicy: 'block', leaseSHA256: 'a'.repeat(64), consoleUID: 501 }), { code: 'APPLICATION_APP_TRANSPORT_UNCONFIRMED' });
+  assert.equal(f.executor.appTransports.get(f.context.runId).uncertain, true);
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID())); assert.equal(f.child.stdin.writableEnded, true);
+});
+test('signed resume verification may exceed 15 seconds while retaining its bound child identity', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ resumeDelay: 32000 }); await startStream(f);
+  await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  const resumed = f.executor.applicationTransportControl(f.context.runId, 'B');
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(15001); assert.equal(f.executor.appTransports.get(f.context.runId).uncertain, false);
+  t.mock.timers.tick(16999);
+  const event = await resumed; assert.equal(event.event, 'resumed'); assert.equal(event.birth, '8994:000001');
+  assert.equal(f.executor.appTransports.get(f.context.runId).phase, 'resumed');
+});
+test('expired resume verification cannot accept a late ACK or send another resume', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ resumeDelay: 46000 }); await startStream(f);
+  await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  const resumed = f.executor.applicationTransportControl(f.context.runId, 'B');
+  const refused = assert.rejects(resumed, { code: 'APPLICATION_APP_RESUME_TIMEOUT' });
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(45000); await refused; t.mock.timers.tick(1000);
+  const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(entry.uncertain, true); assert.notEqual(entry.phase, 'resumed');
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'B'));
+  assert.equal(f.child.stdin.writableEnded, true);
+});
+test('a bound keeper revocation before resume prevents B without treating its report as cleanup', async () => {
+  const f = streamFixture(); await startStream(f);
+  await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  f.emitKeeper('stopping', { childReaped: true, scopeQuiescentObserved: true });
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'B'), { code: 'APPLICATION_APP_RESUME_UNCONFIRMED' });
+  const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(entry.uncertain, false); assert.equal(entry.cleanupOnly, true);
+  assert.equal(f.controlCommands.includes('B'), false); assert.equal(f.child.stdin.writableEnded, false);
+  assert.equal(f.executor.applicationCleanupAvailable(f.context.runId), true);
+  await assert.rejects(f.executor.confirmApplicationTransportExited(f.context.runId));
+});
+test('a keeper revocation during resume preflight is retained before the B waiter or write exists', async () => {
+  const f = streamFixture(); await startStream(f);
+  await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  const identify = f.executor.identify; let entered, release;
+  const identifying = new Promise(resolve => { entered = resolve; }), held = new Promise(resolve => { release = resolve; });
+  f.executor.identify = async pid => { entered(); await held; return identify(pid); };
+  const resume = f.executor.applicationTransportControl(f.context.runId, 'B');
+  const refused = assert.rejects(resume, { code: 'APPLICATION_APP_RESUME_UNCONFIRMED' });
+  await identifying; f.emitKeeper('stopping'); release(); await refused;
+  assert.equal(f.controlCommands.includes('B'), false);
+  assert.equal(f.executor.appTransports.get(f.context.runId).waiters.length, 0);
+  assert.equal(f.child.stdin.writableEnded, false);
+});
+test('exact negative keeper ACKs reject a pending B immediately and freeze out its late resumed frame', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  for (const event of ['stopping', 'released', 'release-refused']) {
+    const f = streamFixture({ resumeDelay: 1000 }); await startStream(f);
+    await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+    const resume = f.executor.applicationTransportControl(f.context.runId, 'B');
+    const refused = assert.rejects(resume, { code: 'APPLICATION_APP_RESUME_UNCONFIRMED' });
+    await new Promise(resolve => setImmediate(resolve));
+    f.emitKeeper(event, { resumeSent: true }); await refused;
+    const entry = f.executor.appTransports.get(f.context.runId), before = structuredClone(entry.events);
+    assert.equal(entry.waiters.length, 0); assert.equal(entry.uncertain, false); assert.equal(entry.cleanupOnly, true);
+    assert.equal(f.controlCommands.filter(command => command === 'B').length, 1);
+    t.mock.timers.tick(1000);
+    assert.deepEqual(entry.events, before); assert.equal(entry.events.some(value => value.event === 'resumed'), false);
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'B'), { code: 'APPLICATION_APP_RESUME_UNCONFIRMED' });
+    assert.equal(f.child.stdin.writableEnded, false);
+  }
+});
+test('foreign identities and malformed negative keeper reports poison without becoming a bound resume refusal', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  for (const change of [{ ticketId: randomUUID() }, { registrationId: randomUUID() }, { versionId: randomUUID() },
+    { keeperPID: 8999 }, { pid: 8999 }, { birth: '8994:000002' }, { persistentDenyObserved: 1 }, { profile: 'cold' }, { extra: proxy.password }]) {
+    const f = streamFixture({ resumeDelay: 1000 }); await startStream(f);
+    await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+    const resume = f.executor.applicationTransportControl(f.context.runId, 'B');
+    const refused = assert.rejects(resume, { code: 'APPLICATION_APP_TRANSPORT_UNCONFIRMED' });
+    await new Promise(resolve => setImmediate(resolve)); f.emitKeeper('stopping', change); await refused;
+    const entry = f.executor.appTransports.get(f.context.runId);
+    assert.notEqual(entry.resumeRefused, true); assert.equal(entry.uncertain, true);
+    assert.equal(JSON.stringify(entry.events).includes(proxy.password), false);
+    t.mock.timers.tick(1000); assert.equal(entry.events.some(value => value.event === 'resumed'), false);
+  }
+});
+test('fixed native failure stage and bounded errno propagate without admitting private text or a successful transport', async () => {
+  for (const [edit, valid] of [[{}, true], [{ stage: '/private/path' }, false], [{ reason: proxy.password }, false], [{ error: true }, false], [{ error: 1025 }, false], [{ extra: 'private' }, false]]) {
+    const f = streamFixture({ nativeRefusal: edit });
+    await assert.rejects(f.executor.startApplicationTransport({ runId: f.context.runId, environmentId: f.context.environmentId, proxy, udpPolicy: 'block', leaseSHA256: 'a'.repeat(64), consoleUID: 501 }), error => {
+      assert.equal(error.code, valid ? 'APPLICATION_APP_NATIVE_REFUSED' : 'APPLICATION_APP_TRANSPORT_UNCONFIRMED');
+      if (valid) assert.deepEqual(error.nativeFailure, { stage: 'front-handshake', reason: 'NATIVE_OPERATION_REFUSED', error: 35 });
+      else assert.equal(error.nativeFailure, undefined); assert.ok(!JSON.stringify(error).includes(proxy.password)); return true;
+    });
+    assert.equal(f.executor.appTransports.get(f.context.runId).uncertain, true);
+  }
+});
+test('bound post-start native refusal preserves fixed diagnostics while normal outer EOF cannot confirm cleanup', async () => {
+  for (const command of ['L', 'S']) for (const stage of ['front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'guardian']) {
+    const f = streamFixture({ controlRefusal: { stage, error: 70 }, controlRefusalCommand: command });
+    await startStream(f);
+    if (command === 'S') await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, command, command === 'L' ? randomUUID() : null), error => {
+      assert.equal(error.code, 'APPLICATION_APP_NATIVE_REFUSED');
+      assert.deepEqual(error.nativeFailure, { stage, reason: 'NATIVE_OPERATION_REFUSED', error: 70 });
+      assert.ok(!JSON.stringify(error).includes(proxy.password)); return true;
+    });
+    const entry = f.executor.appTransports.get(f.context.runId);
+    assert.equal(entry.uncertain, false); assert.equal(entry.cleanupOnly, true); assert.equal(f.child.stdin.writableEnded, false);
+    f.child.emit('close', 0, null);
+    assert.equal(entry.uncertain, true); assert.equal(entry.abortReceipt, undefined); assert.equal(entry.preflightAbortReceipt, undefined);
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'R'));
+    await assert.rejects(f.executor.confirmApplicationTransportExited(f.context.runId));
+  }
+});
+test('post-start refusal rejects foreign bindings, invalid schemas and startup-only stages without importing diagnostics', async () => {
+  for (const edit of [{ runId: randomUUID() }, { environmentId: randomUUID() }, { schema: 'envara.foreign/v1' },
+    { stage: 'preflight' }, { stage: 'factory-open' }, { stage: 'front-handshake' }, { stage: '/private/path' },
+    { reason: proxy.password }, { error: true }, { error: 1025 }, { extra: 'private' }]) {
+    const f = streamFixture({ controlRefusal: edit }); await startStream(f);
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID()), error => {
+      assert.equal(error.code, 'APPLICATION_APP_TRANSPORT_UNCONFIRMED'); assert.equal(error.nativeFailure, undefined);
+      assert.ok(!JSON.stringify(error).includes(proxy.password)); return true;
+    });
+    const entry = f.executor.appTransports.get(f.context.runId);
+    assert.equal(entry.uncertain, true); assert.equal(entry.failure, undefined); assert.equal(f.child.stdin.writableEnded, true);
+  }
+});
+test('production native register envelope preserves errno13 and errno70 through controller snapshot and safe driver report', async () => {
+  for (const errno of [13, 70]) {
+    const f = fixture(), route = await f.prepareRoute(), request = input(route.routeId);
+    f.commands.register = async () => parseNativeApplicationEnvelope({ schema: 1, ok: false, error: errno, ready: false, protected: false,
+      activatesSystem: false, applicationIdentityVerified: false, environmentLeaseVerified: false, ticketIssued: false,
+      reason: 'NATIVE_APP_OPERATION_REFUSED', registrationId: '', versionId: '', ticketId: '', snapshotContentSHA256: '', privatePath: '/private/never-publish' }, {}, 'app-register');
+    await assert.rejects(f.controller.prepareNotionApplication(request), { code: 'APPLICATION_NATIVE_REFUSED' });
+    const snapshot = f.controller.applicationSnapshot({ runId: request.runId }), report = safeNotionResponse(snapshot, request.runId, request.environmentId);
+    assert.equal(snapshot.failure.stage, 'register'); assert.equal(report.failure.code, 'APPLICATION_NATIVE_REFUSED');
+    assert.deepEqual(report.failure.native, { stage: 'register', reason: 'NATIVE_APP_OPERATION_REFUSED', error: errno });
+    assert.equal(f.calls.includes('lock'), false); assert.equal(report.cleanupUncertain, true); assert.equal(report.cleanupEvidence, null);
+    assert.ok(!JSON.stringify(report).includes('never-publish')); assert.equal(report.ready, false); assert.equal(report.protected, false);
+    await f.controller.shutdown();
+  }
+});
+test('register diagnostics refuse unknown reasons, unbounded or Boolean errno and never relabel other native commands', () => {
+  const value = { schema: 1, ok: false, error: 13, ready: false, protected: false, activatesSystem: false,
+    applicationIdentityVerified: false, environmentLeaseVerified: false, ticketIssued: false, reason: 'NATIVE_APP_OPERATION_REFUSED',
+    registrationId: '', versionId: '', ticketId: '', snapshotContentSHA256: '' };
+  for (const [change, command] of [[{ reason: 'PRIVATE_UNKNOWN' }, 'app-register'], [{ error: true }, 'app-register'], [{ error: 0 }, 'app-register'],
+    [{ error: 1025 }, 'app-register'], [{}, 'app-plan']]) assert.throws(() => parseNativeApplicationEnvelope({ ...value, ...change }, {}, command), error => {
+      assert.equal(error.code, 'APPLICATION_NATIVE_REFUSED'); assert.equal(error.nativeFailure, undefined); assert.ok(!JSON.stringify(error).includes('PRIVATE_UNKNOWN')); return true;
+    });
+});
+const startStream = f => f.executor.startApplicationTransport({ runId: f.context.runId, environmentId: f.context.environmentId,
+  proxy, udpPolicy: 'block', leaseSHA256: 'a'.repeat(64), consoleUID: 501 });
+test('factory refusal waits for fragmented/coalesced exact abort and actual exit1; neither direct nor launchctl keeper is queried after exit', async () => {
+  for (const forked of [false, true]) {
+    const f = streamFixture({ forked, abort: {}, fragmentAbort: forked });
+    const identify = f.executor.identify, observed = [];
+    f.executor.identify = async pid => { observed.push(pid); if (observed.length > 1) throw new Error('already exited'); return identify(pid); };
+    await assert.rejects(startStream(f), error => error.code === 'APPLICATION_APP_NATIVE_REFUSED' && error.prestageAborted === true);
+    const entry = f.executor.appTransports.get(f.context.runId);
+    assert.equal(entry.phase, 'prestage-aborted'); assert.equal(entry.uncertain, false); assert.equal(entry.exitCode, 1); assert.equal(entry.exitSignal, null);
+    const proof = await f.executor.confirmApplicationPrestageAborted(f.context.runId);
+    assert.equal(proof.transportExitConfirmed, true); assert.equal(proof.filterJournalAbsent, true);
+    assert.equal(proof.childReaped, undefined); assert.deepEqual(observed, [f.child.pid]);
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID()));
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'B'));
+    await assert.rejects(f.executor.confirmApplicationTransportExited(f.context.runId));
+  }
+});
+for (const [name, change, options] of [
+  ['wrong environment', { environmentId: randomUUID() }], ['wrong lease', { leaseSHA256: 'b'.repeat(64) }], ['wrong realm', { realmId: randomUUID() }],
+  ['wrong group', { gid: 7101 }], ['wrong held lease inode', { leaseInode: '7' }], ['wrong held directory', { runDirectoryDevice: '7' }],
+  ['wrong controller birth', { controllerBirth: '999:000001' }], ['wrong keeper birth', { keeperBirth: '999:000001' }],
+  ['wrong parent', { keeperParentPID: 7777 }], ['wrong parent birth', { keeperParentBirth: '999:000001' }],
+  ['duplicate child identity', { corePID: 8990 }], ['false complete scope', { gidScopeAbsent: false }], ['numeric truth', { coreReaped: 1 }],
+  ['filter written', { filterWriteAttempted: true }], ['deny attempted', { denyAttempted: true }], ['launch accepted', { launchCommandAccepted: true }],
+  ['cold attempted', { coldStageAttempted: true }], ['private extras', { secret: 'never-report' }], ['invalid decimal', { listenerInode: '01' }],
+  ['wrong original interface', { utunName: 'en0' }], ['wrong original listener', { listenerHost: '0.0.0.0' }],
+  ['missing true field', { originalListenerVerified: undefined }], ['missing false field', { coldStageAttempted: undefined }],
+  ['overflow identity', { listenerDevice: '18446744073709551616' }], ['wrong declared exit', { exitStatus: 0 }],
+  ['exit1 without terminal', {}, { omitAbort: true }], ['terminal without initial refusal', {}, { omitRefusal: true }],
+  ['normal exit is not abort proof', {}, { abortExit: 0 }], ['signal is not abort proof', {}, { abortExit: null, abortSignal: 'SIGTERM' }],
+  ['partial output is not empty', {}, { abortTrailing: '{' }], ['late abort after poisoned stage', {}, { refusalStage: 'deny-commit' }],
+]) test(`prestage abort rejects ${name} without normal cleanup or cold commands`, async () => {
+  const f = streamFixture({ abort: change, ...options });
+  await assert.rejects(startStream(f)); const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(entry.uncertain, true); await assert.rejects(f.executor.confirmApplicationPrestageAborted(f.context.runId));
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID()));
+});
+test('accepted abort cannot survive changed held context or a newly appeared private journal', async () => {
+  for (const tamper of ['context', 'journal']) {
+    const f = streamFixture({ abort: {} }); await assert.rejects(startStream(f), { prestageAborted: true });
+    if (tamper === 'context') f.executor.applicationTransportBinding = async () => ({ ...f.binding, runDirectoryInode: '9' });
+    else f.executor.fs.lstat = async () => ({ isDirectory: () => true });
+    await assert.rejects(f.executor.confirmApplicationPrestageAborted(f.context.runId));
+  }
+});
+function abortControllerFixture() {
+  const f = fixture();
+  f.executor.startApplicationTransport = async () => { f.calls.push('transport'); throw Object.assign(new Error(), { code: 'APPLICATION_APP_NATIVE_REFUSED', prestageAborted: true,
+    nativeFailure: { stage: 'factory-open', reason: 'NATIVE_OPERATION_REFUSED', error: 13 } }); };
+  f.executor.confirmApplicationPrestageAborted = async () => {
+    f.calls.push('confirm-abort'); const sealed = f.executor.sealed;
+    return { schema: 'envara.macos-pf-app-transport/v1', event: 'prestage-aborted', stage: 'factory-open', runId: sealed.runId,
+      environmentId: sealed.environmentId, realmId: sealed.realmId, gid: sealed.gid, leaseSHA256: 'a'.repeat(64), exitStatus: 1,
+      ...Object.fromEntries(['originalUTunVerified', 'originalListenerVerified', 'coreReaped', 'frontReaped', 'gidScopeAbsent', 'filterJournalAbsent', 'originalUTunClosed', 'originalListenerClosed', 'transportExitConfirmed'].map(key => [key, true])),
+      ...Object.fromEntries(['denyAttempted', 'filterWriteAttempted', 'launchCommandAccepted', 'coldStageAttempted', 'ready', 'protected'].map(key => [key, false])) };
+  };
+  return f;
+}
+test('proven factory abort cleans only owned reference/issued lease/groups/context and preserves the original launch error and independent schema', async () => {
+  const f = abortControllerFixture(), route = await f.prepareRoute(), request = input(route.routeId);
+  await assert.rejects(f.controller.prepareNotionApplication(request), { code: 'APPLICATION_APP_NATIVE_REFUSED' });
+  const aborted = f.controller.applicationSnapshot({ runId: request.runId });
+  assert.equal(aborted.phase, 'prestage-aborted'); assert.equal(aborted.cleanupUncertain, false); assert.equal(aborted.cleanupComplete, false);
+  assert.equal(aborted.staged, false); assert.equal(aborted.resumed, false); assert.equal(aborted.prestageAborted, true);
+  const start = f.calls.length, clean = await f.controller.stopNotionApplication({ runId: request.runId });
+  assert.deepEqual(f.calls.slice(start).filter(value => value !== 'persist'), ['confirm-abort', 'process-absence', 'release-reference', 'remove-hook', 'remove-groups', 'network-snapshot', 'retire-lease', 'unlock']);
+  assert.equal(clean.phase, 'prestage-cleaned'); assert.equal(clean.cleanupComplete, true); assert.equal(clean.failure.code, 'APPLICATION_APP_NATIVE_REFUSED');
+  assert.equal(clean.cleanupEvidence.schema, 'envara.macos-pf-notion-prestage-cleanup/v1');
+  assert.equal(clean.cleanupEvidence.nativeGIDScopeAbsentBeforeExit, true); assert.equal(clean.cleanupEvidence.ownedEffectiveGIDProcessesAbsentAtCleanup, true);
+  for (const key of ['childReaped', 'privateJournalRetired', 'ownedGIDProcessesAbsent']) assert.equal(clean.cleanupEvidence[key], undefined);
+  for (const key of ['staged', 'resumed', 'notionLaunched', 'lifecyclePassed', 'denyAttempted', 'filterWriteAttempted', 'launchCommandAccepted', 'coldStageAttempted']) assert.equal(clean.cleanupEvidence[key], false);
+  assert.equal(f.calls.some(value => value.startsWith('control:')), false);
+  assert.deepEqual(await f.controller.stopNotionApplication({ runId: request.runId }), clean); assert.equal((await f.controller.shutdown()).cleanupRequired, false);
+  assert.ok(!JSON.stringify(clean).includes('leaseSHA256') && !JSON.stringify(clean).includes('rootHookLease'));
+});
+test('an untrusted abort flag and every failed fresh cleanup step retain sealed state rather than erase the original failure', async () => {
+  for (const failed of ['confirmApplicationPrestageAborted', 'persistRun', 'assertNoOwnedGroupProcesses', 'releaseOwnedReference', 'removeOwnedRootHook', 'removeGroups', 'snapshotUnrelatedNetwork', 'retireApplicationLease', 'releaseLock']) {
+    const f = abortControllerFixture(), route = await f.prepareRoute(), request = input(route.routeId);
+    await assert.rejects(f.controller.prepareNotionApplication(request));
+    f.executor[failed] = async () => { throw new Error('private detail'); };
+    await assert.rejects(f.controller.stopNotionApplication({ runId: request.runId }), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+    const state = f.controller.applicationSnapshot({ runId: request.runId });
+    assert.equal(state.cleanupComplete, false); assert.equal(state.cleanupUncertain, true); assert.equal(state.cleanupEvidence, null);
+    assert.equal(state.failure.code, 'APPLICATION_APP_NATIVE_REFUSED'); assert.equal((await f.controller.shutdown()).cleanupRequired, true);
+  }
+  const f = abortControllerFixture(), route = await f.prepareRoute(); f.executor.confirmApplicationPrestageAborted = async () => ({ transportExitConfirmed: true });
+  const request = input(route.routeId); await assert.rejects(f.controller.prepareNotionApplication(request));
+  assert.equal(f.controller.applicationSnapshot({ runId: request.runId }).cleanupUncertain, true);
+  await assert.rejects(f.controller.stopNotionApplication({ runId: request.runId })); assert.ok(!f.calls.includes('release-reference'));
+  await f.controller.shutdown();
+});
+test('fresh effective-GID cleanup refuses nonempty malformed ps records and matching owned groups', async () => {
+  const executor = new MacOSPFExecutor(), realms = [{ gid: 7100 }];
+  for (const output of ['broken-row\n', '12 0 7100\n', '12 true 20\n', '0 0 20\n', '999999999999999999999 0 20\n']) {
+    executor.command = async () => ({ stdout: output }); await assert.rejects(executor.assertNoOwnedGroupProcesses(realms));
+  }
+  executor.command = async () => ({ stdout: ' 12 0 20\n\n13 501 20\n' }); assert.equal(await executor.assertNoOwnedGroupProcesses(realms), true);
+});
+test('preflight terminal binds the direct native child, full sealed identity and fixed executable metadata without inventing transport resources', async () => {
+  for (const [preflightBeforeIdentity, unavailableIdentity] of [[false, false], [true, false], [true, true]]) {
+    const f = streamFixture({ preflightAbort: {}, preflightBeforeIdentity, unavailableIdentity, fragmentAbort: preflightBeforeIdentity });
+    await assert.rejects(startStream(f), error => error.code === 'APPLICATION_APP_NATIVE_REFUSED' && error.preflightAborted === true);
+    const entry = f.executor.appTransports.get(f.context.runId), proof = await f.executor.confirmApplicationPreflightAborted(f.context.runId);
+    assert.equal(entry.phase, 'preflight-aborted'); assert.equal(entry.uncertain, false); assert.equal(entry.exitCode, 1); assert.equal(entry.exitSignal, null);
+    assert.equal(proof.transportExitConfirmed, true); assert.equal(Object.keys(f.executor.expectedPreflightAbort).length, 35);
+    assert.equal(proof.privateChildrenAbsent, true); assert.equal(proof.ownedFilterClassesEmpty, true); assert.equal(proof.bootstrapPID, f.child.pid);
+    for (const field of ['childReaped', 'coreReaped', 'frontReaped', 'originalUTunClosed', 'originalListenerClosed']) assert.equal(proof[field], undefined);
+    await assert.rejects(f.executor.confirmApplicationTransportExited(f.context.runId));
+    await assert.rejects(f.executor.confirmApplicationPrestageAborted(f.context.runId));
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID()));
+  }
+});
+for (const [name, edit, options] of [
+  ['another environment', { environmentId: randomUUID() }], ['another realm', { realmId: randomUUID() }], ['another lease', { leaseSHA256: 'b'.repeat(64) }],
+  ['another group', { gid: 7101 }], ['another live child', { bootstrapPID: 8991 }], ['changed parent birth', { bootstrapParentBirth: '999:000001' }],
+  ['changed own birth', { bootstrapBirth: '999:000001' }], ['unverified private children', { privateChildrenAbsent: false }],
+  ['unverified full GID scope', { gidScopeAbsent: false }], ['nonempty kernel class', { ownedFilterClassesEmpty: false }],
+  ['numeric positive', { sealedContextVerified: 1 }], ['bootstrap attempted', { bootstrapAttempted: true }], ['transport attempted', { transportAttempted: true }],
+  ['FILTER attempted', { filterWriteAttempted: true }], ['cold stage attempted', { coldStageAttempted: true }], ['unknown nonce', { proofNonce: '0'.repeat(31) }],
+  ['Boolean nonce', { proofNonce: true }], ['noncanonical metadata', { bootstrapInode: '04' }], ['wrong native inode', { bootstrapInode: '6' }],
+  ['wrong parent inode', { bootstrapParentInode: '6' }], ['private extra field', { privatePath: '/never-report' }],
+  ['launchctl cannot be an early direct abort', {}, { forked: true }], ['a factory refusal is not preflight', {}, { preflightRefusalStage: 'factory-open' }],
+  ['a late refusal is not preflight', {}, { preflightRefusalStage: 'deny-commit' }], ['missing terminal', {}, { omitAbort: true }],
+  ['missing diagnostic', {}, { omitRefusal: true }], ['exit zero is not failure cleanup', {}, { abortExit: 0 }],
+  ['signal is not a waitpid proof', {}, { abortExit: null, abortSignal: 'SIGTERM' }], ['partial trailing stdout', {}, { abortTrailing: '{' }],
+  ['duplicate contradictory key', {}, { duplicatePreflightKey: true }],
+]) test(`preflight abort rejects ${name} without permitting cold launch or cleanup`, async () => {
+  const f = streamFixture({ preflightAbort: edit, ...options }); await assert.rejects(startStream(f));
+  assert.equal(f.executor.appTransports.get(f.context.runId).uncertain, true);
+  await assert.rejects(f.executor.confirmApplicationPreflightAborted(f.context.runId));
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID()));
+});
+test('preflight accepted receipt cannot survive changed executable metadata, context, journal, nonce or a repeated terminal', async () => {
+  for (const fault of ['native-file', 'parent-file', 'context', 'journal', 'repeat']) {
+    const f = streamFixture({ preflightAbort: {} }); await assert.rejects(startStream(f), { preflightAborted: true });
+    const previous = f.executor.fs.lstat;
+    if (fault.endsWith('-file')) f.executor.fs.lstat = async filename => {
+      const result = await previous(filename);
+      if (filename.endsWith(fault === 'native-file' ? '/envara-pf-native' : '/node')) result.ino = 7;
+      return result;
+    };
+    if (fault === 'context') f.executor.applicationTransportBinding = async () => ({ ...f.binding, leaseInode: '7' });
+    if (fault === 'journal') f.executor.fs.lstat = async filename => filename.endsWith('/app-filter-events') ? { isDirectory: () => true } : previous(filename);
+    if (fault === 'repeat') f.child.stdout.write(`${JSON.stringify(f.executor.expectedPreflightAbort)}\n`);
+    await assert.rejects(f.executor.confirmApplicationPreflightAborted(f.context.runId));
+  }
+});
+function preflightControllerFixture() {
+  const f = fixture();
+  f.executor.startApplicationTransport = async () => { f.calls.push('transport'); throw Object.assign(new Error(), {
+    code: 'APPLICATION_APP_NATIVE_REFUSED', preflightAborted: true, nativeFailure: { stage: 'preflight', reason: 'NATIVE_OPERATION_REFUSED', error: 13 } }); };
+  f.executor.confirmApplicationPreflightAborted = async () => {
+    f.calls.push('confirm-preflight'); const sealed = f.executor.sealed;
+    return { stage: 'preflight', runId: sealed.runId, environmentId: sealed.environmentId, realmId: sealed.realmId, gid: sealed.gid,
+      leaseSHA256: 'a'.repeat(64), exitStatus: 1, transportExitConfirmed: true,
+      ...Object.fromEntries(['sealedContextVerified', 'privateChildrenAbsent', 'gidScopeAbsent', 'filterJournalAbsent', 'ownedFilterClassesEmpty'].map(key => [key, true])),
+      ...Object.fromEntries(['bootstrapAttempted', 'transportAttempted', 'filterWriteAttempted', 'coldStageAttempted', 'ready', 'protected'].map(key => [key, false])) };
+  };
+  f.executor.inspectOwnedRootHook = async value => { assert.deepEqual(value, f.executor.sealed.rootHookLease); f.calls.push('inspect-hook'); };
+  return f;
+}
+
+test('a verified original cleanup-ready transport preserves its first refusal and can only stop/release its exact custody', async () => {
+  for (const forked of [false, true]) {
+    const f = streamFixture({ forked, nativeRefusal: { stage: 'deny-commit', error: 13, reason: 'NATIVE_PF_GUARD_REFUSED' }, cleanupReady: {} });
+    await assert.rejects(startStream(f), error => error.code === 'APPLICATION_APP_NATIVE_REFUSED' && error.cleanupAvailable === true && error.nativeFailure.reason === 'NATIVE_PF_GUARD_REFUSED');
+    const entry = f.executor.appTransports.get(f.context.runId);
+    assert.equal(entry.uncertain, false); assert.equal(entry.cleanupOnly, true);
+    assert.equal(f.executor.applicationCleanupAvailable(f.context.runId), true);
+    for (const command of ['L', 'B', 'K']) await assert.rejects(f.executor.applicationTransportControl(f.context.runId, command, randomUUID()));
+    const stopped = await f.executor.applicationTransportControl(f.context.runId, 'S');
+    assert.equal(stopped.childReaped, false); assert.equal(stopped.childAbsent, true);
+    const released = await f.executor.applicationTransportControl(f.context.runId, 'R');
+    assert.equal(released.childReaped, false); assert.equal(released.childAbsent, true);
+    assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+    assert.equal(entry.failure.error, 13); assert.deepEqual(f.controlCommands, ['S', 'R']);
+    assert.equal(entry.phase, 'released');
+  }
+});
+test('a guardian refusal before stopped ACK keeps cleanup available without inventing a staged application child', async () => {
+  const f = streamFixture({ controlRefusal: { reason: 'NATIVE_NOTION_STAGE_REFUSED', error: 13 } }); await startStream(f);
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID()), error => error.nativeFailure.reason === 'NATIVE_NOTION_STAGE_REFUSED');
+  assert.equal(f.executor.appTransports.get(f.context.runId).stoppedIdentity, undefined);
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'B'));
+  await f.executor.applicationTransportControl(f.context.runId, 'S');
+  const released = await f.executor.applicationTransportControl(f.context.runId, 'R');
+  assert.equal(released.childAbsent, true); assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+  assert.equal(f.controlCommands.some(command => command === 'B'), false);
+});
+test('cleanup-only transport rejects foreign custody, unproved child absence and unknown terminal fields', async () => {
+  for (const cleanupReady of [{ keeperPID: 8888 }, { coreBirth: '8992:000002' }, { ownsOriginalListenerFD: false }, { extra: proxy.password }]) {
+    const f = streamFixture({ nativeRefusal: { stage: 'deny-commit' }, cleanupReady });
+    await assert.rejects(startStream(f)); assert.equal(f.executor.appTransports.get(f.context.runId).uncertain, true);
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'));
+  }
+  for (const cleanupRelease of [{ childAbsent: false }, { childAbsent: true, childReaped: true }, { privateJournalRetired: false }, { extra: proxy.password }]) {
+    const f = streamFixture({ nativeRefusal: { stage: 'deny-commit' }, cleanupReady: {}, cleanupRelease });
+    await assert.rejects(startStream(f), { cleanupAvailable: true }); await f.executor.applicationTransportControl(f.context.runId, 'S');
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'R'));
+    assert.equal(f.executor.appTransports.get(f.context.runId).uncertain, true);
+    await assert.rejects(f.executor.confirmApplicationTransportExited(f.context.runId));
+  }
+});
+test('original guardian errno and controller stage survive outward throws and cleanup failure without being overwritten', async () => {
+  const original = { stage: 'guardian', reason: 'NATIVE_NOTION_STAGE_REFUSED', error: 13 }, f = fixture();
+  f.executor.applicationTransportControl = async (runId, operation) => {
+    f.calls.push(`control:${operation}`);
+    if (operation === 'L') throw Object.assign(new Error('private detail'), { code: 'APPLICATION_APP_NATIVE_REFUSED', nativeFailure: original });
+    throw Object.assign(new Error('cleanup detail'), { code: 'APPLICATION_APP_TRANSPORT_UNCONFIRMED' });
+  };
+  f.executor.applicationCleanupAvailable = () => true;
+  const route = await f.prepareRoute(), request = input(route.routeId);
+  await assert.rejects(f.controller.prepareNotionApplication(request), error => {
+    assert.equal(error.failureStage, 'cold-stage'); assert.deepEqual(error.nativeFailure, original);
+    assert.deepEqual(error.initialFailure, { stage: 'cold-stage', code: 'APPLICATION_APP_NATIVE_REFUSED', native: original }); return true;
+  });
+  await assert.rejects(f.controller.stopNotionApplication({ runId: request.runId }), error => {
+    assert.deepEqual(error.nativeFailure, original); assert.equal(error.cleanupFailure.code, 'APPLICATION_APP_TRANSPORT_UNCONFIRMED'); return true;
+  });
+  const snapshot = f.controller.applicationSnapshot({ runId: request.runId });
+  assert.deepEqual(snapshot.failure, snapshot.initialFailure); assert.equal(snapshot.initialFailure.native.error, 13);
+  assert.equal(snapshot.cleanupFailure.stage, 'cleanup'); assert.equal(JSON.stringify(snapshot).includes('private detail'), false);
+  await f.controller.shutdown();
+});
+test('application cleanup retries only unfinished owned tail steps after a native release and preserves the initial failure', async () => {
+  for (const step of ['removeGroups', 'snapshotUnrelatedNetwork', 'retireApplicationLease', 'releaseLock']) {
+    const f = fixture(), route = await f.prepareRoute(), request = input(route.routeId); await f.controller.prepareNotionApplication(request);
+    const run = f.controller.appRuns.get(request.runId);
+    run.initialFailure = Object.freeze({ stage: 'resume', code: 'APPLICATION_APP_RESUME_UNCONFIRMED' });
+    const operation = f.executor[step]; let failed = false;
+    f.executor[step] = async (...args) => { if (!failed) { failed = true; throw Object.assign(new Error(), { code: 'APPLICATION_ROUTING_NOT_READY' }); } return operation(...args); };
+    await assert.rejects(f.controller.stopNotionApplication({ runId: request.runId }));
+    const released = f.calls.filter(value => value === 'control:R').length, reference = f.calls.filter(value => value === 'release-reference').length;
+    const clean = await f.controller.stopNotionApplication({ runId: request.runId });
+    assert.equal(clean.cleanupComplete, true); assert.equal(clean.failure.code, 'APPLICATION_APP_RESUME_UNCONFIRMED');
+    assert.equal(f.calls.filter(value => value === 'control:R').length, released);
+    assert.equal(f.calls.filter(value => value === 'release-reference').length, reference);
+    assert.equal(clean.cleanupFailure.code, 'APPLICATION_ROUTING_NOT_READY');
+    await f.controller.shutdown();
+  }
+});
+test('proved direct preflight failure cleans only this controllers issued root resources and preserves the failed launch under an independent schema', async () => {
+  const f = preflightControllerFixture(), route = await f.prepareRoute(), request = input(route.routeId);
+  await assert.rejects(f.controller.prepareNotionApplication(request), { code: 'APPLICATION_APP_NATIVE_REFUSED' });
+  const pending = f.controller.applicationSnapshot({ runId: request.runId });
+  assert.equal(pending.phase, 'preflight-aborted'); assert.equal(pending.cleanupUncertain, false); assert.equal(pending.cleanupComplete, false);
+  assert.equal(pending.preflightAborted, true); assert.equal(pending.prestageAborted, false); assert.equal(pending.staged, false); assert.equal(pending.resumed, false);
+  const start = f.calls.length, clean = await f.controller.stopNotionApplication({ runId: request.runId });
+  assert.deepEqual(f.calls.slice(start).filter(call => call !== 'persist'), ['confirm-preflight', 'empty', 'inspect-hook', 'process-absence',
+    'release-reference', 'remove-hook', 'remove-groups', 'network-snapshot', 'retire-lease', 'unlock']);
+  assert.equal(clean.phase, 'preflight-cleaned'); assert.equal(clean.cleanupComplete, true); assert.equal(clean.failure.code, 'APPLICATION_APP_NATIVE_REFUSED');
+  assert.equal(clean.cleanupEvidence.schema, 'envara.macos-pf-notion-preflight-cleanup/v1');
+  assert.equal(clean.cleanupEvidence.nativePrivateChildrenAbsentBeforeExit, true); assert.equal(clean.cleanupEvidence.nativeGIDScopeAbsentBeforeExit, true);
+  assert.equal(clean.cleanupEvidence.bootstrapExitConfirmed, true); assert.equal(clean.cleanupEvidence.nativeOwnedFilterClassesEmptyBeforeExit, true);
+  for (const field of ['childReaped', 'coreReaped', 'frontReaped', 'originalUTunClosed', 'originalListenerClosed', 'ownedGIDProcessesAbsent']) assert.equal(clean.cleanupEvidence[field], undefined);
+  for (const field of ['staged', 'resumed', 'notionLaunched', 'lifecyclePassed', 'bootstrapAttempted', 'transportAttempted', 'filterWriteAttempted', 'coldStageAttempted']) assert.equal(clean.cleanupEvidence[field], false);
+  assert.equal(f.calls.some(call => call.startsWith('control:')), false); assert.equal(clean.ready, false); assert.equal(clean.protected, false);
+  assert.ok(!JSON.stringify(clean).includes('proofNonce') && !JSON.stringify(clean).includes('leaseSHA256'));
+  assert.deepEqual(await f.controller.stopNotionApplication({ runId: request.runId }), clean); assert.equal((await f.controller.shutdown()).cleanupRequired, false);
+});
+test('every failed fresh preflight cleanup check and an unproven error flag retain private state and never claim a normal app lifetime', async () => {
+  for (const step of ['confirmApplicationPreflightAborted', 'persistRun', 'requireEmptyOwnedAnchor', 'inspectOwnedRootHook', 'assertNoOwnedGroupProcesses',
+    'releaseOwnedReference', 'removeOwnedRootHook', 'removeGroups', 'snapshotUnrelatedNetwork', 'retireApplicationLease', 'releaseLock']) {
+    const f = preflightControllerFixture(), route = await f.prepareRoute(), request = input(route.routeId);
+    await assert.rejects(f.controller.prepareNotionApplication(request));
+    f.executor[step] = async () => { throw new Error('fixture-only private error'); };
+    await assert.rejects(f.controller.stopNotionApplication({ runId: request.runId }), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+    const failed = f.controller.applicationSnapshot({ runId: request.runId });
+    assert.equal(failed.cleanupUncertain, true); assert.equal(failed.cleanupComplete, false); assert.equal(failed.cleanupEvidence, null);
+    assert.equal(failed.failure.code, 'APPLICATION_APP_NATIVE_REFUSED'); assert.equal(failed.staged, false); assert.equal(failed.resumed, false);
+    assert.equal((await f.controller.shutdown()).cleanupRequired, true);
+  }
+  const f = preflightControllerFixture(), route = await f.prepareRoute(), request = input(route.routeId);
+  f.executor.confirmApplicationPreflightAborted = async () => ({ transportExitConfirmed: true });
+  await assert.rejects(f.controller.prepareNotionApplication(request)); await assert.rejects(f.controller.stopNotionApplication({ runId: request.runId }));
+  assert.equal(f.calls.includes('release-reference'), false); assert.equal((await f.controller.shutdown()).cleanupRequired, true);
+});

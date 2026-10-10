@@ -1,0 +1,41 @@
+name: "问题反馈 / Bug report"
+description: "描述可复现的问题 / Report a reproducible problem"
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请勿提交代理密码、订阅链接、Cookie、API keys 或完整个人配置。
+        Please remove secrets, private paths and account information. Development candidates are not public releases.
+  - type: input
+    id: version
+    attributes:
+      label: "Envara 版本 / Version"
+      description: "说明源码或打包版，附提交号（如有） / Source or packaged build; commit if available"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: "系统和架构 / OS and architecture"
+      placeholder: "macOS 27 / arm64, Windows 11 / x64…"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: "复现步骤 / Steps to reproduce"
+      description: "说明所在页面、浏览器内核或终端工具；不要包含凭据 / Include the page and relevant provider or tool, without credentials"
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: "实际与期望行为 / Actual and expected behavior"
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: "脱敏截图或日志 / Redacted evidence"
+      description: "可选；附加软件请注明仅查看状态还是已明确执行安装/授权 / Optional; distinguish status checks from explicit adapter installation or authorization"

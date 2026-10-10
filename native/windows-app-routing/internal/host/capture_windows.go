@@ -4,6 +4,7 @@ package host
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -256,7 +257,7 @@ func (driver *captureDriver) activate(port uint16) error {
 	result, _, _ := driver.start.Call(uintptr(unsafe.Pointer(&config)))
 	runtime.KeepAlive(config)
 	if result != 0 {
-		return errors.New("capture setup failed")
+		return fmt.Errorf("capture setup failed (ABI result %d)", result)
 	}
 	return nil
 }

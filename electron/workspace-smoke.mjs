@@ -5,6 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BrowserWindow } from 'electron';
+import { languages } from '../shared/interface-languages.mjs';
+import { translate } from '../src/i18n.mjs';
 
 const chineseNavigation = ['环境', '网络出口', '浏览器', '终端', '附加软件', '运行监控'];
 const englishNavigation = ['Environments', 'Networks', 'Browsers', 'Terminals', 'Applications', 'Monitor'];
@@ -32,7 +34,7 @@ export async function runWorkspaceSmoke({ app, window, service, terminal, applic
     await evaluate(`document.querySelectorAll('.navigation .nav-item')[${index}].click()`);
     await waitFor(() => evaluate(`document.querySelector('.page-header h1')?.textContent?.trim() === ${JSON.stringify(expected)}`), `${expected} page`);
   };
-  const capture = async (name, target = window, expectedHeading) => {
+  const capture = async (name, target = window, expectedHeading, headingSelector = '.page-header h1, .terminal-window-heading h1') => {
     target.show(); target.focus();
     // DOM updates can precede native presentation, especially while the window
     // is occluded. Wait for renderer frames and an invalidated compositor frame.
@@ -47,16 +49,21 @@ export async function runWorkspaceSmoke({ app, window, service, terminal, applic
     const filename = path.join(artifactDir, name);
     const pixels = await target.webContents.capturePage(); assert.equal(pixels.isEmpty(), false);
     await writeFile(filename, pixels.toPNG()); result.screenshots.push(filename);
-    const actualHeading = await evaluate("document.querySelector('.page-header h1, .terminal-window-heading h1')?.textContent?.trim()", target);
+    const actualHeading = await evaluate(`document.querySelector(${JSON.stringify(headingSelector)})?.textContent?.trim()`, target);
     if (expectedHeading != null) assert.equal(actualHeading, expectedHeading, `Heading after native screenshot ${name}`);
     result.screenshotEvidence.push({ path: filename, expectedHeading, actualHeading, nativePresentation: true, pixels: pixels.getSize() });
   };
   const switchLanguage = async language => {
     await evaluate("document.querySelector('.settings-navigation').click()");
-    await waitFor(() => evaluate("Boolean(document.querySelector('.language-select'))"), 'language selector');
-    await evaluate(`(() => { const select = document.querySelector('.language-select'); select.value = ${JSON.stringify(language)}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
-    await waitFor(async () => (await call('snapshot')).settings?.language === language, 'persisted language preference');
-    await waitFor(async () => JSON.stringify(await navigation()) === JSON.stringify(language === 'en' ? englishNavigation : chineseNavigation), 'translated navigation');
+    await waitFor(() => evaluate("Boolean(document.querySelector('.language-select:not(:disabled)'))"), `interactive language selector before ${language}`);
+    await evaluate(`(() => { const select = document.querySelector('.language-select'); if (!select || select.disabled) throw new Error('Language selector is not interactive'); select.value = ${JSON.stringify(language)}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    await waitFor(async () => (await call('snapshot')).settings?.language === language, `persisted ${language} language preference`);
+    await waitFor(async () => JSON.stringify(await navigation()) === JSON.stringify(chineseNavigation.map(label => translate(label, language))), `${language} translated navigation`);
+    assert.equal(await evaluate('document.documentElement.lang'), language);
+    // The store snapshot and optimistic translation can arrive before the save
+    // IPC promise completes. A user cannot submit the disabled selector during
+    // that interval; keep each test change subject to the same UI boundary.
+    await waitFor(() => evaluate(`(() => { const select = document.querySelector('.language-select'); return Boolean(select && !select.disabled && select.value === ${JSON.stringify(language)}); })()`), `completed ${language} language selection`);
   };
   try {
     assert.equal(process.env.ENVARA_WORKSPACE_SMOKE, '1', 'Harness requires an explicit development flag');
@@ -66,8 +73,26 @@ export async function runWorkspaceSmoke({ app, window, service, terminal, applic
     await waitFor(async () => (await navigation()).length === 6, 'six navigation destinations');
     const initial = await call('snapshot');
     assert.equal(initial.profiles.length, 0); assert.equal(initial.proxies.length, 0); assert.equal(initial.applications.length, 0);
-    assert.deepEqual(await navigation(), chineseNavigation);
-    result.checks.push('First-run native IPC workspace is empty; six Chinese navigation items have the requested order');
+    assert.equal(initial.settings.language, undefined);
+    await waitFor(() => evaluate("document.querySelectorAll('.language-welcome-card input[name=interface-language]').length === 9"), 'first-launch nine-language dialog');
+    assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('.language-welcome-card input')).map(input => input.value)"), [...languages]);
+    await evaluate("document.querySelector('.language-welcome-card input[value=en]').click()");
+    await waitFor(() => evaluate("document.querySelector('.language-welcome-card h1')?.textContent === 'Welcome to Envara'"), 'English preview before confirmation');
+    assert.equal((await call('snapshot')).settings.language, undefined);
+    await capture('first-launch.png', window, 'Welcome to Envara', '.language-welcome-card h1');
+    await evaluate("document.querySelector('.language-welcome-card input[value=fr]').click()");
+    await waitFor(() => evaluate("document.documentElement.lang === 'fr'"), 'French first-launch preview');
+    assert.equal((await call('snapshot')).settings.language, undefined);
+    await evaluate("document.querySelector('.language-start-button').click()");
+    await waitFor(() => evaluate("!document.querySelector('.language-welcome-layer')"), 'confirmed first-launch language');
+    assert.equal((await call('snapshot')).settings.language, 'fr');
+    result.checks.push('First native launch offers nine languages; English/French preview is not persisted until confirmation succeeds through real IPC');
+
+    for (const language of languages) {
+      await switchLanguage(language);
+      assert.equal(await evaluate("document.querySelectorAll('.language-select option').length"), 9);
+    }
+    result.checks.push('All nine interface languages switch through real Settings IPC, with matching navigation and document language');
 
     await switchLanguage('en');
     await capture('settings-en.png', window, 'Settings');
@@ -84,6 +109,7 @@ export async function runWorkspaceSmoke({ app, window, service, terminal, applic
     window.webContents.reload(); await reloaded; await ready();
     await waitFor(async () => JSON.stringify(await navigation()) === JSON.stringify(englishNavigation), 'English after renderer reload');
     assert.equal((await call('snapshot')).settings.language, 'en');
+    assert.equal(await evaluate("Boolean(document.querySelector('.language-welcome-layer'))"), false);
     result.checks.push('Language selector saves English through production IPC and restores it after renderer reload');
     await switchLanguage('zh-CN');
 
@@ -152,6 +178,12 @@ export async function runWorkspaceSmoke({ app, window, service, terminal, applic
     assert.equal(opened.ok, true); assert.equal(opened.profileId, profile.id); assert.equal(opened.sessionId, duplicate.sessionId);
     independentWindow = BrowserWindow.fromId(opened.windowId); assert.ok(independentWindow); await ready(independentWindow);
     await waitFor(() => evaluate("Boolean(document.querySelector('.terminal-dock.is-standalone'))", independentWindow), 'standalone terminal renderer');
+    for (const language of ['ja', 'pt-BR', 'zh-CN']) {
+      await switchLanguage(language);
+      await waitFor(() => evaluate(`document.documentElement.lang === ${JSON.stringify(language)}`, independentWindow), 'independent window language synchronization');
+      assert.equal(await evaluate("Boolean(document.querySelector('.language-welcome-layer'))", independentWindow), false);
+    }
+    result.checks.push('An existing independent terminal follows Japanese, Portuguese and Chinese settings without showing first-run onboarding');
     await capture('terminal-independent-zh.png', independentWindow, profile.name);
     const forbidden = await evaluate("window.envara.call('createProfile', {profile:{name:'forbidden'}}).then(() => ({allowed:true}), () => ({allowed:false}))", independentWindow);
     assert.equal(forbidden.allowed, false);

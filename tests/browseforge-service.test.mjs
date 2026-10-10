@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { BrowseForgeService } from '../electron/browseforge-service.mjs';
 import { ProxyNetworkProbe } from '../electron/proxy-network.mjs';
+import { languages } from '../shared/interface-languages.mjs';
 
 const descriptors = [
   { id: 'cloakbrowser', display_name: 'CloakBrowser', family: 'chromium', enabled: true, platform_supported: true, capabilities: { supports_seed_fingerprint: true, supports_structured_config: false } },
@@ -61,6 +62,24 @@ async function fixture(t, options = {}) {
   return { directory, profilesDir, client, service };
 }
 const create = async (service, patch = {}) => (await service.call('createProfile', { profile: { name: '测试环境', engine: 'cloakbrowser', platform: 'macos', seed: 1234, locale: 'zh-CN', timezone: 'Asia/Shanghai', width: 1440, height: 900, proxyId: null, ...patch } })).profiles.at(-1);
+
+test('BrowseForge interface-language settings keep browser locale and fingerprint data unchanged', async (t) => {
+  const { service, client, directory } = await fixture(t);
+  assert.equal((await service.snapshot()).settings.language, undefined);
+  await create(service, { locale: 'ja-JP', timezone: 'Asia/Tokyo' });
+  const before = structuredClone(client.profiles);
+  for (const language of languages) {
+    await service.saveSettings({ settings: { closeBrowsersOnExit: true, language } });
+    assert.equal((await service.snapshot()).settings.language, language);
+    assert.deepEqual(client.profiles, before);
+  }
+  const persisted = JSON.parse(await readFile(path.join(directory, 'browseforge-manager', 'workspace.json'), 'utf8'));
+  assert.equal(persisted.settings.language, languages.at(-1));
+  for (const language of ['en-US', 'ar', '__proto__', '', {}, ['en']]) {
+    await assert.rejects(service.saveSettings({ settings: { closeBrowsersOnExit: true, language } }), { code: 'VALIDATION_ERROR' });
+  }
+  assert.equal((await service.snapshot()).settings.language, languages.at(-1));
+});
 
 test('null upstream lists normalize to empty and enabled providers are not claimed installed', async (t) => {
   const { service } = await fixture(t, { mockInstalled: false });
@@ -364,6 +383,153 @@ test('proxy and group bindings are preserved and missing region or proxy referen
 const networkGeo = { success: true, ip: '8.8.8.8', country: 'United States', country_code: 'US', region: 'New York', city: 'New York', timezone: { id: 'America/New_York' } };
 const savedProxy = async (service, patch = {}) => (await service.call('saveProxy', { proxy: { name: '认证出口', protocol: 'http', host: 'proxy.example', port: 8080, username: 'dummy-user', password: 'dummy-password', ...patch } })).proxies.find((proxy) => proxy.name === (patch.name ?? '认证出口'));
 
+test('network creation previews actual egress then stores only a matching confirmed location', async (t) => {
+  const { service } = await fixture(t, { networkProbe: new ProxyNetworkProbe({ transport: async () => networkGeo }) });
+  const draft = { name: '推荐位置', protocol: 'http', host: 'proxy.example', port: 8080, username: 'dummy-user', password: 'dummy-password' };
+  const before = JSON.stringify(await service.store.read());
+  const preview = await service.call('previewProxyNetwork', { proxy: draft });
+  assert.equal(preview.network.scope, 'egress'); assert.equal(preview.network.ip, '8.8.8.8');
+  assert.equal(preview.locationRecommendation.confirmed, false); assert.ok(preview.locationPreviewToken);
+  assert.equal(JSON.stringify(await service.store.read()), before);
+  assert.equal(JSON.stringify(preview).includes(draft.password), false);
+  await assert.rejects(service.call('saveProxy', { proxy: { ...draft, location: { mode: 'ip', confirmed: true } } }), { code: 'NETWORK_LOCATION_NOT_VERIFIED' });
+  await assert.rejects(service.call('saveProxy', { proxy: { ...draft, password: 'changed-password', location: { mode: 'ip', confirmed: true } }, locationPreviewToken: preview.locationPreviewToken }), { code: 'NETWORK_LOCATION_NOT_VERIFIED' });
+  const snapshot = await service.call('saveProxy', { proxy: { ...draft, location: { mode: 'ip', confirmed: true, latitude: 0, longitude: 0, label: 'forged house' } }, locationPreviewToken: preview.locationPreviewToken });
+  const saved = snapshot.proxies[0];
+  assert.equal(saved.location.confirmed, true); assert.equal(saved.location.latitude, preview.network.geolocation?.latitude ?? null);
+  assert.equal(saved.location.egressIP, preview.network.ip); assert.equal(saved.location.egressTimezone, preview.network.timezone);
+  assert.notEqual(saved.location.label, 'forged house'); assert.equal(saved.location.addressResolved, false);
+  const renamed = await service.call('saveProxy', { proxy: { ...draft, id: saved.id, name: '重命名' } });
+  assert.deepEqual(renamed.proxies[0].location, saved.location);
+  const replaced = await service.call('saveProxy', { proxy: { ...draft, id: saved.id, password: 'changed-password' } });
+  assert.equal(replaced.proxies[0].location, undefined, 'old selection cannot move silently to another node');
+});
+
+test('failed or expired egress preview cannot confirm a location', async (t) => {
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => { throw new Error('offline fixture'); } });
+  const { service } = await fixture(t, { networkProbe });
+  const draft = { name: '离线', protocol: 'socks5', host: 'proxy.example', port: 1080 };
+  const offline = await service.call('previewProxyNetwork', { proxy: draft });
+  assert.equal(offline.network.ok, false); assert.equal(offline.locationRecommendation, null); assert.equal(offline.locationPreviewToken, null);
+  networkProbe.transport = async () => networkGeo;
+  const preview = await service.call('previewProxyNetwork', { proxy: draft });
+  service.locationPreviews.get(preview.locationPreviewToken).expiresAt = 0;
+  await assert.rejects(service.call('saveProxy', { proxy: { ...draft, location: { mode: 'manual', confirmed: true, label: 'Chosen address' } }, locationPreviewToken: preview.locationPreviewToken }), { code: 'NETWORK_LOCATION_NOT_VERIFIED' });
+  assert.equal((await service.store.read()).proxies.length, 0);
+});
+
+test('confirmed manual coordinate propagates through scoped context and browser without altering detected egress', async (t) => {
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => networkGeo });
+  const { service, client } = await fixture(t, { networkProbe });
+  const draft = { name: '用户位置', protocol: 'socks5', host: 'proxy.example', port: 1080 };
+  const preview = await service.call('previewProxyNetwork', { proxy: draft });
+  const saved = (await service.call('saveProxy', { proxy: { ...draft, location: { mode: 'manual', confirmed: true, label: 'Selected map pin', mapsUrl: 'https://www.google.com/maps/search/?api=1&query=40.7,-74.1' } }, locationPreviewToken: preview.locationPreviewToken })).proxies[0];
+  const profile = await create(service, { proxyId: saved.id, timezone: 'Asia/Tokyo', locale: '' });
+  const original = JSON.stringify(client.profiles);
+  const context = await service.resolveWorkspaceContext(profile.id);
+  assert.equal(context.locationSource, 'manual'); assert.equal(context.selectedLocation.label, 'Selected map pin');
+  assert.deepEqual(context.geolocation, { latitude: 40.7, longitude: -74.1, accuracy: 1000 });
+  assert.deepEqual(context.network.geolocation, preview.network.geolocation);
+  assert.equal(context.timezone, preview.network.timezone);
+  assert.equal(context.timezoneSource, 'proxy-egress', 'source stays compatible with platform adapters');
+  assert.equal(context.timezoneOrigin, 'network-environment', 'confirmed network timezone takes precedence over per-profile legacy settings');
+  assert.equal(JSON.stringify(client.profiles), original, 'selection is a child launch override, not a persistent fingerprint rewrite');
+  const snapshot = await service.call('startProfile', { id: profile.id });
+  assert.equal(snapshot.profiles[0].selectedLocation.label, 'Selected map pin');
+  const launched = client.requests.find(row => row.route === '/api/sessions' && row.method === 'POST');
+  assert.deepEqual(launched.body.launch_overrides.geolocation, context.geolocation);
+  assert.equal(launched.body.launch_overrides.timezone, preview.network.timezone);
+});
+
+test('confirmed text-only address stays unresolved instead of silently using the IP centre', async (t) => {
+  const { service } = await fixture(t, { networkProbe: new ProxyNetworkProbe({ transport: async () => networkGeo }) });
+  const draft = { name: '手填地址', protocol: 'http', host: 'proxy.example', port: 8080 };
+  const preview = await service.call('previewProxyNetwork', { proxy: draft });
+  const saved = (await service.call('saveProxy', { proxy: { ...draft, location: { mode: 'manual', confirmed: true, label: 'User selected address' } }, locationPreviewToken: preview.locationPreviewToken })).proxies[0];
+  const profile = await create(service, { proxyId: saved.id, timezone: '' });
+  const context = await service.resolveWorkspaceContext(profile.id);
+  assert.equal(context.geolocation, null); assert.equal(context.selectedLocation.addressResolved, false);
+  assert.equal(context.network.ip, preview.network.ip);
+});
+
+test('confirmed group context is shared across consumers while unrelated profiles retain their own configuration', async (t) => {
+  const { service, client } = await fixture(t, { networkProbe: new ProxyNetworkProbe({ transport: async () => networkGeo }) });
+  const draft = { name: '网络分组', protocol: 'socks5', host: 'group.proxy.example', port: 1080 };
+  const preview = await service.call('previewProxyNetwork', { proxy: draft });
+  const selected = (await service.call('saveProxy', { proxy: { ...draft, location: { mode: 'manual', confirmed: true, latitude: 40.7, longitude: -74.1 } }, locationPreviewToken: preview.locationPreviewToken })).proxies[0];
+  await service.call('saveGroup', { name: '共同网络', proxyId: selected.id, proxyMode: 'enforced' });
+  const first = await create(service, { group: '共同网络', timezone: 'Asia/Tokyo' });
+  const second = await create(service, { group: '共同网络', timezone: 'Europe/Paris' });
+  const unrelated = await create(service, { name: '独立环境', timezone: 'Asia/Tokyo' });
+  const before = JSON.stringify(client.profiles);
+  const one = await service.resolveWorkspaceContext(first.id), two = await service.resolveWorkspaceContext(second.id), other = await service.resolveWorkspaceContext(unrelated.id);
+  assert.deepEqual(one.selectedLocation, two.selectedLocation); assert.deepEqual(one.geolocation, two.geolocation);
+  assert.equal(one.timezone, preview.network.timezone); assert.equal(two.timezone, one.timezone);
+  assert.equal(one.proxySource, 'group'); assert.equal(other.timezone, 'Asia/Tokyo'); assert.equal(other.selectedLocation, null);
+  assert.equal(JSON.stringify(client.profiles), before);
+  const savedSnapshot = await service.snapshot();
+  assert.equal(savedSnapshot.profiles.find(row => row.id === first.id).timezoneOrigin, 'network-environment');
+});
+
+test('confirmed node launch refuses a failed fresh egress even when the legacy profile timezone is fixed', async (t) => {
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => networkGeo });
+  const { service, client } = await fixture(t, { networkProbe });
+  const draft = { name: '断线环境', protocol: 'http', host: 'proxy.example', port: 8080 };
+  const preview = await service.call('previewProxyNetwork', { proxy: draft });
+  const selected = (await service.call('saveProxy', { proxy: { ...draft, location: { mode: 'ip', confirmed: true } }, locationPreviewToken: preview.locationPreviewToken })).proxies[0];
+  const profile = await create(service, { proxyId: selected.id, timezone: 'Asia/Tokyo' });
+  await service.resolveWorkspaceContext(profile.id);
+  networkProbe.transport = async () => { throw new Error('offline fixture'); };
+  await assert.rejects(service.resolveWorkspaceContext(profile.id, { force: true }), { code: 'NETWORK_LOCATION_NOT_VERIFIED' });
+  assert.equal(client.sessions.length, 0); assert.equal((await service.snapshot()).profiles[0].network.ok, false);
+  assert.equal(service.workspaceContexts.get(profile.id).geolocation, null);
+  const failed = (await service.snapshot()).profiles[0];
+  assert.equal(failed.resolvedTimezone, null); assert.equal(failed.timezoneSource, null);
+  assert.equal(failed.selectedLocation.timezone, preview.network.timezone, 'saved selection remains available for editing without becoming a verified runtime result');
+});
+
+test('same node moving to another region blocks resolve and browser launch while same-region IP rotation preserves confirmation', async (t) => {
+  for (const mode of ['ip', 'manual']) {
+    let actual = { ...networkGeo, latitude: 40.7, longitude: -74.1 };
+    const networkProbe = new ProxyNetworkProbe({ transport: async () => structuredClone(actual) });
+    const { service, client } = await fixture(t, { networkProbe });
+    const draft = { name: `确认-${mode}`, protocol: 'socks5', host: 'proxy.example', port: 1080 };
+    const preview = await service.call('previewProxyNetwork', { proxy: draft });
+    const selected = (await service.call('saveProxy', { proxy: { ...draft, location: { mode, confirmed: true, ...(mode === 'manual' ? { label: 'Chosen pin', latitude: 40.8, longitude: -74.2 } : {}) } }, locationPreviewToken: preview.locationPreviewToken })).proxies[0];
+    const profile = await create(service, { proxyId: selected.id, timezone: 'Asia/Tokyo' });
+    const original = structuredClone((await service.store.read()).proxies[0]);
+    const first = await service.resolveWorkspaceContext(profile.id);
+    actual = { ...actual, ip: '1.1.1.1', city: 'Different city', latitude: 41, longitude: -75 };
+    const rotated = await service.resolveWorkspaceContext(profile.id);
+    assert.equal(rotated.network.ip, '1.1.1.1', 'confirmed contexts force a fresh probe rather than reusing a cached IP');
+    assert.deepEqual(rotated.selectedLocation, first.selectedLocation); assert.deepEqual(rotated.geolocation, first.geolocation); assert.equal(rotated.timezone, first.timezone);
+    for (const moved of [{ ...actual, timezone: { id: 'America/Los_Angeles' } }, { ...actual, country_code: 'CA' }]) {
+      actual = moved;
+      await assert.rejects(service.resolveWorkspaceContext(profile.id), { code: 'NETWORK_LOCATION_RECONFIRM_REQUIRED' });
+      await assert.rejects(service.call('startProfile', { id: profile.id }), { code: 'NETWORK_LOCATION_RECONFIRM_REQUIRED' });
+      assert.equal(client.sessions.length, 0);
+      assert.equal(service.workspaceContexts.get(profile.id).geolocation, null);
+      assert.match(service.workspaceContexts.get(profile.id).networkLastError, /重新检测并确认/);
+      assert.deepEqual((await service.store.read()).proxies[0], original);
+    }
+    const reconfirm = await service.call('previewProxyNetwork', { proxy: original });
+    const updated = (await service.call('saveProxy', { proxy: original, locationPreviewToken: reconfirm.locationPreviewToken })).proxies[0];
+    assert.equal(updated.location.timezone, actual.timezone.id); assert.equal(updated.location.countryCode, actual.country_code);
+    const ready = await service.resolveWorkspaceContext(profile.id);
+    assert.equal(ready.timezone, actual.timezone.id);
+    if (mode === 'manual') assert.deepEqual(ready.geolocation, first.geolocation, 'explicit reconfirmation updates region proof while retaining the user selected pin');
+  }
+});
+
+test('legacy unconfirmed node metadata keeps the original profile timezone behavior', async (t) => {
+  const { service } = await fixture(t, { networkProbe: new ProxyNetworkProbe({ transport: async () => networkGeo }) });
+  const proxy = await savedProxy(service);
+  await service.store.transaction(workspace => { workspace.proxies[0].location = { mode: 'ip', confirmed: false, timezone: 'Asia/Manila' }; });
+  const profile = await create(service, { proxyId: proxy.id, timezone: 'Asia/Tokyo' });
+  const context = await service.resolveWorkspaceContext(profile.id);
+  assert.equal(context.timezone, 'Asia/Tokyo'); assert.equal(context.timezoneSource, 'manual'); assert.equal(context.selectedLocation, null);
+});
+
 test('egress checks cache saved configuration, exclude network cache from export, and do not save drafts', async (t) => {
   let requests = 0;
   const networkProbe = new ProxyNetworkProbe({ transport: async () => { requests++; return networkGeo; } });
@@ -622,6 +788,46 @@ function managedProxyFixture() {
   };
   return { proxyCore, networkProbe, calls, releases, wires, probes };
 }
+
+test('AnyTLS location preview uses an owned authenticated route and releases only its draft core', async (t) => {
+  const managed = managedProxyFixture();
+  const originalProbe = managed.networkProbe.probe.bind(managed.networkProbe);
+  managed.networkProbe.probe = async (...args) => ({ ...(await originalProbe(...args)), scope: 'egress', countryCode: 'JP', country: 'Japan', geolocation: { latitude: 35.6, longitude: 139.7, accuracy: 50000 } });
+  const { service } = await fixture(t, managed);
+  const saved = (await service.call('saveProxy', { proxy: anytlsConfig({ name: '已保存' }) })).proxies[0];
+  const profile = await create(service, { proxyId: saved.id, timezone: '' });
+  await service.resolveWorkspaceContext(profile.id);
+  assert.equal(managed.wires.has(saved.id), true);
+  const before = JSON.stringify(await service.store.read());
+  const draft = anytlsConfig({ name: '新位置', host: 'draft.example.test', alpn: ['h2', 'http/1.1'], udp: false });
+  const preview = await service.call('previewProxyNetwork', { proxy: draft });
+  assert.ok(preview.locationPreviewToken); assert.equal(preview.locationRecommendation.timezone, 'Asia/Tokyo');
+  assert.equal(managed.wires.size, 1); assert.equal(managed.wires.has(saved.id), true);
+  const created = managed.calls.at(-1);
+  assert.match(created.id, /^draft_/); assert.deepEqual(created.alpn, draft.alpn); assert.equal(created.udp, false); assert.equal(created.serverName, draft.serverName);
+  assert.deepEqual(managed.releases, [created.id]);
+  const wire = managed.probes.at(-1).proxy;
+  assert.equal(wire.host, '127.0.0.1'); assert.notEqual(wire.password, draft.password);
+  assert.equal(JSON.stringify(preview).includes(draft.password), false); assert.equal(JSON.stringify(preview).includes(wire.password), false);
+  assert.equal(JSON.stringify(await service.store.read()), before);
+});
+
+test('managed core death cannot refill a resolved timezone from the saved network selection', async (t) => {
+  const managed = managedProxyFixture();
+  const originalProbe = managed.networkProbe.probe.bind(managed.networkProbe);
+  managed.networkProbe.probe = async (...args) => ({ ...(await originalProbe(...args)), scope: 'egress', countryCode: 'JP', country: 'Japan', geolocation: { latitude: 35.6, longitude: 139.7, accuracy: 50000 } });
+  const { service } = await fixture(t, managed);
+  const draft = anytlsConfig();
+  const preview = await service.call('previewProxyNetwork', { proxy: draft });
+  const selected = (await service.call('saveProxy', { proxy: { ...draft, location: { mode: 'ip', confirmed: true } }, locationPreviewToken: preview.locationPreviewToken })).proxies[0];
+  const profile = await create(service, { proxyId: selected.id, timezone: 'America/New_York' });
+  await service.resolveWorkspaceContext(profile.id);
+  assert.equal((await service.snapshot()).profiles[0].resolvedTimezone, 'Asia/Tokyo');
+  service.invalidateManagedProxy(selected.id);
+  const failed = (await service.snapshot()).profiles[0];
+  assert.equal(failed.resolvedTimezone, null); assert.equal(failed.timezoneSource, null); assert.equal(failed.geolocation, null);
+  assert.equal(failed.selectedLocation.timezone, 'Asia/Tokyo'); assert.equal(failed.network.ok, false);
+});
 
 test('AnyTLS raw configuration and stable profile bindings survive reopen without native wire credentials', async (t) => {
   const managed = managedProxyFixture();

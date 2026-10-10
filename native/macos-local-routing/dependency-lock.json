@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "package": "mitmproxy-macos",
+  "version": "0.12.11",
+  "sourceTag": "v0.12.11",
+  "sourceCommit": "40f1dfb5dca7b03ff7793d3c90f23b8bdf873889",
+  "sourceUrl": "https://github.com/mitmproxy/mitmproxy_rs/tree/v0.12.11",
+  "wheelUrl": "https://files.pythonhosted.org/packages/fe/7f/7f77310e810ab3ee47357e4ce1bdafc05d429e411bad63c0e546ceef2f2e/mitmproxy_macos-0.12.11-py3-none-any.whl",
+  "wheelSha256": "63349d9b46514ca679547651f7c0548f9222892edfbcba087b82b3244fbae859",
+  "appArchiveSha256": "b8ea49940489560bb76b231a064aa823cf3d3e8a0787eac4a456611f26c96a7f",
+  "protobufSha256": "e0c65b12652143ddd22eaa1c455a1d5f4e22565f05d8b198ab4e328b17561472",
+  "teamIdentifier": "S8XHQB96PW",
+  "appIdentifier": "org.mitmproxy.macos-redirector",
+  "extensionIdentifier": "org.mitmproxy.macos-redirector.network-extension",
+  "bundleVersion": "1",
+  "bundleShortVersion": "2.0",
+  "minimumMacOS": "12.0",
+  "installedAppPath": "/Applications/Mitmproxy Redirector.app",
+  "appExecutableSha256": "fb154632717ac7780c2706757573f2352a769e07fef7db1e4ae22027d2e4bc7a",
+  "extensionExecutableSha256": "0785d00082db59543c093fe63581d31060f5fdc9677dbf2796bf6ac473f6087a",
+  "appCDHashes": {
+    "arm64": "b1f9f3320ea584219fecd1a423c7623895cbaf67",
+    "x86_64": "021d7ae8a695e9b964f7b30e2f40c89fb89cc897"
+  },
+  "extensionCDHashes": {
+    "arm64": "5e5a926e18280c133fa34a172b57d6f788d90ea5",
+    "x86_64": "faaf3df7efb96c11c32900558890b86b33b6481e"
+  }
+}

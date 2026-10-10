@@ -7,6 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { EnvaraService } from '../electron/service.mjs';
 import { EnvaraStore } from '../electron/store.mjs';
+import { languages } from '../shared/interface-languages.mjs';
 
 class FakeRuntime {
   constructor({ installed = true, startError = null, startGate = null } = {}) {
@@ -56,6 +57,76 @@ async function fixture(t, runtime = new FakeRuntime()) {
 async function create(service, profile = {}) {
   return (await service.call('createProfile', { profile: { name: '环境 A', ...profile } })).profiles.at(-1);
 }
+
+test('legacy network location confirmation is bound to an authenticated probe and affects only child launch', async (t) => {
+  const { service, runtime } = await fixture(t);
+  const network = { ok: true, scope: 'egress', ip: '8.8.8.8', countryCode: 'PH', country: 'Philippines', city: 'Manila', timezone: 'Asia/Manila', geolocation: { latitude: 14.6, longitude: 121, accuracy: 50000 }, checkedAt: new Date().toISOString() };
+  service.networkProbe = { async probe(proxy) { assert.equal(proxy.host, 'fixture.proxy.example'); return structuredClone(network); }, close() {} };
+  const draft = { name: '确认位置', protocol: 'http', host: 'fixture.proxy.example', port: 8080, username: 'fixture-user', password: 'fixture-secret' };
+  const preview = await service.call('previewProxyNetwork', { proxy: draft });
+  assert.ok(preview.locationPreviewToken); assert.equal(preview.locationRecommendation.timezone, 'Asia/Manila');
+  assert.equal((await service.store.read()).proxies.length, 0);
+  assert.equal(JSON.stringify(preview).includes(draft.password), false);
+  await assert.rejects(service.call('saveProxy', { proxy: { ...draft, location: { mode: 'ip', confirmed: true } } }), { code: 'NETWORK_LOCATION_NOT_VERIFIED' });
+  const saved = (await service.call('saveProxy', { proxy: { ...draft, location: { mode: 'ip', confirmed: true } }, locationPreviewToken: preview.locationPreviewToken })).proxies[0];
+  const profile = await create(service, { proxyId: saved.id, timezone: 'Asia/Tokyo' });
+  const original = JSON.stringify((await service.store.read()).profiles);
+  await service.call('startProfile', { id: profile.id });
+  assert.equal(runtime.starts[0].profile.timezone, 'Asia/Manila');
+  assert.deepEqual(runtime.starts[0].profile.geolocation, network.geolocation);
+  assert.equal((await service.store.read()).profiles[0].timezone, 'Asia/Tokyo');
+  const launched = await service.store.read();
+  assert.equal(launched.profiles[0].id, JSON.parse(original)[0].id);
+});
+
+test('legacy confirmed node blocks region changes but preserves manual pin across same-region IP rotation', async (t) => {
+  const { service, runtime } = await fixture(t);
+  let actual = { ok: true, scope: 'egress', ip: '8.8.8.8', countryCode: 'PH', country: 'Philippines', city: 'Manila', timezone: 'Asia/Manila', geolocation: { latitude: 14.6, longitude: 121, accuracy: 50000 }, checkedAt: new Date().toISOString() };
+  service.networkProbe = { async probe() { return structuredClone(actual); }, close() {} };
+  const draft = { name: '同节点', protocol: 'http', host: 'fixture.proxy.example', port: 8080 };
+  const preview = await service.call('previewProxyNetwork', { proxy: draft });
+  const saved = (await service.call('saveProxy', { proxy: { ...draft, location: { mode: 'manual', confirmed: true, latitude: 14.55, longitude: 121.04, label: 'Chosen pin' } }, locationPreviewToken: preview.locationPreviewToken })).proxies[0];
+  const profile = await create(service, { proxyId: saved.id, timezone: 'Asia/Tokyo' });
+  const original = structuredClone((await service.store.read()).proxies[0]);
+  actual = { ...actual, ip: '1.1.1.1', latitude: 15, longitude: 120 };
+  await service.call('startProfile', { id: profile.id });
+  assert.equal(runtime.starts[0].profile.timezone, 'Asia/Manila');
+  assert.deepEqual(runtime.starts[0].profile.geolocation, { latitude: 14.55, longitude: 121.04, accuracy: 1000 });
+  await service.call('stopProfile', { id: profile.id });
+  for (const moved of [{ ...actual, timezone: 'Asia/Tokyo' }, { ...actual, countryCode: 'US' }]) {
+    actual = moved;
+    await assert.rejects(service.call('startProfile', { id: profile.id }), /重新检测并确认/);
+    assert.equal(runtime.starts.length, 1, 'no new child process is started after region mismatch');
+    assert.deepEqual((await service.store.read()).proxies[0], original);
+  }
+  const reconfirm = await service.call('previewProxyNetwork', { proxy: original });
+  const updated = (await service.call('saveProxy', { proxy: original, locationPreviewToken: reconfirm.locationPreviewToken })).proxies[0];
+  assert.equal(updated.location.timezone, actual.timezone); assert.equal(updated.location.countryCode, actual.countryCode);
+  await service.call('startProfile', { id: profile.id });
+  assert.equal(runtime.starts.length, 2); assert.equal(runtime.starts[1].profile.timezone, actual.timezone);
+  assert.deepEqual(runtime.starts[1].profile.geolocation, runtime.starts[0].profile.geolocation);
+});
+
+test('all interface languages persist without altering an existing browser environment', async (t) => {
+  const { directory, service, runtime } = await fixture(t);
+  assert.equal((await service.snapshot()).settings.language, undefined);
+  const profile = await create(service, { locale: 'ja-JP', timezone: 'Asia/Tokyo' });
+  for (const language of languages) {
+    await service.saveSettings({ settings: { closeBrowsersOnExit: true, language } });
+    const snapshot = await service.snapshot();
+    assert.equal(snapshot.settings.language, language);
+    const unchanged = snapshot.profiles.find(row => row.id === profile.id);
+    assert.equal(unchanged.locale, 'ja-JP'); assert.equal(unchanged.timezone, 'Asia/Tokyo');
+  }
+  const restarted = new EnvaraService(directory, runtime, { platform: 'darwin' });
+  await restarted.ready;
+  assert.equal((await restarted.snapshot()).settings.language, languages.at(-1));
+  await restarted.shutdown();
+  for (const language of ['en-US', 'ar', '__proto__', '', {}, ['en']]) {
+    await assert.rejects(service.saveSettings({ settings: { closeBrowsersOnExit: true, language } }), { code: 'VALIDATION_ERROR' });
+  }
+  assert.equal((await service.snapshot()).settings.language, languages.at(-1));
+});
 
 test('empty first run persists defaults with private permissions and survives restart', async (t) => {
   const { directory, service, runtime } = await fixture(t);

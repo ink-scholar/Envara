@@ -3,7 +3,8 @@ import XCTest
 
 final class RoutingTests: XCTestCase {
     private func route(host: String = "127.0.0.1", password: String = "ephemeral-test-secret", udp: Bool = false) throws -> Route {
-        try Route(routeId: UUID().uuidString, applicationIdentity: "io.envara.test", applicationPath: "/Applications/Test.app",
+        try Route(routeId: UUID().uuidString, vpnUUID: UUID().uuidString, applicationIdentity: "io.envara.test",
+                  applicationRequirement: "identifier io.envara.test", applicationPath: "/Applications/Test.app",
                   executablePath: "/Applications/Test.app/Contents/MacOS/Test", protocolName: "socks5",
                   host: host, port: 12345, username: "test", password: password, udp: udp)
     }

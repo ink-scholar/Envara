@@ -14,8 +14,9 @@
     "start": "npm run native:prepare && npm run proxy:prepare && electron .",
     "test": "node --test tests/*.test.mjs",
     "test:smoke": "node scripts/native-smoke.mjs",
-    "dist:mac": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run routing:build:mac && npm run build && electron-builder --mac",
+    "dist:mac": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run routing:build:mac && npm run routing:build:mac:local && npm run routing:build:mac:acceptance && npm run routing:build:mac:pf && npm run build && electron-builder --mac",
     "dist:win": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run routing:build:win && npm run build && electron-builder --win --x64",
+    "dist:win:cross": "node scripts/prepare-windows-desktop.mjs --build",
     "dist:linux": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run build && electron-builder --linux --x64",
     "test:sites": "node --test tests/sites-worker.test.mjs",
     "backend:prepare": "node scripts/build-sidecar.mjs && node scripts/prepare-playwright-driver.mjs",
@@ -26,6 +27,13 @@
     "proxy:prepare": "node scripts/prepare-proxy-core.mjs",
     "test:anytls": "node scripts/anytls-smoke.mjs --native",
     "routing:build:mac": "node scripts/build-macos-app-routing.mjs",
+    "routing:build:mac:acceptance": "node scripts/build-macos-app-routing.mjs --acceptance",
+    "routing:accept:mac:plan": "node scripts/accept-macos-app-proxy.mjs",
+    "routing:build:mac:local": "node scripts/build-macos-local-routing.mjs",
+    "routing:build:mac:pf": "node scripts/build-macos-pf-routing.mjs",
+    "routing:accept:mac:pf:plan": "node scripts/accept-macos-pf-routing.mjs",
+    "routing:accept:mac:pf:dns": "node scripts/accept-macos-pf-dns-uds.mjs",
+    "routing:test:mac:local": "node scripts/test-macos-local-routing.mjs",
     "routing:build:win": "node scripts/build-windows-app-routing.mjs",
     "routing:test:win": "node scripts/test-windows-app-routing.mjs",
     "test:workspace": "node scripts/workspace-smoke.mjs",
@@ -64,6 +72,9 @@
     "files": [
       "dist/client/**/*",
       "electron/**/*",
+      "shared/**/*",
+      "native/macos-local-routing/**/*",
+      "native/macos-pf-routing/*.mjs",
       "package.json",
       "build/icon.png",
       "LICENSE",
@@ -119,6 +130,10 @@
         "to": "licenses/BrowseForge-LICENSE"
       },
       {
+        "from": "native/macos-pf-routing/PFCTL_RS_LICENSE_MIT.txt",
+        "to": "licenses/PFCTL_RS_LICENSE_MIT.txt"
+      },
+      {
         "from": "build/native/licenses",
         "to": "licenses/npm"
       },
@@ -134,7 +149,9 @@
         "to": "app-routing",
         "filter": [
           "**/*",
-          "!**/.swift-build/**"
+          "!**/.swift-build/**",
+          "!macos-pf-*/**",
+          "!macos-pf-*"
         ]
       }
     ]

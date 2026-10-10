@@ -4,7 +4,12 @@ import { api } from "./client.js";
 import { TerminalDock } from "./TerminalPane.jsx";
 import { TerminalWindowApp } from "./TerminalWindowApp.jsx";
 import { initialProxyForm, proxyConfig, proxyFormError } from "./proxy-form-state.mjs";
+import { locationFormState, verifiedLocationPreview, locationConfirmation, proxyRouteFields, networkApplicationChoices, chooseApplicationProfile, isApplicationAlreadyAttached, createdProfileFromSnapshot, savedNetworkPresentation } from "./network-flow-state.mjs";
+import { googleMapsLocationURL, normalizeNetworkLocation } from "../shared/network-location.mjs";
+import { safeNotionTrial, notionTrialLocksConfiguration } from "./notion-trial-state.mjs";
 import { useI18n } from "./i18n.jsx";
+import { LanguageWelcome } from "./LanguageWelcome.jsx";
+import { languageOptions, localeForInterfaceLanguage } from "../shared/interface-languages.mjs";
 import { BrowserWorkspace } from "./BrowserWorkspace.jsx";
 import { ApplicationsWorkspace, ContextDetail, EnvironmentOverview, MonitorWorkspace } from "./workspace-pages.jsx";
 const initialSnapshot = {
@@ -90,14 +95,16 @@ function bytes(value) {
   const i = Math.min(Math.floor(Math.log(Number(value)) / Math.log(1024)), 3);
   return `${(Number(value) / 1024 ** i).toFixed(i > 0 ? 1 : 0)} ${["B", "KB", "MB", "GB"][i]}`;
 }
-function relativeTime(value) {
-  if (!value) return "尚未启动";
+function relativeTime(value, language, t) {
+  if (!value) return t("尚未启动");
   const difference = Math.max(0, Date.now() - new Date(value).getTime());
   if (!Number.isFinite(difference)) return "—";
-  if (difference < 60000) return "刚刚";
-  if (difference < 3600000) return `${Math.floor(difference / 60000)} 分钟前`;
-  if (difference < 86400000) return `${Math.floor(difference / 3600000)} 小时前`;
-  return new Date(value).toLocaleDateString("zh-CN");
+  if (difference < 60000) return t("刚刚");
+  const locale = localeForInterfaceLanguage(language);
+  const relative = new Intl.RelativeTimeFormat(locale, { numeric: "always" });
+  if (difference < 3600000) return relative.format(-Math.floor(difference / 60000), "minute");
+  if (difference < 86400000) return relative.format(-Math.floor(difference / 3600000), "hour");
+  return new Date(value).toLocaleDateString(locale);
 }
 function Status({
   status = "stopped"
@@ -252,6 +259,7 @@ function ProfileForm({
   const groupProxy = proxies.find(item => item.id === groupDescriptor?.proxyId);
   const groupEnforced = groupDescriptor?.proxy_mode === "enforced" && !!groupProxy;
   const effectiveProxy = groupEnforced ? groupProxy : proxies.find(item => item.id === form.proxyId) || groupProxy;
+  const confirmedNetworkTimezone = effectiveProxy?.location?.confirmed ? effectiveProxy.location.timezone : null;
   const change = key => event => {
     setForm(value => ({
       ...value,
@@ -318,7 +326,7 @@ function ProfileForm({
       fail("locale", t("请填写固定语言，或选择自动匹配。"));
       return;
     }
-    if (fixedModes.timezone && !form.timezone.trim()) {
+    if (!confirmedNetworkTimezone && fixedModes.timezone && !form.timezone.trim()) {
       fail("timezone", t("请填写固定时区，或选择自动匹配。"));
       return;
     }
@@ -330,7 +338,7 @@ function ProfileForm({
         return;
       }
     }
-    if (form.timezone) {
+    if (!confirmedNetworkTimezone && form.timezone) {
       try {
         new Intl.DateTimeFormat("en", {
           timeZone: form.timezone
@@ -355,7 +363,7 @@ function ProfileForm({
         seed: Number(form.seed)
       } : {}),
       locale: form.locale,
-      timezone: form.timezone,
+      timezone: confirmedNetworkTimezone ? "" : form.timezone,
       width: Number(form.width),
       height: Number(form.height),
       startUrl: form.startUrl || "about:blank",
@@ -381,7 +389,7 @@ function ProfileForm({
             }) : undefined
           })}
       </div>
-      <div className="automatic-context-note"><ShieldCheck size={16} /><span>{t("时区、语言和定位自动跟随实际网络出口")}</span></div>
+      <div className="automatic-context-note"><ShieldCheck size={16} /><span>{t(confirmedNetworkTimezone ? "创建时确认位置与时区，浏览器、终端和附加软件共同使用。" : "时区、语言和定位自动跟随实际网络出口")}</span></div>
       <details className="advanced-settings" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}>
         <summary>{t("高级设置")}<span>{t("浏览器、指纹与隐私")}</span></summary>
         <div className="form-grid">
@@ -396,7 +404,7 @@ function ProfileForm({
                 }
               }))}><option value="standard">{t("标准")}</option><option value="strict">{t("严格")}</option><option value="off">{t("停用")}</option></select></Field>
           {field("locale", t("语言"), <><select aria-label={t("语言模式")} value={fixedModes.locale ? "fixed" : "auto"} onChange={changeMode("locale")}><option value="auto">{t("跟随网络出口")}</option><option value="fixed">{t("固定语言")}</option></select>{fixedModes.locale && <input aria-label={t("固定语言")} value={form.locale} onChange={change("locale")} disabled={!allows(runtime, "locale")} placeholder="zh-CN" {...invalid("locale")} />}</>)}
-          {field("timezone", t("时区"), <><select aria-label={t("时区模式")} value={fixedModes.timezone ? "fixed" : "auto"} onChange={changeMode("timezone")}><option value="auto">{t("跟随网络出口")}</option><option value="fixed">{t("固定时区")}</option></select>{fixedModes.timezone && <input aria-label={t("固定时区")} value={form.timezone} onChange={change("timezone")} disabled={!allows(runtime, "timezone")} placeholder="Asia/Shanghai" {...invalid("timezone")} />}</>)}
+          {field("timezone", t("时区"), confirmedNetworkTimezone ? <span className="field-hint">{confirmedNetworkTimezone}<br />{t("已保存配置")}</span> : <><select aria-label={t("时区模式")} value={fixedModes.timezone ? "fixed" : "auto"} onChange={changeMode("timezone")}><option value="auto">{t("跟随网络出口")}</option><option value="fixed">{t("固定时区")}</option></select>{fixedModes.timezone && <input aria-label={t("固定时区")} value={form.timezone} onChange={change("timezone")} disabled={!allows(runtime, "timezone")} placeholder="Asia/Shanghai" {...invalid("timezone")} />}</>)}
           {field("platform", t("指纹平台"), <select value={form.platform} onChange={change("platform")} disabled={!allows(runtime, "platform")} {...invalid("platform")}><option value="macos">macOS</option><option value="windows">Windows</option><option value="linux">Linux</option></select>)}
           {field("seed", t("指纹种子"), <div className="input-action"><input type="number" min="1" max="4294967295" required readOnly={!!profile} disabled={!allows(runtime, "seed")} value={allows(runtime, "seed") ? form.seed : ""} placeholder={t("不适用")} onChange={change("seed")} {...invalid("seed")} /><IconButton disabled={!!profile || !allows(runtime, "seed")} icon={ArrowsClockwise} label={t("随机生成种子")} type="button" onClick={() => setForm(value => ({
                 ...value,
@@ -499,11 +507,12 @@ function NetworkResult({
   compact = false
 }) {
   const {
-    t
+    t,
+    language
   } = useI18n();
   const verified = network?.ok === true && network?.scope === "egress" && !!network.ip;
   return <div role="status" aria-live="polite" className={`network-result ${compact ? "compact" : ""} ${verified ? "verified" : network?.ok === false ? "failed" : ""}`}>
-    {checking ? <><ArrowsClockwise size={16} className="spin" /><div><strong>{t("正在识别出口…")}</strong><small>{t("通过代理访问出口查询服务")}</small></div></> : verified ? <><CheckCircle size={17} /><div><strong className="mono-value">{network.ip}</strong>{networkPlace(network) && <small>{networkPlace(network)}</small>}<small>{network.timezone || t("时区尚未识别")}</small><span className="network-source">{network.source || t("出口查询")}{network.checkedAt ? ` · ${relativeTime(network.checkedAt)}` : ""}</span></div></> : network ? <><WarningCircle size={17} /><div><strong>{t("出口识别失败")}</strong><small>{network.message || t("未获得有效的出口资料，请检查代理参数后重试。")}</small></div></> : <><GlobeHemisphereWest size={17} /><div><strong>{t("尚未识别")}</strong><small>{t("检测实际出口 IP、地区和时区")}</small></div></>}
+    {checking ? <><ArrowsClockwise size={16} className="spin" /><div><strong>{t("正在识别出口…")}</strong><small>{t("通过代理访问出口查询服务")}</small></div></> : verified ? <><CheckCircle size={17} /><div><strong className="mono-value">{network.ip}</strong>{networkPlace(network) && <small>{networkPlace(network)}</small>}<small>{network.timezone || t("时区尚未识别")}</small><span className="network-source">{network.source || t("出口查询")}{network.checkedAt ? ` · ${relativeTime(network.checkedAt, language, t)}` : ""}</span></div></> : network ? <><WarningCircle size={17} /><div><strong>{t("出口识别失败")}</strong><small>{network.message || t("未获得有效的出口资料，请检查代理参数后重试。")}</small></div></> : <><GlobeHemisphereWest size={17} /><div><strong>{t("尚未识别")}</strong><small>{t("检测实际出口 IP、地区和时区")}</small></div></>}
   </div>;
 }
 function ProxyForm({
@@ -518,18 +527,26 @@ function ProxyForm({
   } = useI18n();
   const [form, setForm] = useState(() => initialProxyForm(proxy));
   const [visible, setVisible] = useState(false),
-    [network, setNetwork] = useState(proxy?.network || null),
+    [preview, setPreview] = useState(null),
+    [location, setLocation] = useState(() => locationFormState(proxy?.location)),
+    [step, setStep] = useState("connection"),
     [checking, setChecking] = useState(false),
     [checkError, setCheckError] = useState("");
+  const network = preview?.network;
+  const recommendation = preview?.locationRecommendation;
+  const verified = verifiedLocationPreview(preview);
   const anytls = form.protocol === "anytls";
   const checkSequence = useRef(0);
   useEffect(() => () => {
     checkSequence.current++;
   }, []);
   const update = (key, value) => {
-    checkSequence.current++;
-    setChecking(false);
-    setNetwork(null);
+    if (proxyRouteFields.has(key)) {
+      checkSequence.current++;
+      setChecking(false);
+      setPreview(null);
+      setLocation(previous => ({ ...previous, confirmed: false }));
+    }
     setCheckError("");
     setForm(previous => ({
       ...previous,
@@ -547,33 +564,56 @@ function ProxyForm({
     const sequence = ++checkSequence.current;
     setChecking(true);
     setCheckError("");
-    setNetwork(null);
+    setPreview(null);
+    setLocation(previous => ({ ...previous, confirmed: false }));
     try {
-      const result = await api.call("checkProxy", {
+      const result = await api.call("previewProxyNetwork", {
         proxy: proxyConfig({
           ...form,
           name: form.name.trim() || t("待检测出口")
         })
       });
-      if (sequence === checkSequence.current) setNetwork(result);
+      if (sequence === checkSequence.current) {
+        setPreview(result);
+        if (verifiedLocationPreview(result)) setStep("location");
+        else setCheckError(result?.network?.message || t("出口识别未完成，请重试。"));
+      }
     } catch (error) {
-      if (sequence === checkSequence.current) setNetwork({
-        ok: false,
-        message: error.message || t("出口识别未完成，请重试。")
-      });
+      if (sequence === checkSequence.current) setCheckError(error.message || t("出口识别未完成，请重试。"));
     } finally {
       if (sequence === checkSequence.current) setChecking(false);
     }
   };
-  return <Modal title={proxy ? t("编辑网络出口") : t("添加网络出口")} subtitle={t("选择普通代理或 AnyTLS 节点，供浏览器与终端使用。")} onClose={onClose} className="proxy-modal"><form onSubmit={event => {
+  const updateLocation = (key, value) => {
+    setLocation(previous => ({ ...previous, [key]: value, confirmed: false }));
+    setCheckError("");
+  };
+  let manualLocation = null;
+  if (location.mode === "manual") {
+    try { manualLocation = normalizeNetworkLocation({ ...location, confirmed: true }); } catch {}
+  }
+  const mapsUrl = location.mode === "ip" ? recommendation?.mapsUrl : manualLocation?.mapsUrl || googleMapsLocationURL({ label: location.label });
+  const openMap = async () => {
+    if (!mapsUrl) return;
+    try {
+      if (api.isDesktop) await api.call("openNetworkLocationMap", { url: mapsUrl });
+      else window.open(mapsUrl, "_blank", "noopener,noreferrer");
+    } catch (error) { setCheckError(error.message || t("地图链接未打开，请重试。")); }
+  };
+  return <Modal title={proxy ? t("编辑网络环境") : t("创建网络环境")} subtitle={t("先验证代理，再确认位置与时区。")} onClose={onClose} className="proxy-modal"><form onSubmit={event => {
       event.preventDefault();
       const error = proxyFormError(form);
       if (error) {
         setCheckError(error);
         return;
       }
-      onSave(proxyConfig(form));
-    }}><div className="modal-body"><div className="form-grid">
+      if (api.isDesktop && step === "connection") { detect(); return; }
+      try {
+        const config = proxyConfig(form);
+        if (api.isDesktop) config.location = locationConfirmation(location, preview);
+        onSave(config, preview?.locationPreviewToken, preview?.network);
+      } catch (error) { setCheckError(error.message); }
+    }}><div className="network-flow-steps" aria-label={t("创建网络环境")}><span className={step === "connection" ? "current" : "complete"}><span>1</span>{t("代理连接")}</span><CaretRight size={14} /><span className={step === "location" ? "current" : ""}><span>2</span>{t("位置与时区")}</span></div><div className="modal-body">{step === "connection" ? <><div className="form-grid">
     <Field label={t("名称")} className="span-two"><input required maxLength={80} value={form.name} onChange={change("name")} placeholder={t("例如：东京节点")} /></Field>
     <Field label={t("协议")}><select value={form.protocol} onChange={change("protocol")}><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option><option value="anytls">{t("AnyTLS · 内置连接")}</option></select></Field>
     <Field label={t("端口")}><input required type="number" min="1" max="65535" value={form.port} onChange={change("port")} placeholder={anytls ? "443" : "8080"} /></Field>
@@ -581,7 +621,6 @@ function ProxyForm({
     {!anytls && <Field label={t("用户名（选填）")}><input value={form.username} onChange={change("username")} autoComplete="off" /></Field>}
     <Field label={anytls ? t("节点密码") : t("密码（选填）")} className={anytls ? "span-two" : ""}><div className="input-action"><input required={anytls} type={visible ? "text" : "password"} value={form.password} onChange={change("password")} autoComplete="new-password" /><IconButton type="button" icon={visible ? EyeSlash : Eye} label={visible ? t("隐藏密码") : t("显示密码")} onClick={() => setVisible(!visible)} /></div></Field>
     {anytls && <Field label={t("TLS 服务器名称 / SNI（选填）")} className="span-two" hint={t("留空时使用服务器地址；如果服务商提供了 SNI，请填写指定值。")}><input value={form.serverName || ""} onChange={change("serverName")} placeholder={form.host.trim() || t("默认使用服务器地址")} autoComplete="off" /></Field>}
-    <Field label={t("代理地域（选填）")} className="span-two" hint={t("BrowseForge Chromium 使用代理时必填，例如 us-ny；此标签不会替代实际出口检测。")}><input maxLength={64} value={form.region || ""} onChange={change("region")} placeholder="us-ny" /></Field>
     </div>
     {anytls && <><div className={`anytls-core-note ${api.isDesktop && proxyCore?.supported === false ? "unavailable" : ""}`} role={api.isDesktop && proxyCore?.supported === false ? "status" : undefined}><ShieldCheck size={17} /><span>{!api.isDesktop ? t("AnyTLS 由境舱桌面应用内置连接，浏览器与终端共用节点，无需单独运行 Clash。") : proxyCore?.supported === false ? proxyCore.message || t("当前安装无法使用内置 AnyTLS。可先保存节点配置，检测或启动时会显示具体问题。") : t("境舱在应用内连接 AnyTLS 节点，浏览器与终端共用出口，无需单独运行 Clash。")}</span></div>
       <details className="advanced-settings proxy-tls-settings"><summary>{t("高级节点设置")}<span>{form.skipCertVerify ? t("证书验证已关闭") : t("验证服务器证书")}</span></summary><div className="proxy-tls-options">
@@ -590,7 +629,82 @@ function ProxyForm({
         <Field label={t("ALPN（选填）")} hint={t("按服务商配置填写，用英文逗号分隔；留空使用内核默认值。")}><input value={Array.isArray(form.alpn) ? form.alpn.join(", ") : form.alpn || ""} onChange={change("alpn")} placeholder="h2, http/1.1" autoComplete="off" /></Field>
         <div className="proxy-udp-option"><label className="proxy-check-option"><input type="checkbox" checked={form.udp !== false} onChange={event => update("udp", event.target.checked)} /><span>{t("启用节点 UDP")}</span></label><p className="field-hint">{t("控制此节点的 UDP 转发，不会自动接管本机程序的全部 UDP 流量。")}</p></div>
       </div></details></>}
-    <div className="proxy-detect-card"><div className="proxy-detect-heading"><strong>{t("实际网络出口")}</strong><Button type="button" icon={GlobeHemisphereWest} disabled={!api.isDesktop || checking} onClick={detect}>{checking ? t("识别中…") : t("识别出口")}</Button></div>{api.isDesktop ? <NetworkResult network={network} checking={checking} /> : <p className="native-feature-note">{t("真实出口识别需要境舱桌面应用。")}</p>}{checkError && <p className="field-error" role="alert">{checkError}</p>}<p className="field-hint">{t("检测结果用于确认出口与自动时区，不会覆盖手动地域标签。")}</p></div><div className="form-note">{t("代理凭据仅保存在本机。导出的环境配置不包含密码。")}</div></div><div className="modal-footer"><Button type="button" onClick={onClose}>{t("取消")}</Button><Button type="submit" className="primary" disabled={saving}>{saving ? t("保存中…") : api.isDesktop ? t("保存并识别") : t("保存网络出口")}</Button></div></form></Modal>;
+    <details className="advanced-settings proxy-region-settings"><summary>{t("高级设置")}</summary><div className="form-grid"><Field label={t("代理地域（选填）")} className="span-two" hint={t("BrowseForge Chromium 使用代理时必填，例如 us-ny；此标签不会替代实际出口检测。")}><input maxLength={64} value={form.region || ""} onChange={change("region")} placeholder="us-ny" /></Field></div></details>
+    {checking && <div className="proxy-detect-card"><NetworkResult checking /></div>}
+    {!api.isDesktop && <p className="native-feature-note">{t("真实出口识别需要境舱桌面应用。")}</p>}
+    <div className="form-note">{t("代理凭据仅保存在本机。导出的环境配置不包含密码。")}</div></> : <>
+      <NetworkResult network={network} compact />
+      <div className="location-mode-control" role="group" aria-label={t("出口位置")}><button type="button" className={location.mode === "ip" ? "selected" : ""} aria-pressed={location.mode === "ip"} onClick={() => updateLocation("mode", "ip")}>{t("IP 推荐位置")}</button><button type="button" className={location.mode === "manual" ? "selected" : ""} aria-pressed={location.mode === "manual"} onClick={() => updateLocation("mode", "manual")}>{t("手动选择位置")}</button></div>
+      {location.mode === "ip" ? <div className="location-recommendation"><strong>{recommendation?.label || networkPlace(network) || network?.countryCode}</strong>{recommendation?.latitude != null && <small className="mono-value">{Number(recommendation.latitude).toFixed(4)}, {Number(recommendation.longitude).toFixed(4)}</small>}<p className="field-hint">{t("IP 定位为城市级估计，不代表住宅地址。")}</p></div> : <div className="form-grid location-manual-fields">
+        <Field label={t("地址或地点")} className="span-two"><input maxLength={500} value={location.label} onChange={event => updateLocation("label", event.target.value)} autoComplete="off" /></Field>
+        <Field label={t("Google Maps 链接（选填）")} className="span-two"><input type="url" maxLength={2048} value={location.mapsUrl} onChange={event => updateLocation("mapsUrl", event.target.value)} placeholder="https://www.google.com/maps/…" /></Field>
+        <details className="advanced-settings span-two"><summary>{t("坐标（选填）")}</summary><div className="form-grid"><Field label={t("纬度")}><input type="number" min="-90" max="90" step="any" value={location.latitude} onChange={event => updateLocation("latitude", event.target.value)} /></Field><Field label={t("经度")}><input type="number" min="-180" max="180" step="any" value={location.longitude} onChange={event => updateLocation("longitude", event.target.value)} /></Field></div></details>
+        {manualLocation?.latitude == null && <p className="field-hint span-two">{t("地址文字未转换为坐标；可粘贴地图地点链接或填写坐标。")}</p>}
+      </div>}
+      <div className="location-map-row"><Button type="button" icon={ArrowSquareOut} onClick={openMap} disabled={!mapsUrl}>{t("在 Google Maps 中查看")}</Button></div>
+      <div className="location-timezone"><Clock size={16} /><strong>{network?.timezone || t("时区尚未识别")}</strong><span>{t("时区跟随实际代理出口。")}</span></div>
+      <label className="location-confirmation"><input type="checkbox" checked={location.confirmed} onChange={event => { setLocation(previous => ({ ...previous, confirmed: event.target.checked })); setCheckError(""); }} /><span>{t("我确认这个网络环境的位置与时区")}</span></label>
+    </>}{checkError && <p className="field-error network-flow-error" role="alert">{t(checkError)}</p>}</div><div className="modal-footer"><Button type="button" onClick={step === "location" ? () => setStep("connection") : onClose} disabled={saving}>{t(step === "location" ? "上一步" : "取消")}</Button><Button type="submit" className="primary" disabled={saving || checking || step === "location" && (!verified || !location.confirmed)}>{saving ? t("保存中…") : checking ? t("检测中…") : !api.isDesktop ? t("保存网络出口") : step === "connection" ? t("检测并继续") : t("保存网络环境")}</Button></div></form></Modal>;
+}
+function AttachApplicationForm({ profiles, proxies, groups, applications, selectedId, onSave, onClose, onAddNetwork, saving }) {
+  const { t } = useI18n();
+  const choices = networkApplicationChoices(proxies, groups, profiles);
+  const preferred = choices.find(choice => choice.profileIds.includes(selectedId));
+  const [choiceId, setChoiceId] = useState(preferred?.id || choices[0]?.id || "");
+  const [step, setStep] = useState("network");
+  const [query, setQuery] = useState("");
+  const [catalog, setCatalog] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [picked, setPicked] = useState(null);
+  const [retry, setRetry] = useState(0);
+  const choice = choices.find(item => item.id === choiceId);
+  useEffect(() => {
+    if (step !== "application") return;
+    let current = true;
+    setLoading(true);
+    setError("");
+    const timer = setTimeout(async () => {
+      try {
+        const result = await api.call("listLocalApplications", { query, limit: 200 });
+        if (!current) return;
+        if (result?.available !== true || !Array.isArray(result.applications)) throw new Error(t("本地软件需要桌面应用"));
+        setCatalog(result);
+      } catch (value) { if (current) setError(value.message || t("软件列表读取失败，请重试。")); }
+      finally { if (current) setLoading(false); }
+    }, query ? 180 : 0);
+    return () => { current = false; clearTimeout(timer); };
+  }, [step, query, retry]);
+  const chooseFromFile = async () => {
+    setError("");
+    try {
+      const result = await api.call("pickApplication");
+      if (result?.path) {
+        if (isApplicationAlreadyAttached(result, applications)) throw new Error(t("软件已附加到其他境舱，请先移除原绑定。"));
+        setPicked(result);
+      }
+    } catch (value) { setError(value.message || t("操作未完成，请重试。")); }
+  };
+  return <Modal title={t(step === "network" ? "选择网络分组" : "选择本地软件")} onClose={onClose} className="attach-application-modal">
+    <div className="network-flow-steps"><span className={step === "network" ? "current" : "complete"}><span>1</span>{t("网络分组")}</span><CaretRight size={14} /><span className={step === "application" ? "current" : ""}><span>2</span>{t("选择软件")}</span></div>
+    <div className="modal-body">{step === "network" ? choices.length ? <div className="network-choice-list">{choices.map(item => <button type="button" key={item.id} className={`network-choice ${choiceId === item.id ? "selected" : ""}`} aria-pressed={choiceId === item.id} onClick={() => setChoiceId(item.id)}><GlobeHemisphereWest size={21} /><span><strong>{item.name}</strong><small>{item.group ? item.proxy.name : protocolLabel(item.proxy.protocol)} · {item.proxy.location?.confirmed ? item.proxy.location.label || item.proxy.location.timezone : t("位置尚未确认")}</small></span>{choiceId === item.id && <CheckCircle size={19} />}</button>)}</div> : <div className="application-picker-empty"><GlobeHemisphereWest size={30} /><strong>{t("先创建网络环境")}</strong><Button type="button" onClick={onAddNetwork} icon={Plus}>{t("创建网络环境")}</Button></div> : <>
+      <div className="selected-network-context"><GlobeHemisphereWest size={18} /><strong>{choice?.name}</strong><span>{choice?.proxy.location?.timezone || choice?.proxy.network?.timezone || t("自动时区")}</span></div>
+      <div className="search-input application-picker-search"><MagnifyingGlass size={17} /><input value={query} onChange={event => setQuery(event.target.value)} maxLength={256} placeholder={t("搜索本地软件")} aria-label={t("搜索本地软件")} /></div>
+      <div className="local-application-list" aria-live="polite">{loading ? <div className="application-picker-empty"><ArrowsClockwise className="spin" size={23} /><span>{t("正在读取本地软件…")}</span></div> : error ? <div className="application-picker-empty"><WarningCircle size={24} /><span>{t(error)}</span><Button type="button" onClick={() => setRetry(value => value + 1)}>{t("重新读取")}</Button></div> : catalog?.applications.length ? catalog.applications.map(application => {
+        const attached = isApplicationAlreadyAttached(application, applications);
+        return <button type="button" key={application.identity || application.path} className={`local-application-choice ${picked?.path === application.path ? "selected" : ""}`} disabled={attached} aria-pressed={picked?.path === application.path} title={application.path} onClick={() => setPicked(application)}><Desktop size={24} /><span>{application.name}</span>{attached ? <small>{t("已附加")}</small> : picked?.path === application.path && <CheckCircle size={18} />}</button>;
+      }) : <div className="application-picker-empty"><Desktop size={27} /><span>{t(query ? "没有匹配的软件" : "未找到本地软件")}</span></div>}</div>
+      {catalog?.truncated && <p className="field-hint">{t("列表可能不完整，可搜索名称或选择文件。")}</p>}
+      <div className="application-picker-file"><Button type="button" icon={FolderOpen} onClick={chooseFromFile} disabled={saving}>{t("从文件选择…")}</Button>{picked && <strong title={picked.path}>{picked.name || picked.path.split(/[\\/]/).pop()}</strong>}</div>
+      <p className="field-hint">{t("使用已确认的网络环境；定位支持取决于软件。")}</p>
+    </>}{step === "network" && error && <p className="field-error" role="alert">{t(error)}</p>}</div>
+    <div className="modal-footer"><Button type="button" disabled={saving} onClick={step === "network" ? onClose : () => { setStep("network"); setError(""); }}>{t(step === "network" ? "取消" : "上一步")}</Button><Button className="primary" disabled={saving || !choice || step === "application" && (!picked || isApplicationAlreadyAttached(picked, applications))} onClick={async () => {
+      if (!choice) { setError(t("网络分组已改变，请重新选择。")); return; }
+      if (step === "network") { setStep("application"); return; }
+      const result = await onSave(choice, picked);
+      if (!result?.ok) setError(result?.message || t("操作未完成，请重试。"));
+    }}>{saving ? t("保存中…") : step === "network" ? t("选择软件") : t("添加软件")}</Button></div>
+  </Modal>;
 }
 function BrowserDetail({
   profile,
@@ -608,6 +722,7 @@ function BrowserDetail({
   t
 }) {
   if (!profile) return <div className="detail-empty"><Browsers size={32} /><h2>{t("浏览器详情")}</h2><p>{t("选择一个环境")}</p></div>;
+  const networkPresentation = savedNetworkPresentation(profile, proxy);
   const running = profile.status === "running";
   const starting = profile.status === "starting" || pending[`startProfile:${profile.id}`];
   return <>
@@ -622,7 +737,7 @@ function BrowserDetail({
       <div><dt>{t("网络出口")}</dt><dd>{proxy?.name || t("本机网络")}</dd></div>
       <div><dt>{t("指纹平台")}</dt><dd>{allows(runtime, "platform") ? platforms[profile.platform] || t("内核默认") : t("本机平台")}</dd></div>
       <div><dt>{t("屏幕尺寸")}</dt><dd>{t(profileDimensions(profile))}</dd></div>
-      <div><dt>{t("时区")}</dt><dd>{profile.observed?.timezone || profile.resolvedTimezone || profile.timezone || t("跟随网络出口")}</dd></div>
+      <div><dt>{t("时区")}</dt><dd>{networkPresentation.failed ? networkPresentation.timezone || t("跟随网络出口") : profile.observed?.timezone || networkPresentation.timezone || t("跟随网络出口")}{networkPresentation.savedOnly && <small>{t("已保存配置")}</small>}</dd></div>
       <div><dt>{t("语言")}</dt><dd>{profile.observed?.language || profile.locale || t("跟随网络出口")}</dd></div>
       <div><dt>{t("隐私防护")}</dt><dd>{t({
             standard: "标准",
@@ -639,13 +754,18 @@ function BrowserDetail({
 }
 export function App() {
   const route = new URLSearchParams(window.location.search);
-  return route.get("view") === "terminal" ? <TerminalWindowApp profileId={route.get("profileId")} sessionId={route.get("sessionId")} /> : <WorkspaceApp />;
+  const { phase } = useI18n();
+  if (route.get("view") === "terminal") return <TerminalWindowApp profileId={route.get("profileId")} sessionId={route.get("sessionId")} />;
+  const initializing = phase !== "ready";
+  return <><div className="workspace-content" inert={initializing ? true : undefined} aria-hidden={initializing ? true : undefined}><WorkspaceApp /></div><LanguageWelcome /></>;
 }
 function WorkspaceApp() {
   const {
     t,
     language,
-    setLanguage
+    setLanguage,
+    saving: savingLanguage,
+    phase: languagePhase
   } = useI18n();
   const [snapshot, setSnapshot] = useState(initialSnapshot),
     [loading, setLoading] = useState(true),
@@ -715,6 +835,7 @@ function WorkspaceApp() {
   }, [toast]);
   useEffect(() => {
     const onKey = event => {
+      if (languagePhase !== "ready") return;
       if ((event.metaKey || event.ctrlKey) && event.key === "k" && !modal && !event.target?.closest?.(".terminal-dock")) {
         event.preventDefault();
         setPage("profiles");
@@ -725,8 +846,9 @@ function WorkspaceApp() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [modal]);
+  }, [modal, languagePhase]);
   const closeModal = useCallback(() => {
+    if (pendingRef.current.has("attachApplication:")) return;
     const session = modalRef.current?.type === "importMapping" ? modalRef.current.session : null;
     if (session && pendingRef.current.has(`importProfiles:${session.importId}`)) return;
     if (session?.importId) api.call("cancelImport", {
@@ -790,7 +912,7 @@ function WorkspaceApp() {
       message: t("此内核不在当前可用目录中。"),
       capabilities: {}
     };
-  const groups = [...new Set([...profiles.map(profile => profile.group), ...(snapshot.groups || []).map(group => typeof group === "string" ? group : group.name)].filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  const groups = [...new Set([...profiles.map(profile => profile.group), ...(snapshot.groups || []).map(group => typeof group === "string" ? group : group.name)].filter(Boolean))].sort((a, b) => a.localeCompare(b, localeForInterfaceLanguage(language)));
   const selected = profiles.find(profile => profile.id === selectedId),
     selectedRuntime = runtimeFor(selected),
     activeProfiles = profiles.filter(profile => ["running", "starting"].includes(profile.status)),
@@ -904,7 +1026,7 @@ function WorkspaceApp() {
       message: t("环境配置已导入")
     });
   };
-  const saveProxy = async proxy => {
+  const saveProxy = async (proxy, locationPreviewToken, previewNetwork) => {
     const existingIds = new Set(proxies.map(item => item.id));
     if (proxy.id) {
       proxyTestTokens.current[proxy.id] = (proxyTestTokens.current[proxy.id] || 0) + 1;
@@ -917,13 +1039,14 @@ function WorkspaceApp() {
       });
     }
     const response = await perform("saveProxy", {
-      proxy
+      proxy, ...(locationPreviewToken ? { locationPreviewToken } : {})
     }, t("网络出口已保存"));
     if (response.ok) {
       closeModal();
       const next = response.result?.proxies || snapshotRef.current.proxies;
       const saved = proxy.id ? next.find(item => item.id === proxy.id) : next.find(item => !existingIds.has(item.id));
-      if (api.isDesktop && saved) checkProxy(saved);
+      if (api.isDesktop && saved && previewNetwork?.ok === true) setProxyTests(value => ({ ...value, [saved.id]: previewNetwork }));
+      else if (api.isDesktop && saved) checkProxy(saved);
     }
   };
   const confirmAction = async () => {
@@ -1116,11 +1239,38 @@ function WorkspaceApp() {
     });
   };
   const applications = snapshot.applications || [];
+  const trialPollingIds = applications.filter(application => application.identity === "bundle:notion.id" && (pending[`runNotionTrial:${application.id}`] || pending[`stopNotionTrial:${application.id}`] || application.notionTrial?.active === true)).map(application => application.id).sort().join("|");
+  useEffect(() => {
+    if (!api.isDesktop || !trialPollingIds) return;
+    let closed = false;
+    let timer;
+    const poll = async () => {
+      const results = await Promise.allSettled(trialPollingIds.split("|").map(async id => {
+        const value = await api.call("notionTrialSnapshot", { id });
+        if (value?.applicationId !== id) return null;
+        const notionTrial = safeNotionTrial({ id, notionTrial: value.notionTrial });
+        return notionTrial ? { id, notionTrial } : null;
+      }));
+      if (closed) return;
+      const updates = results.flatMap(result => result.status === "fulfilled" && result.value ? [result.value] : []);
+      if (updates.length) acceptSnapshot({ ...snapshotRef.current, applications: (snapshotRef.current.applications || []).map(application => {
+        const update = updates.find(item => item.id === application.id);
+        return update ? { ...application, notionTrial: update.notionTrial } : application;
+      }) });
+      timer = setTimeout(poll, 1500);
+    };
+    void poll();
+    return () => { closed = true; clearTimeout(timer); };
+  }, [trialPollingIds, acceptSnapshot]);
   const selectedWorkspace = terminalProfiles.find(item => item.profileId === selectedId);
   const contextualProfiles = profiles.map(profile => ({
     ...profile,
     workspace: terminalProfiles.find(item => item.profileId === profile.id)
   }));
+  const terminalContextProfiles = profiles.map(profile => {
+    const proxy = proxies.find(item => item.id === profile.proxyId);
+    return proxy?.location?.confirmed && proxy.location.timezone ? { ...profile, savedNetworkTimezone: proxy.location.timezone, savedNetworkLocation: proxy.location } : profile;
+  });
   const withDetail = ["profiles", "browsers", "applications"].includes(page);
   const navigate = target => {
     setPage(target);
@@ -1133,7 +1283,7 @@ function WorkspaceApp() {
     });
   };
   const editSelected = profile => {
-    if (["running", "starting"].includes(profile.status) || terminalActive(profile.id) || applications.some(item => item.profileId === profile.id && ["running", "starting", "stopping"].includes(item.status))) {
+    if (["running", "starting"].includes(profile.status) || terminalActive(profile.id) || applications.some(item => item.profileId === profile.id && (["running", "starting", "stopping"].includes(item.status) || notionTrialLocksConfiguration(item, pending)))) {
       setToast({
         type: "info",
         message: t("请先停止这个境舱的运行会话。")
@@ -1153,18 +1303,51 @@ function WorkspaceApp() {
     const value = await api.call("terminalSnapshot").catch(() => null);
     if (value?.profiles) setTerminalProfiles(value.profiles);
   };
-  const pickApplication = async () => {
-    if (!selected || !api.isDesktop) return;
-    const response = await perform("pickApplication");
-    if (response.ok && response.result?.path) await perform("saveApplication", {
-      application: {
-        profileId: selected.id,
-        path: response.result.path,
-        name: response.result.name
+  const pickApplication = () => { if (api.isDesktop) setModal({ type: "attachApplication" }); };
+  const activeInEnvironment = profile => ["running", "starting"].includes(profile?.status) || terminalActive(profile?.id) || applications.some(item => item.profileId === profile?.id && (["running", "starting", "stopping"].includes(item.status) || notionTrialLocksConfiguration(item, pending)));
+  const saveAttachedApplication = async (choice, application) => {
+    const key = "attachApplication:";
+    if (pendingRef.current.has(key)) return { ok: false, message: t("此操作正在进行中。") };
+    pendingRef.current.add(key);
+    setPending(value => ({ ...value, [key]: true }));
+    let created = null;
+    try {
+      const current = snapshotRef.current;
+      const currentChoice = networkApplicationChoices(current.proxies, current.groups, current.profiles).find(item => item.id === choice.id && item.proxyId === choice.proxyId);
+      if (!currentChoice) return { ok: false, message: t("网络分组已改变，请重新选择。") };
+      if (isApplicationAlreadyAttached(application, current.applications || [])) return { ok: false, message: t("软件已附加到其他境舱，请先移除原绑定。") };
+      let owner = chooseApplicationProfile(currentChoice, current.profiles, selectedId, activeInEnvironment);
+      if (!owner) {
+        const beforeIds = new Set(current.profiles.map(profile => profile.id));
+        const creation = await perform("createProfile", { profile: {
+          name: `${application.name || t("选择软件")} · ${currentChoice.name}`.slice(0, 100), group: currentChoice.group, proxyId: currentChoice.proxyId,
+          engine: preferredEngine(engines, snapshot.settings?.defaultEngine), platform: { darwin: "macos", win32: "windows", linux: "linux" }[system.platform] || "macos",
+        } });
+        if (!creation.ok) return creation;
+        owner = createdProfileFromSnapshot(beforeIds, snapshotRef.current, currentChoice);
+        if (!owner) return { ok: false, message: t("未能确认新境舱，请在环境页检查。") };
+        created = owner;
       }
-    }, t("软件已添加"));
+      const result = await perform("saveApplication", { application: { profileId: owner.id, path: application.path, name: application.name } }, t("软件已添加"));
+      if (result.ok) { setSelectedId(owner.id); setModal(null); return result; }
+      if (created) {
+        // Remove only the fresh, unused environment we created, after reading
+        // current application and terminal state. An uncertain save preserves it.
+        const fresh = await refresh().catch(() => null);
+        const terminals = await api.call("terminalSnapshot").catch(() => null);
+        const unused = fresh?.profiles.find(profile => profile.id === created.id && profile.status === "stopped" && !profile.lastLaunchedAt && !profile.dataBytes);
+        const noBinding = fresh && !(fresh.applications || []).some(item => item.profileId === created.id);
+        const noTerminal = Array.isArray(terminals?.profiles) && !terminals.profiles.some(item => item.profileId === created.id && item.sessions?.length);
+        if (unused && noBinding && noTerminal) {
+          const removal = await perform("deleteProfile", { id: created.id }, undefined, `deleteProfile:${created.id}`, true);
+          if (!removal.ok) return { ...result, message: `${result.message} ${t("软件未添加；已保留新建境舱。")}` };
+        }
+        else return { ...result, message: `${result.message} ${t("软件未添加；已保留新建境舱。")}` };
+      }
+      return result;
+    } catch (error) { return { ok: false, message: error.message || t("操作未完成，请重试。") }; }
+    finally { pendingRef.current.delete(key); setPending(value => { const next = { ...value }; delete next[key]; return next; }); }
   };
-  const activeInEnvironment = profile => ["running", "starting"].includes(profile?.status) || terminalActive(profile?.id) || applications.some(item => item.profileId === profile?.id && ["running", "starting", "stopping"].includes(item.status));
   const subtitle = {
     profiles: t("统一管理网络与工作目录"),
     proxies: t("设置一次，整个境舱共用"),
@@ -1179,7 +1362,7 @@ function WorkspaceApp() {
   }}>
     {api.isDesktop && <div className="desktop-titlebar" aria-hidden="true" />}
     <aside className="sidebar">
-      <div className="brand"><img className="brand-mark" src={`${import.meta.env.BASE_URL}assets/envara-icon.png`} alt="" /><div><div className="brand-name">Envara{language !== "en" && <span>境舱</span>}</div><div className="brand-caption">{t("独立工作空间")}</div></div></div>
+      <div className="brand"><img className="brand-mark" src={`${import.meta.env.BASE_URL}assets/envara-icon.png`} alt="" /><div><div className="brand-name">Envara{language.startsWith("zh") && <span>境舱</span>}</div><div className="brand-caption">{t("独立工作空间")}</div></div></div>
       <div className="sidebar-section">{t("工作区")}</div>
       <nav className="navigation" aria-label={t("主导航")}>{navItems.map(({
           id,
@@ -1224,13 +1407,13 @@ function WorkspaceApp() {
         id: profile.id
       })} onEdit={editSelected} onCreate={() => setModal({
         type: "createProfile"
-      })} onInstall={installRuntime} busyProfile={busyProfile} editingDisabled={id => terminalActive(id) || applications.some(item => item.profileId === id && ["running", "starting", "stopping"].includes(item.status))} pending={pending} t={t} />}
-      {page === "terminals" && <div className="terminal-page-context"><TerminalWindow size={18} /><span>{t("选择境舱和工作目录，打开终端即可使用本地工具。")}</span></div>}
+      })} onInstall={installRuntime} busyProfile={busyProfile} editingDisabled={id => terminalActive(id) || applications.some(item => item.profileId === id && (["running", "starting", "stopping"].includes(item.status) || notionTrialLocksConfiguration(item, pending)))} pending={pending} t={t} />}
+      {page === "terminals" && <div className="terminal-page-context"><TerminalWindow size={18} /><span>{selectedProxy?.location?.confirmed ? `${selectedProxy.name} · ${selectedProxy.location.label || ""} · ${selectedProxy.location.timezone}` : t("选择境舱和工作目录，打开终端即可使用本地工具。")}</span></div>}
       {page === "applications" && <ApplicationsWorkspace profiles={profiles} proxies={proxies} applications={applications} routing={snapshot.applicationRouting} selectedId={selectedId} onSelect={setSelectedId} onPick={pickApplication} onStart={application => perform("startApplication", {
         id: application.id
       })} onStop={application => perform("stopApplication", {
         id: application.id
-      }, t("软件已停止"))} onDelete={application => setModal({
+      }, t("软件已停止"))} onRunNotionTrial={async application => { const result = await perform("runNotionTrial", { id: application.id }); if (!result.ok) await refresh().catch(() => {}); }} onStopNotionTrial={async application => { const result = await perform("stopNotionTrial", { id: application.id }); if (!result.ok) await refresh().catch(() => {}); }} onExportNotionDiagnostics={application => perform("exportNotionDiagnostics", { id: application.id })} onDelete={application => setModal({
         type: "confirm",
         title: t("移除「{value1}」？", {
           value1: application.name
@@ -1240,8 +1423,8 @@ function WorkspaceApp() {
         id: application.id,
         button: t("移除软件"),
         success: t("软件已移除")
-      })} onSetup={() => perform("setupApplicationRouting")} pending={pending} t={t} desktop={api.isDesktop} />}
-      {page === "proxies" && <div className="page-content"><div className="section-note"><ShieldCheck size={18} /><span>{api.isDesktop ? t("通过代理查询实际出口 IP、地区和时区。自动时区在启动前重新识别。") : t("真实出口识别需要境舱桌面应用；预览中可管理示例代理配置。")}</span></div>{proxies.length ? <div className="proxy-table"><div className="proxy-grid table-head"><span>{t("网络出口")}</span><span>{t("服务器")}</span><span>{t("实际出口")}</span><span>{t("操作")}</span></div>{proxies.map(proxy => <div className="proxy-grid proxy-row" key={proxy.id}><div className="proxy-name"><div className="proxy-icon"><GlobeHemisphereWest size={20} /></div><div><strong>{proxy.name}</strong><small>{profiles.filter(profile => profile.proxyId === proxy.id).length}{t("个环境使用")}{snapshot.groups?.some(group => group.proxyId === proxy.id) && t(" · {value1} 个分组绑定", {
+      })} onSetup={() => perform("setupApplicationRouting")} onInstall={() => perform("setupApplicationRouting", { activate: true })} pending={pending} t={t} desktop={api.isDesktop} />}
+      {page === "proxies" && <div className="page-content"><div className="section-note"><ShieldCheck size={18} /><span>{api.isDesktop ? t("创建时确认位置与时区，浏览器、终端和附加软件共同使用。") : t("真实出口识别需要境舱桌面应用；预览中可管理示例代理配置。")}</span></div>{proxies.length ? <div className="proxy-table"><div className="proxy-grid table-head"><span>{t("网络出口")}</span><span>{t("服务器")}</span><span>{t("实际出口")}</span><span>{t("操作")}</span></div>{proxies.map(proxy => <div className="proxy-grid proxy-row" key={proxy.id}><div className="proxy-name"><div className="proxy-icon"><GlobeHemisphereWest size={20} /></div><div><strong>{proxy.name}</strong><small>{profiles.filter(profile => profile.proxyId === proxy.id).length}{t("个环境使用")}{snapshot.groups?.some(group => group.proxyId === proxy.id) && t(" · {value1} 个分组绑定", {
                     value1: snapshot.groups.filter(group => group.proxyId === proxy.id).length
                   })}</small></div></div><div className="proxy-server"><span className="server-address">{proxy.host}:{proxy.port}</span><span className="protocol-tag">{protocolLabel(proxy.protocol)}</span></div><NetworkResult compact network={proxyTests[proxy.id]?.checking ? null : proxyTests[proxy.id] || proxy.network} checking={proxyTests[proxy.id]?.checking} /><div className="row-actions"><Button onClick={() => checkProxy(proxy)} disabled={!api.isDesktop || proxyTests[proxy.id]?.checking} title={api.isDesktop ? t("识别实际网络出口") : t("出口识别需要桌面应用")}>{t("识别")}</Button><IconButton icon={PencilSimple} label={t("编辑网络出口")} onClick={() => setModal({
                 type: "editProxy",
@@ -1263,7 +1446,7 @@ function WorkspaceApp() {
       {page === "monitor" && <MonitorWorkspace profiles={profiles} terminalProfiles={terminalProfiles} applications={applications} events={events} onNavigate={navigate} t={t} language={language} />}
       {page === "settings" && <div className="page-content settings-content">
         <div className="section-heading first"><h2>{t("偏好设置")}</h2></div>
-        <div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("界面语言")}</strong></div><select className="language-select" value={language} onChange={event => setLanguage(event.target.value)} aria-label={t("界面语言")}><option value="zh-CN">{t("简体中文")}</option><option value="en">English</option></select></div><div className="settings-row"><div><strong>{t("退出时关闭浏览器")}</strong></div><input type="checkbox" className="row-checkbox" aria-label={t("退出时关闭浏览器")} checked={snapshot.settings?.closeBrowsersOnExit !== false} onChange={event => perform("saveSettings", {
+        <div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("界面语言")}</strong></div><select className="language-select" value={language} disabled={savingLanguage} onChange={event => void setLanguage(event.target.value).catch(() => setToast({ type: "error", message: t("无法保存语言，请重试。") }))} aria-label={t("界面语言")}>{languageOptions.map(option => <option key={option.code} value={option.code} lang={option.code}>{option.nativeName}</option>)}</select></div><div className="settings-row"><div><strong>{t("退出时关闭浏览器")}</strong></div><input type="checkbox" className="row-checkbox" aria-label={t("退出时关闭浏览器")} checked={snapshot.settings?.closeBrowsersOnExit !== false} onChange={event => perform("saveSettings", {
               settings: {
                 ...snapshot.settings,
                 closeBrowsersOnExit: event.target.checked
@@ -1284,11 +1467,12 @@ function WorkspaceApp() {
       }, t("会话已停止"))} onEdit={() => editSelected(selected)} onClear={() => confirmClear(selected)} editingDisabled={activeInEnvironment(selected)} t={t} /> : <ContextDetail profile={selected} proxy={selectedProxy} workspace={selectedWorkspace} onEdit={() => editSelected(selected)} onDirectory={chooseDirectory} directoryDisabled={!api.isDesktop || !selected || activeInEnvironment(selected) || !!pending[`chooseWorkspaceDirectory:${selected?.id}`]} onNavigate={navigate} onClone={() => cloneProfile(selected)} onExport={() => perform("exportProfiles", {
         id: selected.id
       }, t("环境配置已导出"))} onDelete={() => confirmDelete(selected)} editingDisabled={activeInEnvironment(selected)} t={t} />}</aside>}
-    <TerminalDock profiles={profiles} visible={terminalVisible} onHide={() => {
+    <TerminalDock profiles={terminalContextProfiles} visible={terminalVisible} onHide={() => {
       setTerminalVisible(false);
       setTerminalExpanded(false);
       if (page === "terminals") setPage("profiles");
     }} expanded={terminalExpanded} onToggleExpanded={() => setTerminalExpanded(value => !value)} onHeightChange={resizeTerminalDock} minHeight={320} maxHeight={terminalMaxHeight} openRequest={terminalRequest} onError={terminalError} onProfilesChange={setTerminalProfiles} />
+    {modal?.type === "attachApplication" && <AttachApplicationForm profiles={profiles} proxies={proxies} groups={snapshot.groups} applications={applications} selectedId={selectedId} onSave={saveAttachedApplication} onClose={closeModal} onAddNetwork={() => { setPage("proxies"); setModal({ type: "createProxy" }); }} saving={pending["attachApplication:"]} />}
     {(modal?.type === "createProfile" || modal?.type === "editProfile") && <ProfileForm profile={modal.profile} proxies={proxies} systemPlatform={system.platform} engines={engines} defaultEngine={snapshot.settings?.defaultEngine} groups={groups} groupDescriptors={snapshot.groups} onSave={saveProfile} onClose={closeModal} saving={pending[`updateProfile:${modal.profile?.id}`] || pending["createProfile:"]} />}{(modal?.type === "createProxy" || modal?.type === "editProxy") && <ProxyForm proxy={modal.proxy} proxyCore={system.proxyCore} onSave={saveProxy} onClose={closeModal} saving={pending["saveProxy:"]} />}{modal?.type === "importMapping" && <ImportMappingForm session={modal.session} proxies={proxies} onImport={proxyMap => importProfiles({
       importId: modal.session.importId,
       proxyMap

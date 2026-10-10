@@ -7,6 +7,7 @@ import { constants } from 'node:fs';
 export const APPLICATION_ROUTING_PROTOCOL = 'envara.application-routing';
 export const APPLICATION_ROUTING_VERSION = 1;
 export const APPLICATION_ROUTING_CHECKS = Object.freeze(['tcp', 'udp', 'dns', 'childProcesses', 'failClosed']);
+export const PF_APPLICATION_ROUTING_CHECKS = Object.freeze(['guard', 'unrelatedApps', 'nativeAcceptance']);
 const failure = (code, message) => Object.assign(new Error(message), { code });
 const errorMessages = {
   APPLICATION_ROUTING_UNAVAILABLE: '应用网络组件尚未安装。',
@@ -22,22 +23,40 @@ export function applicationRoutingError(error, fallback = 'APPLICATION_ROUTING_N
   return failure(code, errorMessages[code] ?? errorMessages[fallback] ?? '应用网络操作失败。');
 }
 export function applicationRoutingReady(value) {
+  if (value?.backend === 'pf-utun' && (value.processScopeVerified !== true ||
+      value.authorization?.kind !== 'privileged-helper' || value.authorization?.verified !== true ||
+      value.verification?.backend !== 'pf-utun' || value.verification?.native !== true ||
+      !PF_APPLICATION_ROUTING_CHECKS.every(key => value.capabilities?.[key] === true && value.verification?.checks?.[key] === true))) return false;
   return value?.installed === true && value.authorized === true && value.ready === true &&
+    value.processScopeVerified !== false &&
     APPLICATION_ROUTING_CHECKS.every(key => value.capabilities?.[key] === true) &&
     value.verification?.passed === true && typeof value.verification.version === 'string' &&
     value.verification.version.length > 0 && value.verification.version.length <= 128 &&
     APPLICATION_ROUTING_CHECKS.every(key => value.verification.checks?.[key] === true);
 }
 export function publicApplicationRoutingStatus(value, platform = process.platform) {
+  const componentNames = { 'mitmproxy-redirector': 'Mitmproxy Redirector', 'envara-windivert': 'Envara · WinDivert', 'envara-app-proxy': 'Envara · App Proxy', 'envara-pf-routing': 'Envara · PF' };
+  const publicComponent = component => component && Object.hasOwn(componentNames, component.name) ? {
+    name: componentNames[component.name],
+    version: typeof component.version === 'string' && /^[A-Za-z0-9._+-]{1,64}$/.test(component.version) ? component.version : null,
+    available: component.available === true, verified: component.verified === true, installed: component.installed === true,
+  } : null;
+  const component = publicComponent(value?.component);
+  const diagnosticComponent = publicComponent(value?.diagnosticComponent);
   const capabilities = Object.fromEntries(APPLICATION_ROUTING_CHECKS.map(key => [key, value?.capabilities?.[key] === true]));
   const verification = { passed: value?.verification?.passed === true,
     version: typeof value?.verification?.version === 'string' ? value.verification.version.slice(0, 128) : null,
     checks: Object.fromEntries(APPLICATION_ROUTING_CHECKS.map(key => [key, value?.verification?.checks?.[key] === true])) };
   const ready = applicationRoutingReady(value);
-  const status = ready ? 'ready' : value?.installed !== true ? 'unavailable' : value?.authorized !== true ? 'authorization-required' : 'incomplete';
+  const status = ready ? 'ready' : value?.installed !== true ? component?.available && component.verified ? 'prepared' : 'unavailable' : value?.authorized !== true ? 'authorization-required' : 'incomplete';
   return { platform, protocolVersion: APPLICATION_ROUTING_VERSION, installed: value?.installed === true,
     authorized: value?.authorized === true, ready, status, capabilities, verification,
-    message: ready ? '应用网络接管已就绪。' : errorMessages[status === 'unavailable' ? 'APPLICATION_ROUTING_UNAVAILABLE' : status === 'authorization-required' ? 'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED' : 'APPLICATION_ROUTING_NOT_READY'] };
+    ...(value?.backend === 'pf-utun' ? { backend: 'pf-utun',
+      systemChecks: Object.fromEntries(PF_APPLICATION_ROUTING_CHECKS.map(key => [key, value?.verification?.checks?.[key] === true])) } : {}),
+    ...(typeof value?.processScopeVerified === 'boolean' ? { processScopeVerified: value.processScopeVerified } : {}),
+    ...(component ? { component } : {}),
+    ...(diagnosticComponent ? { diagnosticComponent: { ...diagnosticComponent, authorized: value.diagnosticComponent.authorized === true } } : {}),
+    message: ready ? '应用网络接管已就绪。' : status === 'prepared' ? '组件已准备，等待安装与系统授权。' : errorMessages[status === 'unavailable' ? 'APPLICATION_ROUTING_UNAVAILABLE' : status === 'authorization-required' ? 'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED' : 'APPLICATION_ROUTING_NOT_READY'] };
 }
 
 /** One private stdin JSON-RPC request per native helper process. No shell/argv credentials. */
@@ -49,7 +68,7 @@ export class NativeApplicationRouting {
   }
   async request(method, params = {}) {
     if (this.closed) throw failure('APPLICATION_ROUTING_CLOSED', errorMessages.APPLICATION_ROUTING_CLOSED);
-    if (!['status', 'setup', 'prepareRoute', 'launch', 'stop', 'revoke'].includes(method)) throw failure('APPLICATION_ROUTING_PROTOCOL_ERROR', errorMessages.APPLICATION_ROUTING_PROTOCOL_ERROR);
+    if (!['status', 'setup', 'resolveRealm', 'prepareRoute', 'launch', 'stop', 'revoke'].includes(method)) throw failure('APPLICATION_ROUTING_PROTOCOL_ERROR', errorMessages.APPLICATION_ROUTING_PROTOCOL_ERROR);
     try {
       if (!this.helperPath) throw new Error();
       const canonical = await realpath(this.helperPath), info = await lstat(canonical);
@@ -96,6 +115,7 @@ export class NativeApplicationRouting {
     catch (error) { return { installed: false, authorized: false, ready: false, error: applicationRoutingError(error).code }; }
   }
   setup(params = {}) { return this.request('setup', params); }
+  resolveRealm(params) { return this.request('resolveRealm', params); }
   prepareRoute(params) { return this.request('prepareRoute', params); }
   launch(params) { return this.request('launch', params); }
   stop(params) { return this.request('stop', params); }

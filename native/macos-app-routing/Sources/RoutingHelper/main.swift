@@ -6,8 +6,14 @@ import CryptoKit
 import SystemExtensions
 import RoutingShared
 
-private let providerIdentifier = "io.envara.app-routing.proxy"
+let providerIdentifier = RoutingSigningAuthorization.providerIdentifier
+let providerBundleURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/SystemExtensions/\(providerIdentifier).systemextension")
 private let protocolIdentifier = "envara.application-routing"
+#if ENVARA_NATIVE_ROUTING_ACCEPTANCE
+let runtimeNamespace = RoutingRuntimeNamespace.fixtureAcceptance
+#else
+let runtimeNamespace = RoutingRuntimeNamespace.production
+#endif
 
 // Development signing is an explicit, separately compiled local build. A
 // release helper never changes its trust policy via environment or RPC input.
@@ -36,36 +42,50 @@ private func codeIdentity(_ path: URL) throws -> (String, String) {
     return (identity, text)
 }
 
-func validateApplication(path: String, executable: String, identity: String? = nil) throws -> (String, String) {
+func validateApplication(path: String, executable: String, identity: String? = nil, requirement: String? = nil) throws -> (String, String) {
     let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-    guard path.hasSuffix(".app"), url.path == path, let bundle = Bundle(url: url),
+    guard RealmValidation.executablePath(path), RealmValidation.executablePath(executable),
+          path.hasSuffix(".app"), url.path == path, let bundle = Bundle(url: url),
           let actual = bundle.executableURL?.resolvingSymlinksInPath(),
-          actual.path == URL(fileURLWithPath: executable).resolvingSymlinksInPath().path,
+          RealmValidation.applicationExecutablePath(executable), actual.path == executable,
           actual.path.hasPrefix(url.appendingPathComponent("Contents/MacOS", isDirectory: true).path + "/") else {
         throw RoutingError.notReady("application-executable-does-not-match-signed-bundle")
     }
     let validated = try codeIdentity(url)
     if let expected = identity, expected != validated.0 { throw RoutingError.notReady("application-identity-changed") }
+    if let expected = requirement, expected != validated.1 { throw RoutingError.notReady("application-requirement-changed") }
     return validated
 }
 
-private func hostAuthorized() -> Bool {
+func hostAuthorized() -> Bool {
     do {
         let devices = signingMode == .development ? try RoutingSigningAuthorization.deviceIdentifiers() : []
         let bundle = Bundle.main.bundleURL
         let host = try RoutingSigningAuthorization.validateBundle(bundle,
             expectedIdentifier: RoutingSigningAuthorization.hostIdentifier, host: true, mode: signingMode, devices: devices)
-        let provider = try RoutingSigningAuthorization.validateBundle(bundle.appendingPathComponent("Contents/Library/SystemExtensions/io.envara.app-routing.proxy.systemextension"),
+        let provider = try RoutingSigningAuthorization.validateBundle(providerBundleURL,
             expectedIdentifier: providerIdentifier, host: false, mode: signingMode, devices: devices)
-        return host.team == provider.team && host.certificateSHA256 == provider.certificateSHA256
+        guard host.team == provider.team && host.certificateSHA256 == provider.certificateSHA256 else { return false }
+        #if ENVARA_NATIVE_ROUTING_ACCEPTANCE
+        guard let manifestURL = Bundle.main.url(forResource: "provider-reuse", withExtension: "json"),
+              let bytes = try? Data(contentsOf: manifestURL), bytes.count <= 16_384,
+              let manifest = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              manifest["version"] as? Int == 1, manifest["acceptanceOnly"] as? Bool == true,
+              manifest["runtimeNamespace"] as? String == runtimeNamespace.rawValue,
+              manifest["providerIdentifier"] as? String == providerIdentifier,
+              let record = manifest["provider"] as? [String: Any], record["fingerprintVersion"] as? Int == 1,
+              record["bundle"] as? String == "\(providerIdentifier).systemextension",
+              record["bundleSHA256"] as? String == (try? RoutingBundleFingerprint.sha256(providerBundleURL)) else { return false }
+        #endif
+        return true
     } catch { return false }
 }
 
-func store() throws -> RuntimeStore {
+func store(readOnly: Bool = false) throws -> RuntimeStore {
     guard hostAuthorized(), let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: RuntimeStore.groupIdentifier) else {
         throw RoutingError.notReady(authorizationReason)
     }
-    return try RuntimeStore(directory: group)
+    return try RuntimeStore(directory: group, create: !readOnly, namespace: runtimeNamespace)
 }
 
 private func managers() async throws -> [NEAppProxyProviderManager] {
@@ -73,7 +93,8 @@ private func managers() async throws -> [NEAppProxyProviderManager] {
         NEAppProxyProviderManager.loadAllFromPreferences { managers, error in
             if let error = error { continuation.resume(throwing: error) }
             else { continuation.resume(returning: (managers ?? []).filter {
-                ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == providerIdentifier
+                ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == providerIdentifier &&
+                ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?[RoutingRuntimeNamespace.configurationKey] as? String == runtimeNamespace.rawValue
             }) }
         }
     }
@@ -88,8 +109,9 @@ private func verification() -> [String: Any] {
           let data = try? Data(contentsOf: url),
           let receipt = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
           receipt["providerVersion"] as? String == "1",
-          let binary = try? Data(contentsOf: Bundle.main.bundleURL.appendingPathComponent("Contents/Library/SystemExtensions/io.envara.app-routing.proxy.systemextension/Contents/MacOS/EnvaraAppProxy")),
+          let binary = try? Data(contentsOf: providerBundleURL.appendingPathComponent("Contents/MacOS/EnvaraAppProxy")),
           receipt["providerSHA256"] as? String == SHA256.hash(data: binary).map({ String(format: "%02x", $0) }).joined(),
+          receipt["providerBundleSHA256"] as? String == (try? RoutingBundleFingerprint.sha256(providerBundleURL)),
           receipt["osMajor"] as? Int == ProcessInfo.processInfo.operatingSystemVersion.majorVersion,
           receipt["passed"] as? Bool == true,
           let checks = receipt["checks"] as? [String: Bool], keys.allSatisfy({ checks[$0] == true }),
@@ -98,33 +120,49 @@ private func verification() -> [String: Any] {
 }
 
 private final class PropertiesDelegate: NSObject, OSSystemExtensionRequestDelegate {
-    var completion: ((Bool) -> Void)?
-    func finish(_ value: Bool) { let callback = completion; completion = nil; callback?(value) }
+    var completion: (([OSSystemExtensionProperties]?) -> Void)?
+    func finish(_ value: [OSSystemExtensionProperties]?) { let callback = completion; completion = nil; callback?(value) }
     func request(_ request: OSSystemExtensionRequest, actionForReplacingExtension existing: OSSystemExtensionProperties, withExtension ext: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction { .cancel }
-    func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) { finish(false) }
+    func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) { finish(nil) }
     func request(_ request: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) { }
-    func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) { finish(false) }
-    func request(_ request: OSSystemExtensionRequest, foundProperties properties: [OSSystemExtensionProperties]) {
-        guard let bundled = try? Data(contentsOf: Bundle.main.bundleURL.appendingPathComponent("Contents/Library/SystemExtensions/io.envara.app-routing.proxy.systemextension/Contents/MacOS/EnvaraAppProxy")) else { finish(false); return }
-        let expected = SHA256.hash(data: bundled)
-        finish(properties.contains { item in
-            guard item.isEnabled, !item.isAwaitingUserApproval, !item.isUninstalling,
-                  let active = try? Data(contentsOf: item.url.appendingPathComponent("Contents/MacOS/EnvaraAppProxy")) else { return false }
-            return SHA256.hash(data: active) == expected
-        })
-    }
+    func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) { finish(nil) }
+    func request(_ request: OSSystemExtensionRequest, foundProperties properties: [OSSystemExtensionProperties]) { finish(properties) }
 }
 private var propertiesDelegate: PropertiesDelegate?
 
-private func extensionEnabled() async -> Bool {
+private func extensionProperties() async -> [OSSystemExtensionProperties]? {
     await withCheckedContinuation { continuation in
         let delegate = PropertiesDelegate(); propertiesDelegate = delegate
         delegate.completion = { continuation.resume(returning: $0) }
         let request = OSSystemExtensionRequest.propertiesRequest(forExtensionWithIdentifier: providerIdentifier, queue: .main)
         request.delegate = delegate
         OSSystemExtensionManager.shared.submitRequest(request)
-        let timeout = DispatchWorkItem { delegate.finish(false) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeout)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { delegate.finish(nil) }
+    }
+}
+
+func extensionEnabled() async -> Bool {
+    guard let expected = try? RoutingBundleFingerprint.sha256(providerBundleURL),
+          let properties = await extensionProperties() else { return false }
+    return properties.contains { item in
+        item.isEnabled && !item.isAwaitingUserApproval && !item.isUninstalling &&
+        (try? RoutingBundleFingerprint.sha256(item.url)) == expected
+    }
+}
+
+private func activationPreflight() async throws {
+    let host = Bundle.main.bundleURL.resolvingSymlinksInPath()
+    let roots = [URL(fileURLWithPath: "/Applications", isDirectory: true),
+                 FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)]
+    guard roots.contains(where: { host.path.hasPrefix($0.path + "/") }),
+          host.path.hasSuffix(".app"), hostAuthorized(),
+          let properties = await extensionProperties() else { throw RoutingError.notReady("installed-authorized-activation-host-required") }
+    let expected = try RoutingBundleFingerprint.sha256(providerBundleURL)
+    for existing in properties {
+        guard !existing.isAwaitingUserApproval, !existing.isUninstalling,
+              (try? RoutingBundleFingerprint.sha256(existing.url)) == expected else {
+            throw RoutingError.notReady("existing-provider-installation-conflicts-no-replacement-performed")
+        }
     }
 }
 
@@ -133,13 +171,35 @@ private func status() async -> [String: Any] {
     let configured = authorized ? ((try? await managers()) ?? []) : []
     let enabled = authorized ? await extensionEnabled() : false
     let assessment = verification()
-    let ready = authorized && enabled && !configured.isEmpty && assessment["passed"] as? Bool == true
+    let snapshot = authorized ? try? sessionSnapshot() : nil
+    let journalReadable = snapshot != nil
+    let scopeVerified = snapshot?.allSatisfy { session in
+        guard session.scopeVerified, session.unknownPIDs.isEmpty else { return false }
+        if session.state == "stopped" { return session.application.exitConfirmed && session.children.allSatisfy { $0.exitConfirmed } }
+        return session.state == "running" && session.guardian.presence() == .alive &&
+            ([session.application] + session.children).allSatisfy { identity in
+                switch identity.presence() { case .alive, .gone: return true; case .unknown: return false }
+            }
+    } ?? false
+    let ready = authorized && enabled && !configured.isEmpty && scopeVerified && assessment["passed"] as? Bool == true
     var result: [String: Any] = ["platform": "darwin", "installed": enabled && !configured.isEmpty, "extensionEnabled": enabled,
         "authorized": authorized, "ready": ready, "signingMode": signingMode.rawValue,
+        "component": ["name": "envara-app-proxy", "version": "1", "available": true,
+                      "verified": authorized, "installed": enabled && !configured.isEmpty],
         "capabilities": ["tcp": true, "udp": true, "dns": true, "childProcesses": true, "failClosed": true],
-        "udpPolicies": ["proxy", "block"], "verification": assessment, "sessions": sessionStatuses()]
-    if !ready { result["reason"] = !authorized ? authorizationReason : configured.isEmpty || !enabled ? "per-app-profile-and-extension-required" : "native-routing-acceptance-required" }
+        "udpPolicies": ["proxy", "block"], "verification": assessment, "journalReadable": journalReadable,
+        "processScopeVerified": scopeVerified, "sessions": sessionStatuses(snapshot ?? [])]
+    if !ready { result["reason"] = !authorized ? authorizationReason : configured.isEmpty || !enabled ? "per-app-profile-and-extension-required" : !scopeVerified ? "owned-session-journal-unverified" : "native-routing-acceptance-required" }
     return result
+}
+
+func requireTestedApplication(_ identity: String) throws {
+    guard let receiptURL = Bundle.main.url(forResource: "routing-acceptance", withExtension: "plist"),
+          let receiptData = try? Data(contentsOf: receiptURL),
+          let receipt = try? PropertyListSerialization.propertyList(from: receiptData, format: nil) as? [String: Any],
+          let tested = receipt["testedApplications"] as? [String], tested.contains(identity) else {
+        throw RoutingError.notReady("selected-application-native-acceptance-required")
+    }
 }
 
 func requireReady() async throws {
@@ -149,126 +209,245 @@ func requireReady() async throws {
 
 func manager(for routeId: String) async throws -> NEAppProxyProviderManager {
     let route = try store().read(routeId)
-    guard let item = try await managers().first(where: {
-        $0.appRules.count == 1 && $0.appRules.contains { $0.matchSigningIdentifier == route.applicationIdentity && ($0.matchPath == nil || $0.matchPath == route.executablePath) && $0.matchDomains == nil && $0.matchTools == nil }
-    }) else { throw RoutingError.notReady("per-app-profile-required") }
-    return item
+    return try exactManager(in: await managers(), vpnUUID: route.vpnUUID, identity: route.applicationIdentity,
+                            requirement: route.applicationRequirement, executable: route.executablePath)
 }
 
-func health(_ manager: NEAppProxyProviderManager, routeId: String) async throws {
+private func exactManager(in configured: [NEAppProxyProviderManager], vpnUUID: String, identity: String,
+                          requirement: String, executable: String) throws -> NEAppProxyProviderManager {
+    let bindings = configured.map { item -> RealmManagerBinding in
+        let configuration = (item.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+        let realm = configuration?[RealmBindingSelection.versionKey] as? Int == 1
+            ? configuration?[RealmBindingSelection.configurationKey] as? String : nil
+        return RealmManagerBinding(realmUUID: realm, rules: item.appRules.map {
+            RealmRule(signingIdentifier: $0.matchSigningIdentifier, designatedRequirement: $0.matchDesignatedRequirement,
+                      executablePath: $0.matchPath, domains: $0.matchDomains == nil ? nil : [],
+                      toolsRestricted: $0.matchTools != nil)
+        })
+    }
+    let index = try RealmBindingSelection.uniqueIndex(in: bindings, vpnUUID: vpnUUID, signingIdentifier: identity,
+                                                     designatedRequirement: requirement, executablePath: executable)
+    return configured[index]
+}
+
+func health(_ manager: NEAppProxyProviderManager, routeId: String, guardianSession: String? = nil) async throws {
+    let route = try store().read(routeId)
     guard manager.connection.status == .connected, let session = manager.connection as? NETunnelProviderSession else {
         throw RoutingError.notReady("app-proxy-not-connected")
     }
     let request = try JSONSerialization.data(withJSONObject: ["method": "health"])
-    let response: Data? = try await withCheckedThrowingContinuation { continuation in
-        do { try session.sendProviderMessage(request) { continuation.resume(returning: $0) } }
-        catch { continuation.resume(throwing: error) }
-    }
+    let response = try await boundedProviderReply(session, request: request)
     guard let response = response, let values = try JSONSerialization.jsonObject(with: response) as? [String: Any],
           values["active"] as? Bool == true, values["routeId"] as? String == routeId,
+          (values["vpnUUID"] as? String).flatMap(RealmValidation.canonicalUUID) == route.vpnUUID,
+          values["runtimeNamespace"] as? String == runtimeNamespace.rawValue,
+          guardianSession == nil || (values["guardianLeaseReady"] as? Bool == true && values["sessionId"] as? String == guardianSession),
           values["providerVersion"] as? String == "1" else { throw RoutingError.notReady("route-not-confirmed-by-extension") }
 }
 
-private func prepare(_ params: [String: Any]) async throws -> [String: Any] {
-    try await requireReady()
+func prepare(_ params: [String: Any], acceptanceOnly: Bool = false) async throws -> [String: Any] {
+    if acceptanceOnly {
+        #if ENVARA_NATIVE_ROUTING_ACCEPTANCE
+        try await requireAcceptanceReady()
+        #else
+        throw RoutingError.invalidRequest
+        #endif
+    } else { try await requireReady() }
     guard let app = params["application"] as? [String: Any], let path = app["path"] as? String,
           let executable = app["executablePath"] as? String,
+          let requestedRealm = params["vpnUUID"] as? String, let vpnUUID = RealmValidation.canonicalUUID(requestedRealm),
           let request = params["route"] as? [String: Any], let protocolName = request["protocol"] as? String,
           let host = request["host"] as? String, let port = request["port"] as? Int, port > 0, port <= 65535,
           let user = request["username"] as? String, let password = request["password"] as? String else { throw RoutingError.invalidRequest }
     let (identity, requirement) = try validateApplication(path: path, executable: executable)
-    guard let receiptURL = Bundle.main.url(forResource: "routing-acceptance", withExtension: "plist"),
-          let receiptData = try? Data(contentsOf: receiptURL),
-          let receipt = try? PropertyListSerialization.propertyList(from: receiptData, format: nil) as? [String: Any],
-          let tested = receipt["testedApplications"] as? [String], tested.contains(identity) else {
-        throw RoutingError.notReady("selected-application-native-acceptance-required")
+    if acceptanceOnly {
+        #if ENVARA_NATIVE_ROUTING_ACCEPTANCE
+        _ = try acceptanceFixture(path: path, executable: executable)
+        #else
+        throw RoutingError.invalidRequest
+        #endif
+    } else { try requireTestedApplication(identity) }
+    let manager = try exactManager(in: await managers(), vpnUUID: vpnUUID, identity: identity,
+                                   requirement: requirement, executable: executable)
+    guard !NSWorkspace.shared.runningApplications.contains(where: { $0.bundleURL?.path == path }),
+          !(try sessionSnapshot()).contains(where: { $0.application.path == executable &&
+              (!$0.scopeVerified || !$0.unknownPIDs.isEmpty || !$0.application.exitConfirmed ||
+               $0.children.contains { !$0.exitConfirmed }) }) else {
+        throw RoutingError.notReady("application-already-running-close-it-before-binding")
     }
-    guard let manager = try await managers().first(where: { item in
-        item.appRules.count == 1 && item.appRules.contains { $0.matchSigningIdentifier == identity && $0.matchDesignatedRequirement == requirement && ($0.matchPath == nil || $0.matchPath == executable) && $0.matchDomains == nil && $0.matchTools == nil }
-    }) else { throw RoutingError.notReady("selected-application-profile-required") }
     let id = UUID().uuidString
     let udpPolicy = request["udpPolicy"] as? String ?? (request["udp"] as? Bool == true ? "proxy" : "block")
     guard ["proxy", "block"].contains(udpPolicy) else { throw RoutingError.invalidRequest }
-    let route = try Route(routeId: id, applicationIdentity: identity, applicationPath: path, executablePath: executable,
+    let route = try Route(routeId: id, vpnUUID: vpnUUID, applicationIdentity: identity, applicationRequirement: requirement,
+                          applicationPath: path, executablePath: executable,
                           protocolName: protocolName, host: host, port: UInt16(port), username: user, password: password,
                           udp: udpPolicy == "proxy" && request["udp"] as? Bool == true,
-                          privacyMode: ((params["workspace"] as? [String: Any])?["privacy"] as? [String: Any])?["mode"] as? String ?? "standard")
-    try store().write(route)
-    var confirmed = false
-    defer { if !confirmed { try? store().revoke(id) } }
+                          privacyMode: ((params["workspace"] as? [String: Any])?["privacy"] as? [String: Any])?["mode"] as? String ?? "standard", runtimeNamespace: runtimeNamespace)
     // Profiles are administrator-owned. Do not rewrite them. Our generated profile
     // must already enforce on-demand routing and contain no disconnect bypass rule.
     guard manager.isEnabled, manager.isOnDemandEnabled,
           !(manager.onDemandRules ?? []).contains(where: { $0 is NEOnDemandRuleDisconnect }),
           manager.excludedDomains.isEmpty,
-          !sessions().contains(where: { $0.application.path == executable && ($0.application.alive || $0.children.contains { $0.alive }) }) else {
+          [.disconnected, .connected].contains(manager.connection.status) else {
         throw RoutingError.notReady("application-profile-must-enforce-routing-without-bypass")
     }
-    if manager.connection.status == .connected { manager.connection.stopVPNTunnel() }
-    try manager.connection.startVPNTunnel(options: ["routeId": id as NSString])
-    for _ in 0..<100 {
-        if manager.connection.status == .connected { break }
-        try await Task.sleep(nanoseconds: 100_000_000)
+    let wasDisconnected = manager.connection.status == .disconnected
+    try store().write(route)
+    var rebindRejected = false
+    do {
+        if wasDisconnected {
+            try manager.connection.startVPNTunnel(options: ["routeId": id as NSString, "vpnUUID": vpnUUID as NSString])
+            for _ in 0..<100 {
+                if manager.connection.status == .connected { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+        } else {
+            // Only a revoked, empty provider in this exact realm can bind again.
+            // This preserves its VPN mapping and never stops another manager.
+            let response = try await providerMessage(manager, ["method": "rebind", "routeId": id, "vpnUUID": vpnUUID])
+            if response["rebound"] as? Bool == false { rebindRejected = true }
+            guard response["rebound"] as? Bool == true,
+                  response["routeId"] as? String == id,
+                  (response["vpnUUID"] as? String).flatMap(RealmValidation.canonicalUUID) == vpnUUID else {
+                throw RoutingError.notReady("same-realm-provider-is-not-idle")
+            }
+        }
+        try await health(manager, routeId: id)
+    } catch {
+        // Removing a file alone cannot revoke the provider's in-memory secrets.
+        // Roll back only this attempted route, and keep records if unconfirmed.
+        var rolledBack = rebindRejected
+        if !rolledBack, manager.connection.status == .connected,
+           let response = try? await providerMessage(manager, ["method": "revoke", "routeId": id]) {
+            rolledBack = response["revoked"] as? Bool == true
+        }
+        if !rolledBack && wasDisconnected {
+            // This manager was idle and started solely by this failed attempt.
+            manager.connection.stopVPNTunnel()
+            for _ in 0..<30 {
+                if [.disconnected, .invalid].contains(manager.connection.status) { rolledBack = true; break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        if rolledBack { try store().revoke(id) }
+        else { throw RoutingError.notReady("prepare-rollback-unconfirmed-route-retained") }
+        throw error
     }
-    try await health(manager, routeId: id)
-    confirmed = true
-    return ["routeId": id, "ready": true, "failClosed": true, "udpPolicy": route.udp ? "proxy" : "block",
+    return ["routeId": id, "vpnUUID": vpnUUID, "ready": !acceptanceOnly, "acceptanceOnly": acceptanceOnly, "failClosed": !acceptanceOnly, "udpPolicy": route.udp ? "proxy" : "block",
             "capabilities": ["tcp": true, "udp": true, "dns": true, "childProcesses": true, "failClosed": true], "verification": verification()]
 }
 
-private func sessions() -> [Session] {
-    guard let store = try? store(), let files = try? FileManager.default.contentsOfDirectory(at: store.directory, includingPropertiesForKeys: nil) else { return [] }
-    return files.filter { $0.pathExtension == "session" }.compactMap { url in
-        guard let data = try? store.readPrivate(url) else { return nil }
-        return try? JSONDecoder().decode(Session.self, from: data)
+private func sessionSnapshot() throws -> [Session] {
+    let runtime = try store(readOnly: true)
+    let files = try FileManager.default.contentsOfDirectory(at: runtime.directory, includingPropertiesForKeys: nil)
+    return try files.filter { $0.pathExtension == "session" }.map { url in
+        let session = try JSONDecoder().decode(Session.self, from: runtime.readPrivate(url))
+        guard let fileID = RealmValidation.canonicalUUID(url.deletingPathExtension().lastPathComponent),
+              let sessionID = RealmValidation.canonicalUUID(session.sessionId), fileID == sessionID,
+              RealmValidation.canonicalUUID(session.routeId) != nil,
+              ["starting", "running", "stopped", "error"].contains(session.state),
+              session.unknownPIDs.allSatisfy({ $0 > 0 }) else { throw RoutingError.unsafeFile }
+        return session
     }
 }
 
-private func sessionStatuses() -> [[String: Any]] {
-    sessions().map {
+
+private func providerMessage(_ manager: NEAppProxyProviderManager, _ message: [String: Any]) async throws -> [String: Any] {
+    guard manager.connection.status == .connected, let session = manager.connection as? NETunnelProviderSession else {
+        throw RoutingError.notReady("app-proxy-not-connected")
+    }
+    let request = try JSONSerialization.data(withJSONObject: message)
+    let response = try await boundedProviderReply(session, request: request)
+    guard let response = response,
+          let result = try JSONSerialization.jsonObject(with: response) as? [String: Any] else { throw RoutingError.refused }
+    return result
+}
+
+private func sessionStatuses(_ records: [Session]) -> [[String: Any]] {
+    records.map {
         let running = $0.guardian.alive && ($0.application.alive || $0.children.contains { $0.alive })
+        let stopped = $0.state == "stopped" && $0.scopeVerified && $0.unknownPIDs.isEmpty &&
+            $0.application.exitConfirmed && $0.children.allSatisfy { $0.exitConfirmed }
         return ["sessionId": $0.sessionId, "pid": Int($0.pid), "routeId": $0.routeId,
-                "status": running ? "running" : $0.state == "stopped" ? "stopped" : "error"]
+                "status": running ? "running" : stopped ? "stopped" : "error"]
     }
 }
 
-private func launch(_ params: [String: Any]) async throws -> [String: Any] {
-    try await requireReady()
+func launch(_ params: [String: Any], acceptanceOnly: Bool = false) async throws -> [String: Any] {
+    if acceptanceOnly {
+        #if ENVARA_NATIVE_ROUTING_ACCEPTANCE
+        try await requireAcceptanceReady()
+        #else
+        throw RoutingError.invalidRequest
+        #endif
+    } else { try await requireReady() }
     guard let id = params["routeId"] as? String else { throw RoutingError.invalidRequest }
     let route = try store().read(id), manager = try await manager(for: id)
+    if acceptanceOnly {
+        #if ENVARA_NATIVE_ROUTING_ACCEPTANCE
+        _ = try acceptanceFixture(path: route.applicationPath, executable: route.executablePath)
+        try validateAcceptanceLaunch(params)
+        #else
+        throw RoutingError.invalidRequest
+        #endif
+    } else { try requireTestedApplication(route.applicationIdentity) }
     try await health(manager, routeId: id)
-    guard !NSWorkspace.shared.runningApplications.contains(where: { $0.bundleURL?.path == route.applicationPath }) else {
+    guard !(try sessionSnapshot()).contains(where: { $0.routeId == id &&
+              (!$0.scopeVerified || !$0.unknownPIDs.isEmpty || !$0.application.exitConfirmed || $0.children.contains { !$0.exitConfirmed }) }),
+          !NSWorkspace.shared.runningApplications.contains(where: { $0.bundleURL?.path == route.applicationPath }) else {
         throw RoutingError.notReady("application-already-running-close-it-before-binding")
     }
     let sessionId = UUID().uuidString
     var request = params; request["sessionId"] = sessionId
+    let requestBytes = try JSONSerialization.data(withJSONObject: request)
     let guardian = Process()
     guardian.executableURL = Bundle.main.executableURL
+    #if ENVARA_NATIVE_ROUTING_ACCEPTANCE
+    guardian.arguments = ["--acceptance-guardian"]
+    #else
     guardian.arguments = ["--guardian"]
+    #endif
     let input = Pipe(); guardian.standardInput = input
     guardian.standardOutput = FileHandle.nullDevice; guardian.standardError = FileHandle.nullDevice
     try guardian.run()
-    input.fileHandleForWriting.write(try JSONSerialization.data(withJSONObject: request)); try input.fileHandleForWriting.close()
+    // Capture the process generation now. A later error must not adopt a reused
+    // PID, and every failure after spawn must attempt owned cleanup.
+    let guardianIdentity = ProcessIdentity.read(guardian.processIdentifier).flatMap { identity in
+        identity.parent == getpid() && identity.path == Bundle.main.executableURL?.resolvingSymlinksInPath().path ? identity : nil
+    }
+    var confirmed = false
+    defer {
+        try? input.fileHandleForWriting.close()
+        if !confirmed, let identity = guardianIdentity { _ = identity.signal(SIGTERM) }
+    }
+    guard guardianIdentity != nil else { throw RoutingError.notReady("owned-guardian-identity-unconfirmed") }
+    input.fileHandleForWriting.write(requestBytes); try input.fileHandleForWriting.close()
     // The response is written atomically before launch is reported. A guardian owns
     // the process family after this short-lived RPC helper exits.
     for _ in 0..<100 {
-        if let session = sessions().first(where: { $0.sessionId == sessionId }), session.application.alive, session.guardian.alive {
+        if let session = try sessionSnapshot().first(where: { $0.sessionId == sessionId }), session.state == "running",
+           session.scopeVerified, session.unknownPIDs.isEmpty, session.application.alive, session.guardian.alive {
+            try await health(manager, routeId: id, guardianSession: sessionId)
+            confirmed = true
             return ["sessionId": session.sessionId, "pid": Int(session.pid), "startedAt": ISO8601DateFormatter().string(from: session.startedAt)]
         }
         if !guardian.isRunning { break }
         try await Task.sleep(nanoseconds: 100_000_000)
     }
-    guardian.terminate(); throw RoutingError.notReady("owned-application-launch-unconfirmed")
+    throw RoutingError.notReady("owned-application-launch-unconfirmed")
 }
 
-private func stop(_ params: [String: Any]) async throws -> [String: Any] {
+func stop(_ params: [String: Any]) async throws -> [String: Any] {
     let id = params["sessionId"] as? String, routeId = params["routeId"] as? String
     guard id != nil || routeId != nil else { throw RoutingError.invalidRequest }
-    let matched = sessions().filter { id != nil ? $0.sessionId == id : $0.routeId == routeId }
+    let matched = try sessionSnapshot().filter { id != nil ? $0.sessionId == id : $0.routeId == routeId }
+    guard !matched.isEmpty else { throw RoutingError.notReady("known-owned-session-required") }
     for session in matched { _ = session.guardian.signal(SIGTERM) }
     for _ in 0..<80 {
-        let latest = sessions().filter { id != nil ? $0.sessionId == id : $0.routeId == routeId }
-        if latest.allSatisfy({ $0.state == "stopped" && !$0.application.alive && $0.children.allSatisfy { !$0.alive } }) {
+        let latest = try sessionSnapshot().filter { id != nil ? $0.sessionId == id : $0.routeId == routeId }
+        guard latest.count == matched.count else { throw RoutingError.notReady("owned-session-journal-is-incomplete") }
+        if latest.allSatisfy({ $0.state == "stopped" && $0.scopeVerified && $0.unknownPIDs.isEmpty &&
+            $0.application.exitConfirmed && $0.children.allSatisfy { $0.exitConfirmed } }) {
             return ["stopped": true]
         }
         try await Task.sleep(nanoseconds: 100_000_000)
@@ -282,61 +461,123 @@ private func stop(_ params: [String: Any]) async throws -> [String: Any] {
     return ["stopped": false, "reason": "child-process-exit-verification-required"]
 }
 
-private func revoke(_ params: [String: Any]) async throws -> [String: Any] {
+func revoke(_ params: [String: Any]) async throws -> [String: Any] {
     guard let id = params["routeId"] as? String else { throw RoutingError.invalidRequest }
-    guard sessions().filter({ $0.routeId == id }).allSatisfy({ !$0.application.alive && $0.children.allSatisfy { !$0.alive } }) else {
+    guard try sessionSnapshot().filter({ $0.routeId == id }).allSatisfy({ $0.state == "stopped" &&
+        $0.scopeVerified && $0.unknownPIDs.isEmpty && $0.application.exitConfirmed &&
+        $0.children.allSatisfy { $0.exitConfirmed } }) else {
         throw RoutingError.notReady("stop-owned-applications-before-revoking-route")
     }
-    if let manager = try? await manager(for: id), manager.connection.status == .connected,
-       let connection = manager.connection as? NETunnelProviderSession {
-        let data = try JSONSerialization.data(withJSONObject: ["method": "revoke", "routeId": id])
-        let response: Data? = try await withCheckedThrowingContinuation { continuation in
-            do { try connection.sendProviderMessage(data) { continuation.resume(returning: $0) } }
-            catch { continuation.resume(throwing: error) }
+    let selected = try await manager(for: id)
+    if selected.connection.status == .connected {
+        let values = try await providerMessage(selected, ["method": "revoke", "routeId": id])
+        guard values["revoked"] as? Bool == true else { throw RoutingError.notReady("route-revocation-unconfirmed") }
+    } else {
+        guard [.disconnected, .invalid].contains(selected.connection.status) else {
+            throw RoutingError.notReady("route-revocation-unconfirmed")
         }
-        guard let response = response, let values = try JSONSerialization.jsonObject(with: response) as? [String: Any],
-              values["revoked"] as? Bool == true else { throw RoutingError.notReady("route-revocation-unconfirmed") }
     }
     // Removing route secrets makes new/provider-restarted flows fail closed. Keep the
     // app mapping enabled rather than disabling the VPN and potentially enabling DIRECT.
-    try store().revoke(id)
+    let runtime = try store()
+    try runtime.revoke(id)
+    let leaseFile = try runtime.url(id, suffix: "lease")
+    var leaseInfo = stat()
+    if lstat(leaseFile.path, &leaseInfo) == 0 { try runtime.removeGuardianLease(id) }
+    else if errno != ENOENT { throw RoutingError.unsafeFile }
     return ["revoked": true, "mappingRetained": true]
 }
 
 private final class ActivationDelegate: NSObject, OSSystemExtensionRequestDelegate {
     var completion: (([String: Any]) -> Void)?
-    func request(_ request: OSSystemExtensionRequest, actionForReplacingExtension existing: OSSystemExtensionProperties, withExtension ext: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction { .replace }
+    func request(_ request: OSSystemExtensionRequest, actionForReplacingExtension existing: OSSystemExtensionProperties, withExtension ext: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction {
+        // Same-version installations also need the preceding full-bundle check.
+        // Never replace existing bytes as a side effect of acceptance or setup.
+        return .cancel
+    }
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) { completion?(["ready": false, "reason": "system-extension-user-approval-required"]); completion = nil }
     func request(_ request: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) { completion?(["ready": false, "reason": result == .completed ? "per-app-profile-and-acceptance-required" : "system-restart-required"]); completion = nil }
     func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) { completion?(["ready": false, "reason": "system-extension-activation-failed"]); completion = nil }
 }
 private var activationDelegate: ActivationDelegate?
 
-private func setup(_ params: [String: Any]) async throws -> [String: Any] {
-    if let application = params["application"] as? [String: Any], let path = application["path"] as? String,
-       let executable = application["executablePath"] as? String {
+func resolveRealm(_ params: [String: Any]) throws -> [String: Any] {
+    guard let application = params["application"] as? [String: Any], let path = application["path"] as? String,
+          let executable = application["executablePath"] as? String else { throw RoutingError.invalidRequest }
+    // Read-only means no generated profile, directory creation, chmod, manager
+    // configuration or extension activation. A missing manifest is not setup.
+    let runtime = try store(readOnly: true)
+    let (identity, requirement) = try validateApplication(path: path, executable: executable)
+    let matches = try runtime.realmMappings().filter { $0.executablePath == executable }
+    guard matches.count == 1, let mapping = matches.first,
+          mapping.signingIdentifier == identity, mapping.designatedRequirement == requirement,
+          mapping.applicationIdentifier == Bundle(url: URL(fileURLWithPath: path))?.bundleIdentifier,
+          let realm = RealmValidation.canonicalUUID(mapping.vpnUUID) else {
+        throw RoutingError.notReady("unique-owned-application-realm-required")
+    }
+    return ["vpnUUID": realm]
+}
+
+func setup(_ params: [String: Any]) async throws -> [String: Any] {
+    if params["application"] != nil || params["applications"] != nil {
         guard hostAuthorized() else { throw RoutingError.notReady(authorizationReason) }
-        let (identity, requirement) = try validateApplication(path: path, executable: executable)
-        let provider = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/SystemExtensions/io.envara.app-routing.proxy.systemextension")
+        let applications: [[String: Any]]
+        if let many = params["applications"] as? [[String: Any]], params["application"] == nil { applications = many }
+        else if let one = params["application"] as? [String: Any], params["applications"] == nil { applications = [one] }
+        else { throw RoutingError.invalidRequest }
+        guard !applications.isEmpty else { throw RoutingError.invalidRequest }
+        let runtime = try store()
+        let profileScope = try await validateInstalledProfileNamespace(runtime: runtime)
+        var mappings = try runtime.realmMappings()
+        var requested: [RealmMapping] = []
+        for application in applications {
+            guard let path = application["path"] as? String, let executable = application["executablePath"] as? String else {
+                throw RoutingError.invalidRequest
+            }
+            let (identity, requirement) = try validateApplication(path: path, executable: executable)
+            guard let bundleIdentifier = Bundle(url: URL(fileURLWithPath: path))?.bundleIdentifier else { throw RoutingError.invalidRequest }
+            let existing = mappings.first { $0.executablePath == executable }
+            let realm = (application["vpnUUID"] as? String) ?? (applications.count == 1 ? params["vpnUUID"] as? String : nil)
+                ?? existing?.vpnUUID ?? UUID().uuidString
+            guard let canonical = RealmValidation.canonicalUUID(realm) else { throw RoutingError.invalidRequest }
+            let mapping = RealmMapping(applicationIdentifier: bundleIdentifier, signingIdentifier: identity,
+                                       designatedRequirement: requirement, executablePath: executable, vpnUUID: canonical)
+            // Reusing the same exact owned entry is idempotent. Changing its realm
+            // or code identity requires an explicit future migration, never a
+            // silent replacement of an application's already installed mapping.
+            if let existing = existing {
+                guard existing == mapping else { throw RoutingError.notReady("existing-application-realm-conflicts-with-request") }
+            } else { mappings.append(mapping) }
+            requested.append(mapping)
+        }
+        // Validate the request itself as well: duplicate entries in one request
+        // must not disappear just because the persisted manifest is idempotent.
+        let provider = providerBundleURL
         let (_, providerRequirement) = try codeIdentity(provider)
-        guard let bundleIdentifier = Bundle(url: URL(fileURLWithPath: path))?.bundleIdentifier else { throw RoutingError.invalidRequest }
-        let profile = try ConfigurationProfile.make(applicationIdentifier: bundleIdentifier,
-                                                   signingIdentifier: identity, designatedRequirement: requirement,
-                                                   executablePath: executable, providerRequirement: providerRequirement)
-        let file = try store().directory.appendingPathComponent("Envara-\(UUID().uuidString).mobileconfig")
-        try store().writePrivate(profile, to: file)
+        _ = try ConfigurationProfile.make(applications: requested, providerRequirement: providerRequirement, namespace: runtimeNamespace)
+        let profile = try ConfigurationProfile.make(applications: mappings, providerRequirement: providerRequirement, namespace: runtimeNamespace)
+        let file = runtime.directory.appendingPathComponent("Envara-owned-realms.mobileconfig")
+        try runtime.writePrivate(profile, to: file)
+        try runtime.writeRealmMappings(mappings)
         // The desktop can present this local profile for explicit system approval.
         // Generating it does not install a profile, change routes, or register a VPN.
-        return ["ready": false, "reason": "per-app-profile-user-installation-required", "profilePath": file.path, "requiresUserApproval": true]
+        return ["ready": false, "reason": "per-app-profile-user-installation-required", "profilePath": file.path,
+                "requiresUserApproval": true, "vpnUUID": requested.count == 1 ? requested[0].vpnUUID : "",
+                "realmCount": mappings.count, "profileConflictScope": profileScope, "globalProfileInventoryVerified": profileScope == "all"]
     }
     guard params["activate"] as? Bool == true else { return ["ready": false, "reason": "signed-extension-and-per-app-profile-required", "requiresUserApproval": true] }
     guard hostAuthorized() else { throw RoutingError.notReady(authorizationReason) }
+    try await activationPreflight()
     return await withCheckedContinuation { continuation in
         let delegate = ActivationDelegate(); activationDelegate = delegate
         delegate.completion = { continuation.resume(returning: $0) }
         let request = OSSystemExtensionRequest.activationRequest(forExtensionWithIdentifier: providerIdentifier, queue: .main)
         request.delegate = delegate
         OSSystemExtensionManager.shared.submitRequest(request)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+            delegate.completion?(["ready": false, "reason": "system-extension-activation-deadline"])
+            delegate.completion = nil
+        }
     }
 }
 
@@ -351,6 +592,7 @@ private func handle(_ request: [String: Any]) async -> [String: Any] {
         switch method {
         case "status": result = await status()
         case "setup": result = try await setup(params)
+        case "resolveRealm": result = try resolveRealm(params)
         case "prepareRoute": result = try await prepare(params)
         case "launch": result = try await launch(params)
         case "stop": result = try await stop(params)
@@ -363,22 +605,45 @@ private func handle(_ request: [String: Any]) async -> [String: Any] {
     return response
 }
 
-guard CommandLine.arguments.contains("--rpc") || CommandLine.arguments.contains("--guardian") else {
-    // The helper is not a general-purpose application launcher.
-    FileHandle.standardError.write(Data("Use the Envara desktop application.\n".utf8)); exit(64)
+#if ENVARA_NATIVE_ROUTING_ACCEPTANCE
+let rpcFlag = "--acceptance-rpc", guardianFlag = "--acceptance-guardian"
+#else
+let rpcFlag = "--rpc", guardianFlag = "--guardian"
+#endif
+guard CommandLine.arguments.count == 2,
+      CommandLine.arguments[1] == rpcFlag || CommandLine.arguments[1] == guardianFlag else {
+    FileHandle.standardError.write(Data("Use the Envara desktop application or its dedicated acceptance tool.\n".utf8)); exit(64)
 }
 let input = FileHandle.standardInput.readDataToEndOfFile()
-guard input.count <= 1_048_576, let request = try? JSONSerialization.jsonObject(with: input) as? [String: Any] else {
-    FileHandle.standardOutput.write(Data("{\"protocol\":\"envara.application-routing\",\"version\":1,\"id\":null,\"error\":{\"code\":\"invalidRequest\",\"message\":\"Invalid request\"}}\n".utf8)); exit(65)
-}
+guard input.count <= 1_048_576, let request = try? JSONSerialization.jsonObject(with: input) as? [String: Any] else { exit(65) }
 Task {
-    if CommandLine.arguments.contains("--guardian") {
-        do { try await runGuardian(request); exit(0) } catch { exit(70) }
+    if CommandLine.arguments[1] == guardianFlag {
+        do {
+            #if ENVARA_NATIVE_ROUTING_ACCEPTANCE
+            try await runGuardian(request, acceptanceOnly: true)
+            #else
+            try await runGuardian(request)
+            #endif
+            exit(0)
+        } catch { exit(70) }
     }
+    #if ENVARA_NATIVE_ROUTING_ACCEPTANCE
+    let response = await handleAcceptance(request)
+    #else
     let response = await handle(request)
+    #endif
     if let output = try? JSONSerialization.data(withJSONObject: response, options: [.sortedKeys]) {
         FileHandle.standardOutput.write(output + Data([10]))
     }
     exit(0)
 }
-dispatchMain()
+// Only the explicit, authorized activation operation starts the AppKit host
+// lifecycle required for the OS authorization UI. Status never activates it.
+let explicitActivation = CommandLine.arguments[1] == rpcFlag &&
+    ((request["method"] as? String == "setup" || request["method"] as? String == "activateExtension") &&
+     (request["params"] as? [String: Any])?["activate"] as? Bool == true) && hostAuthorized()
+if explicitActivation {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    app.run()
+} else { dispatchMain() }

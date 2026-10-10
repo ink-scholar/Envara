@@ -18,8 +18,21 @@ do {
     let provider = try RoutingSigningAuthorization.validateProfile(Data(contentsOf: URL(fileURLWithPath: extensionPath)), certificate: certificate,
                        bundleIdentifier: RoutingSigningAuthorization.providerIdentifier, host: false, mode: mode, devices: devices)
     guard host.team == provider.team, host.certificateSHA256 == provider.certificateSHA256 else { throw RoutingError.notReady("host-provider-signing-team-mismatch") }
-    let result: [String: Any] = ["verified": true, "mode": mode.rawValue, "networkEntitlement": mode.networkEntitlement,
+    var result: [String: Any] = ["verified": true, "mode": mode.rawValue, "networkEntitlement": mode.networkEntitlement,
                                "host": host.dictionary, "provider": provider.dictionary]
+    if let path = request["providerBundle"] as? String {
+        let bundle = URL(fileURLWithPath: path)
+        guard path.hasPrefix("/"), bundle.resolvingSymlinksInPath().path == path,
+              path.hasSuffix(".systemextension") else { throw RoutingError.invalidRequest }
+        let reused = try RoutingSigningAuthorization.validateBundle(bundle,
+            expectedIdentifier: RoutingSigningAuthorization.providerIdentifier, host: false, mode: mode, devices: devices)
+        guard reused.team == provider.team, reused.certificateSHA256 == provider.certificateSHA256,
+              reused.profileSHA256 == provider.profileSHA256,
+              reused.applicationIdentifier == provider.applicationIdentifier else {
+            throw RoutingError.notReady("reused-provider-signing-authorization-mismatch")
+        }
+        result["providerBundle"] = reused.dictionary
+    }
     FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]))
 } catch {
     // Avoid Foundation errors containing private provisioning-profile paths.

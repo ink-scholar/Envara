@@ -20,3 +20,17 @@ test('independent terminal workspace notifications omit credentials and privileg
   const event = { sessionId: 'term_a', profileId: 'prof_a', sequence: 3, status: 'running' };
   assert.equal(terminalViewSnapshot(event), event);
 });
+
+test('detached terminal retains saved timezone and failed-context provenance without private network details', () => {
+  const profile = { id: 'prof_a', resolvedTimezone: null, timezoneSource: null,
+    selectedLocation: { confirmed: true, timezone: 'Asia/Manila', label: 'private address' },
+    network: { ok: false, password: 'private-password', ip: '8.8.8.8' }, networkLastError: 'private diagnostic' };
+  const result = terminalViewSnapshot({ profiles: [profile], system: { platform: 'darwin' } });
+  assert.equal(result.profiles[0].savedNetworkTimezone, 'Asia/Manila');
+  assert.equal(result.profiles[0].networkContextUnavailable, true);
+  assert.equal(result.profiles[0].resolvedTimezone, null);
+  assert.equal(result.profiles[0].timezoneSource, null);
+  assert.equal(JSON.stringify(result).includes('private'), false);
+  assert.equal(result.profiles[0].network, undefined);
+  assert.equal(result.profiles[0].selectedLocation, undefined);
+});

@@ -3,10 +3,12 @@ import net from 'node:net';
 import { spawn as spawnChild, execFile } from 'node:child_process';
 import { networkInterfaces } from 'node:os';
 import { promisify } from 'node:util';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createReadStream, constants } from 'node:fs';
 import { access, chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
+import { resolveProxyBootstrapHost } from './proxy-bootstrap-dns.mjs';
+import { isPublicIP } from './proxy-network.mjs';
 
 export const PROXY_CORE_VERSION = 'v1.19.32';
 // IP-addressed DoH bootstraps the node without consulting host VPN fake-IP DNS.
@@ -36,6 +38,13 @@ export async function detectMacPhysicalInterface({ command = execute, interfaces
     throw fail('PROXY_CORE_INTERFACE_UNAVAILABLE', '未找到可用的默认物理网络接口，请连接网络后重试。');
   }
 }
+export function bootstrapLocalAddress(interfaceName, interfaces = networkInterfaces()) {
+  const address = interfaces[interfaceName]?.find(item => !item.internal && ['IPv4', 4].includes(item.family) && net.isIP(item.address) === 4)?.address;
+  if (!physicalInterfacePattern.test(interfaceName ?? '') || !address) throw fail('PROXY_CORE_INTERFACE_UNAVAILABLE', '节点解析需要默认物理接口的 IPv4 地址。');
+  // This binds the owned HTTPS socket's source address; it does not change routes
+  // or claim that an arbitrary system VPN cannot capture that socket.
+  return address;
+}
 function isLoopbackHost(host) {
   return host === 'localhost' || host.endsWith('.localhost') || host === '::1' ||
     (net.isIP(host) === 4 && host.startsWith('127.'));
@@ -63,8 +72,9 @@ export function anyTlsSettings(input) {
     skipCertVerify: input.skipCertVerify ?? false, clientFingerprint, alpn: [...alpn], udp: input.udp ?? true };
 }
 
-export function anyTlsCoreConfig(settings, local, { interfaceName } = {}) {
+export function anyTlsCoreConfig(settings, local, { interfaceName, resolvedServer } = {}) {
   if (interfaceName != null && !physicalInterfacePattern.test(interfaceName)) throw fail('PROXY_CORE_INTERFACE_UNAVAILABLE', '默认物理网络接口无效。');
+  if (resolvedServer != null && (net.isIP(resolvedServer) !== 4 || !isPublicIP(resolvedServer))) throw fail('PROXY_CORE_BOOTSTRAP_UNAVAILABLE', '节点解析未返回有效的公开 IPv4 地址。');
   const resolvers = PROXY_CORE_BOOTSTRAP_DNS.map(url => interfaceName ? `${url}#${interfaceName}` : url);
   return {
     'mixed-port': local.port,
@@ -85,7 +95,7 @@ export function anyTlsCoreConfig(settings, local, { interfaceName } = {}) {
     ntp: { enable: false, 'write-to-system': false },
     profile: { 'store-selected': false, 'store-fake-ip': false },
     'proxy-providers': {}, 'rule-providers': {}, 'proxy-groups': [], listeners: [], tunnels: [],
-    proxies: [{ name: 'ENVARA_ANYTLS', type: 'anytls', server: settings.host, port: settings.port,
+    proxies: [{ name: 'ENVARA_ANYTLS', type: 'anytls', server: resolvedServer ?? settings.host, port: settings.port,
       password: settings.password, sni: settings.serverName,
       ...(interfaceName ? { 'interface-name': interfaceName } : {}),
       'skip-cert-verify': settings.skipCertVerify, 'client-fingerprint': settings.clientFingerprint,
@@ -154,7 +164,8 @@ export class ProxyCoreManager {
   constructor({ dataDir, resourcesDir, resolveBinary, spawn = spawnChild, choosePort = freePort, verifyRecoveryPort = checkRecoveryPort,
     probeListener = probeCoreListener, onChange = () => {}, startupTimeoutMs = 8000,
     retryDelayMs = 75, portAttempts = 3, stopTimeoutMs = 1500, platform = process.platform,
-    detectInterface = detectMacPhysicalInterface } = {}) {
+    detectInterface = detectMacPhysicalInterface, resolveBootstrapHost = resolveProxyBootstrapHost,
+    bootstrapAddress = bootstrapLocalAddress } = {}) {
     if (!path.isAbsolute(dataDir ?? '') || !path.isAbsolute(resourcesDir ?? '')) throw fail('INVALID_PROXY_CORE_PATH', '代理内核目录无效。');
     this.baseDir = path.join(dataDir, 'proxy-core'); this.resourcesDir = resourcesDir;
     this.resolveBinary = resolveBinary ?? (() => this._bundledBinary());
@@ -162,6 +173,7 @@ export class ProxyCoreManager {
     this.startupTimeoutMs = startupTimeoutMs; this.retryDelayMs = retryDelayMs;
     this.portAttempts = portAttempts; this.stopTimeoutMs = stopTimeoutMs;
     this.platform = platform; this.detectInterface = detectInterface;
+    this.resolveBootstrapHost = resolveBootstrapHost; this.bootstrapAddress = bootstrapAddress;
     this.routes = new Map(); this.queues = new Map(); this.generations = new Map(); this.closed = false;
     this.binary = null; this.binaryPromise = null; this.resourceError = null;
   }
@@ -239,7 +251,7 @@ export class ProxyCoreManager {
       const recoveryWire = existing?.digest === digest ? (existing.recoveryWire ? { ...existing.recoveryWire } :
         existing.status === 'running' && existing.wire ? { ...existing.wire } : null) : null;
       if (existing) await this._stop(existing);
-      const route = { key, digest, controller: new AbortController(), status: 'starting', child: null, directory: null, exited: false,
+      const route = { key, digest, routeIdentity: randomUUID(), coreGeneration: null, controller: new AbortController(), status: 'starting', child: null, directory: null, exited: false,
         recoveryWire, interfaceName };
       this.routes.set(key, route);
       const onAbort = () => route.controller.abort();
@@ -247,6 +259,14 @@ export class ProxyCoreManager {
       if (signal?.aborted) onAbort();
       try {
         await this.initialize(); this._assertLive(route);
+        let resolvedServer;
+        if (this.platform === 'darwin' && !isLoopbackHost(settings.host) && !net.isIP(settings.host)) {
+          const localAddress = this.bootstrapAddress(interfaceName);
+          try { resolvedServer = await this.resolveBootstrapHost(settings.host, { localAddress, signal: route.controller.signal }); }
+          catch { this._assertLive(route); throw fail('PROXY_CORE_BOOTSTRAP_UNAVAILABLE', '无法安全解析节点入口；未切换为系统 DNS 或直接连接。'); }
+          if (net.isIP(resolvedServer) !== 4 || !isPublicIP(resolvedServer)) throw fail('PROXY_CORE_BOOTSTRAP_UNAVAILABLE', '节点解析未返回有效的公开 IPv4 地址。');
+          this._assertLive(route);
+        }
         const deadline = Date.now() + this.startupTimeoutMs;
         const attempts = recoveryWire ? 1 : this.portAttempts;
         for (let attempt = 0; attempt < attempts; attempt++) {
@@ -260,9 +280,10 @@ export class ProxyCoreManager {
           route.wire = recoveryWire ? { ...recoveryWire } : { protocol: 'http', host: '127.0.0.1', port,
             username: randomBytes(16).toString('hex'), password: randomBytes(32).toString('hex') };
           const config = path.join(route.directory, 'config.json');
-          await writeFile(config, JSON.stringify(anyTlsCoreConfig(settings, route.wire, { interfaceName })), { mode: 0o600, flag: 'wx' });
+          await writeFile(config, JSON.stringify(anyTlsCoreConfig(settings, route.wire, { interfaceName, resolvedServer })), { mode: 0o600, flag: 'wx' });
           await chmod(config, 0o600); this._assertLive(route);
           route.exited = false; route.bindCollision = false;
+          route.coreGeneration = randomUUID();
           route.child = this.spawn(this.binary, ['-d', route.directory, '-f', config], {
             cwd: route.directory, env: this._environment(route.directory), windowsHide: true,
             stdio: ['ignore', 'pipe', 'pipe'], shell: false,
@@ -314,7 +335,7 @@ export class ProxyCoreManager {
         }
         await this._stop(route);
         if (error.code === 'PROXY_CORE_CANCELLED') throw error;
-        if (['PROXY_CORE_UNAVAILABLE', 'PROXY_CORE_START_FAILED', 'PROXY_CORE_START_TIMEOUT', 'PROXY_CORE_STORAGE_FAILED', 'PROXY_CORE_INTERFACE_UNAVAILABLE'].includes(error.code)) throw error;
+        if (['PROXY_CORE_UNAVAILABLE', 'PROXY_CORE_START_FAILED', 'PROXY_CORE_START_TIMEOUT', 'PROXY_CORE_STORAGE_FAILED', 'PROXY_CORE_INTERFACE_UNAVAILABLE', 'PROXY_CORE_BOOTSTRAP_UNAVAILABLE'].includes(error.code)) throw error;
         throw fail('PROXY_CORE_START_FAILED', '内置 AnyTLS 内核未能启动，请重试或检查完整安装包。');
       } finally { signal?.removeEventListener('abort', onAbort); }
     });
@@ -337,6 +358,15 @@ export class ProxyCoreManager {
     route.recoveryWire = null;
     if (this.routes.get(route.key) === route) this.routes.delete(route.key);
     route.status = 'stopped'; this._changed({ id: route.key, status: 'stopped' });
+  }
+  /** Private lifecycle evidence, never credentials or a renderer readiness receipt. */
+  routingIdentity(proxyOrId) {
+    const key = typeof proxyOrId === 'string' ? proxyOrId : this._key(proxyOrId, anyTlsSettings(proxyOrId));
+    const route = this.routes.get(key);
+    if (this.closed || route?.status !== 'running' || route.exited || route.controller.signal.aborted || !route.wire ||
+        !Number.isSafeInteger(route.child?.pid) || route.child.pid < 1 || !route.coreGeneration) return null;
+    return { proxyId: key, nodeType: 'anytls', routeIdentity: route.routeIdentity,
+      coreGeneration: route.coreGeneration, corePid: route.child.pid, coreVersion: PROXY_CORE_VERSION };
   }
   async release(proxyOrId) {
     const key = typeof proxyOrId === 'string' ? proxyOrId : this._key(proxyOrId, anyTlsSettings(proxyOrId));

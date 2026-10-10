@@ -6,6 +6,11 @@ build/native/
 build/proxy-core/
 build/app-routing/
 build/development-app-routing/
+build/acceptance-app-routing/
+build/local-authorization/
+build/local-verification/
+build/local-carrier-verification/
+native/macos-pf-routing/build/
 .DS_Store
 *.log
 .env*
@@ -18,3 +23,5 @@ playwright-report/
 *.key
 *.p12
 *.pfx
+__pycache__/
+*.py[cod]

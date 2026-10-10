@@ -11,6 +11,13 @@ import { fileURLToPath } from 'node:url';
 import * as asar from '@electron/asar';
 import { minimatch } from 'minimatch';
 import { NativeApplicationRouting, publicApplicationRoutingStatus } from '../electron/application-routing.mjs';
+import { MacOSApplicationRouting } from '../electron/macos-application-routing.mjs';
+import { MacOSPFApplicationRouting } from '../electron/macos-pf-application-routing.mjs';
+import { inspectDependency } from '../native/macos-local-routing/dependency.mjs';
+import { PF_INSTALLATION_SCHEMA, PF_MANIFEST_FILES, inspectPFBundledComponent } from '../native/macos-pf-routing/controller.mjs';
+import { driverArtifacts, NODE_VERSION } from './prepare-playwright-driver.mjs';
+import { PROXY_CORE_VERSION, PROXY_CORE_COMMIT, proxyCoreArtifacts } from './prepare-proxy-core.mjs';
+import { PF_RUNTIME_MODULE_FILES } from './build-macos-pf-routing.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const posix = value => value.split(path.sep).join('/');
@@ -116,6 +123,129 @@ function resourceFilter(patterns = ['**/*']) {
   return relative => !relative || ((!positive.length || positive.some(pattern => minimatch(relative, pattern, { dot: true }))) && !negative.some(pattern => minimatch(relative, pattern, { dot: true })));
 }
 
+/** Resource integrity only: never installs, activates, or executes the PF payload. */
+export async function inspectPFRoutingResources({ resourceRoot, arch = process.arch, sourceRoot = projectRoot } = {}) {
+  assert.ok(path.isAbsolute(resourceRoot ?? ''), 'PF resource root must be absolute');
+  assert.ok(['arm64', 'x64'].includes(arch), 'Unsupported PF resource architecture');
+  const manifest = JSON.parse(await readFile(path.join(resourceRoot, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.schema, PF_INSTALLATION_SCHEMA);
+  assert.equal(manifest.component, 'envara-pf-routing'); assert.equal(manifest.version, '1');
+  assert.equal(manifest.backend, 'pf-utun'); assert.equal(manifest.platform, 'darwin'); assert.equal(manifest.arch, arch);
+  assert.equal(manifest.ready, false, 'Bundled resources cannot advertise production readiness');
+  assert.equal(manifest.nativeAcceptance, false, 'Resource build is not native routing acceptance');
+  assert.ok(manifest.files && typeof manifest.files === 'object' && !Array.isArray(manifest.files));
+  assert.deepEqual(Object.keys(manifest.files).sort(), Object.keys(PF_MANIFEST_FILES).sort(), 'PF manifest file contract differs');
+  const expectedLeaves = [...Object.keys(PF_MANIFEST_FILES), 'manifest.json', 'EnvaraPFInstall'].sort();
+  const rows = await inventory(resourceRoot);
+  assert.deepEqual(rows.filter(row => row.kind !== 'directory').map(row => row.relative).sort(), expectedLeaves, 'PF resource inventory differs');
+  for (const row of rows) {
+    assert.notEqual(row.kind, 'symlink', 'PF resources must not contain symlinks');
+    assert.ok(['file', 'directory'].includes(row.kind), 'PF resources must be ordinary files/directories');
+  }
+  for (const [name, executable] of Object.entries(PF_MANIFEST_FILES)) {
+    const filename = path.join(resourceRoot, name), info = await lstat(filename);
+    assert.ok(info.isFile() && !info.isSymbolicLink(), `${name} must be a regular file`);
+    assert.match(manifest.files[name], /^[0-9a-f]{64}$/, `${name} has no SHA-256`);
+    assert.equal(await sha256File(filename), manifest.files[name], `${name} differs from PF manifest`);
+    assert.equal((info.mode & 0o111) !== 0, executable, `${name} executable permission differs`);
+  }
+  for (const name of ['node', 'mihomo', 'envara-pf-native', 'EnvaraPFInstall', 'fixtures/EnvaraRoutingAcceptanceFixture']) {
+    assert.deepEqual(await binaryTarget(path.join(resourceRoot, name)), { platform: 'darwin', arch }, `${name} binary target differs`);
+  }
+  assert.ok((await lstat(path.join(resourceRoot, 'EnvaraPFInstall'))).mode & 0o111, 'PF installer must be executable');
+  const nodeArtifact = driverArtifacts('darwin', arch);
+  assert.equal(manifest.node?.version, NODE_VERSION); assert.equal(manifest.node?.archiveSha256, nodeArtifact.nodeArchiveSha256);
+  assert.equal(manifest.node?.source, nodeArtifact.nodeUrl);
+  assert.ok(manifest.nativeSourceFiles && typeof manifest.nativeSourceFiles === 'object' && !Array.isArray(manifest.nativeSourceFiles),
+    'PF manifest must record native source SHA-256 values');
+  const fixtureDirectory = path.join(sourceRoot, 'native/macos-pf-routing/fixture');
+  const fixtureInfo = await lstat(fixtureDirectory);
+  assert.ok(fixtureInfo.isDirectory() && !fixtureInfo.isSymbolicLink(),
+    'PF fixture sources must be a regular directory');
+  const fixtureSources = (await readdir(fixtureDirectory)).filter(name => name.endsWith('.swift')).sort();
+  assert.ok(fixtureSources.length > 0, 'PF fixture compilation sources are absent');
+  const requiredNativeSources = [
+    ...['Makefile', 'native.h', 'main.c', 'launcher.c', 'tunnel.c', 'transport.c', 'authorize-install.c',
+      'installer-upgrade-f8.h', 'known-installations/f8.manifest.json',
+      'installer-upgrade-e940.h', 'known-installations/e940.manifest.json',
+      'installer-upgrade-518.h', 'known-installations/518.manifest.json',
+      'installer-upgrade-2a7.h', 'known-installations/2a7.manifest.json',
+      'installer-upgrade-832.h', 'known-installations/832.manifest.json',
+      'installer-upgrade-ff9.h', 'known-installations/ff9.manifest.json',
+      'installer-upgrade-6f8.h', 'known-installations/6f8.manifest.json',
+      'installer-upgrade-199.h', 'known-installations/199.manifest.json',
+      'installer-upgrade-46a.h', 'known-installations/46a.manifest.json',
+      'installer-upgrade-c37.h', 'known-installations/c37.manifest.json',
+      'installer-upgrade-f99.h', 'known-installations/f99.manifest.json',
+      'installer-upgrade-05d6.h', 'known-installations/05d6.manifest.json',
+      'installer-upgrade-14b87.h', 'known-installations/14b87.manifest.json',
+      'installer-upgrade-dbcf.h', 'known-installations/dbcf.manifest.json',
+      'installer-upgrade-43b.h', 'known-installations/43b.manifest.json',
+      'installer-upgrade-acfc.h', 'known-installations/acfc.manifest.json',
+      'installer-upgrade-c34.h', 'known-installations/c34.manifest.json', 'pf-hook.c', 'pf-hook.h', 'pf-hook-abi.h', 'pf-run-ledger.c', 'pf-run-ledger.h',
+      'pf-filter-command.c', 'pf-filter-command.h',
+      'pf-filter-transaction.c', 'pf-filter-transaction.h',
+      'app-command.c', 'app-command.h',
+      'app-control.c', 'app-control.h',
+      'app-ticket.c', 'app-ticket.h',
+      'app-registry.c', 'app-registry.h',
+      'app-supervisor.c', 'app-supervisor.h',
+      'gui-launch.m', 'gui-launch.h',
+      'launch-guardian.c', 'launch-guardian.h',
+      'pf-production-filter.c', 'pf-production-filter.h',
+      'app-native-factory.m', 'app-native-factory.h',
+      'journal-retirement.c', 'journal-retirement.h',
+      'app-scope-proof.c', 'app-scope-proof.h',
+      'app-transport.c', 'app-transport.h', 'transport-session.h',
+      'notion-launch.m', 'notion-launch.h'].map(name => `native/macos-pf-routing/${name}`),
+    'scripts/build-macos-pf-routing.mjs',
+    ...fixtureSources.map(name => `native/macos-pf-routing/fixture/${name}`),
+  ].sort();
+  assert.deepEqual(Object.keys(manifest.nativeSourceFiles).sort(), requiredNativeSources, 'PF native source inventory differs');
+  for (const name of requiredNativeSources) {
+    const filename = path.join(sourceRoot, name), info = await lstat(filename);
+    assert.ok(info.isFile() && !info.isSymbolicLink(), `${name} must be a regular native source file`);
+    assert.match(manifest.nativeSourceFiles[name], /^[0-9a-f]{64}$/, `${name} has no native source SHA-256`);
+    assert.equal(manifest.nativeSourceFiles[name], await sha256File(filename), `${name} differs from build-time native source`);
+  }
+  for (const name of PF_RUNTIME_MODULE_FILES) {
+    const filename = path.join(sourceRoot, 'native/macos-pf-routing', name), info = await lstat(filename);
+    assert.ok(info.isFile() && !info.isSymbolicLink(), `${name} must be a regular production source file`);
+    assert.equal(manifest.files[name], await sha256File(filename), `${name} differs from production source`);
+  }
+  const coreArtifact = proxyCoreArtifacts('darwin', arch);
+  const coreRoot = path.join(sourceRoot, 'build/proxy-core');
+  const core = JSON.parse(await readFile(path.join(coreRoot, 'provenance.json'), 'utf8'));
+  assert.equal(core.core, 'mihomo'); assert.equal(core.version, PROXY_CORE_VERSION); assert.equal(core.commit, PROXY_CORE_COMMIT);
+  assert.equal(core.platform, 'darwin'); assert.equal(core.arch, arch); assert.equal(core.binaryName, coreArtifact.binaryName);
+  assert.equal(core.sha256?.archive, coreArtifact.archiveSha256); assert.equal(core.sha256?.sourceArchive, coreArtifact.sourceSha256);
+  assert.equal(core.correspondingSource, 'mihomo-corresponding-source.tar.gz');
+  assert.equal(manifest.mihomo?.version, PROXY_CORE_VERSION); assert.equal(manifest.mihomo?.commit, PROXY_CORE_COMMIT);
+  assert.equal(manifest.mihomo?.sourceArchiveSha256, coreArtifact.sourceSha256);
+  for (const [name, origin, digest] of [
+    ['mihomo', core.binaryName, core.sha256.binary], ['mihomo-LICENSE', 'LICENSE', core.sha256.license],
+    ['mihomo-corresponding-source.tar.gz', core.correspondingSource, core.sha256.correspondingSource],
+    ['mihomo-SOURCE.md', 'SOURCE.md', await sha256File(path.join(coreRoot, 'SOURCE.md'))],
+  ]) {
+    assert.equal(manifest.files[name], digest, `${name} differs from pinned dependency provenance`);
+    assert.equal(await sha256File(path.join(coreRoot, origin)), digest, `${name} source build differs from provenance`);
+  }
+  assert.equal(manifest.files.LICENSE, await sha256File(path.join(sourceRoot, 'LICENSE')), 'PF owned license differs');
+  const staged = path.join(sourceRoot, 'build/app-routing/macos-pf');
+  for (const name of ['node', 'node-LICENSE', 'envara-pf-native', 'EnvaraPFHelper', 'EnvaraPFInstall', 'fixtures/EnvaraRoutingAcceptanceFixture']) {
+    assert.equal(await sha256File(path.join(resourceRoot, name)), await sha256File(path.join(staged, name)), `${name} differs from the prepared source build`);
+  }
+  const bundled = await inspectPFBundledComponent({ root: resourceRoot });
+  assert.equal(bundled.verified, true, 'PF runtime bundled-resource inspector rejected the payload');
+  assert.equal(bundled.installed, false, 'Bundled resources are not a privileged installation');
+  return { verified: true, backend: 'pf-utun', component: 'envara-pf-routing', manifestSha256: await sha256File(path.join(resourceRoot, 'manifest.json')),
+    installerSha256: await sha256File(path.join(resourceRoot, 'EnvaraPFInstall')), platform: 'darwin', arch,
+    manifestFiles: Object.keys(PF_MANIFEST_FILES).length, nodeVersion: NODE_VERSION, mihomoVersion: PROXY_CORE_VERSION,
+    binaryTargetChecked: true, dependencyLicenseAndSourceChecked: true, sourceBuildCompared: true,
+    nativeSourceHashesChecked: true, nativeSourceFiles: requiredNativeSources.length,
+    readOnly: true, installed: false, authorized: false, nativeAcceptance: false, ready: false };
+}
+
 async function verify(options) {
   const sourcePackage = JSON.parse(await readFile(path.join(projectRoot, 'package.json'), 'utf8'));
   // Preflight failures must replace the current attempt's report as well, so a
@@ -175,15 +305,19 @@ async function verify(options) {
       }
       report.files.push(row);
     });
-    for (const prefix of ['electron', 'dist/client']) {
-      const expected = (await inventory(path.join(projectRoot, prefix), relative => prefix === 'electron' && excludedSmoke(relative))).filter(row => row.kind !== 'directory').map(row => `${prefix}/${row.relative}`);
+    await check('native/macos-pf-routing/packaging-pattern', async () => assert.ok(sourcePackage.build.files.includes('native/macos-pf-routing/*.mjs'), 'PF production modules need their explicit ASAR packaging pattern'));
+    for (const prefix of ['electron', 'shared', 'dist/client', 'native/macos-local-routing', 'native/macos-pf-routing']) {
+      const expected = (await inventory(path.join(projectRoot, prefix), relative =>
+        (prefix === 'electron' && excludedSmoke(relative)) || path.posix.basename(relative) === '.gitignore' ||
+        (prefix === 'native/macos-pf-routing' && relative !== '' && !minimatch(relative, '*.mjs', { dot: true }))
+      )).filter(row => row.kind !== 'directory').map(row => `${prefix}/${row.relative}`);
       const actual = [...archiveFiles].filter(([relative, item]) => relative.startsWith(`${prefix}/`) && !item.files).map(([relative]) => relative);
       await check(`${prefix}/inventory`, async () => assert.deepEqual(actual.sort(), expected.sort(), 'Archive file inventory differs; missing/stale/unexpected files'));
       for (const relative of expected) await verifyArchiveEntry(relative);
     }
     await check('electron/smoke-exclusion', async () => assert.ok(!archiveRows.some(relative => relative.startsWith('electron/') && excludedSmoke(relative)), 'Development smoke harness leaked into release'));
     for (const filename of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'build/icon.png']) await verifyArchiveEntry(filename);
-    report.checks.push('All owned Electron production modules and all generated dist/client files compared by SHA-256; development smoke files excluded');
+    report.checks.push('All owned Electron production modules, shared language catalog, macOS local-routing modules, explicitly packaged macOS PF .mjs modules and all generated dist/client files compared by SHA-256; development smoke files excluded');
 
     assert.ok(Array.isArray(sourcePackage.build?.extraResources) && sourcePackage.build.extraResources.length, 'No configured extraResources');
     for (const configured of sourcePackage.build.extraResources) {
@@ -226,6 +360,23 @@ async function verify(options) {
       });
     }
     report.checks.push('Every configured extraResources inventory, file SHA-256, permission mode and symlink compared; .swift-build excluded');
+    await check('resources/app-routing/macos-pf-manifest', async () => {
+      if (target.platform !== 'darwin') return;
+      report.pfResources = await inspectPFRoutingResources({ resourceRoot: path.join(target.resources, 'app-routing/macos-pf'), arch: target.arch });
+      report.checks.push('PF fixed-file manifest, native/Node/installer targets, dependency pins, licenses, corresponding source and source-build hashes verified read-only; bundled does not imply installed, authorized or ready');
+    });
+    await check('resources/app-routing/original-macos-dependency', async () => {
+      if (target.platform !== 'darwin' || process.platform !== 'darwin') return;
+      const appPath = path.join(target.resources, 'app-routing/macos-local/Resources/Mitmproxy Redirector.app');
+      const original = await inspectDependency({ appPath });
+      assert.equal(original.binaryVerified, true, 'Packaged original signature, hashes or dual-architecture identity mismatch');
+      assert.equal(original.gatekeeperAccepted, true, 'Packaged original dependency did not pass Gatekeeper');
+      report.originalMacDependency = { version: original.packageVersion, sourceCommit: original.sourceCommit,
+        signatureVerified: true, gatekeeperAccepted: true, originalIdentityPreserved: true,
+        nativeCaptureTested: false, fullAcceptance: false };
+      assert.ok(!(await inventory(path.join(target.resources, 'app-routing/macos-local'))).some(row => /certificate-truster/i.test(row.relative)), 'Certificate truster must not be packaged');
+      report.checks.push('Original macOS Redirector signature and notarization preserved; certificate-truster excluded; no activation performed');
+    });
     await check('resources/provenance-target', async () => {
       const backend = JSON.parse(await readFile(path.join(target.resources, 'backend/sidecar-provenance.json'), 'utf8'));
       const proxy = JSON.parse(await readFile(path.join(target.resources, 'proxy-core/provenance.json'), 'utf8'));
@@ -242,17 +393,53 @@ async function verify(options) {
         report.nativeRouting = { tested: false, ready: null, expectedReady: false, reason: 'Packaged native helper cannot be executed on this host/architecture' }; return;
       }
       const helperPath = target.platform === 'darwin'
-        ? path.join(target.resources, 'app-routing/macos/EnvaraAppRouting.app/Contents/MacOS/EnvaraAppRoutingHelper')
+        ? path.join(target.resources, 'app-routing/macos-pf/EnvaraPFHelper')
         : path.join(target.resources, 'app-routing/win32', target.arch, 'EnvaraAppRouting.exe');
+      if (target.platform === 'darwin') assert.equal(report.pfResources?.verified, true, 'Refuse to execute an unverified packaged PF helper');
       const adapter = new NativeApplicationRouting({ helperPath, platform: target.platform, timeoutMs: 5000 });
       try {
         const raw = await adapter.request('status');
         report.nativeRouting = { tested: true, helper: posix(path.relative(target.resources, helperPath)), ...publicApplicationRoutingStatus(raw, target.platform) };
         assert.equal(report.nativeRouting.ready, false, 'Current native routing must remain unavailable until complete system acceptance');
         assert.equal(raw.ready, false, 'Helper advertised unexpected readiness');
+        if (target.platform === 'darwin') {
+          assert.equal(raw.backend, 'pf-utun'); assert.equal(raw.readOnly, true); assert.equal(raw.productionReceiptAllowed, false);
+          assert.equal(raw.verification?.native, false); assert.equal(raw.verification?.passed, false);
+          report.nativeRouting.backend = 'pf-utun'; report.nativeRouting.nativeAcceptance = false;
+        }
         report.checks.push('Packaged native helper read-only status round-trip succeeds and readiness remains false; no setup/route/launch called');
       } finally { await adapter.shutdown(); }
     });
+    if (target.platform === 'darwin' && process.platform === 'darwin' && target.arch === process.arch) {
+      await check('resources/app-routing/mac-production-status', async () => {
+        assert.equal(report.pfResources?.verified, true, 'Refuse to execute an unverified packaged PF helper');
+        const adapter = new MacOSPFApplicationRouting({ helperPath: path.join(target.resources, 'app-routing/macos-pf/EnvaraPFHelper') });
+        try {
+          const raw = await adapter.status();
+          report.macProductionRouting = { tested: true, ...raw };
+          assert.equal(raw.backend, 'pf-utun'); assert.equal(raw.component?.name, 'envara-pf-routing');
+          assert.equal(raw.requiresAppleNetworkExtension, false); assert.equal(raw.authorization?.kind, 'privileged-helper');
+          assert.equal(raw.installed, report.nativeRouting.installed); assert.equal(raw.authorized, report.nativeRouting.authorized);
+          assert.equal(raw.ready, false); assert.equal(raw.productionReady, false); assert.equal(raw.protected, false);
+          assert.equal(raw.verification.native, false); assert.equal(raw.verification.passed, false);
+          report.checks.push('Mac production status uses the PF privileged-helper acceptance gates and remains unready; no setup, route, installer, tunnel or application launch called');
+        } finally { await adapter.shutdown(); }
+      });
+      await check('resources/app-routing/mac-legacy-ne-diagnostic-status', async () => {
+        const adapter = new MacOSApplicationRouting({
+          helperPath: path.join(target.resources, 'app-routing/macos/EnvaraAppRouting.app/Contents/MacOS/EnvaraAppRoutingHelper'),
+          peerVerifierPath: path.join(target.resources, 'app-routing/macos-local/EnvaraPeerVerifier'),
+          bundledAppPath: path.join(target.resources, 'app-routing/macos-local/Resources/Mitmproxy Redirector.app'),
+        });
+        try {
+          const raw = await adapter.status();
+          report.macLegacyNERouting = { tested: true, diagnosticOnly: true, ...publicApplicationRoutingStatus(raw, 'darwin') };
+          assert.equal(report.macLegacyNERouting.component?.name, 'Envara · App Proxy');
+          assert.equal(report.macLegacyNERouting.ready, false);
+          report.checks.push('Legacy owned AppProxy status and original Redirector licensing/signature remain separate diagnostics, without activation or launch');
+        } finally { await adapter.shutdown(); }
+      });
+    }
   } catch (error) { recordFailure('verification', error); }
   finally {
     report.passed = report.failures.length === 0;
@@ -266,7 +453,7 @@ async function verify(options) {
   }
 }
 
-try {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) try {
   const options = parseArguments(process.argv.slice(2));
   if (options.help) console.log('Usage: node scripts/verify-package-resources.mjs /absolute/Envara.app|Envara.exe\n       node scripts/verify-package-resources.mjs --resources /absolute/resources --platform darwin|win32|linux --arch arm64|x64|ia32\n       Optional: --build-platform darwin|win32|linux for executable owned ASAR files');
   else await verify(options);

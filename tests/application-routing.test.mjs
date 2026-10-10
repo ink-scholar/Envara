@@ -16,8 +16,46 @@ test('readiness requires complete capabilities and a versioned successful real v
   const capabilities = Object.fromEntries(APPLICATION_ROUTING_CHECKS.map(key => [key, true]));
   const good = { installed: true, authorized: true, ready: true, capabilities, verification: { passed: true, version: 'fixture/1', checks: capabilities } };
   assert.equal(applicationRoutingReady(good), true); assert.equal(applicationRoutingReady({ ...good, verification: null }), false);
+  assert.equal(applicationRoutingReady({ ...good, processScopeVerified: false }), false);
+  const uncertain = publicApplicationRoutingStatus({ ...good, processScopeVerified: false, journalPath: '/private/fixture' });
+  assert.equal(uncertain.ready, false); assert.equal(uncertain.status, 'incomplete');
+  assert.equal(uncertain.processScopeVerified, false); assert.equal(uncertain.journalPath, undefined);
   for (const key of APPLICATION_ROUTING_CHECKS) assert.equal(applicationRoutingReady({ ...good, verification: { ...good.verification, checks: { ...capabilities, [key]: false } } }), false);
   assert.equal(publicApplicationRoutingStatus({ ...good, password: 'private', extra: 'secret' }).password, undefined);
+});
+test('prepared original components expose safe progress without authorizing application launch', () => {
+  const native = { installed: false, authorized: false, ready: false,
+    component: { name: 'mitmproxy-redirector', version: '0.12.11', available: true, verified: true,
+      installed: false, password: 'fixture-private', path: '/fixture/private/path' },
+    capabilities: { tcp: true }, verification: { passed: false, checks: { tcp: true } } };
+  const state = publicApplicationRoutingStatus(native, 'darwin');
+  assert.equal(state.status, 'prepared'); assert.equal(state.ready, false);
+  assert.equal(state.component.name, 'Mitmproxy Redirector');
+  assert.equal(state.verification.checks.tcp, true); assert.equal(state.verification.checks.dns, false);
+  assert.equal(state.component.password, undefined); assert.equal(state.component.path, undefined);
+  assert.equal(applicationRoutingReady(native), false);
+  assert.equal(publicApplicationRoutingStatus({ ...native, component: { ...native.component, verified: false } }).status, 'unavailable');
+  assert.equal(publicApplicationRoutingStatus({ ...native, component: { ...native.component, name: 'fixture-private' } }).component, undefined);
+});
+test('PF readiness cannot borrow legacy checks or a Network Extension authorization', () => {
+  const capabilities = Object.fromEntries([...APPLICATION_ROUTING_CHECKS, 'guard', 'unrelatedApps', 'nativeAcceptance'].map(key => [key, true]));
+  const good = { backend: 'pf-utun', installed: true, authorized: true, ready: true, processScopeVerified: true,
+    authorization: { kind: 'privileged-helper', verified: true }, capabilities,
+    verification: { backend: 'pf-utun', native: true, passed: true, version: 'fixture/1', checks: capabilities } };
+  assert.equal(applicationRoutingReady(good), true);
+  for (const changes of [{ authorization: { kind: 'network-extension', verified: true } }, { processScopeVerified: undefined },
+    { verification: { ...good.verification, native: false } }, { verification: { ...good.verification, backend: 'app-proxy' } }]) {
+    assert.equal(applicationRoutingReady({ ...good, ...changes }), false);
+  }
+  for (const key of ['guard', 'unrelatedApps', 'nativeAcceptance']) {
+    assert.equal(applicationRoutingReady({ ...good, capabilities: { ...capabilities, [key]: false } }), false);
+    assert.equal(applicationRoutingReady({ ...good, verification: { ...good.verification, checks: { ...capabilities, [key]: false } } }), false);
+  }
+  const publicState = publicApplicationRoutingStatus({ ...good, component: { name: 'envara-pf-routing', version: '1', available: true, verified: true },
+    gid: 7100, rootPath: '/private/path', password: 'fixture-private' });
+  assert.equal(publicState.component.name, 'Envara · PF'); assert.equal(publicState.backend, 'pf-utun');
+  assert.equal(publicState.systemChecks.nativeAcceptance, true); assert.equal(publicState.gid, undefined);
+  assert.equal(publicState.password, undefined); assert.equal(publicState.rootPath, undefined);
 });
 test('helper RPC carries credentials only in private stdin; argv and helper env contain no host secrets', async t => {
   const adapter = await helper(t, `let raw='';process.stdin.on('data',c=>raw+=c);process.stdin.on('end',()=>{const r=JSON.parse(raw);process.stdout.write(JSON.stringify({protocol:r.protocol,version:r.version,id:r.id,result:{method:r.method,received:r.params.route.password,argv:process.argv.slice(2),env:Object.keys(process.env)}}));});`);

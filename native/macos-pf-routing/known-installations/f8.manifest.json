@@ -1,0 +1,50 @@
+{
+  "schema": "envara.macos-pf-installation/v1",
+  "component": "envara-pf-routing",
+  "version": "1",
+  "backend": "pf-utun",
+  "platform": "darwin",
+  "arch": "arm64",
+  "ready": false,
+  "nativeAcceptance": false,
+  "node": {
+    "version": "24.18.0",
+    "archiveSha256": "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
+    "source": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-darwin-arm64.tar.gz"
+  },
+  "mihomo": {
+    "version": "v1.19.32",
+    "commit": "88dcbf7f1614a67c3b36b848ee3592dfa92ada36",
+    "sourceArchiveSha256": "77643ec763a92b330a0b4a44870f78ee05c08792897e7f5e40a3654415c5f077"
+  },
+  "files": {
+    "node": "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a",
+    "node-LICENSE": "148eacf7863ef4329224a29398623077200a27194aa075569faf4a0a85566ca5",
+    "mihomo": "94a386ec0149080deadd86b1f667363bde3c70f7489dba3258e52c56fc9a6d66",
+    "mihomo-LICENSE": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "mihomo-SOURCE.md": "abba5783d51be50d72260f6dea97e3df7b4e6e0cc32a46339cfe357c719e66a0",
+    "mihomo-corresponding-source.tar.gz": "6859f30fa7ef47eea24a535e52711d91026adeac905768443aaf1d6f5955dddb",
+    "envara-pf-native": "48e82cbe86f7560895eae37d4c9238693cb272c846e57193a5890be869ef132a",
+    "helper.mjs": "b5cba337a5a019d70577aa4f213aaff65dc4e211c7603e85249d48761f167cee",
+    "controller.mjs": "b384ee4278c470a7dad591834bc35bb3cfe348e73bcf770a20a2e1c6c31b7029",
+    "policy.mjs": "c484229340e088c08c34e20594e4818baf518dbc7581174be34caec5efee2727",
+    "EnvaraPFHelper": "89b32f784003031c3b005898ac2b2e601edeff5ef91e9a4e60dcf5e0d59ff345",
+    "LICENSE": "c5c17ea1c06b26cb4a04e72bef9072dbb6ef52cb36b721a9ee2b98b29e66bc28",
+    "fixtures/EnvaraRoutingAcceptanceFixture": "85bfa04fdfede1a37553b7b70cef1bed08f3cb19a6e7321ef97f1cef40ae07d6"
+  },
+  "nativeSourceFiles": {
+    "native/macos-pf-routing/Makefile": "deb49830f3cfb20070838d81d16038b2f50a5cb30bd396e5bdc0a7dc18a45b05",
+    "native/macos-pf-routing/native.h": "9a84b78857271ff9936aa5dc2da8d57cb2274e78236f4638503de0553190a684",
+    "native/macos-pf-routing/main.c": "e90173ba5868665fdc95e72eabe2bf2604dab342a7ac4c73ecbf2e88f190619c",
+    "native/macos-pf-routing/launcher.c": "8709f45e20e891cb8ed66dc485f4717e15a6205437caab12cadfee7dea392b95",
+    "native/macos-pf-routing/tunnel.c": "e9959858b2009f415e85e92ef590403ec1b780e7df8802a8886e443baadfd6d9",
+    "native/macos-pf-routing/transport.c": "6c9c50c5f3217acaac9b60d8b93fbf7b223826b6bd4d9f55632f8dd7522087b9",
+    "native/macos-pf-routing/authorize-install.c": "22833ad75763ddfecfad26de77348cc4f0506e534958ed082037d29761641fe6",
+    "native/macos-pf-routing/fixture/Entry.swift": "12eadef6e685bc5ca1e2541255935406bc849f55cbfb1b00afa339c6a10c87aa",
+    "native/macos-pf-routing/fixture/FixtureRuntime.swift": "cba39d50678fff412bf234c9bb35698d49389ac3c9771c0128bc64ee237a9e7c",
+    "native/macos-pf-routing/fixture/FixtureProbe.swift": "94f902bee0f19b826876564d1648b0b8f2ed766fb5a4a4fd8b368ef8bef46cd7",
+    "native/macos-pf-routing/fixture/FixtureProtocol.swift": "8b6b56af239149e1527582792ff7e7f98eee5ac59686f5ad478da9d08060e3f7",
+    "native/macos-pf-routing/fixture/ProcessIdentity.swift": "2388605ba5677bb0ea8d84580ae8e7923be2279456c99c3a4d0ab92b0bd7481c",
+    "scripts/build-macos-pf-routing.mjs": "ad4097c6bf547ee2ed256624ece82f44e52df7d13c36e2464e7d2d339f3d5886"
+  }
+}

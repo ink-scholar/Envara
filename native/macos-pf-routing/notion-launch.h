@@ -1,0 +1,52 @@
+#ifndef ENVARA_NOTION_LAUNCH_H
+#define ENVARA_NOTION_LAUNCH_H
+#include "app-registry.h"
+
+#define ENVARA_NOTION_DATA_ROOT "/Library/PrivilegedHelperTools/io.envara.pf-app-data"
+#define ENVARA_NOTION_SUPPORTED_VERSION "7.34.0"
+#define ENVARA_NOTION_SUPPORTED_VERSION_ADDITIONAL "7.37.1"
+#define ENVARA_NOTION_ELECTRON_VERSION "43.6.0"
+#define ENVARA_NOTION_READY 0
+
+/* Native private context only. The live factory binds this port to a held-open
+ * unique front listener, exact realm socket-GID FILTER admission, no lo0 skip,
+ * front process birth and this registration/environment/run. Not wire argv,
+ * a proxy environment variable, a caller selected path, or a readiness proof. */
+struct envara_notion_context {
+    char registration_id[37];
+    uint16_t front_port;
+};
+struct envara_notion_plan {
+    int ready, protected_ready, resumed;
+    char user_data[PATH_MAX];
+    char arguments[9][PATH_MAX];
+};
+/* Read-only exact original signed version inspection. Never loads ASAR code. */
+int envara_notion_supported(const struct envara_gui_manifest *manifest);
+const char *envara_notion_dns_profile(void);
+/* First-app scope: all outbound socket traffic is denied except this exact
+ * held IPv4 TCP front. Nonproxy Node/QUIC/UDP requests fail. No generic routing
+ * claim follows; external Mach/XPC delegates still require actual acceptance. */
+int envara_notion_scoped_profile(uint16_t front_port, char *out, size_t capacity);
+/* Fixed native activation only. Creates root-owned nonwritable ancestors and
+ * an exact console-owned 0700 UserData leaf. Never called by plan/status; no
+ * caller path, chmod of preexisting data, deletion or original modification. */
+int envara_notion_data_prepare(const struct envara_app_registration *app,
+    const struct envara_gui_request *request, const struct envara_notion_context *context,
+    const struct envara_gui_stage_authority *authority);
+/* Only an existing signed root-sealed registered snapshot and pre-created
+ * console-owned 0700 UserData under root nonwritable ancestors are accepted.
+ * Missing data allocation refuses; plan/status never creates directories. */
+int envara_notion_plan(const struct envara_app_registration *app,
+    const struct envara_gui_request *request, const struct envara_notion_context *context,
+    struct envara_notion_plan *out);
+/* Real cold stage via Apple sandbox-exec with fixed DNS broker exclusions and
+ * fixed Electron SOCKS/host-resolver/user-data-dir/locale arguments. The fixed
+ * native authority must re-attest actual front admission, realm deny, original
+ * utun/core and session before fork; this library installs no PF or route.
+ * Does not resume. Flags and profile coverage for this signed Notion version,
+ * external helpers, keychain/TCC and whole-guard remain acceptance gates. */
+int envara_notion_stage(const struct envara_app_registration *app,
+    const struct envara_gui_request *request, const struct envara_notion_context *context,
+    const struct envara_gui_stage_authority *authority, struct envara_gui_lifecycle *out);
+#endif

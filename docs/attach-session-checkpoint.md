@@ -11,9 +11,22 @@ Everything attached must still leave through its environment's network.
 
 ## Status
 
-**Phase 1 code is written but NOT verified.** Nothing in this checkpoint has been compiled, tested,
-packaged or exercised on real hardware yet. Treat every claim below as "the code now does this",
-not "this works".
+**Phase 1 is compiled, tested and packaged; not yet exercised on real hardware.**
+
+- Built and packaged at `release/mac-arm64/Envara.app`, component manifest
+  `7beb7b50ced9…`, carrier `265ba4078a35…`; both match `PF_NOTION_TRIAL_CANDIDATE`
+  and the packaged-resource verification passes.
+- Full suite green (1611 tests, 1609 pass, 2 skip, 0 fail).
+- **The first packaged build could not update the installed component at all.** The
+  `03245359` snapshot header had been generated and included in `authorize-install.c`
+  but was never added to the `known_prior_snapshots[]` table, so the carrier
+  classified the installed component as unrecognized and refused with
+  `existing-installation-conflict`. Fixed and rebuilt; the packaged carrier now
+  recognizes it.
+- Hardware verification (one password per launch, runs until stopped, survives
+  sleep, clean quit) is still outstanding and is what the user is testing next.
+
+Everything below in "What changed" describes the code, not verified behaviour.
 
 ## What changed (phase 1)
 

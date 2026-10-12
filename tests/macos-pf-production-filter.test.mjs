@@ -58,7 +58,8 @@ typedef struct {
 } Fixture;
 static int is(Fixture *f, const char *scenario) { return !strcmp(f->scenario, scenario); }
 static EnvaraPFProductionConfig config(void) {
-    EnvaraPFProductionConfig value = {0}; strcpy(value.run_id, "a85314b8-5b24-4784-95ec-47b739c2e841");
+#define RUN_ID "a85314b8-5b24-4784-95ec-47b739c2e841"
+    EnvaraPFProductionConfig value = {0}; strcpy(value.run_id, RUN_ID);
     strcpy(value.realm_id, "00112233-4455-4677-8899-aabbccddeeff"); value.gid = 7111;
     strcpy(value.utun, "utun911"); value.route_ipv4[0] = 198; value.route_ipv4[1] = 18;
     value.route_ipv4[2] = 11; value.route_ipv4[3] = 1; value.listener_fd = 124; value.tcp_front_port = 49151;
@@ -346,6 +347,26 @@ static void model_front_credentials(const EnvaraPFProductionConfig *value) {
 int main(int argc, char **argv) {
     assert(argc == 2); EnvaraPFProductionConfig value = config();
     if (!strcmp(argv[1], "model-front-credentials")) { model_front_credentials(&value); return 0; }
+    if (!strcmp(argv[1], "dump-sibling-anchor")) {
+        /* Per-application rules live in their own top-level anchor. A nested
+         * path is 90 bytes while both the plan anchor and the rule owner field
+         * hold 64, so the shared root hook reaches each application by a fixed
+         * call line rather than by nesting. Each anchor stays within the owner
+         * field that must carry it.
+         */
+        ProductionPlan plan; assert(production_plan(&value, ENVARA_PF_PRODUCTION_FRONT, &plan));
+        assert(strcmp(plan.anchor, "io.envara.pf.run." RUN_ID) == 0);
+        assert(strlen(plan.anchor) == 53 && strlen(plan.anchor) < sizeof(plan.anchor));
+        assert(strchr(plan.anchor, '/') == NULL);
+        assert(plan.count);
+        for (uint32_t i = 0; i < plan.count; i++) {
+            assert(strcmp(plan.rows[i].rule.owner, plan.anchor) == 0);
+            assert(strnlen(plan.rows[i].rule.owner, sizeof(plan.rows[i].rule.owner)) < sizeof(plan.rows[i].rule.owner));
+            assert(strnlen(plan.rows[i].rule.label, sizeof(plan.rows[i].rule.label)) < sizeof(plan.rows[i].rule.label));
+        }
+        printf("{\"anchor\":\"%s\",\"count\":%u}", plan.anchor, plan.count);
+        return 0;
+    }
     if (!strncmp(argv[1], "dump-", 5)) {
         dump(&value, !strcmp(argv[1], "dump-empty") ? ENVARA_PF_PRODUCTION_EMPTY : !strcmp(argv[1], "dump-deny") ? ENVARA_PF_PRODUCTION_DENY : !strcmp(argv[1], "dump-front") ? ENVARA_PF_PRODUCTION_FRONT : ENVARA_PF_PRODUCTION_ROUTED); return 0;
     }
@@ -449,7 +470,7 @@ test('inert production filter transactions and fixed policy scope', { skip: proc
     await writeFile(input, harness.replace('PRODUCTION_SOURCE', JSON.stringify(source)));
     await execute('/usr/bin/clang', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', input, '-o', binary],
       { timeout: 30000, maxBuffer: 1024 * 1024 });
-    const cases = ['success', 'success-empty', 'success-deny', 'success-front', 'copied-config', 'init-nonroot', 'uid-drift', 'pid-drift', 'zero-ticket', 'readonly-before', 'readonly-complete', 'prior-good', 'prior-writer', 'prior-revision', 'verify-no-receipt',
+    const cases = ['success', 'success-empty', 'success-deny', 'success-front', 'dump-sibling-anchor', 'copied-config', 'init-nonroot', 'uid-drift', 'pid-drift', 'zero-ticket', 'readonly-before', 'readonly-complete', 'prior-good', 'prior-writer', 'prior-revision', 'verify-no-receipt',
       'invalid-run', 'invalid-realm', 'invalid-gid', 'invalid-interface', 'invalid-route', 'invalid-interface-zero', 'invalid-interface-tail', 'invalid-route-zero',
       'invalid-route-broadcast', 'invalid-listener', 'invalid-shared-fd', 'invalid-port', 'invalid-system-port', 'invalid-writer', 'invalid-receipt', 'guard-initial', 'guard-listener', 'guard-begin',
       'guard-reenter', 'ioctl-reenter', 'guard-pool', 'guard-address', 'guard-rule', 'guard-commit', 'guard-verify', 'guard-rollback',

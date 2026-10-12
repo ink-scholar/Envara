@@ -38,8 +38,18 @@ the existing lease identity. Three ways out, in order of preference:
 3. Extend the 64-byte field, which changes the pinned kernel ABI. Rejected: the
    layout is a frozen observation, not a negotiated structure.
 
-Option 2 is the direction. Options 1 and 3 are recorded only so the reasoning is
-not lost.
+Option 2 is the direction, and it was confirmed the hard way: the nested path was
+actually implemented in the filter, and it fails on two separate 64-byte fields,
+not one.
+
+- `rule.owner` (64 bytes) must equal the lease owner.
+- `ProductionPlan.anchor` (64 bytes) holds the anchor the transaction names.
+
+A 90-byte nested path cannot be produced by the filter at all: `snprintf` into
+`plan.anchor` truncates, and the fixture assertion in
+`tests/macos-pf-production-filter.test.mjs` (`dump-sibling-anchor`) now pins the
+53-byte sibling anchor and the fact that it contains no separator. Options 1 and
+3 are recorded only so the reasoning is not lost.
 
 ## Ordering hazard that still applies (unchanged from the plan)
 

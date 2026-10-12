@@ -33,8 +33,7 @@ typedef struct {
 typedef union { struct { uint16_t port[2]; uint8_t op, pad; } range; uint32_t words[2]; } ProductionTransport;
 typedef struct { ProductionAddress address; ProductionTransport transport; uint8_t neg, pad[7]; } ProductionRuleAddress;
 typedef struct { EnvaraPFHookRule rule; ProductionPoolAddress pool; int has_pool; } ProductionGeneratedRule;
-typedef struct { char anchor[64]; char session_anchor[64]; int shared;
-    uint32_t count; ProductionGeneratedRule rows[ENVARA_PF_PRODUCTION_MAX_RULES]; } ProductionPlan;
+typedef struct { char anchor[64]; uint32_t count; ProductionGeneratedRule rows[ENVARA_PF_PRODUCTION_MAX_RULES]; } ProductionPlan;
 #define PRODUCTION_OFFSET(type, field, offset) _Static_assert(offsetof(type, field) == offset, #field " ABI offset")
 _Static_assert(sizeof(ProductionEntry) == 1032 && _Alignof(ProductionEntry) == 4, "transaction entry ABI");
 PRODUCTION_OFFSET(ProductionEntry, anchor, 4); PRODUCTION_OFFSET(ProductionEntry, ticket, 1028);
@@ -93,8 +92,6 @@ static int production_utun(const char value[16]) {
 }
 static int production_config_valid(const EnvaraPFProductionConfig *config) {
     if (!config || !production_uuid(config->run_id) || !production_uuid(config->realm_id) ||
-        (config->session_run_id[0] && (!production_uuid(config->session_run_id) ||
-            !strcmp(config->session_run_id, config->run_id))) ||
         config->gid < 7100 || config->gid > 7999 || !production_utun(config->utun) ||
         config->route_ipv4[0] != 198 || (config->route_ipv4[1] != 18 && config->route_ipv4[1] != 19) ||
         !config->route_ipv4[3] || config->route_ipv4[3] == 255 || config->listener_fd < 3 ||
@@ -149,13 +146,10 @@ static ProductionGeneratedRule *production_append(ProductionPlan *plan, const En
 static int production_plan(const EnvaraPFProductionConfig *config, EnvaraPFProductionMode mode, ProductionPlan *plan) {
     memset(plan, 0, sizeof(*plan));
     if (!production_config_valid(config) || mode < ENVARA_PF_PRODUCTION_EMPTY || mode > ENVARA_PF_PRODUCTION_FRONT) return 0;
-    /* The rules live in one anchor; a shared session puts every application
-     * below it so the single root-hook call line can reach each one by name. */
-    if (config->session_run_id[0]) {
-        plan->shared = 1;
-        snprintf(plan->session_anchor, sizeof(plan->session_anchor), "io.envara.pf.run.%s", config->session_run_id);
-        snprintf(plan->anchor, sizeof(plan->anchor), "io.envara.pf.run.%s/%s", config->session_run_id, config->run_id);
-    } else snprintf(plan->anchor, sizeof(plan->anchor), "io.envara.pf.run.%s", config->run_id);
+    /* Every application keeps its own top-level anchor. A shared root hook
+     * reaches them through fixed call lines, not through nesting: a nested path
+     * is 90 bytes and both the plan anchor and the rule owner hold 64. */
+    snprintf(plan->anchor, sizeof(plan->anchor), "io.envara.pf.run.%s", config->run_id);
     if (mode == ENVARA_PF_PRODUCTION_EMPTY) return 1;
     if (mode == ENVARA_PF_PRODUCTION_FRONT) {
         ProductionGeneratedRule *allow = production_append(plan, config, PRODUCTION_PASS, PRODUCTION_OUT,

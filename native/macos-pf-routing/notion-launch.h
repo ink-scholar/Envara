@@ -19,7 +19,7 @@ struct envara_notion_context {
 struct envara_notion_plan {
     int ready, protected_ready, resumed;
     char user_data[PATH_MAX];
-    char arguments[9][PATH_MAX];
+    char arguments[10][PATH_MAX];
 };
 /* Read-only exact original signed version inspection. Never loads ASAR code. */
 int envara_notion_supported(const struct envara_gui_manifest *manifest);
@@ -49,4 +49,59 @@ int envara_notion_plan(const struct envara_app_registration *app,
 int envara_notion_stage(const struct envara_app_registration *app,
     const struct envara_gui_request *request, const struct envara_notion_context *context,
     const struct envara_gui_stage_authority *authority, struct envara_gui_lifecycle *out);
+/* Fixed compile-time sub-operation enumeration for the cold-stage internals.
+ * The stage, plan, data-preparation and supported-version checks each contain
+ * several distinct refusal conditions that all collapse onto the same errno.
+ * Without this enumeration a caller cannot tell which internal predicate,
+ * syscall or downstream return code failed first, and a repeated errno must not
+ * be misread as a second identical refusal.
+ *
+ * The first sub-operation recorded inside one instrumented invocation wins.
+ * Values map to fixed string constants only: never a path, account, PID, node,
+ * credential, errno text or arbitrary message. They are explanatory and MUST
+ * NOT be consumed as launch, resume, cleanup or resource-ownership authority. */
+typedef enum {
+    ENVARA_NOTION_SUBOP_NONE = 0,
+    /* Read-only supported-version inspection. */
+    ENVARA_NOTION_SUBOP_SUPPORTED_ARGUMENT,
+    ENVARA_NOTION_SUBOP_SUPPORTED_PLIST,
+    ENVARA_NOTION_SUBOP_SUPPORTED_VERSION,
+    ENVARA_NOTION_SUBOP_SUPPORTED_SIGNATURE,
+    /* Fixed plan construction. */
+    ENVARA_NOTION_SUBOP_PLAN_ARGUMENT,
+    ENVARA_NOTION_SUBOP_PLAN_REGISTRY,
+    ENVARA_NOTION_SUBOP_PLAN_CONTEXT,
+    ENVARA_NOTION_SUBOP_PLAN_REQUEST,
+    ENVARA_NOTION_SUBOP_PLAN_SEALED,
+    ENVARA_NOTION_SUBOP_PLAN_SUPPORTED,
+    ENVARA_NOTION_SUBOP_PLAN_DIGEST,
+    ENVARA_NOTION_SUBOP_PLAN_CDHASH,
+    ENVARA_NOTION_SUBOP_PLAN_REQUIREMENT,
+    ENVARA_NOTION_SUBOP_PLAN_DATA,
+    ENVARA_NOTION_SUBOP_PLAN_ALLOCATION,
+    /* Fixed native data allocation. */
+    ENVARA_NOTION_SUBOP_DATA_ARGUMENT,
+    ENVARA_NOTION_SUBOP_DATA_ENTRY,
+    ENVARA_NOTION_SUBOP_DATA_ANCESTOR,
+    ENVARA_NOTION_SUBOP_DATA_LEAF,
+    ENVARA_NOTION_SUBOP_DATA_DENY,
+    /* Cold stage. */
+    ENVARA_NOTION_SUBOP_STAGE_ARGUMENT,
+    ENVARA_NOTION_SUBOP_STAGE_AUTHORITY,
+    ENVARA_NOTION_SUBOP_STAGE_ENTRY,
+    ENVARA_NOTION_SUBOP_STAGE_SESSION,
+    ENVARA_NOTION_SUBOP_STAGE_ORIGINAL_RUNNING,
+    ENVARA_NOTION_SUBOP_STAGE_ACCOUNT,
+    ENVARA_NOTION_SUBOP_STAGE_ENVIRONMENT,
+    ENVARA_NOTION_SUBOP_STAGE_DATA,
+    ENVARA_NOTION_SUBOP_STAGE_RECHECK,
+    ENVARA_NOTION_SUBOP_STAGE_SPAWN,
+    ENVARA_NOTION_SUBOP_STAGE_STOPPED
+} EnvaraNotionSuboperation;
+
+/* Reset before one instrumented invocation; never inherits a prior result. */
+void envara_notion_suboperation_begin(void);
+void envara_notion_suboperation_set(EnvaraNotionSuboperation sub);
+EnvaraNotionSuboperation envara_notion_suboperation(void);
+const char *envara_notion_suboperation_name(EnvaraNotionSuboperation sub);
 #endif

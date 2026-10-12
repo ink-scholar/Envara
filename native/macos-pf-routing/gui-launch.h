@@ -100,6 +100,7 @@ int envara_gui_acl_free(const char *path);
 int envara_gui_sealed_snapshot_validate(const struct envara_gui_manifest *manifest);
 int envara_gui_request_validate(const struct envara_gui_manifest *manifest,
                                const struct envara_gui_request *request, int fixture_only);
+int envara_gui_requirement_team(const char *requirement, char team[11]);
 int envara_gui_original_running(const struct envara_gui_manifest *manifest, uid_t uid, pid_t *found_pid);
 int envara_gui_session_read(struct envara_gui_session *out);
 int envara_gui_bootstrap_plan(const struct envara_gui_request *request,

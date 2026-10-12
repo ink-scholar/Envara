@@ -6,8 +6,8 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import { realpath } from 'node:fs/promises';
 import { MacOSPFNotionTrial } from '../electron/macos-pf-notion-trial.mjs';
-import { MacOSPFApplicationRouting } from '../electron/macos-pf-application-routing.mjs';
-import { createPersistentPFNotionSessionClient } from '../electron/macos-pf-notion-session.mjs';
+import { MacOSPFApplicationRouting, ownedRootSessionInProcessList } from '../electron/macos-pf-application-routing.mjs';
+import { createPersistentPFNotionSessionClient, PF_SESSION_LEASE_SECONDS } from '../electron/macos-pf-notion-session.mjs';
 import { servePFHelper } from '../native/macos-pf-routing/helper.mjs';
 import { pfRoutingAnchor } from '../native/macos-pf-routing/policy.mjs';
 import { MacOSPFController } from '../native/macos-pf-routing/controller.mjs';
@@ -24,8 +24,9 @@ const request = () => ({ application: { id: 'notion_bound', profileId: 'owned_pr
   managedRoute: { profileId: 'owned_profile', proxyId: 'owned_node', nodeType: 'anytls', routeIdentity: randomUUID(), coreGeneration: randomUUID(), corePid: 999, coreVersion: 'v1.19.32' } });
 function fixture({ dirty = false, selectedRefused = false, missingEOF = false, foreignSnapshot = false, foreignStatus = false,
   resumeFailure = false, snapshotFailure = false, prepareDelayMs = 0, prepareTimeoutMs = null, resumeDelayMs = 0, now,
-  diagnosticOverride = null, onEvent = () => {}, observationMs = 0 } = {}) {
+  diagnosticOverride = null, onEvent = () => {}, watchMs = 0, applicationEndedAfterMs = null } = {}) {
   const input = new PassThrough(), child = new EventEmitter(), calls = [], statusRequests = []; let bound, stageResolve;
+  const startedAt = Date.now();
   const running = new Promise(resolve => { stageResolve = resolve; });
   const state = phase => ({ ...flags, ...bound, profile: 'seatbelt-front-only', phase, staged: true, resumed: phase === 'running', cleanupComplete: false, cleanupUncertain: false });
   const cleanup = () => ({ ...state('cleaned'), cleanupComplete: true, cleanupEvidence: {
@@ -48,7 +49,16 @@ function fixture({ dirty = false, selectedRefused = false, missingEOF = false, f
       if (resumeDelayMs) await new Promise(resolve => setTimeout(resolve, resumeDelayMs));
       if (resumeFailure) throw Object.assign(new Error('PRIVATE_TRIAL_PASSWORD'), { code: 'APPLICATION_APP_RESUME_UNCONFIRMED' }); return state('running'); },
     stopNotionApplication: async () => { calls.push('stop'); return cleanup(); },
-    applicationSnapshot: async () => { calls.push('snapshot'); const value = cleanup();
+    applicationSnapshot: async () => { calls.push('snapshot');
+      /* The controller reports that the guardian already stopped the exact
+       * child. The trial must end its observation window then instead of
+       * showing a run that had already ended. */
+      /* Before cleanup the controller reports a live phase with the ended
+       * fact; once cleanup has run the receipt is normal and the fact remains. */
+      if (applicationEndedAfterMs !== null && Date.now() >= startedAt + applicationEndedAfterMs)
+        return calls.includes('stop') ? { ...cleanup(), applicationEnded: true, endedChildReaped: true, endedChildSignalled: false }
+          : { ...state('running'), applicationEnded: true, endedChildReaped: true, endedChildSignalled: false };
+      const value = cleanup();
       if (snapshotFailure) return { ...state('cleanup-required'), cleanupUncertain: true,
         failure: { stage: 'cold-stage', code: 'APPLICATION_APP_NATIVE_REFUSED',
           native: { stage: 'ticket-prepare', reason: 'NATIVE_OPERATION_REFUSED', error: 70 } }, private: 'PRIVATE_TRIAL_PASSWORD' };
@@ -57,7 +67,7 @@ function fixture({ dirty = false, selectedRefused = false, missingEOF = false, f
   child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => { input.end(); return true; };
   child.stdin = new Writable({ write(bytes, encoding, done) { input.write(Buffer.from(bytes)); done(); }, final(done) { input.end(); done(); } });
   let starts = 0;
-  const trial = new MacOSPFNotionTrial({ verifyCandidate: async () => true, verifyNotion: async () => true, observationMs, onEvent,
+  const trial = new MacOSPFNotionTrial({ verifyCandidate: async () => true, verifyNotion: async () => true, watchMs, onEvent,
     createClient: () => {
       const call = createPersistentPFNotionSessionClient({ ...(now ? { now } : {}), spawnRootControlledLifecycle: () => {
       starts++; servePFHelper({ controller, input, output: child.stdout, signalSource: null }).then(() => {
@@ -94,7 +104,7 @@ test('real client framing requires prepare/resume/stop/fresh receipt/actual EOF 
   assert.deepEqual(value.statusRequests, [{ runId: report.runId }]);
   assert.equal(report.cleanupComplete, true); assert.equal(report.cleanupUncertain, false);
   for (const key of Object.keys(flags)) assert.equal(report[key], false);
-  assert.equal(report.maximumLifetimeSeconds, 180); assert.equal(events.some(event => event.stage === 'running'), true);
+  assert.equal(report.maximumLifetimeSeconds, PF_SESSION_LEASE_SECONDS); assert.equal(events.some(event => event.stage === 'running'), true);
   assert.equal(report.sessionDiagnostics.terminalExitCode, 0);
   assert.deepEqual(report.sessionDiagnostics.callHistory, ['status', 'prepareRoute', 'prepareNotionApplication', 'resumeNotionApplication', 'stopNotionApplication', 'applicationSnapshot']);
   assert.equal(JSON.stringify({ report, events }).includes('PRIVATE_TRIAL_'), false);
@@ -110,7 +120,7 @@ test('multi-step preparation can exceed 60 seconds without the client abandoning
   t.mock.timers.tick(4999);
   const report = await completion;
   assert.equal(report.lifecyclePassed, true); assert.equal(report.cleanupComplete, true);
-  assert.equal(report.maximumLifetimeSeconds, 180);
+  assert.equal(report.maximumLifetimeSeconds, PF_SESSION_LEASE_SECONDS);
   for (const key of Object.keys(flags)) assert.equal(report[key], false);
 });
 
@@ -123,7 +133,7 @@ test('resume covers slow controller preflight and cold validation beyond 15 seco
   assert.equal(value.trial.snapshot().errorCode, null); assert.equal(value.trial.snapshot().resumed, false);
   current = 20000; t.mock.timers.tick(4999);
   const report = await completion, timing = report.sessionDiagnostics.callTimings.find(item => item.method === 'resumeNotionApplication');
-  assert.equal(report.lifecyclePassed, true); assert.equal(report.maximumLifetimeSeconds, 180);
+  assert.equal(report.lifecyclePassed, true); assert.equal(report.maximumLifetimeSeconds, PF_SESSION_LEASE_SECONDS);
   assert.equal(timing.requestedTimeoutMs, 60000); assert.equal(timing.effectiveTimeoutMs, 60000);
   assert.equal(timing.elapsedMs, 20000); assert.equal(timing.cleanupReserveMs, 40000); assert.equal(timing.outcome, 'result');
   assert.equal(timing.lateResponseObserved, false); assert.equal(JSON.stringify(report).includes('PRIVATE_TRIAL_'), false);
@@ -189,6 +199,13 @@ test('the same status-only refusal without actual EOF retains its cleanup uncert
   await assert.rejects(run(value), { code: 'PF_OWNED_RUNTIME_NOT_EMPTY' });
 });
 
+test('an application that ends on its own is noticed during observation and never shown as running', async () => {
+  const value = fixture({ watchMs: 45000, applicationEndedAfterMs: 0 }); const report = await run(value);
+  assert.equal(report.applicationEnded, true);
+  assert.equal(report.cleanupComplete, true);
+  assert.equal(report.cleanupUncertain, false);
+  assert.equal(report.phase, 'cleaned');
+});
 test('foreign cleanup snapshot cannot be laundered by valid stop and normal outer EOF', async () => {
   const value = fixture({ foreignSnapshot: true }); const report = await run(value);
   assert.equal(report.phase, 'cleanup-required'); assert.equal(report.cleanupComplete, false); assert.equal(report.cleanupUncertain, true);
@@ -196,7 +213,7 @@ test('foreign cleanup snapshot cannot be laundered by valid stop and normal oute
 });
 
 test('stop interrupts only observation, serializes normal cleanup, and refuses a simultaneous trial', async () => {
-  const value = fixture({ observationMs: 45000 }); const pending = run(value); await value.running;
+  const value = fixture({ watchMs: 45000 }); const pending = run(value); await value.running;
   await assert.rejects(run(value), { code: 'PF_NOTION_TRIAL_BUSY' });
   value.trial.stop('foreign'); assert.equal(value.trial.snapshot('notion_bound').active, true);
   value.trial.stop('notion_bound'); const report = await pending;
@@ -250,12 +267,29 @@ test('final diagnostic logs reject a foreign source, environment or numeric bool
   }
 });
 
-test('uncertain trial prevents adapter from reporting clean shutdown or installing over an active trial', async () => {
-  let shutdowns = 0;
-  const trial = { state: { cleanupUncertain: true }, pending: null };
-  const adapter = new MacOSPFApplicationRouting({ notionTrial: trial, native: { shutdown: async () => { shutdowns++; } } });
-  await assert.rejects(adapter.shutdown(), { code: 'APPLICATION_ROUTING_CLEANUP_UNCONFIRMED' });
-  assert.equal(shutdowns, 0); assert.equal(adapter.closed, false);
+test('an uncertain trial refuses shutdown only while an owned root process may still depend on the managed route', async () => {
+  for (const [alive, label] of [[true, 'root session alive'], [false, 'no root process remains']]) {
+    let shutdowns = 0;
+    const trial = { state: { cleanupUncertain: true }, pending: null };
+    const adapter = new MacOSPFApplicationRouting({ notionTrial: trial, native: { shutdown: async () => { shutdowns++; } }, rootSessionAlive: async () => alive });
+    if (alive) {
+      await assert.rejects(adapter.shutdown(), { code: 'APPLICATION_ROUTING_CLEANUP_UNCONFIRMED' }, label);
+      assert.equal(shutdowns, 0); assert.equal(adapter.closed, false);
+    } else {
+      await adapter.shutdown();
+      assert.equal(shutdowns, 1, label); assert.equal(adapter.closed, true);
+    }
+  }
+  // A probe that cannot answer never permits the quit.
+  const failing = new MacOSPFApplicationRouting({ notionTrial: { state: { cleanupUncertain: true }, pending: null }, native: { shutdown: async () => {} },
+    rootSessionAlive: async () => { throw new Error('ps unavailable'); } });
+  await assert.rejects(failing.shutdown()); assert.equal(failing.closed, false);
+});
+test('the owned root session probe matches only exact installed paths and the fixed authorizer arguments', () => {
+  assert.equal(ownedRootSessionInProcessList('/Library/PrivilegedHelperTools/io.envara.pf-routing/envara-pf-native app-tunnel-run a b'), true);
+  assert.equal(ownedRootSessionInProcessList('/x/Envara.app/Contents/Resources/local-authorization/A.app/Contents/Resources/app-routing/macos-pf/EnvaraPFInstall --run-controlled-experiment'), true);
+  assert.equal(ownedRootSessionInProcessList('/x/Envara.app/Contents/Resources/proxy-core/mihomo -d /y'), false);
+  assert.equal(ownedRootSessionInProcessList('/usr/bin/grep /Library/PrivilegedHelperTools/io.envara.pf-routing/envara-pf-native'), false);
 });
 
 test('adapter projects only private exact context into the dedicated trial and never changes generic readiness', async () => {

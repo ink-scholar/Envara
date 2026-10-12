@@ -875,3 +875,42 @@ test('issued receipt captured before INSERT follow-up proof failure remains avai
   assert.equal(logs.filter(value => value === 'delete-exact-issued').length, 1); assert.ok(!logs.includes('group') && !logs.includes('enable-reference'));
   assert.ok(!logs.includes('prove-absent-hook')); await controller.shutdown();
 });
+
+test('route snapshots ignore kernel-cloned cache entries but still detect configured route changes', () => {
+  const base = 'Routing tables\nInternet:\nDestination Gateway Flags Netif Expire\ndefault 192.0.2.1 UGScg en0\n192.0.2/24 link#14 UCS en0\n192.0.2.1 aa:bb:cc:dd:ee:ff UHLWI en0 1200\nInternet6:\nDestination Gateway Flags Netif Expire\ndefault fe80::1%en0 UGcIg en0\nfe80::1%en0 aa:bb:cc:dd:ee:ff UHLWIi en0\n';
+  // ARP/neighbour entries expire or appear and cloned host routes follow traffic.
+  assert.equal(normalizePFRouteTable(base), normalizePFRouteTable(base.replace('192.0.2.1 aa:bb:cc:dd:ee:ff UHLWI en0 1200\n', '')));
+  assert.equal(normalizePFRouteTable(base), normalizePFRouteTable(base.replace('192.0.2/24 link#14 UCS en0\n', '192.0.2/24 link#14 UCS en0\n198.51.100.7 192.0.2.1 UGHWIig en0\n192.0.2.9 11:22:33:44:55:66 UHLWIi en0 900\n')));
+  assert.equal(normalizePFRouteTable(base), normalizePFRouteTable(base.replace('fe80::1%en0 aa:bb:cc:dd:ee:ff UHLWIi en0\n', '')));
+  // Configured routes still count.
+  assert.notEqual(normalizePFRouteTable(base), normalizePFRouteTable(base.replace('192.0.2/24 link#14 UCS en0\n', '192.0.2/24 link#14 UCS en0\n10/8 192.0.2.1 UGSc en0\n')));
+  assert.notEqual(normalizePFRouteTable(base), normalizePFRouteTable(base.replace('192.0.2/24 link#14 UCS en0\n', '')));
+  assert.notEqual(normalizePFRouteTable(base), normalizePFRouteTable(base.replace('default 192.0.2.1 UGScg en0', 'default 198.18.1.1 UGScg utun9')));
+});
+
+test('Directory Services cleanup reads real macOS listings with negative IDs, attribute-less records and nobody processes', async () => {
+  const ours = '_envara_pf_7100                  7100\n';
+  const listing = `nobody                           -2\nnogroup                          -1\n_amavisd                         83\n_lonely\n${ours}staff                            20\n`;
+  const executor = new MacOSPFExecutor(), groupPath = '/Groups/_envara_pf_7100', realm = { gid: 7100, groupPath }, deleted = [];
+  executor.groups.set(groupPath, 7100); executor.groupIdentities.set(groupPath, { gid: 7100, generatedUID: 'AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA' });
+  let present = true;
+  executor.command = async (executable, argv) => {
+    if (executable === '/bin/ps') return { stdout: '    1     0     0\n  245    -2    -2\n 3016   501    20\n' };
+    if (argv[1] === '-list') return { stdout: present ? listing : listing.replace(ours, '') };
+    if (argv[1] === '-read') return { stdout: 'GeneratedUID: AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA\nPrimaryGroupID: 7100\n' };
+    if (argv[1] === '-delete') { deleted.push(argv); present = false; return { stdout: '' }; }
+    throw new Error('unexpected command');
+  };
+  await executor.removeGroups([realm]);
+  assert.equal(realm.groupRemoved, true); assert.deepEqual(deleted, [['.', '-delete', groupPath]]);
+  // Our own record must still be exact: no attribute-less, wrong-GID or duplicate copy.
+  for (const own of ['_envara_pf_7100\n', '_envara_pf_7100 7101\n', `${ours}${ours}`]) {
+    const other = new MacOSPFExecutor(); other.command = async () => ({ stdout: listing.replace(ours, own) });
+    await assert.rejects(other.ownedGroupPresent(groupPath, 7100), { code: 'APPLICATION_ROUTING_NOT_READY' });
+  }
+  // A process still in the owned group blocks removal; unparseable output refuses.
+  for (const stdout of ['  245    -2    -2\n 4000   501  7100\n', '  245  nobody  -2\n']) {
+    const busy = new MacOSPFExecutor(); busy.command = async () => ({ stdout });
+    await assert.rejects(busy.assertNoOwnedGroupProcesses([realm]), { code: 'APPLICATION_ROUTING_NOT_READY' });
+  }
+});

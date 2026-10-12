@@ -10,6 +10,17 @@
 #include <string.h>
 #include <poll.h>
 #include <signal.h>
+#include <spawn.h>
+#include <libproc.h>
+
+extern char **environ;
+/* Substituted for proc_pidpath in gui-launch.m by this fixture build only. */
+static pid_t fixture_unresolved_pid = -1;
+int envara_gui_fixture_pidpath(int pid, void *buffer, uint32_t size);
+int envara_gui_fixture_pidpath(int pid, void *buffer, uint32_t size) {
+    if (pid == fixture_unresolved_pid) { errno = ENOENT; return 0; }
+    return proc_pidpath(pid, buffer, size);
+}
 
 #define CHECK(expression) do { if (!(expression)) { fprintf(stderr, "fixture failed line %d errno %d\n", __LINE__, errno); goto fail; } } while (0)
 
@@ -69,7 +80,7 @@ int main(int argc, char **argv) {
     struct envara_gui_manifest manifest; struct envara_gui_request request, invalid;
     struct envara_gui_lifecycle lifecycle; envara_gui_lifecycle_init(&lifecycle);
     struct envara_gui_lifecycle mutation; envara_gui_lifecycle_init(&mutation);
-    int input[2] = {-1,-1}, output[2] = {-1,-1}, held = -1, status = 0; pid_t running;
+    int input[2] = {-1,-1}, output[2] = {-1,-1}, held = -1, status = 0; pid_t running, orphan_pid = -1;
     CHECK(ENVARA_GUI_PRODUCTION_READY == 0);
     struct envara_gui_bootstrap_plan plan; memset(&plan, 0, sizeof(plan));
     strcpy(plan.executable, "/bin/launchctl"); strcpy(plan.uid_decimal, "501");
@@ -91,6 +102,25 @@ int main(int argc, char **argv) {
     invalid = request; invalid.lease_id[0] = 'z'; CHECK(envara_gui_request_validate(&manifest, &invalid, 1) == -1);
     invalid = request; memset(invalid.cwd, 'x', sizeof(invalid.cwd)); CHECK(envara_gui_request_validate(&manifest, &invalid, 1) == -1);
     CHECK(envara_gui_original_running(&manifest, getuid(), &running) == 0 && running == 0);
+    /* A live child whose executable was unlinked, as an updater does, has no
+     * path. Its kernel signing identity decides instead of failing the scan. */
+    char *orphan_argv[] = {"sleep", "30", NULL}, team[11];
+    CHECK(posix_spawn(&orphan_pid, "/bin/sleep", NULL, NULL, orphan_argv, environ) == 0);
+    fixture_unresolved_pid = orphan_pid;
+    CHECK(envara_gui_original_running(&manifest, getuid(), &running) == 0 && running == 0);
+    struct envara_gui_manifest signed_as = manifest; strcpy(signed_as.identifier, "com.apple.sleep");
+    CHECK(envara_gui_original_running(&signed_as, getuid(), &running) == 1 && running == orphan_pid);
+    strcpy(signed_as.identifier, "com.apple"); /* "identifier.helper" is the same app */
+    CHECK(envara_gui_original_running(&signed_as, getuid(), &running) == 1 && running == orphan_pid);
+    strcpy(signed_as.identifier, "com.app"); strcpy(signed_as.requirement, "anchor apple generic and certificate leaf[subject.OU] = ABCDE12345");
+    CHECK(envara_gui_original_running(&signed_as, getuid(), &running) == 0); /* no prefix, no team */
+    fixture_unresolved_pid = -1;
+    CHECK(kill(orphan_pid, SIGKILL) == 0 && waitpid(orphan_pid, NULL, 0) == orphan_pid); orphan_pid = -1;
+    CHECK(envara_gui_requirement_team("identifier \"notion.id\" and anchor apple generic and certificate leaf[subject.OU] = LBQJ96FQ8D", team) == 1 && !strcmp(team, "LBQJ96FQ8D"));
+    CHECK(envara_gui_requirement_team("certificate leaf[subject.OU] = \"LBQJ96FQ8D\"", team) == 1 && !strcmp(team, "LBQJ96FQ8D"));
+    CHECK(envara_gui_requirement_team("cdhash H\"0123456789abcdef0123456789abcdef01234567\"", team) == 0);
+    CHECK(envara_gui_requirement_team("certificate leaf[subject.OU] = LBQJ96FQ8", team) == 0);
+    CHECK(envara_gui_requirement_team("certificate leaf[subject.OU] = LBQJ96FQ8DX", team) == 0);
     CHECK(envara_gui_stage(&manifest, &manifest, &request, 0, NULL, -1, -1, &lifecycle) == -1 && errno == EACCES &&
           lifecycle.blocked_reason == ENVARA_GUI_ROOT_HELPER_REQUIRED);
     CHECK(pipe(input) == 0 && pipe(output) == 0);
@@ -131,6 +161,7 @@ int main(int argc, char **argv) {
     close(held); close(200);
     puts("{\"ok\":true,\"ready\":false,\"protected\":false,\"activatesSystem\":false,\"fixtures\":{\"immutableBundle\":true,\"strictRequest\":true,\"suspendedBeforeExec\":true,\"scopedEnvironment\":true,\"inheritedNetworkFDClosed\":true,\"originalRunningRefused\":true,\"duplicateResumeRefused\":true,\"mutationCancels\":true,\"noQuiescenceClaim\":true}}"); return 0;
 fail:
+    if (orphan_pid > 0) { kill(orphan_pid, SIGKILL); waitpid(orphan_pid, NULL, 0); }
     if (lifecycle.phase != ENVARA_GUI_EMPTY && !lifecycle.leader_reaped) envara_gui_cancel(&lifecycle);
     if (mutation.phase != ENVARA_GUI_EMPTY && !mutation.leader_reaped) envara_gui_cancel(&mutation);
     for (int i = 0; i < 2; i++) { if (input[i] >= 0) close(input[i]); if (output[i] >= 0) close(output[i]); }

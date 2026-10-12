@@ -28,7 +28,7 @@ function binaryStringDictionary(values) {
 try {
   const executable = path.join(temporary, 'gui-fixture');
   const compile = spawnSync('xcrun', ['clang', '-std=gnu11', '-O2', '-Wall', '-Wextra', '-Werror',
-    '-Wno-deprecated-declarations', '-target', `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macos13.0`,
+    '-Wno-deprecated-declarations', '-DENVARA_GUI_PIDPATH=envara_gui_fixture_pidpath', '-target', `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macos13.0`,
     path.join(directory, 'gui-launch.m'), path.join(directory, 'gui-fixture.m'), path.join(directory, 'launcher.c'),
     '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'Security', '-lbsm', '-o', executable],
     { encoding: 'utf8', timeout: 60000 });

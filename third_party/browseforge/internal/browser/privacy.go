@@ -11,8 +11,8 @@ import (
 )
 
 // Explicit collection hosts; ordinary app APIs and authentication are untouched.
-var standardTrackerDomains = []string{"google-analytics.com", "doubleclick.net", "api.segment.io", "api.segment.com", "cdn.segment.com"}
-var strictTrackerDomains = []string{"googletagmanager.com", "api.mixpanel.com", "api-js.mixpanel.com", "api.amplitude.com", "api2.amplitude.com", "cdn.amplitude.com", "hotjar.com", "hotjar.io", "sessions.bugsnag.com", "notify.bugsnag.com", "browser-intake-datadoghq.com", "browser-intake-datadoghq.eu", "ingest.sentry.io", "ingest.us.sentry.io", "ingest.de.sentry.io"}
+var standardTrackerDomains = []string{"google-analytics.com", "doubleclick.net", "api.segment.io", "api.segment.com", "cdn.segment.com", "clarity.ms", "bat.bing.com", "analytics.tiktok.com", "px.ads.linkedin.com", "mc.yandex.ru", "mc.yandex.com", "hm.baidu.com", "cnzz.com", "scorecardresearch.com", "quantserve.com", "quantcount.com", "omtrdc.net", "2o7.net", "demdex.net"}
+var strictTrackerDomains = []string{"googletagmanager.com", "api.mixpanel.com", "api-js.mixpanel.com", "cdn.mxpnl.com", "api.amplitude.com", "api2.amplitude.com", "cdn.amplitude.com", "hotjar.com", "hotjar.io", "sessions.bugsnag.com", "notify.bugsnag.com", "browser-intake-datadoghq.com", "browser-intake-datadoghq.eu", "ingest.sentry.io", "ingest.us.sentry.io", "ingest.de.sentry.io", "nr-data.net", "js-agent.newrelic.com", "connect.facebook.net", "ads-twitter.com", "analytics.twitter.com", "googleadservices.com", "googlesyndication.com", "adservice.google.com", "criteo.com", "criteo.net", "taboola.com", "outbrain.com", "adnxs.com", "amazon-adsystem.com"}
 
 // Explicit service roots only; a last-two-label heuristic would incorrectly
 // combine unrelated sites on shared hosting or public suffixes.
@@ -37,6 +37,35 @@ var trackerServiceRoots = map[string][]string{
 	"ingest.sentry.io":             {"sentry.io"},
 	"ingest.us.sentry.io":          {"sentry.io"},
 	"ingest.de.sentry.io":          {"sentry.io"},
+	"clarity.ms":                   {"clarity.ms"},
+	"bat.bing.com":                 {"bing.com"},
+	"analytics.tiktok.com":         {"tiktok.com"},
+	"px.ads.linkedin.com":          {"linkedin.com"},
+	"mc.yandex.ru":                 {"yandex.ru"},
+	"mc.yandex.com":                {"yandex.com"},
+	"hm.baidu.com":                 {"baidu.com"},
+	"cnzz.com":                     {"cnzz.com", "umeng.com"},
+	"scorecardresearch.com":        {"scorecardresearch.com"},
+	"quantserve.com":               {"quantserve.com", "quantcast.com"},
+	"quantcount.com":               {"quantcount.com", "quantcast.com"},
+	"omtrdc.net":                   {"omtrdc.net", "adobe.com"},
+	"2o7.net":                      {"2o7.net", "adobe.com"},
+	"demdex.net":                   {"demdex.net", "adobe.com"},
+	"cdn.mxpnl.com":                {"mixpanel.com", "mxpnl.com"},
+	"nr-data.net":                  {"nr-data.net", "newrelic.com"},
+	"js-agent.newrelic.com":        {"newrelic.com"},
+	"connect.facebook.net":         {"facebook.com", "facebook.net"},
+	"ads-twitter.com":              {"twitter.com", "x.com"},
+	"analytics.twitter.com":        {"twitter.com", "x.com"},
+	"googleadservices.com":         {"googleadservices.com"},
+	"googlesyndication.com":        {"googlesyndication.com"},
+	"adservice.google.com":         {"google.com"},
+	"criteo.com":                   {"criteo.com"},
+	"criteo.net":                   {"criteo.com", "criteo.net"},
+	"taboola.com":                  {"taboola.com"},
+	"outbrain.com":                 {"outbrain.com"},
+	"adnxs.com":                    {"adnxs.com", "xandr.com"},
+	"amazon-adsystem.com":          {"amazon-adsystem.com"},
 }
 
 type PrivacyState struct {

@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 
 const exec = promisify(execFile), root = path.resolve(import.meta.dirname, '..');
 const native = path.join(root, 'native/macos-pf-routing');
-const fixedOldSHA = 'fbb72973188f51cc44fa5b5a961b6e6ce51912c11d8e0d5350cfb19e19fad053';
+const fixedOldSHA = 'c29c1636eba730cca09f6bc596659a04818e98a8a9b4708d6fcc48cfea6cedf5';
 const helper = `static void quarantine_refusal_delay(void) {
     struct timespec delay = {0, 50000000};
     while (nanosleep(&delay, &delay) < 0 && errno == EINTR) {}

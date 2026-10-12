@@ -91,6 +91,12 @@ test('later updates accept only fixed reviewed priors and report private runtime
   '43b392665e496cba2bc2675284fd2d03390ea92db85496d07e49ba696cd7c2a7',
   'acfc112b497c680001c7ce37dcdc99021b51de615072b15c096895900ecfa0c6',
   'c34cba313dad0712fc53eaea514d8466c6710eb70cc7840a1ca4238eea3817e4',
+  '4b9f859585a10e31eb98d43682595a9e152b3f93439ebea6ef1de0a4659ba557',
+  '43392e3095a921e1531d459a93d5d7329bfc5a28bab5192179eb1fc4fadd0fce',
+  'f0b99f600185ecadd9c862fe826193a52e348cde3fb77d353ab5bd7471ab1bfc',
+  'f39101dd94c622c886ca6709f2f13f8c826cdd1f3fe609112d5445ad2fd6f305',
+  'a8bd008ae1b54f656e52ecba509e706811df386ac7a2b12bb269cd095fc74575',
+  'da6e7c9714ec57781f68d875d131e9ee178adbaab401793a153ac7b216ceef05',
   ]) {
   const inspected = { ...original, priorManifestSHA256,
     privateRuntimeInspectionRequired: true, controlledRuntimeAbsent: false, canRequestAuthorizationForInspection: true,

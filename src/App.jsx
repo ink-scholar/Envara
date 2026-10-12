@@ -1239,7 +1239,7 @@ function WorkspaceApp() {
     });
   };
   const applications = snapshot.applications || [];
-  const trialPollingIds = applications.filter(application => application.identity === "bundle:notion.id" && (pending[`runNotionTrial:${application.id}`] || pending[`stopNotionTrial:${application.id}`] || application.notionTrial?.active === true)).map(application => application.id).sort().join("|");
+  const trialPollingIds = applications.filter(application => typeof application.identity === "string" && application.identity && (pending[`runNotionTrial:${application.id}`] || pending[`stopNotionTrial:${application.id}`] || application.notionTrial?.active === true)).map(application => application.id).sort().join("|");
   useEffect(() => {
     if (!api.isDesktop || !trialPollingIds) return;
     let closed = false;

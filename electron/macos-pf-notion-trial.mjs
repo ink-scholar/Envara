@@ -19,8 +19,8 @@ import { createPersistentPFNotionSessionClient, validatePFNotionSessionRequest,
 export const PF_ATTACH_POLL_INTERVAL_MS = 2000;
 
 export const PF_NOTION_TRIAL_CANDIDATE = Object.freeze({
-  authorizerSHA256: 'd8451ce285fbf37f6130a635b68b052d354e60bce6f582105600859fca1fb3f3',
-  manifestSHA256: '03245359a948d31c9f4b87fe88dd1b3cb6a270228fbfc13fe873de50cdcce7da',
+  authorizerSHA256: '265ba4078a3592aab09a973bf402b32d81145c6c64ff3339143c5cdf449cbb36',
+  manifestSHA256: '7beb7b50ced9fae5932872d97c3e51c2f58e6185a4241ecad6ccf4d52dd42d33',
 });
 /* The bundled carrier is named after the manifest it carries. Deriving the path
  * from the pin keeps a single source of truth: a pinned candidate with a stale
@@ -192,12 +192,15 @@ export class MacOSPFNotionTrial {
       return createPersistentPFNotionSessionClient({ spawnRootControlledLifecycle: null, acquireChannel: () => target,
         lifetimeMs: PF_SESSION_CHANNEL_LIFETIME_MS, channelKey: runId });
     },
-    observationMs = 0, onEvent = () => {}, persistDiagnostics = async () => {} } = {}) {
+    /* An attached application runs until it is stopped, it exits, or Envara
+     * quits. A bounded trial may pass a finite watch window in milliseconds;
+     * the default keeps watching for as long as the run lasts. */
+    watchMs = Infinity, onEvent = () => {}, persistDiagnostics = async () => {} } = {}) {
     if (![verifyCandidate, verifyNotion, createClient, onEvent, persistDiagnostics].every(value => typeof value === 'function') ||
-        !Number.isInteger(observationMs) || observationMs < 0 || observationMs > 45000) throw error('PF_NOTION_TRIAL_REQUEST_INVALID');
+        !(watchMs === Infinity || Number.isInteger(watchMs) && watchMs >= 0 && watchMs <= 45000)) throw error('PF_NOTION_TRIAL_REQUEST_INVALID');
     this.verifyCandidate = verifyCandidate; this.verifyNotion = verifyNotion; this.createClient = createClient;
-    this.observationMs = observationMs; this.onEvent = onEvent; this.persistDiagnostics = persistDiagnostics;
-    this.observationSeconds = observationMs > 0 ? observationMs / 1000 : null;
+    this.watchMs = watchMs; this.onEvent = onEvent; this.persistDiagnostics = persistDiagnostics;
+    this.observationSeconds = Number.isFinite(watchMs) && watchMs > 0 ? watchMs / 1000 : null;
     this.state = null; this.pending = null; this.stopObservation = null; this.closed = false;
     this.mux = null; this.activeTarget = null; this.runTargets = new Map();
     this.authorizerPath = authorizerPath;
@@ -205,7 +208,7 @@ export class MacOSPFNotionTrial {
   stateFlags() { return { active: false, phase: 'idle', staged: false, resumed: false, cleanupComplete: false, cleanupUncertain: false,
     lifecyclePassed: false, errorCode: null, events: [], ...fixedFlags, initialFailure: null, cleanupFailure: null,
     maximumLifetimeSeconds: PF_APP_SESSION_LEASE_SECONDS,
-    observationSeconds: this.observationMs > 0 ? this.observationMs / 1000 : null }; }
+    observationSeconds: this.observationSeconds }; }
   /* One authorized root session per Envara launch. The first attach opens it and
    * the system asks for the administrator password once; every later attach in
    * this launch reuses it, and quitting Envara is what closes it. The carrier is
@@ -292,12 +295,15 @@ export class MacOSPFNotionTrial {
   async observe(call, runId, windowMs) {
     let done = false, timer = null, settle;
     const settleObservation = new Promise(resolve => { settle = resolve; });
+    /* A watch window that has already elapsed, or a stop that was already
+     * requested, must not wait for the next poll: a bounded trial zero
+     * milliseconds long would otherwise idle for a full poll interval. */
+    const elapsed = () => Number.isFinite(windowMs) && Date.now() - this.observedAt >= windowMs;
     const finish = () => { if (done) return; done = true; clearTimeout(timer); this.stopObservation = null;
       Promise.resolve(this.observationInFlight).catch(() => {}).then(() => settle()); };
     const poll = () => {
       if (done) return;
-      if (this.state.stopRequested || this.closed ||
-          Number.isFinite(windowMs) && Date.now() - this.observedAt >= windowMs) {
+      if (this.state.stopRequested || this.closed || elapsed()) {
         if (Number.isFinite(windowMs)) this.state.observationCompleted = true;
         finish(); return;
       }
@@ -315,7 +321,8 @@ export class MacOSPFNotionTrial {
     };
     this.observedAt = Date.now();
     this.stopObservation = finish;
-    timer = setTimeout(poll, PF_ATTACH_POLL_INTERVAL_MS);
+    if (this.state.stopRequested || this.closed || elapsed()) { if (Number.isFinite(windowMs)) this.state.observationCompleted = true; finish(); }
+    else timer = setTimeout(poll, PF_ATTACH_POLL_INTERVAL_MS);
     await settleObservation;
   }
   /* Stops the attached application and then tears the shared authorized session
@@ -340,7 +347,7 @@ export class MacOSPFNotionTrial {
       stopRequested: false, cleanupComplete: false, cleanupUncertain: false, lifecyclePassed: false, errorCode: null,
       initialFailure: null, cleanupFailure: null, events: [], ...fixedFlags,
       maximumLifetimeSeconds: PF_APP_SESSION_LEASE_SECONDS,
-      observationSeconds: this.observationMs > 0 ? this.observationMs / 1000 : null };
+      observationSeconds: this.observationSeconds };
     const task = this.execute(request); this.pending = task;
     task.finally(() => { if (this.pending === task) this.pending = null; }).catch(() => {});
     return task;
@@ -387,7 +394,7 @@ export class MacOSPFNotionTrial {
        * polling the controller, so an application that ended is reported as
        * ended instead of being shown as running. A bounded trial keeps its
        * window as an upper limit only. */
-      await this.observe(call, runId, this.observationMs > 0 ? this.observationMs : Infinity);
+      await this.observe(call, runId, this.watchMs);
     } catch (failure) { this.emit('failed', failure); }
     finally {
       this.stopObservation?.();

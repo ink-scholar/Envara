@@ -567,5 +567,7 @@
   "首次错误": "Erster Fehler",
   "清理错误": "Bereinigungsfehler",
   "上次附加": "Zuvor angehängt",
-  "导出诊断": "Diagnose exportieren"
+  "导出诊断": "Diagnose exportieren",
+  "附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。": "Eine angehängte Anwendung läuft weiter, bis Sie sie beenden, die Anwendung sich schließt oder Sie Envara beenden. Fingerprint-Browser und Terminals zählen nicht mit.",
+  "首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。": "Beim ersten Anhängen wird einmalig eine Administrator-Autorisierung abgefragt. In diesem Envara-Lauf wird sie nicht erneut verlangt."
 }

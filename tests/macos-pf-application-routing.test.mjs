@@ -310,3 +310,24 @@ test('status and native errors expose only approved fields, never endpoints, env
   await value.adapter.revoke({ routeId: prepared.routeId }); await value.adapter.shutdown();
   await assert.rejects(value.adapter.status(), { code: 'APPLICATION_ROUTING_CLOSED' });
 });
+
+test('a failed installer reports only its fixed result reason and never echoes free text', async () => {
+  const failed = (reason, schema = 'envara.macos-pf-install/v1') => JSON.stringify({ schema, action: 'installedResourcesOnly', installed: false, changed: false,
+    ready: false, productionReady: false, manifestSHA256: 'a'.repeat(64), reason, needsManualReview: false });
+  for (const [output, code] of [
+    [failed('administrator-authorization-canceled'), 'APPLICATION_ROUTING_AUTHORIZATION_CANCELED'],
+    [failed('administrator-authorization-denied'), 'APPLICATION_ROUTING_AUTHORIZATION_DENIED'],
+    [failed('controlled-runtime-still-present'), 'APPLICATION_ROUTING_RUNTIME_PRESENT'],
+    [failed('existing-installation-conflict'), 'APPLICATION_ROUTING_INSTALL_CONFLICT'],
+    [failed('owned-staging-review-required'), 'APPLICATION_ROUTING_INSTALL_REVIEW'],
+    [failed('installation-maintenance-busy'), 'APPLICATION_ROUTING_INSTALL_BUSY'],
+    [failed('installation-completion-unconfirmed'), 'APPLICATION_ROUTING_INSTALL_INCOMPLETE'],
+    [failed('private-fixture-password'), 'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED'],
+    [failed('controlled-runtime-still-present', 'untrusted'), 'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED'],
+    ['private-fixture-password', 'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED']]) {
+    const value = await installationFixture({ exitCode: 1, output });
+    await assert.rejects(value.adapter.setup({ activate: true }), error => error.code === code && !error.message.includes('private-fixture-password') && /[一-鿿]/.test(error.message), code);
+    assert.equal(value.native.helperPath, undefined); assert.deepEqual(value.calls, []);
+    assert.equal(value.adapter.installationPending, false);
+  }
+});

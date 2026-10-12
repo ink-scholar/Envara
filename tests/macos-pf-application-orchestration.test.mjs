@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { MacOSPFController, MacOSPFExecutor, validatePFAppBoundLease, validatePFRootHookLease, validatePFApplicationPrestageAbort, validatePFApplicationPreflightAbort, PF_APP_BOUND_LEASE_SCHEMA, PF_ROOT_HOOK_LEASE_SCHEMA, PF_INSTALL_ROOT, PF_RUNTIME_ROOT, dispatchPFRequest } from '../native/macos-pf-routing/controller.mjs';
+import { MacOSPFController, MacOSPFExecutor, validatePFAppBoundLease, validatePFRootHookLease, validatePFApplicationPrestageAbort, validatePFApplicationPreflightAbort, PF_APP_BOUND_LEASE_SCHEMA, PF_APP_SESSION_LEASE_MS, PF_ROOT_HOOK_LEASE_SCHEMA, PF_INSTALL_ROOT, PF_RUNTIME_ROOT, dispatchPFRequest } from '../native/macos-pf-routing/controller.mjs';
 import { pfRoutingAnchor } from '../native/macos-pf-routing/policy.mjs';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
@@ -22,7 +23,7 @@ function lease() { const runId = randomUUID(); return { schema: PF_APP_BOUND_LEA
 test('sealed app context is exact, native-clock bounded, immutable copy and strictly binds root hook', () => {
   const source = lease(), copy = validatePFAppBoundLease(source); source.rootHookLease.ticket = '2'; assert.equal(copy.rootHookLease.ticket, '1');
   for (const edit of [v => { v.extra = true; }, v => { delete v.locale; }, v => { v.gid = true; }, v => { v.consoleUID = 0; },
-    v => { v.expiresMonotonicMs = v.issuedMonotonicMs + 180001; }, v => { v.expiresMonotonicMs = v.issuedMonotonicMs; },
+    v => { v.expiresMonotonicMs = v.issuedMonotonicMs + PF_APP_SESSION_LEASE_MS + 1; }, v => { v.expiresMonotonicMs = v.issuedMonotonicMs; },
     v => { v.bootTimeSeconds = true; }, v => { v.controllerBirth = 'invalid'; }, v => { v.timezone = 'invalid'; },
     v => { v.cwd = 'relative'; }, v => { v.locale = 'en\n'; }, v => { v.ipv4Address = '127.0.0.1'; }, v => { v.rootHookLease.runId = randomUUID(); }]) {
     const value = lease(); edit(value); assert.throws(() => validatePFAppBoundLease(value), { code: 'APPLICATION_APP_CONTEXT_REFUSED' });
@@ -55,13 +56,14 @@ function fixture(overrides = {}, extra = {}) {
       assert.deepEqual(value, executor.sealed.rootHookLease); calls.push('remove-hook');
       return { ownedRootHookRemoved: true, originalRootRestored: true, namespaceReclaimed: true, receiptRetired: true }; },
     removeGroups: async () => calls.push('remove-groups'), retireApplicationLease: async () => calls.push('retire-lease'), releaseLock: async () => calls.push('unlock'), ...overrides };
-  const commands = { register: async input => { calls.push('register'); return { ...input, applicationIdentityVerified: true }; } };
+  const registered = [];
+  const commands = { register: async input => { calls.push('register'); registered.push(input); return { ...input, applicationIdentityVerified: true }; } };
   const controller = new MacOSPFController({ executor, applicationCommands: commands, inspectInstallation: async () => ({ verified: true, runtimeVerified: true }),
     authenticateProxy: async () => {}, identity: { uid: 0, euid: 0, callerUID: 501, controlledSession: true }, ...extra });
   const prepareRoute = async (change = {}) => controller.prepareRoute({ application: { id: 'notion', profileId: 'profile', executablePath: '/Applications/Notion.app' },
     workspace: { cwd: '/tmp/owned-workspace', timezone: 'Asia/Manila', locale: 'en-PH' }, route: proxy,
     managedRoute: { profileId: 'profile', proxyId: 'node', nodeType: 'anytls', corePid: managedPid, routeIdentity: randomUUID(), coreGeneration: randomUUID(), coreVersion: 'v1.19.32' }, ...change });
-  return { controller, executor, calls, prepareRoute, commands, identities, child };
+  return { controller, executor, calls, prepareRoute, commands, identities, child, registered };
 }
 const input = routeId => ({ routeId, runId: randomUUID(), environmentId: randomUUID(), lifetimeSeconds: 30, activationAuthorized: true });
 test('successful stop passes only the issued lease through the real executor validator, DELETE and independent STATUS before complete cleanup', async () => {
@@ -116,14 +118,30 @@ test('actual orchestration orders signed snapshot, sealed clock context, same na
   assert.ok(calls.indexOf('control:R') < calls.indexOf('release-reference')); assert.ok(calls.indexOf('transport-exit') < calls.indexOf('remove-hook'));
   assert.ok(calls.indexOf('retire-lease') < calls.indexOf('unlock')); await controller.shutdown();
 });
-for (const kind of ['no-root', 'no-runtime', 'no-activation', 'lo-skipped', 'wrong-app', 'injected-proof']) test(`Notion ${kind} refuses before native mutation`, async () => {
+/* Attaching software is not limited to one product: any locally selected
+ * application is accepted here, and the fixed native registry independently
+ * inspects and seals the real signed bundle. A path that is not a bundle at all
+ * is still refused, and that refusal must precede every native mutation. */
+for (const kind of ['no-root', 'no-runtime', 'no-activation', 'lo-skipped', 'not-a-bundle', 'injected-proof']) test(`application ${kind} refuses before native mutation`, async () => {
   const options = kind === 'no-root' ? { identity: { uid: 501, euid: 501, callerUID: 501, controlledSession: true } } :
     kind === 'no-runtime' ? { inspectInstallation: async () => ({ verified: true, runtimeVerified: false }) } : {};
-  const f = fixture({}, options), route = await f.prepareRoute(kind === 'wrong-app' ? { application: { id: 'other', profileId: 'profile', executablePath: '/Applications/Other.app' } } : {});
+  const f = fixture({}, options), route = await f.prepareRoute(kind === 'not-a-bundle' ? { application: { id: 'other', profileId: 'profile', executablePath: '/Applications/Other' } } : {});
   const request = input(route.routeId); if (kind === 'no-activation') request.activationAuthorized = false;
   if (kind === 'injected-proof') request.nativeVerified = true;
   if (kind === 'lo-skipped') f.executor.readOnlyStatus = async () => ({ consoleUID: 501, pf: { lo0SkipVerified: false } });
   await assert.rejects(f.controller.prepareNotionApplication(request)); assert.ok(!f.calls.includes('register') && !f.calls.includes('lock'));
+  await f.controller.shutdown();
+});
+test('a locally selected application outside Notion is accepted and sealed by its own bundle', async () => {
+  const f = fixture(), route = await f.prepareRoute({ application: { id: 'other', profileId: 'profile', executablePath: '/Applications/Other.app/Contents/MacOS/Other' } });
+  const request = input(route.routeId);
+  const prepared = await f.controller.prepareNotionApplication(request);
+  assert.equal(prepared.staged, true); assert.equal(prepared.ready, false); assert.equal(prepared.protected, false);
+  assert.ok(f.calls.includes('register') && f.calls.includes('lock'), 'the fixed native registry performs the identity work');
+  /* The bundle is derived from the selected executable and handed to the fixed
+   * native registry, which inspects and seals the real signed bundle itself. */
+  const registered = f.registered.at(-1);
+  assert.equal(registered.bundlePath, '/Applications/Other.app');
   await f.controller.shutdown();
 });
 test('lost stage proof permanently retains sealed state and cannot resume or report cleanup', async () => {
@@ -199,6 +217,10 @@ test('production sealed-file writer detects same-size content, replaced inode, h
 });
 function streamFixture({ forked = false, wrongParent = false, malformed = false, missingListener = false, nativeRefusal = null,
   cleanupReady = null, cleanupStopping = null, cleanupRelease = null, controlRefusal = null, controlRefusalCommand = 'L', coldStageDelay = 0, resumeDelay = 0,
+  /* revokeAfterResume: the guardian revokes on its own while the application
+   * runs, exactly as a crashed child makes it do. This is the case that left
+   * the trial showing 'running' for 44 s after the child had stopped. */
+  revokeAfterResume = false,
   abort = null, abortExit = 1, abortSignal = null, abortTrailing = '', refusalStage = 'factory-open', fragmentAbort = false, omitAbort = false, omitRefusal = false,
   preflightAbort = null, preflightBeforeIdentity = false, unavailableIdentity = false, preflightRefusalStage = 'preflight', duplicatePreflightKey = false } = {}) {
   const context = lease(), keeperPID = forked ? 8991 : 8990;
@@ -239,7 +261,7 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
     if (fragmentAbort) { child.stdout.write(output.slice(0, 53)); child.stdout.write(output.slice(53)); } else child.stdout.write(output);
     setImmediate(() => child.emit('close', abortExit, abortSignal));
   };
-  let commands = '', ticket;
+  let commands = '', ticket, guardianArmed = false, guardianRevoked = false;
   const controlCommands = [];
   const emitKeeper = (event, changes = {}) => emit({ schema: 'envara.pf-app-keeper/v1', event, ticketId: ticket,
     registrationId: context.registrationId, versionId: context.versionId, environmentId: context.environmentId, runId: context.runId,
@@ -282,7 +304,7 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
         emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-started', runId: context.runId, environmentId: context.environmentId,
           interfaceName: 'utun90', corePID: 8992, coreBirth: '8992:000001', frontPID: 8993, frontBirth: '8993:000001', frontPort: 29999, keeperPID,
           ownsOriginalUTunFD: true, ownsOriginalListenerFD: !missingListener, ready: false, protected: false, ...(malformed ? { callerProof: true } : {}) });
-      } else if (command.startsWith('L ')) { ticket = command.slice(2); const stopped = { schema: 'envara.pf-app-keeper/v1', event: 'stopped', ticketId: ticket,
+      } else if (command.startsWith('L ')) { ticket = command.slice(2); guardianArmed = true; const stopped = { schema: 'envara.pf-app-keeper/v1', event: 'stopped', ticketId: ticket,
         registrationId: context.registrationId, versionId: context.versionId, runId: context.runId, environmentId: context.environmentId,
         keeperPID, pid: 8994, birth: '8994:000001', profile: 'seatbelt-front-only', persistentDenyObserved: true, stoppedBeforeExec: true,
         ...Object.fromEntries(['childReaped', 'scopeQuiescentObserved', 'resumeSent', 'resumed', 'cancelSent', 'executedIdentityVerified', 'seatbeltAppliedByFixedExec', 'frontAdmissionVerified'].map(key => [key, false])), ready: false, protected: false };
@@ -293,12 +315,33 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
           keeperPID, pid: 8994, birth: '8994:000001', executedIdentityVerified: true, seatbeltAppliedByFixedExec: true,
           frontAdmissionVerified: true, profile: 'seatbelt-front-only', persistentDenyObserved: false, stoppedBeforeExec: false, childReaped: false, scopeQuiescentObserved: false, resumeSent: true, resumed: true, cancelSent: false, ready: false, protected: false };
         if (resumeDelay) setTimeout(() => emit(resumed), resumeDelay); else emit(resumed);
+        if (revokeAfterResume) setImmediate(() => {
+          /* The guardian revokes once, on its own: the exact child is stopped
+           * and the trial is still showing 'running'. */
+          if (!guardianRevoked) { guardianRevoked = true; emitKeeper('stopping', { childReaped: true, cancelSent: false, stoppedBeforeExec: false }); }
+        });
+      } else if (command === 'S' && guardianArmed) {
+        /* The guardian owns the stopped child: S revokes exactly once and never
+         * produces a second stopping frame, and the main loop's own
+         * transport-cleanup-stopping frame is unreachable from here. */
+        if (!guardianRevoked) { guardianRevoked = true; emitKeeper('stopping', { childReaped: true, cancelSent: true }); }
       } else if (command === 'S') {
         if (executor.appTransports.get(context.runId).cleanupOnly) emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-cleanup-stopping',
           runId: context.runId, environmentId: context.environmentId, keeperPID, keeperBirth: `${keeperPID}:000001`,
           childReaped: !!executor.appTransports.get(context.runId).stoppedIdentity, childAbsent: !executor.appTransports.get(context.runId).stoppedIdentity,
           scopeQuiescentObserved: true, persistentDenyObserved: true, ready: false, protected: false, ...cleanupStopping });
         else emitKeeper('stopping');
+      }
+      else if (command === 'R' && guardianArmed) {
+        /* The guardian re-verifies reap, denial and scope, then emits its own
+         * released frame before the transport one. An unrevoked guardian
+         * revokes first, exactly as the fixed native side does. */
+        if (!guardianRevoked) { guardianRevoked = true; emitKeeper('stopping', { childReaped: true, cancelSent: true }); continue; }
+        emitKeeper('released', { childReaped: true, persistentDenyObserved: true, scopeQuiescentObserved: true, stoppedBeforeExec: false });
+        emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-released', runId: context.runId, environmentId: context.environmentId,
+          keeperPID, ready: false, protected: false, ...Object.fromEntries(['coreReaped', 'frontReaped', 'scopeQuiescentObserved', 'originalUTunClosed', 'originalListenerClosed', 'filterEmptyVerified', 'privateJournalRetired'].map(key => [key, true])),
+          childReaped: true, childAbsent: false, ...cleanupRelease });
+        setImmediate(() => child.emit('close', 0, null));
       }
       else if (command === 'R') { emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-released', runId: context.runId, environmentId: context.environmentId,
         keeperPID, ready: false, protected: false, ...Object.fromEntries(['coreReaped', 'frontReaped', 'scopeQuiescentObserved', 'originalUTunClosed', 'originalListenerClosed', 'filterEmptyVerified', 'privateJournalRetired'].map(key => [key, true])),
@@ -308,6 +351,73 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
   });
   return { executor, child, context, binding, emitKeeper, controlCommands };
 }
+test('a one-shot keeper revocation emitted before the stop request still satisfies the later S', async t => {
+  /* The fixed guardian records its reason once and returns for every later
+   * lease byte, so an 'S' that follows an earlier revocation never produces a
+   * second stopping frame. That buffered frame is the only proof the stop
+   * happened, and dropping it is what produced a 15 s APPLICATION_APP_STOP_TIMEOUT
+   * after a 45 s run. */
+  const f = streamFixture({});
+  await f.executor.startApplicationTransport({ runId: f.context.runId, environmentId: f.context.environmentId, proxy, udpPolicy: 'block', leaseSHA256: 'a'.repeat(64), consoleUID: 501 });
+  await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  await f.executor.applicationTransportControl(f.context.runId, 'B');
+  const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(entry.phase, 'resumed');
+  /* The revocation lands while the run is live and no stop waiter exists. */
+  f.emitKeeper('stopping', { childReaped: true, cancelSent: false, persistentDenyObserved: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(entry.waiters.length, 0);
+  assert.equal(entry.events.filter(event => event.event === 'stopping').length, 1);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const stopping = await f.executor.applicationTransportControl(f.context.runId, 'S');
+  assert.equal(stopping.event, 'stopping');
+  assert.equal(entry.uncertain, false); assert.equal(entry.stoppingRequested, true);
+  assert.equal(entry.cleanupWaitFailure, undefined);
+});
+
+test('replay is limited to the one-shot keeper stopping frame and never answers a release', () => {
+  /* R is answered per request; replaying a buffered frame into it would
+   * release PF custody on a transition the keeper never confirmed. The flag is
+   * a call-site argument, so bind it at the source rather than by behaviour. */
+  const source = readFileSync(new URL('../native/macos-pf-routing/controller.mjs', import.meta.url), 'utf8');
+  assert.match(source, /entry\.wait = \(predicate, timeoutMs = 15000, timeoutCode = null, replay = false\)/);
+  assert.match(source, /const captured = replay \? entry\.events\.find\(predicate\) : null;/);
+  const start = source.indexOf('const waiting = expected ? entry.wait(');
+  const end = source.indexOf('entry.child.stdin.write(', start);
+  assert.ok(start > 0 && end > start, 'the control wait must remain a single call site');
+  const call = source.slice(start, end);
+  assert.match(call, /command === 'S' && \(!entry\.cleanupOnly \|\| guardianOnly\)\)/);
+  assert.equal((call.match(/,\s*true\s*\)/g) ?? []).length, 0, 'no command may pass the replay flag unconditionally');
+});
+
+test('a run whose launch authority is burned while the guardian holds the child can still stop and release', async () => {
+  /* This is the failure that required root recovery. A bound keeper refusal
+   * while the guardian is armed latches cleanup-only, but the cleanup-only S
+   * waited for transport-cleanup-stopping, which only the native main loop
+   * emits -- and that loop is blocked inside the guardian. The wait could not
+   * be satisfied by any native behaviour, so S timed out, the channel was
+   * poisoned, and the run was left holding PF, the utun and its credential
+   * group. S must instead be satisfied by the guardian's own stopping frame,
+   * and R by its own released frame. */
+  const f = streamFixture({ revokeAfterResume: true });
+  await f.executor.startApplicationTransport({ runId: f.context.runId, environmentId: f.context.environmentId, proxy, udpPolicy: 'block', leaseSHA256: 'a'.repeat(64), consoleUID: 501 });
+  await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  await f.executor.applicationTransportControl(f.context.runId, 'B');
+  const entry = f.executor.appTransports.get(f.context.runId);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(entry.guardianArmed, true, 'the L ACK binds the guardian');
+  assert.equal(entry.applicationEnded?.childReaped, true, 'the revocation is recorded, not silently buffered');
+  /* Cleanup-only is latched the way a burned launch authority latches it. */
+  entry.cleanupOnly = true;
+  const stopping = await f.executor.applicationTransportControl(f.context.runId, 'S');
+  assert.equal(stopping.event, 'stopping');
+  assert.equal(entry.uncertain, false, 'S must not poison the channel');
+  const released = await f.executor.applicationTransportControl(f.context.runId, 'R');
+  assert.equal(released.event, 'transport-released');
+  assert.equal(entry.guardianReleased, true, 'the guardian released the child itself');
+  assert.equal(entry.uncertain, false);
+});
+
 test('actual persistent transport parser binds exec or one verified launchctl fork, then waits for a new stop frame and confirmed outer exit', async () => {
   for (const forked of [false, true]) {
     const f = streamFixture({ forked });
@@ -578,7 +688,7 @@ test('proven factory abort cleans only owned reference/issued lease/groups/conte
   assert.ok(!JSON.stringify(clean).includes('leaseSHA256') && !JSON.stringify(clean).includes('rootHookLease'));
 });
 test('an untrusted abort flag and every failed fresh cleanup step retain sealed state rather than erase the original failure', async () => {
-  for (const failed of ['confirmApplicationPrestageAborted', 'persistRun', 'assertNoOwnedGroupProcesses', 'releaseOwnedReference', 'removeOwnedRootHook', 'removeGroups', 'snapshotUnrelatedNetwork', 'retireApplicationLease', 'releaseLock']) {
+  for (const failed of ['confirmApplicationPrestageAborted', 'persistRun', 'assertNoOwnedGroupProcesses', 'releaseOwnedReference', 'removeOwnedRootHook', 'removeGroups', 'retireApplicationLease', 'releaseLock']) {
     const f = abortControllerFixture(), route = await f.prepareRoute(), request = input(route.routeId);
     await assert.rejects(f.controller.prepareNotionApplication(request));
     f.executor[failed] = async () => { throw new Error('private detail'); };
@@ -726,8 +836,55 @@ test('original guardian errno and controller stage survive outward throws and cl
   assert.equal(snapshot.cleanupFailure.stage, 'cleanup'); assert.equal(JSON.stringify(snapshot).includes('private detail'), false);
   await f.controller.shutdown();
 });
+test('a host network change observed after every owned resource is reclaimed is reported, never left wedging the runtime', async () => {
+  /* Host PF, routes and DNS are not Envara's to restore. A difference from the
+   * baseline, or a snapshot that cannot be taken, used to abandon the lease and
+   * lock after everything Envara owned was already released, leaving a runtime
+   * directory that blocked every later trial and the component installer. */
+  for (const finalSnapshot of ['dns-changed', 'unavailable']) {
+    const f = fixture(), route = await f.prepareRoute(), request = input(route.routeId); await f.controller.prepareNotionApplication(request);
+    await f.controller.resumeNotionApplication({ runId: request.runId, activationAuthorized: true });
+    const baseline = await f.executor.snapshotUnrelatedNetwork();
+    f.executor.snapshotUnrelatedNetwork = async () => {
+      if (finalSnapshot === 'unavailable') throw Object.assign(new Error(), { code: 'APPLICATION_ROUTING_NOT_READY' });
+      return { ...baseline, dnsDigest: 'f'.repeat(64), digest: 'e'.repeat(64) };
+    };
+    const clean = await f.controller.stopNotionApplication({ runId: request.runId });
+    assert.equal(clean.cleanupComplete, true, finalSnapshot);
+    assert.equal(clean.cleanupUncertain, false, finalSnapshot);
+    assert.ok(f.calls.includes('retire-lease') && f.calls.includes('unlock'), 'the lease is retired and the lock released');
+    const evidence = clean.cleanupEvidence;
+    assert.equal(evidence.hostDNSUnchanged, false, 'a change or an unprovable state is never reported as unchanged');
+    if (finalSnapshot === 'dns-changed') { assert.equal(evidence.unrelatedPFUnchanged, true); assert.equal(evidence.unrelatedRoutesUnchanged, true); }
+    else { assert.equal(evidence.unrelatedPFUnchanged, false); assert.equal(evidence.unrelatedRoutesUnchanged, false); }
+    for (const key of ['ownedGroupsRemoved', 'ownedRootHookRemoved', 'ownedPFReferenceReleased', 'registryReleased']) assert.equal(evidence[key], true, key);
+    await f.controller.shutdown();
+  }
+});
+test('the public snapshot reports an application the guardian already stopped as ended', async () => {
+  /* The executor records the revocation as an object. Comparing that object to
+   * true reported every ended run as still running, so the trial kept
+   * observing a process that had exited within a second of starting. */
+  const f = fixture(), route = await f.prepareRoute(), request = input(route.routeId); await f.controller.prepareNotionApplication(request);
+  await f.controller.resumeNotionApplication({ runId: request.runId, activationAuthorized: true });
+  f.executor.appTransports = new Map();
+  assert.equal(f.controller.applicationSnapshot({ runId: request.runId }).applicationEnded, false);
+  f.executor.appTransports.set(request.runId, { applicationEnded: Object.freeze({ pid: 4242, birth: '4242:000001', childReaped: true, childSignalled: false }) });
+  const ended = f.controller.applicationSnapshot({ runId: request.runId });
+  assert.equal(ended.applicationEnded, true);
+  assert.equal(ended.endedChildReaped, true); assert.equal(ended.endedChildSignalled, false);
+  assert.equal(ended.ready, false); assert.equal(ended.protected, false);
+  await f.controller.shutdown();
+});
+test('an unchanged host is still reported as unchanged after cleanup', async () => {
+  const f = fixture(), route = await f.prepareRoute(), request = input(route.routeId); await f.controller.prepareNotionApplication(request);
+  await f.controller.resumeNotionApplication({ runId: request.runId, activationAuthorized: true });
+  const clean = await f.controller.stopNotionApplication({ runId: request.runId });
+  for (const key of ['unrelatedPFUnchanged', 'unrelatedRoutesUnchanged', 'hostDNSUnchanged']) assert.equal(clean.cleanupEvidence[key], true, key);
+  await f.controller.shutdown();
+});
 test('application cleanup retries only unfinished owned tail steps after a native release and preserves the initial failure', async () => {
-  for (const step of ['removeGroups', 'snapshotUnrelatedNetwork', 'retireApplicationLease', 'releaseLock']) {
+  for (const step of ['removeGroups', 'retireApplicationLease', 'releaseLock']) {
     const f = fixture(), route = await f.prepareRoute(), request = input(route.routeId); await f.controller.prepareNotionApplication(request);
     const run = f.controller.appRuns.get(request.runId);
     run.initialFailure = Object.freeze({ stage: 'resume', code: 'APPLICATION_APP_RESUME_UNCONFIRMED' });
@@ -764,7 +921,7 @@ test('proved direct preflight failure cleans only this controllers issued root r
 });
 test('every failed fresh preflight cleanup check and an unproven error flag retain private state and never claim a normal app lifetime', async () => {
   for (const step of ['confirmApplicationPreflightAborted', 'persistRun', 'requireEmptyOwnedAnchor', 'inspectOwnedRootHook', 'assertNoOwnedGroupProcesses',
-    'releaseOwnedReference', 'removeOwnedRootHook', 'removeGroups', 'snapshotUnrelatedNetwork', 'retireApplicationLease', 'releaseLock']) {
+    'releaseOwnedReference', 'removeOwnedRootHook', 'removeGroups', 'retireApplicationLease', 'releaseLock']) {
     const f = preflightControllerFixture(), route = await f.prepareRoute(), request = input(route.routeId);
     await assert.rejects(f.controller.prepareNotionApplication(request));
     f.executor[step] = async () => { throw new Error('fixture-only private error'); };

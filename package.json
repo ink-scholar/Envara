@@ -153,6 +153,13 @@
           "!macos-pf-*/**",
           "!macos-pf-*"
         ]
+      },
+      {
+        "from": "build/local-authorization",
+        "to": "local-authorization",
+        "filter": [
+          "**/*"
+        ]
       }
     ]
   }

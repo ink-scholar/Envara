@@ -40,7 +40,14 @@ export function createPFAuthorizedChannelMux({ spawnRootControlledLifecycle, max
       terminal = { exitCode, exitSignal };
       const remaining = [...pending.values()]; pending.clear(); owners.clear();
       for (const record of remaining) record.emit('end');
-      for (const target of [...targets.values()]) target.emit('close', exitCode, exitSignal);
+      /* The shared root session ending is never a clean end for an attached
+       * application unless it exited zero: a run whose cleanup was never
+       * confirmed must be told the session is gone rather than look finished. */
+      const abrupt = exitCode !== 0 || exitSignal != null;
+      for (const target of [...targets.values()]) {
+        target.emit('close', abrupt ? null : CLOSED_CODE, exitSignal ?? null);
+        if (abrupt) target.emit('error', failed('mux-session-ended'));
+      }
       targets.clear();
     });
     return child;
@@ -101,15 +108,36 @@ export function createPFAuthorizedChannelMux({ spawnRootControlledLifecycle, max
       target.emit('close', CLOSED_CODE, null);
     };
     target.end = end;
+    // Requests written before the shared carrier is ready are held, not dropped:
+    // the first request is what starts that carrier, and a caller must never
+    // lose a request just because the authorization dialog is still on screen.
+    const backlog = [];
+    const forward = input => {
+      if (disposed || terminal || ended || !child) return false;
+      try { return child.stdin.write(input); } catch { return false; }
+    };
+    const flush = () => {
+      while (backlog.length) {
+        const input = backlog.shift();
+        if (!forward(input)) { backlog.unshift(input); return false; }
+      }
+      return true;
+    };
     target.stdin = {
       write: (input, callback) => {
-        if (disposed || terminal || ended || !child) { callback?.(); return false; }
+        if (disposed || terminal || ended) { callback?.(); return false; }
         const id = parseId(input);
         if (id) {
           if (pending.has(id)) { callback?.(); throw failed('mux-duplicate-request'); }
           pending.set(id, { id, emit: target.emit }); owners.set(id, target);
         }
-        try { return child.stdin.write(input, callback); } catch { callback?.(); return false; }
+        if (child) { const sent = forward(input); callback?.(); return sent; }
+        // The first request is what opens the shared authorized session; this is
+        // the only place the carrier is ever spawned.
+        backlog.push(input);
+        void start().then(() => { if (!flush()) fail('mux-input-failed'); }).catch(() => fail('mux-process-unavailable'));
+        callback?.();
+        return false;
       },
       end,
       on: () => {}, once: () => {}, removeListener: () => {},

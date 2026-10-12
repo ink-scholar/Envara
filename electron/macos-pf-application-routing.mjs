@@ -389,7 +389,7 @@ export class MacOSPFApplicationRouting {
      * authorized root session the launch opened. The session is closed here so
      * the root controller cleans up and exits; no privileged daemon is left
      * behind. A recycled Electron process must not inherit a finished session. */
-    await this.notionTrial.disposeShared().catch(() => {});
+    if (typeof this.notionTrial.disposeShared === 'function') await this.notionTrial.disposeShared().catch(() => {});
     /* An unconfirmed cleanup used to make the app impossible to quit, even after
      * the system was verified clean and no Envara root process remained, which
      * forced a kill. Quitting changes no root state; what must not happen is

@@ -16,6 +16,13 @@ const errorMessages = {
   APPLICATION_ROUTING_PROTOCOL_ERROR: '应用网络组件返回了无效响应。',
   APPLICATION_ROUTING_TIMEOUT: '应用网络组件响应超时。',
   APPLICATION_ROUTING_CLOSED: '应用网络组件正在退出。',
+  APPLICATION_ROUTING_AUTHORIZATION_CANCELED: '已取消管理员授权，网络组件没有变化。',
+  APPLICATION_ROUTING_AUTHORIZATION_DENIED: '管理员授权未通过，网络组件没有变化。',
+  APPLICATION_ROUTING_RUNTIME_PRESENT: '上次试运行留下的系统运行记录仍在，需先清理后才能安装或更新网络组件。',
+  APPLICATION_ROUTING_INSTALL_CONFLICT: '已安装的网络组件不是可识别的版本；为避免覆盖未知文件，已停止更新。',
+  APPLICATION_ROUTING_INSTALL_REVIEW: '上次安装留下了未完成的暂存目录，需要检查后才能继续安装。',
+  APPLICATION_ROUTING_INSTALL_BUSY: '网络组件正在使用中，请先结束试运行再更新。',
+  APPLICATION_ROUTING_INSTALL_INCOMPLETE: '网络组件安装没有完成，已安装的版本保持不变。常见原因是上次试运行留下的系统记录仍在。',
 };
 export function applicationRoutingError(error, fallback = 'APPLICATION_ROUTING_NOT_READY') {
   const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{1,95}$/.test(error.code) ? error.code : fallback;

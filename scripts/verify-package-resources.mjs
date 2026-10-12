@@ -182,7 +182,7 @@ export async function inspectPFRoutingResources({ resourceRoot, arch = process.a
       'installer-upgrade-dbcf.h', 'known-installations/dbcf.manifest.json',
       'installer-upgrade-43b.h', 'known-installations/43b.manifest.json',
       'installer-upgrade-acfc.h', 'known-installations/acfc.manifest.json',
-      'installer-upgrade-c34.h', 'known-installations/c34.manifest.json', 'pf-hook.c', 'pf-hook.h', 'pf-hook-abi.h', 'pf-run-ledger.c', 'pf-run-ledger.h',
+      'installer-upgrade-c34.h', 'known-installations/c34.manifest.json', 'installer-upgrade-4b9f85.h', 'known-installations/4b9f85.manifest.json', 'installer-upgrade-43392e.h', 'known-installations/43392e.manifest.json', 'installer-upgrade-03245359.h', 'known-installations/03245359.manifest.json', 'installer-upgrade-f0b99f.h', 'known-installations/f0b99f.manifest.json', 'installer-upgrade-f39101.h', 'known-installations/f39101.manifest.json', 'installer-upgrade-a8bd00.h', 'known-installations/a8bd00.manifest.json', 'installer-upgrade-da6e7c.h', 'known-installations/da6e7c.manifest.json', 'pf-hook.c', 'pf-hook.h', 'pf-hook-abi.h', 'pf-run-ledger.c', 'pf-run-ledger.h',
       'pf-filter-command.c', 'pf-filter-command.h',
       'pf-filter-transaction.c', 'pf-filter-transaction.h',
       'app-command.c', 'app-command.h',
@@ -364,6 +364,26 @@ async function verify(options) {
       if (target.platform !== 'darwin') return;
       report.pfResources = await inspectPFRoutingResources({ resourceRoot: path.join(target.resources, 'app-routing/macos-pf'), arch: target.arch });
       report.checks.push('PF fixed-file manifest, native/Node/installer targets, dependency pins, licenses, corresponding source and source-build hashes verified read-only; bundled does not imply installed, authorized or ready');
+    });
+    /* The app pins one exact trial candidate and derives the carrier it loads
+     * from that pin. A build whose pin and bundled carrier disagree passes every
+     * per-file check above yet cannot authorize anything, and it hides the
+     * component upgrade from the user. Compare them here, before handover. */
+    await check('resources/local-authorization/pinned-carrier', async () => {
+      if (target.platform !== 'darwin') return;
+      const source = asar.extractFile(archive, 'electron/macos-pf-notion-trial.mjs').toString('utf8');
+      const pinned = /PF_NOTION_TRIAL_CANDIDATE = Object\.freeze\(\{\s*authorizerSHA256: '([0-9a-f]{64})',\s*manifestSHA256: '([0-9a-f]{64})',/.exec(source);
+      assert.ok(pinned, 'The packaged app does not declare a parseable trial candidate pin');
+      const [, authorizerSHA256, manifestSHA256] = pinned;
+      const carriers = (await readdir(path.join(target.resources, 'local-authorization'))).filter(name => name.endsWith('.app')).sort();
+      const expected = `EnvaraPFAuthorization-${manifestSHA256.slice(0, 12)}.app`;
+      assert.deepEqual(carriers, [expected], `Bundled carriers ${JSON.stringify(carriers)} do not match the pinned candidate ${expected}`);
+      const payload = path.join(target.resources, 'local-authorization', expected, 'Contents/Resources/app-routing/macos-pf');
+      assert.equal(await sha256File(path.join(payload, 'manifest.json')), manifestSHA256, 'Bundled carrier manifest differs from the pinned candidate');
+      assert.equal(await sha256File(path.join(payload, 'EnvaraPFInstall')), authorizerSHA256, 'Bundled carrier installer differs from the pinned candidate');
+      assert.equal(await sha256File(path.join(target.resources, 'app-routing/macos-pf/manifest.json')), manifestSHA256,
+        'The bundled routing component and the pinned trial candidate are different builds');
+      report.checks.push('Pinned trial candidate, the single bundled carrier, its installer and the bundled routing component are one build');
     });
     await check('resources/app-routing/original-macos-dependency', async () => {
       if (target.platform !== 'darwin' || process.platform !== 'darwin') return;

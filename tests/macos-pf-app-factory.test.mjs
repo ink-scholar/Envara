@@ -76,7 +76,11 @@ static void ticket_fixture(const char *workspace,const char *bundle) {
     provider_initialize(&f);const struct envara_app_supervisor_provider *provider=envara_app_native_factory_provider(&f);
     CHECK(provider==&f.provider);CHECK(provider->ticket.inspect==ticket_inspect);CHECK(provider->ticket.verify==ticket_verify);
     CHECK(provider->ticket.adopt==ticket_never_adopt);CHECK(provider->ticket.context==&f);
-    CHECK(provider->prepare_guard==prepare_guard&&provider->stage==notion_stage&&provider->context==&f);
+    /* This inert registration is not the supported Notion target, so it selects
+     * the generic cold profile: no fixed adapter and no front execution profile.
+     * Both profiles are real owned-process scopes; neither is ready/protected. */
+    CHECK(provider->prepare_guard==prepare_guard&&provider->stage==NULL&&provider->context==&f);
+    CHECK(provider->execution_profile==ENVARA_APP_EXECUTION_COLD);
     struct envara_gui_lifecycle child;envara_gui_lifecycle_init(&child);struct envara_gui_lifecycle unchanged=child;
     CHECK(provider->ticket.adopt(NULL,&child,provider->ticket.context)==-1&&errno==ENOTSUP);CHECK(!memcmp(&child,&unchanged,sizeof(child)));
     /* Only these two callbacks use inert fixture authority. The custody hook
@@ -98,7 +102,7 @@ static NSDictionary *json(const char *s){return decode(s,strlen(s));}
 static NSMutableDictionary *lease(void) {
     const char *run="00112233-4455-4677-8899-aabbccddeeff";
     return [@{@"schema":@ENVARA_APP_BOUND_LEASE_SCHEMA,@"runId":@(run),@"environmentId":@(run),@"realmId":@(run),@"leaseId":@(run),@"generation":@(run),@"registrationId":@(run),@"versionId":@(run),
-      @"consoleUID":@501,@"gid":@7111,@"cwd":@"/Users/example/工作 目录",@"timezone":@"Asia/Manila",@"locale":@"en-PH",@"issuedMonotonicMs":@1000,@"expiresMonotonicMs":@181000,@"bootTimeSeconds":@1234567,@"controllerPid":@222,@"controllerBirth":@"1234567:000123",@"ipv4Address":@"198.18.1.1",@"rootHookLease":@{@"runId":@(run)}} mutableCopy];
+      @"consoleUID":@501,@"gid":@7111,@"cwd":@"/Users/example/工作 目录",@"timezone":@"Asia/Manila",@"locale":@"en-PH",@"issuedMonotonicMs":@1000,@"expiresMonotonicMs":@(1000+ENVARA_APP_BOUND_MAX_LEASE_MS),@"bootTimeSeconds":@1234567,@"controllerPid":@222,@"controllerBirth":@"1234567:000123",@"ipv4Address":@"198.18.1.1",@"rootHookLease":@{@"runId":@(run)}} mutableCopy];
 }
 int main(int argc,char **argv) {@autoreleasepool {
     CHECK(getuid()!=0&&geteuid()!=0); // never a root/PF/native fixture
@@ -132,7 +136,7 @@ int main(int argc,char **argv) {@autoreleasepool {
       bad=[valid mutableCopy];bad[key]=@YES;CHECK(!lease_shape(bad));bad[key]=@1.1;CHECK(!lease_shape(bad));bad[key]=@"1000";CHECK(!lease_shape(bad));
     }
     for(NSNumber *gid in @[@7099,@8000,@0]){bad=[valid mutableCopy];bad[@"gid"]=gid;CHECK(!lease_shape(bad));}
-    bad=[valid mutableCopy];bad[@"expiresMonotonicMs"]=@181001;CHECK(!lease_shape(bad));
+    bad=[valid mutableCopy];bad[@"expiresMonotonicMs"]=@(1001+ENVARA_APP_BOUND_MAX_LEASE_MS);CHECK(!lease_shape(bad));
     bad=[valid mutableCopy];bad[@"expiresMonotonicMs"]=@1000;CHECK(!lease_shape(bad));
     bad=[valid mutableCopy];bad[@"ipv4Address"]=@"192.168.1.1";CHECK(!lease_shape(bad));
     bad=[valid mutableCopy];bad[@"rootHookLease"]=@{@"runId":@"11112233-4455-4677-8899-aabbccddeeff"};CHECK(!lease_shape(bad));
@@ -201,10 +205,12 @@ test('production factory initializer and real private tickets retain mandatory f
   }
 });
 
-test('factory authority uses a private durable journal, immutable original descriptors and fresh FRONT guards', async () => {
+test('factory authority uses a private durable journal, immutable original descriptors and fresh live-mode guards', async () => {
   const source = await readFile(path.join(native, 'app-native-factory.m'), 'utf8');
-  assert.match(source, /f->guard_live=mode==ENVARA_PF_PRODUCTION_FRONT/);
-  assert.match(source, /basic\(f,f->guard_live\)/);
+  /* A live mode is the one this factory's registered profile owns; DENY/EMPTY
+   * stay available to either profile. FRONT/RUNNING guards are still required. */
+  assert.match(source, /f->guard_live=mode_is_live\(mode\)/);
+  assert.match(source, /basic\(f,mode_is_live\(mode\)\)/);
   assert.match(source, /journal_write\(f,@"intent",intent\)/);
   assert.match(source, /O_RDWR\|O_CREAT\|O_EXCL\|O_NOFOLLOW\|O_CLOEXEC,0600/);
   assert.match(source, /f->poisoned=1;f->cleanup_reconciled=0;return operation_refuse/);
@@ -214,7 +220,10 @@ test('factory authority uses a private durable journal, immutable original descr
   assert.match(source, /dependencies\(f\)&&pf_running\(f\)/);
   assert.match(source, /f->lease_pipe_identity\.st_ino/);
   assert.match(source, /copied_one\.st_ino!=f->lease_pipe_identity\.st_ino/);
-  assert.match(source, /ENVARA_PF_PRODUCTION_FRONT&&!f->staged&&envara_app_scope_gid_absent/);
+  assert.match(source, /mode_is_live\(mode\)&&!f->staged&&envara_app_scope_gid_absent/);
+  /* The profile selects the live mode from the registered snapshot only. */
+  assert.match(source, /static EnvaraPFProductionMode live_mode\(const struct envara_app_native_factory \*f\)/);
+  assert.match(source, /f->notion_front\?ENVARA_PF_PRODUCTION_FRONT:ENVARA_PF_PRODUCTION_ROUTED/);
   assert.match(source, /guard->verify_resume=verify_resume/);
   assert.match(source, /SecCodeCopyGuestWithAttributes/);
   assert.match(source, /p\.kp_eproc\.e_ucred\.cr_ngroups!=1/);

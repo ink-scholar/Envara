@@ -382,3 +382,76 @@ test('read-only app data fails explicitly without switching to a shared HOME', {
     await assert.rejects(service.snapshot(), { code: 'TERMINAL_STORAGE_UNAVAILABLE' });
   } finally { await chmod(dataDir, 0o700); await rm(root, { recursive: true, force: true }); }
 });
+
+const socksContext = async id => ({ id, timezone: 'UTC', proxy: { protocol: 'socks5', host: '127.0.0.1', port: 12345, username: 'fixture-user', password: 'fixture-password' } });
+function recordingPty(launches) {
+  return (executable, args, options) => { const pty = new FakePty(options); launches.push({ executable, args, env: options.env, pty }); return pty; };
+}
+
+test('a SOCKS bridge route starts only inside the network fence and Node uses the environment proxy', async t => {
+  const launches = [], wraps = [];
+  const networkFence = { wrap: async (shell, options) => { wraps.push({ shell, options });
+    return { executable: '/usr/bin/sandbox-exec', args: ['-p', 'FIXTURE-PROFILE', shell.executable, ...shell.args], environment: shell.environment }; } };
+  const f = await fixture(t, { networkFence, resolveContext: socksContext, ptyFactory: recordingPty(launches) });
+  await f.service.setDirectory({ id: 'profile_a', path: f.cwd });
+  const session = await f.service.create({ id: 'profile_a' });
+  assert.equal(session.networkFence, true);
+  assert.equal(launches.length, 1);
+  const shell = f.service.shell({});
+  assert.equal(launches[0].executable, '/usr/bin/sandbox-exec');
+  assert.deepEqual(launches[0].args, ['-p', 'FIXTURE-PROFILE', shell.executable, ...shell.args]);
+  // The fence admits exactly this session's bridge, the only route it receives.
+  const endpoint = new URL(launches[0].env.HTTPS_PROXY);
+  assert.equal(endpoint.hostname, '127.0.0.1');
+  assert.equal(wraps[0].options.routePort, Number(endpoint.port));
+  assert.equal(launches[0].env.NODE_USE_ENV_PROXY, '1');
+  const duplicate = await f.service.duplicate({ sessionId: session.sessionId });
+  assert.equal(duplicate.networkFence, true);
+  assert.equal(launches[1].executable, '/usr/bin/sandbox-exec');
+  assert.notEqual(wraps[1].options.routePort, wraps[0].options.routePort);
+});
+
+test('a refused network fence never spawns an unfenced terminal and releases its bridge', async t => {
+  const launches = [], ports = [];
+  const networkFence = { wrap: async (_shell, { routePort }) => { ports.push(routePort);
+    throw Object.assign(new Error('系统网络围栏组件不可用，未启动终端。'), { code: 'TERMINAL_NETWORK_FENCE_UNAVAILABLE' }); } };
+  const f = await fixture(t, { networkFence, resolveContext: socksContext, ptyFactory: recordingPty(launches) });
+  await f.service.setDirectory({ id: 'profile_a', path: f.cwd });
+  await assert.rejects(f.service.create({ id: 'profile_a' }), { code: 'TERMINAL_NETWORK_FENCE_UNAVAILABLE' });
+  assert.equal(launches.length, 0);
+  assert.equal(ports.length, 1);
+  const net = await import('node:net');
+  await assert.rejects(new Promise((resolve, reject) => { const socket = net.connect(ports[0], '127.0.0.1', () => { socket.destroy(); resolve(); }); socket.on('error', reject); }), { code: 'ECONNREFUSED' });
+  assert.equal((await f.service.snapshot({ id: 'profile_a' })).profiles[0].sessions?.some(item => item.status === 'running') ?? false, false);
+});
+
+test('a local-network terminal needs no fence and receives no proxy variables', async t => {
+  const launches = [];
+  const networkFence = { wrap: async () => { throw new Error('a local-network terminal must not be wrapped'); } };
+  const f = await fixture(t, { networkFence, ptyFactory: recordingPty(launches) });
+  await f.service.setDirectory({ id: 'profile_a', path: f.cwd });
+  const session = await f.service.create({ id: 'profile_a' });
+  assert.equal(session.networkFence, false);
+  assert.equal(launches[0].executable, f.service.shell({}).executable);
+  for (const key of ['HTTPS_PROXY', 'ALL_PROXY', 'NODE_USE_ENV_PROXY']) assert.equal(launches[0].env[key], undefined);
+});
+
+test('the managed core listener is fenced as the only route; a remote HTTP upstream is reported unfenced', async t => {
+  const wraps = [];
+  const networkFence = { wrap: async (shell, options) => { wraps.push(options); return { executable: '/usr/bin/sandbox-exec', args: ['-p', 'FIXTURE-PROFILE', shell.executable, ...shell.args], environment: shell.environment }; } };
+  const managedLaunches = [];
+  const managed = await fixture(t, { networkFence, ptyFactory: recordingPty(managedLaunches),
+    resolveContext: async id => ({ id, timezone: 'UTC', proxy: { protocol: 'http', host: '127.0.0.1', port: 51234, username: 'runtime-user', password: 'runtime-password' } }) });
+  await managed.service.setDirectory({ id: 'profile_a', path: managed.cwd });
+  assert.equal((await managed.service.create({ id: 'profile_a' })).networkFence, true);
+  assert.deepEqual(wraps, [{ routePort: 51234 }]);
+  assert.equal(managedLaunches[0].executable, '/usr/bin/sandbox-exec');
+  assert.equal(managedLaunches[0].env.NODE_USE_ENV_PROXY, '1');
+  const remoteLaunches = [];
+  const remote = await fixture(t, { networkFence, ptyFactory: recordingPty(remoteLaunches),
+    resolveContext: async id => ({ id, timezone: 'UTC', proxy: { protocol: 'http', host: 'proxy.example', port: 8080, username: 'remote-user', password: 'remote-password' } }) });
+  await remote.service.setDirectory({ id: 'profile_a', path: remote.cwd });
+  assert.equal((await remote.service.create({ id: 'profile_a' })).networkFence, false);
+  assert.equal(remoteLaunches[0].executable, remote.service.shell({}).executable);
+  assert.equal(wraps.length, 1);
+});

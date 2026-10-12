@@ -28,7 +28,9 @@
 #define PFCTL_HASH "ceae69b705ccb481c9bce4fc4a3b9fb8cb4e9775b09677901bac6f4c44398bef"
 #define PFD_HASH "ce0e2352db81ea01fdc592c56447c5f89a3ee1a923122ef6ba5f78259bc47049"
 #define ROOT_TEXT_HASH "5e803c2e459d5417da5d61aba888d1da25ad56cb0bff4f22e69d36078eb7f575"
-#define ROOT_RULE_HASH "7f79342e7409a1d3569220b8e143c1f261574ae1ae7de6a07b915a2364316bb5"
+/* The 2026-10-08 stock root (pf.conf 9ac69169…, text 5e803c2e…) after the
+ * per-load normalization below; the earlier pin also held that boot's cpid. */
+#define ROOT_RULE_HASH "bc0d8665f149912c14cde7196b7ecaefda3f0a2161dc65aac4bfbfcb998c5a8d"
 #define INPUT_LIMIT 4096
 #define TEXT_LIMIT 65536
 #define RULE_LIMIT 64
@@ -221,9 +223,17 @@ static int write_rule(int fd, unsigned long op, EnvaraPFHookRequest *request, co
 }
 /* Same fixed-source normalization as the native-verified canary: XNU
  * f6217f891ac0bb64f3d375211650a4c1ff8ca1ea pf_rule_copyout/calc_skip_steps.
- * Preserve inner ticket/owner/label/matches/opaque semantics and rule order. */
+ * pf_rule_copyin also stamps every load with its creator (cuid @956, cpid
+ * @960) and resets live counts (states @904, src_nodes @912), so the same
+ * pf.conf loaded on another boot differs only there. Clear those too; keep
+ * inner ticket/owner/label/matches/other opaque semantics and rule order. */
+#define RULE_STATES_AT (904 - 764)
+#define RULE_SRC_NODES_AT (912 - 764)
+#define RULE_CREATOR_AT (956 - 952)
+_Static_assert(offsetof(EnvaraPFHookRule, opaque764) == 764 && offsetof(EnvaraPFHookRule, opaque952) == 952, "per-load field layout mismatch");
 static EnvaraPFHookRule semantic(EnvaraPFHookRule rule) {
-    memset(rule.skip, 0, sizeof(rule.skip)); rule.evaluations = 0; memset(rule.packets, 0, sizeof(rule.packets)); memset(rule.bytes, 0, sizeof(rule.bytes)); return rule;
+    memset(rule.skip, 0, sizeof(rule.skip)); rule.evaluations = 0; memset(rule.packets, 0, sizeof(rule.packets)); memset(rule.bytes, 0, sizeof(rule.bytes));
+    memset(rule.opaque764 + RULE_STATES_AT, 0, 4); memset(rule.opaque764 + RULE_SRC_NODES_AT, 0, 4); memset(rule.opaque952 + RULE_CREATOR_AT, 0, 8); return rule;
 }
 static void root_hash(HookRoot *root, uint32_t count) {
     EnvaraPFHookRequest normalized[RULE_LIMIT]; memcpy(normalized, root->rows, count * sizeof(*normalized));

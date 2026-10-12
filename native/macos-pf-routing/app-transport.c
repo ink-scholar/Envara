@@ -37,6 +37,12 @@ static int fixed_entry(void);
 static volatile sig_atomic_t stopped;
 static void stop_signal(int number) { stopped = number; }
 static int refuse(int error) { errno = error; return -1; }
+/* A live mode carries admission and needs held original descriptors plus live
+ * dependencies; DENY/EMPTY never do. Kept local so this file never guesses the
+ * factory's profile — it asks the factory which mode is live. */
+static int mode_is_live_mode(EnvaraPFProductionMode mode) {
+    return mode == ENVARA_PF_PRODUCTION_FRONT || mode == ENVARA_PF_PRODUCTION_ROUTED;
+}
 static int write_bounded(int fd,const char *buffer,size_t count);
 static void refused_event_reason(const char *run,const char *environment,const char *stage,const char *reason,int error) {
     char frame[768]; int saved_errno=errno; if (error < 1 || error > 1024) error = EIO;
@@ -756,17 +762,21 @@ int envara_app_transport_command(int argc, char *const argv[]) {
 static int admission(envara_app_native_factory *factory, int front_input) {
     struct envara_app_native_admission p;
     if (envara_app_native_factory_admission(factory, &p)) return -1;
+    /* The profile label is derived from the factory's registered snapshot, not
+     * assumed here, so a generic app never reports the Notion front profile. */
+    const char *profile = envara_app_native_factory_profile(factory);
     char frame[1536]; int n = snprintf(frame, sizeof(frame),
         "{\"schema\":\"envara.macos-pf-notion-admission/v1\",\"operation\":\"activate\",\"runId\":\"%s\","
         "\"environmentId\":\"%s\",\"leaseId\":\"%s\",\"generation\":\"%s\",\"leaseSHA256\":\"%s\","
         "\"keeperPID\":%d,\"keeperBirth\":\"%llu:%06llu\",\"frontPID\":%d,\"frontBirth\":\"%llu:%06llu\","
-        "\"frontPort\":%u,\"gid\":%u,\"filterRevision\":%u,\"writerPid\":%u,\"profile\":\"seatbelt-front-only\","
+        "\"frontPort\":%u,\"gid\":%u,\"filterRevision\":%u,\"writerPid\":%u,\"profile\":\"%s\","
         "\"rulesVerified\":true,\"poolsVerified\":true,\"lo0FilteringVerified\":true,\"originalListenerHeld\":true,"
         "\"originalUTunHeld\":true,\"expiresMonotonicMs\":%llu,\"bootTimeSeconds\":%llu,\"ready\":false,\"protected\":false}\n",
         p.run_id, p.environment_id, p.lease_id, p.generation, p.lease_sha256,
         p.keeper.pid, (unsigned long long)p.keeper.birth_seconds, (unsigned long long)p.keeper.birth_microseconds,
         p.frontend.pid, (unsigned long long)p.frontend.birth_seconds, (unsigned long long)p.frontend.birth_microseconds,
-        p.front_port, p.gid, p.filter_revision, p.writer_pid, (unsigned long long)p.expires_monotonic_ms,
+        p.front_port, p.gid, p.filter_revision, p.writer_pid, profile,
+        (unsigned long long)p.expires_monotonic_ms,
         (unsigned long long)p.boot_time_seconds);
     if (n <= 0 || n >= (int)sizeof(frame)) return refuse(EOVERFLOW);
     return write_bounded(front_input, frame, (size_t)n);
@@ -910,9 +920,14 @@ static int run(const struct envara_app_native_preflight *plan) {
         if(fault||stage_used||strncmp(command,"L ",2)||!uuid(command+2)){RUN_FAULT(EINVAL,"NATIVE_OPERATION_REFUSED");continue;}
         stage_used=1;abort.launch_accepted=1;
         const struct envara_app_supervisor_provider *provider=envara_app_native_factory_provider(factory);
-        if(!provider||!provider->stage){RUN_FAULT(EACCES,"NATIVE_OPERATION_REFUSED");continue;}
+        /* A NULL adapter is the generic cold profile, which the supervisor runs
+         * through envara_app_ticket_stage/envara_gui_stage. An absent provider
+         * object itself is still a refusal. */
+        if(!provider){RUN_FAULT(EACCES,"NATIVE_OPERATION_REFUSED");continue;}
+        EnvaraPFProductionMode live=envara_app_native_factory_live_mode(factory);
+        if(!mode_is_live_mode(live)){RUN_FAULT(ENOTSUP,"NATIVE_OPERATION_REFUSED");continue;}
         deny_confirmed=0;deny_attempted=0;stage="front-commit";
-        if(envara_app_native_factory_apply(factory,ENVARA_PF_PRODUCTION_FRONT,&filter)){int e=errno;RUN_FAULT(e,envara_app_native_failure_reason());continue;}
+        if(envara_app_native_factory_apply(factory,live,&filter)){int e=errno;RUN_FAULT(e,envara_app_native_failure_reason());continue;}
         stage="front-admission";if(admission(factory,front_input)){int e=errno;RUN_FAULT(e,envara_app_native_failure_reason());continue;}
         stage="ticket-prepare";
         struct envara_app_registry registry={.fd=-1};struct envara_app_ticket_store tickets={.fd=-1};struct envara_app_ticket prepared;

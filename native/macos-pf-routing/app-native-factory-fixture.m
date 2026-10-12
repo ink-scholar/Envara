@@ -26,6 +26,8 @@ static int staged_ticket_fixture(void) {
     strcpy(f.plan.run_id,"00000000-0000-4000-8000-000000000003");
     memset(f.plan.lease_sha256,'a',64);f.plan.lease_sha256[64]=0;
     f.app.schema=1;f.request.schema=ENVARA_GUI_SCHEMA;f.mode=ENVARA_PF_PRODUCTION_FRONT;
+    /* This seam exercises the Notion front profile explicitly. A zero-initialised factory selects the generic cold profile, whose live mode is ROUTED. */
+    f.notion_front=1;
     if(ticket_verify(&f.app,&f.request,f.plan.run_id,f.plan.lease_sha256,&f)||bundle_calls!=1||mode_calls!=1||live_calls!=1)return 50;
     bundle_valid=0;
     if(ticket_verify(&f.app,&f.request,f.plan.run_id,f.plan.lease_sha256,&f)!=-1||bundle_calls!=2||mode_calls!=1)return 51;

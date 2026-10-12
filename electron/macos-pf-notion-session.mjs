@@ -9,6 +9,10 @@ export const PF_NOTION_CHANNEL_LIFETIME_MS = 180000;
  * application exits, or Envara quits. Its authorized channel therefore has no
  * total lifetime, and only each individual request stays bounded. */
 export const PF_SESSION_CHANNEL_LIFETIME_MS = Infinity;
+/* The sealed lease only bounds the session from outside; the controller and the
+ * native guardian enforce the same 30-day ceiling. Kept as a local constant so
+ * this module does not import the controller it is validated against. */
+export const PF_SESSION_LEASE_SECONDS = 30 * 24 * 60 * 60;
 export const PF_NOTION_CLEANUP_RESERVE_MS = 40000;
 export const PF_NOTION_CLOSE_RESERVE_MS = 10000;
 export const PF_NOTION_RESUME_TIMEOUT_MS = 60000;
@@ -57,7 +61,8 @@ export function validatePFNotionSessionRequest(method, params) {
     const keys = method === 'prepareNotionApplication' ? ['routeId', 'runId', 'environmentId', 'lifetimeSeconds', 'activationAuthorized'] :
       method === 'resumeNotionApplication' ? ['runId', 'activationAuthorized'] : ['runId'];
     if (!exact(params, keys) || !canonicalUUID(params.runId) || method === 'prepareNotionApplication' &&
-        (!/^[A-Za-z0-9_-]{1,128}$/.test(params.routeId ?? '') || !canonicalUUID(params.environmentId) || !Number.isInteger(params.lifetimeSeconds) || params.lifetimeSeconds < 10 || params.lifetimeSeconds > 180) ||
+        (!/^[A-Za-z0-9_-]{1,128}$/.test(params.routeId ?? '') || !canonicalUUID(params.environmentId) || !Number.isInteger(params.lifetimeSeconds) ||
+          params.lifetimeSeconds < 10 || params.lifetimeSeconds > PF_SESSION_LEASE_SECONDS) ||
         Object.hasOwn(params, 'activationAuthorized') && params.activationAuthorized !== true) throw failed('PF_HELPER_REQUEST_INVALID');
   } else throw failed('PF_HELPER_REQUEST_INVALID');
 }
@@ -281,10 +286,12 @@ function publicResult(method, result) {
  * authorization callback.
  */
 export function createPersistentPFNotionSessionClient({ spawnRootControlledLifecycle, acquireChannel = null,
-  lifetimeMs = PF_NOTION_CHANNEL_LIFETIME_MS, channelKey = null, disposable = false, maximumBytes = 65536,
+  lifetimeMs = PF_NOTION_CHANNEL_LIFETIME_MS, channelKey = null, maximumBytes = 65536,
   now = () => performance.now(), requestSerial = null } = {}) {
+  /* A caller supplies either its own spawn callback or a shared channel; a
+   * serializing wrapper is optional and defaults to running requests directly. */
   if (typeof spawnRootControlledLifecycle !== 'function' && typeof acquireChannel !== 'function' ||
-      typeof now !== 'function' || typeof requestSerial !== 'function' ||
+      typeof now !== 'function' || requestSerial !== null && typeof requestSerial !== 'function' ||
       typeof lifetimeMs !== 'number' || !(lifetimeMs > 0) ||
       channelKey !== null && typeof channelKey !== 'string' ||
       !Number.isInteger(maximumBytes) || maximumBytes < 1024 || maximumBytes > 131072) throw failed('PF_HELPER_REQUEST_INVALID');

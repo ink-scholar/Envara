@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { access, chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { captureTerminalProcess, closeTerminalProcess } from './terminal-process.mjs';
+import { TerminalNetworkFence } from './terminal-network-fence.mjs';
 
 const require = createRequire(import.meta.url);
 const MAX_SESSIONS = 8;
@@ -91,14 +92,27 @@ async function ownedFile(filename, source, overwrite = false) {
 }
 
 /** Real per-profile PTYs with private tool configuration; this is not an OS sandbox. */
+// Seatbelt admits only loopback peers, so a remote HTTP(S) upstream stays unfenced.
+function loopbackRoutePort(bridge, endpoint) {
+  if (bridge) return bridge.port;
+  if (!endpoint) return null;
+  try {
+    const url = new URL(endpoint);
+    return ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) ? Number(url.port || (url.protocol === 'https:' ? 443 : 80)) : null;
+  } catch { return null; }
+}
+
 export class TerminalService {
-  constructor({ dataDir, onEvent = () => {}, resolveContext, ptyFactory = defaultPtyFactory, processControl = { capture: captureTerminalProcess, close: closeTerminalProcess }, additionalExecutablePaths = [] }) {
+  constructor({ dataDir, onEvent = () => {}, resolveContext, ptyFactory = defaultPtyFactory, processControl = { capture: captureTerminalProcess, close: closeTerminalProcess }, additionalExecutablePaths = [],
+    networkFence = process.platform === 'darwin' ? new TerminalNetworkFence() : null }) {
     if (!path.isAbsolute(dataDir ?? '') || typeof resolveContext !== 'function') throw codeError('终端数据目录或环境解析器无效。');
     this.dataDir = path.resolve(dataDir);
     this.onEvent = onEvent;
     this.resolveContext = resolveContext;
     this.ptyFactory = ptyFactory;
     this.processControl = processControl;
+    if (networkFence != null && typeof networkFence.wrap !== 'function') throw codeError('终端网络围栏无效。');
+    this.networkFence = networkFence;
     if (!Array.isArray(additionalExecutablePaths) || additionalExecutablePaths.some(value => typeof value !== 'string' || !path.isAbsolute(value) || /[\0\r\n]/.test(value))) throw codeError('可信程序搜索目录无效。');
     this.additionalExecutablePaths = [...additionalExecutablePaths];
     this.hostHome = os.homedir();
@@ -147,7 +161,7 @@ export class TerminalService {
   }
   active(id) { return [...this.sessions.values()].find(session => session.profileId === id && ['starting', 'running', 'closing'].includes(session.status)); }
   metadata(session) {
-    return { sessionId: session.sessionId, profileId: session.profileId, status: session.status, cwd: session.cwd, timezone: session.timezone ?? null, privacy: session.launchContext?.privacy ?? { mode: 'standard' }, geolocation: session.launchContext?.geolocation ?? null, network: session.network ?? unknownNetwork(), columns: session.columns, rows: session.rows, startedAt: session.startedAt, sequence: session.sequence, replay: session.replay,
+    return { sessionId: session.sessionId, profileId: session.profileId, status: session.status, cwd: session.cwd, timezone: session.timezone ?? null, networkFence: session.networkFence === true, privacy: session.launchContext?.privacy ?? { mode: 'standard' }, geolocation: session.launchContext?.geolocation ?? null, network: session.network ?? unknownNetwork(), columns: session.columns, rows: session.rows, startedAt: session.startedAt, sequence: session.sequence, replay: session.replay,
       ...(session.exitCode != null ? { exitCode: session.exitCode } : {}), ...(session.error ? { error: session.error } : {}) };
   }
   async snapshot({ id } = {}) {
@@ -219,6 +233,8 @@ export class TerminalService {
       environment.HOMEDRIVE = drive.slice(0, 2); environment.HOMEPATH = directories.home.slice(2);
     }
     if (proxyEndpoint) for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) environment[key] = proxyEndpoint;
+    // Node's built-in fetch/http ignore proxy variables unless this is set.
+    if (proxyEndpoint) environment.NODE_USE_ENV_PROXY = '1';
     // Supported tool opt-outs apply only to this owned shell and its children.
     if (privacy?.mode !== 'off') Object.assign(environment, { DO_NOT_TRACK: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' });
     if (privacy?.mode === 'strict') environment.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
@@ -294,7 +310,13 @@ export class TerminalService {
       session.timezone = timezone; session.network = { ...publicNetwork(proxy), ...(session.launchContext.networkEgress?.ok ? { egress: session.launchContext.networkEgress } : {}) };
       this.contexts.set(id, { name: session.launchContext.name, timezone, timezoneSource: session.launchContext.timezoneSource, network: session.network, configDir: directories.config, claudeConfigDir: directories.claude });
       if (source) this.requireDuplicable(source);
-      const shell = this.shell(this.childEnvironment(directories, timezone, endpoint, session.launchContext.privacy));
+      let shell = this.shell(this.childEnvironment(directories, timezone, endpoint, session.launchContext.privacy));
+      // A loopback route (this session's bridge or the managed core listener)
+      // is the environment's only network path for this whole process tree.
+      // Fence it or refuse to start; never run it unfenced.
+      session.networkFence = false;
+      const routePort = loopbackRoutePort(session.bridge, endpoint);
+      if (routePort && this.networkFence) { shell = await this.networkFence.wrap(shell, { routePort }); session.networkFence = true; }
       this.assertStarting(session);
       const spawned = this.ptyFactory(shell.executable, shell.args, { name: 'xterm-256color', cols: session.columns, rows: session.rows, cwd, env: shell.environment, encoding: 'utf8', handleFlowControl: false });
       const pty = typeof spawned?.then === 'function' ? await spawned : spawned;

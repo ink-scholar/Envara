@@ -25,3 +25,5 @@ playwright-report/
 *.pfx
 __pycache__/
 *.py[cod]
+release-verified-*/
+build/local-authorization-archive/

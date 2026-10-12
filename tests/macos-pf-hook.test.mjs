@@ -179,7 +179,7 @@ int main(void) {
 }`;
   await native(binary => execute(binary, [], { timeout: 15000 }), harness);
 });
-test('native original semantic hash agrees with verified canary normalization and preserves original tickets and opaque fields', onlyMac, async () => {
+test('native original semantic hash ignores only per-load creator and live counts while preserving tickets and configured opaque fields', onlyMac, async () => {
   const harness = `
 #include HOOK_SOURCE
 int main(void) {
@@ -191,6 +191,13 @@ int main(void) {
     second = first; second.rows[0].rule.opaque272[0]++; root_hash(&second,7); if (!strcmp(first.canonical,second.canonical)) return 3;
     second = first; second.rows[0].rule.owner[0] = 'x'; root_hash(&second,7); if (!strcmp(first.canonical,second.canonical)) return 4;
     second = first; second.rows[0].rule.src[0] = 1; root_hash(&second,7); if (!strcmp(first.canonical,second.canonical)) return 5;
+    /* states/src_nodes (opaque764 140..143, 148..151) and cuid/cpid (opaque952
+     * 4..11) are stamped per load; neighbouring configured bytes still count. */
+    const unsigned kept764[] = {139,144,147,152}, cleared764[] = {140,143,148,151}, kept952[] = {0,3,12}, cleared952[] = {4,7,8,11};
+    for (unsigned k = 0; k < 4; k++) { second = first; second.rows[1].rule.opaque764[kept764[k]]++; root_hash(&second,7); if (!strcmp(first.canonical,second.canonical)) return 8; }
+    for (unsigned k = 0; k < 4; k++) { second = first; second.rows[1].rule.opaque764[cleared764[k]]++; root_hash(&second,7); if (strcmp(first.canonical,second.canonical)) return 9; }
+    for (unsigned k = 0; k < 3; k++) { second = first; second.rows[1].rule.opaque952[kept952[k]]++; root_hash(&second,7); if (!strcmp(first.canonical,second.canonical)) return 10; }
+    for (unsigned k = 0; k < 4; k++) { second = first; second.rows[1].rule.opaque952[cleared952[k]]++; root_hash(&second,7); if (strcmp(first.canonical,second.canonical)) return 11; }
     if (!old_text_matches("anchor \\\"original-0\\\" all",&first.rows[0])) return 6;
     if (old_text_matches("pass out quick all",&first.rows[0])) return 7;
     return 0;

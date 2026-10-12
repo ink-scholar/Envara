@@ -31,7 +31,13 @@ const upgradeInputs = ['installer-upgrade-f8.h', 'known-installations/f8.manifes
   'installer-upgrade-dbcf.h', 'known-installations/dbcf.manifest.json',
   'installer-upgrade-43b.h', 'known-installations/43b.manifest.json',
   'installer-upgrade-acfc.h', 'known-installations/acfc.manifest.json',
-  'installer-upgrade-c34.h', 'known-installations/c34.manifest.json'];
+  'installer-upgrade-c34.h', 'known-installations/c34.manifest.json',
+  'installer-upgrade-4b9f85.h', 'known-installations/4b9f85.manifest.json',
+  'installer-upgrade-43392e.h', 'known-installations/43392e.manifest.json', 'installer-upgrade-03245359.h', 'known-installations/03245359.manifest.json',
+  'installer-upgrade-f0b99f.h', 'known-installations/f0b99f.manifest.json',
+  'installer-upgrade-f39101.h', 'known-installations/f39101.manifest.json',
+  'installer-upgrade-a8bd00.h', 'known-installations/a8bd00.manifest.json',
+  'installer-upgrade-da6e7c.h', 'known-installations/da6e7c.manifest.json'];
 const linkedAppFilterInputs = [
   'pf-filter-command.c', 'pf-filter-command.h',
   'pf-filter-transaction.c', 'pf-filter-transaction.h',
@@ -237,6 +243,6 @@ test('PF acceptance fixture inputs must match the current dedicated source inven
 
 test('a self-authored complete manifest cannot replace the pinned source build', { skip }, async t => {
   const value = await fixture(t);
-  assert.equal(Object.keys(value.manifest.nativeSourceFiles).length, 83);
+  assert.equal(Object.keys(value.manifest.nativeSourceFiles).length, 97);
   await assert.rejects(value.inspect(), { code: 'ENOENT' });
 });

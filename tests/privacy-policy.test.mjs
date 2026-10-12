@@ -67,3 +67,42 @@ test('top-level navigation uses its destination while fetches and child navigati
   }
   assert.equal(snapshotPrivacy(state).blockedRequests, 4);
 });
+
+test('standard blocks pure collection hosts; ad networks and Facebook Login hosts wait for strict; sign-in stays reachable', () => {
+  const outside = { firstPartyUrl: 'https://example.com/' };
+  for (const url of ['https://www.clarity.ms/tag/abc', 'https://bat.bing.com/bat.js', 'https://analytics.tiktok.com/i18n/pixel/events.js', 'https://px.ads.linkedin.com/collect',
+    'https://mc.yandex.ru/watch/1', 'https://hm.baidu.com/hm.js', 'https://s4.cnzz.com/z_stat.php', 'https://sb.scorecardresearch.com/b', 'https://pixel.quantserve.com/pixel',
+    'https://site.sc.omtrdc.net/b/ss', 'https://dpm.demdex.net/id']) {
+    assert.equal(shouldBlockTracker(url, outside), true, url);
+  }
+  for (const url of ['https://connect.facebook.net/en_US/sdk.js', 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js', 'https://www.googleadservices.com/pagead/conversion.js',
+    'https://static.criteo.net/js/ld/publishertag.js', 'https://cdn.mxpnl.com/libs/mixpanel-2-latest.min.js', 'https://bam.nr-data.net/1/x', 'https://c.amazon-adsystem.com/aax2/apstag.js']) {
+    assert.equal(shouldBlockTracker(url, outside), false, `standard keeps ${url}`);
+    assert.equal(shouldBlockTracker(url, { ...outside, mode: 'strict' }), true, `strict blocks ${url}`);
+  }
+  for (const url of ['https://accounts.google.com/o/oauth2/v2/auth', 'https://appleid.apple.com/auth/authorize', 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+    'https://www.facebook.com/login.php', 'https://www.bing.com/search?q=envara', 'https://www.baidu.com/s?wd=envara', 'https://www.linkedin.com/feed/']) {
+    assert.equal(shouldBlockTracker(url, { ...outside, mode: 'strict' }), false, url);
+  }
+  // A service's own site keeps its own analytics: first party, not cross-site tracking.
+  assert.equal(shouldBlockTracker('https://bat.bing.com/bat.js', { firstPartyUrl: 'https://www.bing.com/' }), false);
+  assert.equal(shouldBlockTracker('https://connect.facebook.net/en_US/sdk.js', { firstPartyUrl: 'https://www.facebook.com/', mode: 'strict' }), false);
+  assert.equal(shouldBlockTracker('https://bat.bing.com.evil.example/bat.js', outside), false);
+});
+
+test('the BrowseForge kernel enforces exactly the same tracker hosts and service roots as the desktop policy', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { STANDARD_TRACKER_DOMAINS, STRICT_TRACKER_DOMAINS } = await import('../electron/privacy-policy.mjs');
+  const go = await readFile(new URL('../third_party/browseforge/internal/browser/privacy.go', import.meta.url), 'utf8');
+  const js = await readFile(new URL('../electron/privacy-policy.mjs', import.meta.url), 'utf8');
+  const strings = text => [...text.matchAll(/"([^"]+)"/g)].map(([, value]) => value);
+  const goStandard = strings(/var standardTrackerDomains = \[\]string\{([^}]*)\}/.exec(go)[1]);
+  const goStrict = strings(/var strictTrackerDomains = \[\]string\{([^}]*)\}/.exec(go)[1]);
+  assert.deepEqual(goStandard, [...STANDARD_TRACKER_DOMAINS]);
+  assert.deepEqual([...goStandard, ...goStrict], [...STRICT_TRACKER_DOMAINS]);
+  const rootBlock = /var trackerServiceRoots = map\[string\]\[\]string\{\n([\s\S]*?)\n\}/.exec(go)[1];
+  const goRoots = Object.fromEntries([...rootBlock.matchAll(/^\s*"([^"]+)":\s*\{([^}]*)\},$/gm)].map(([, key, values]) => [key, strings(values)]));
+  const jsRoots = Function(`return ${/const TRACKER_SERVICE_ROOTS = Object\.freeze\((\{[\s\S]*?\})\);/.exec(js)[1]}`)();
+  assert.deepEqual(goRoots, jsRoots);
+  for (const domain of STRICT_TRACKER_DOMAINS) assert.ok(jsRoots[domain], `${domain} has an explicit service root`);
+});

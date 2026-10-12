@@ -567,5 +567,7 @@
   "首次错误": "Error inicial",
   "清理错误": "Error de limpieza",
   "上次附加": "Adjuntada anteriormente",
-  "导出诊断": "Exportar diagnóstico"
+  "导出诊断": "Exportar diagnóstico",
+  "附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。": "Una aplicación adjuntada sigue ejecutándose hasta que la detengas, la aplicación termine o cierres Envara. El navegador de huella y las terminales no cuentan.",
+  "首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。": "Al adjuntar por primera vez se solicita una autorización de administrador; esta ejecución de Envara no volverá a preguntar."
 }

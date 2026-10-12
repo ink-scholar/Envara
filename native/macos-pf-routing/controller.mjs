@@ -1240,14 +1240,6 @@ export class MacOSPFExecutor {
     entry.phase = command === 'R' ? 'released' : expected;
     return structuredClone(event);
   }
-  /* A cleaned run keeps its route only as long as it is needed for its own
-   * receipts. Once its resources are reclaimed, the route goes too: a long
-   * session must not accumulate routes, and their listener credentials, for
-   * every application it ever attached. */
-  retireApplicationRoute(run) {
-    const selected = this.routes.get(run.routeId);
-    if (selected) { selected.active = false; selected.proxy = null; this.routes.delete(run.routeId); }
-  }
   applicationCleanupAvailable(runId) {
     const entry = this.appTransports.get(runId);
     return !!entry && entry.cleanupOnly === true && !!entry.ack && !entry.uncertain && !entry.refusalPending && !entry.exited;
@@ -1899,6 +1891,14 @@ export class MacOSPFController {
   }
   async launch() { this.assertOpen(); throw failure('APPLICATION_ROUTING_NOT_READY'); }
   async start() { return this.launch(); }
+  /* A cleaned run keeps its route only as long as it is needed for its own
+   * receipts. Once its resources are reclaimed, the route goes too: a long
+   * session must not accumulate routes, and their listener credentials, for
+   * every application it ever attached. */
+  retireApplicationRoute(run) {
+    const selected = this.routes.get(run.routeId);
+    if (selected) { selected.active = false; selected.proxy = null; this.routes.delete(run.routeId); }
+  }
   publicApplication(run) {
     return { ...appFlags(), runId: run.runId, environmentId: run.environmentId, routeId: run.routeId,
       phase: run.phase, staged: run.staged === true, resumed: run.resumed === true,

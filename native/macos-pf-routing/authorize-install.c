@@ -49,6 +49,7 @@ typedef struct { const char *manifest_sha256; const EnvaraPFInstallFile *files; 
 #include "installer-upgrade-f39101.h"
 #include "installer-upgrade-a8bd00.h"
 #include "installer-upgrade-da6e7c.h"
+#include "installer-upgrade-03245359.h"
 static const InstallSnapshot *const known_prior_snapshots[] = {
     &ENVARA_PF_UPGRADE_F8_SNAPSHOT, &ENVARA_PF_UPGRADE_E940_SNAPSHOT,
     &ENVARA_PF_UPGRADE_518_SNAPSHOT, &ENVARA_PF_UPGRADE_2A7_SNAPSHOT,
@@ -61,7 +62,7 @@ static const InstallSnapshot *const known_prior_snapshots[] = {
     &ENVARA_PF_UPGRADE_C34_SNAPSHOT, &ENVARA_PF_UPGRADE_4B9F85_SNAPSHOT,
     &ENVARA_PF_UPGRADE_43392E_SNAPSHOT, &ENVARA_PF_UPGRADE_F0B99F_SNAPSHOT,
     &ENVARA_PF_UPGRADE_F39101_SNAPSHOT, &ENVARA_PF_UPGRADE_A8BD00_SNAPSHOT,
-    &ENVARA_PF_UPGRADE_DA6E7C_SNAPSHOT
+    &ENVARA_PF_UPGRADE_DA6E7C_SNAPSHOT, &ENVARA_PF_UPGRADE_03245359_SNAPSHOT
 };
 #define KNOWN_PRIOR_COUNT (sizeof(known_prior_snapshots) / sizeof(known_prior_snapshots[0]))
 

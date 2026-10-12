@@ -45,7 +45,7 @@ test('real helper RPC preserves first native refusal independently of cleanup an
     cleanupComplete: false, cleanupUncertain: true, failure: original, initialFailure: original, cleanupFailure: cleanup, private: privateText }),
   shutdown: async () => ({ closed: true, cleanupRequired: false }) };
   const trial = new MacOSPFNotionTrial({ verifyCandidate: async () => true, verifyNotion: async () => true, createClient: () => channel(controller),
-    observationMs: 0, onEvent: event => events.push(event), persistDiagnostics: report => { history.push(report); } });
+    watchMs: 0, onEvent: event => events.push(event), persistDiagnostics: report => { history.push(report); } });
   const result = await trial.run({ request: request(), applicationId: 'notion_bound', activationAuthorized: true });
   assert.deepEqual(result.initialFailure, original); assert.deepEqual(result.cleanupFailure, cleanup);
   assert.equal(result.errorCode, original.code); assert.equal(resumed, false); assert.equal(result.cleanupUncertain, true);
@@ -148,6 +148,23 @@ test('safe export reconstructs the first native error from an older same-bound c
   assert.equal(exportPFNotionTrialDiagnostics(value).initialFailure, null);
 });
 
+test('host PF, route and DNS changes are reported observations, while every owned-resource fact stays mandatory', () => {
+  const runId = randomUUID(), environmentId = randomUUID();
+  const owned = ['coreReaped', 'frontReaped', 'scopeQuiescentObserved', 'originalUTunClosed', 'originalListenerClosed', 'filterEmptyVerified',
+    'privateJournalRetired', 'transportExitConfirmed', 'ownedGIDProcessesAbsent', 'ownedGroupsRemoved', 'ownedRootHookRemoved', 'originalRootRestored',
+    'namespaceReclaimed', 'receiptRetired', 'ownedPFReferenceReleased', 'sealedContextRetired', 'registryReleased'];
+  const value = { ...flags, runId, environmentId, profile: 'seatbelt-front-only', phase: 'cleaned', cleanupComplete: true, cleanupUncertain: false,
+    cleanupEvidence: { schema: 'envara.macos-pf-notion-cleanup/v1', source: 'native-notion-controller', runId, environmentId, profile: 'seatbelt-front-only',
+      complete: true, cleanupUncertain: false, childReaped: true, ...Object.fromEntries(owned.map(key => [key, true])),
+      unrelatedPFUnchanged: true, unrelatedRoutesUnchanged: true, hostDNSUnchanged: false } };
+  assert.equal(validatePFNotionCleanupReceipt(value, runId), true, 'a reported host DNS change does not make Envara cleanup incomplete');
+  for (const key of ['unrelatedPFUnchanged', 'unrelatedRoutesUnchanged', 'hostDNSUnchanged']) {
+    const missing = structuredClone(value); delete missing.cleanupEvidence[key];
+    assert.equal(validatePFNotionCleanupReceipt(missing, runId), false, `${key} must be reported`);
+    assert.equal(validatePFNotionCleanupReceipt({ ...value, cleanupEvidence: { ...value.cleanupEvidence, [key]: 'false' } }, runId), false, `${key} must be a boolean`);
+  }
+  for (const key of owned) assert.equal(validatePFNotionCleanupReceipt({ ...value, cleanupEvidence: { ...value.cleanupEvidence, [key]: false } }, runId), false, `${key} stays mandatory`);
+});
 test('cleanup before creating a child uses explicit absence proof and never invents child-reaped evidence', () => {
   const runId = randomUUID(), environmentId = randomUUID();
   const facts = ['coreReaped', 'frontReaped', 'scopeQuiescentObserved', 'originalUTunClosed', 'originalListenerClosed', 'filterEmptyVerified',

@@ -7,6 +7,7 @@
 #include <bsm/audit.h>
 #include <fts.h>
 #include <libproc.h>
+#include <arpa/inet.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/acl.h>
@@ -270,6 +271,53 @@ int envara_gui_request_validate(const struct envara_gui_manifest *manifest, cons
                envara_console_uid(&console_uid) || request->console_uid != console_uid) return denied(EACCES);
     return 0;
 }
+/* csops(2) is the kernel code-signing query (xnu bsd/kern/kern_proc.c).
+ * CS_OPS_IDENTITY / CS_OPS_TEAMID return an 8-byte header holding the
+ * big-endian total length, then the NUL-ended value, and only while the
+ * process signature is still valid: its executable file need not exist. */
+extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+/* Tests substitute the original-running path lookup to model a live process
+ * whose executable was unlinked; production always uses proc_pidpath. */
+#ifdef ENVARA_GUI_PIDPATH
+int ENVARA_GUI_PIDPATH(int pid, void *buffer, uint32_t size);
+#else
+#define ENVARA_GUI_PIDPATH proc_pidpath
+#endif
+#define ENVARA_CS_OPS_IDENTITY 11
+#define ENVARA_CS_OPS_TEAMID 14
+static int kernel_signing_value(pid_t pid, unsigned int op, char *out, size_t capacity) {
+    unsigned char blob[8 + 1024]; uint32_t length;
+    memset(blob, 0, sizeof(blob));
+    if (csops(pid, op, blob, sizeof(blob))) return -1;
+    memcpy(&length, blob + 4, sizeof(length)); length = ntohl(length);
+    size_t value = length > 9 && length <= sizeof(blob) ? strnlen((const char *)blob + 8, length - 8) : 0;
+    if (!value || value + 9 != length || value >= capacity) { errno = EPROTO; return -1; }
+    memcpy(out, blob + 8, value + 1); return 0;
+}
+/* A Developer ID designated requirement names its team as
+ * certificate leaf[subject.OU]; ad-hoc and platform requirements have none. */
+int envara_gui_requirement_team(const char *requirement, char team[11]) {
+    static const char key[] = "certificate leaf[subject.OU] = ";
+    const char *at = requirement ? strstr(requirement, key) : NULL;
+    if (!at) return 0;
+    at += sizeof(key) - 1; int quoted = *at == '"'; at += quoted;
+    size_t n = 0; while (n < 11 && ((at[n] >= 'A' && at[n] <= 'Z') || (at[n] >= '0' && at[n] <= '9'))) n++;
+    if (n != 10 || (quoted && at[n] != '"')) return 0;
+    memcpy(team, at, 10); team[10] = 0; return 1;
+}
+/* A live process without a path, because an updater unlinked its executable,
+ * still has its kernel signing identity. Only that decides: the registered
+ * identifier, its helpers or its team count as running; another signed program
+ * does not; anything unverifiable stays unknown and refuses. Never a name. */
+static int unresolved_is_target(pid_t pid, const struct envara_gui_manifest *manifest) {
+    char identity[1024], team[64], expected[11];
+    if (kernel_signing_value(pid, ENVARA_CS_OPS_IDENTITY, identity, sizeof(identity))) return -1;
+    size_t length = strlen(manifest->identifier);
+    if (length && (!strcmp(identity, manifest->identifier) || (!strncmp(identity, manifest->identifier, length) && identity[length] == '.'))) return 1;
+    if (!envara_gui_requirement_team(manifest->requirement, expected)) return 0;
+    if (!kernel_signing_value(pid, ENVARA_CS_OPS_TEAMID, team, sizeof(team))) return !strcmp(team, expected);
+    return errno == ENOENT ? 0 : -1;
+}
 int envara_gui_original_running(const struct envara_gui_manifest *manifest, uid_t uid, pid_t *found) {
     @autoreleasepool {
         if (!manifest_valid(manifest) || !uid || !found) return denied(EINVAL);
@@ -293,8 +341,14 @@ int envara_gui_original_running(const struct envara_gui_manifest *manifest, uid_
             /* Fixture inventory is self-owned direct children only. This is
              * deliberately narrower than the production UID-wide refusal. */
             if (manifest->fixture_only && before.parent_pid != getpid()) continue;
-            if (proc_pidpath(pids[i], executable, sizeof(executable)) <= 0) {
-                if (!envara_same_process(&before)) continue; result = -1; break;
+            if (ENVARA_GUI_PIDPATH(pids[i], executable, sizeof(executable)) <= 0) {
+                if (!envara_same_process(&before)) continue;
+                int target = unresolved_is_target(pids[i], manifest);
+                /* Bind the signing answer to this process, never a reused PID. */
+                if (!envara_same_process(&before)) continue;
+                if (target < 0) { result = -1; break; }
+                if (target) { *found = pids[i]; result = 1; break; }
+                continue;
             }
             if (envara_identity_read(pids[i], &after) || !envara_same_process(&before)) {
                 if (errno == ESRCH) continue; result = -1; break;

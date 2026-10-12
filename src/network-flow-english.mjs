@@ -62,7 +62,6 @@ export const networkFlowEnglish = {
   '附加中': 'Attached',
   '附加中 · 不会自动结束 · 接管未验收': 'Attached · Runs until stopped · Routing not verified',
   '不会自动结束 · 接管未验收': 'Runs until stopped · Routing not verified',
-  '运行中 · 接管未验收': 'Running · Routing not verified',
   '附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。':
     'An attached application keeps running until you stop it, it exits, or you quit Envara. The fingerprint browser and terminals are not counted.',
   '首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。':

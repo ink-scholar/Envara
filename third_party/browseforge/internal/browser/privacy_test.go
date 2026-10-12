@@ -143,3 +143,24 @@ func TestTrackerRequestPartyUsesTopNavigationDestination(t *testing.T) {
 		})
 	}
 }
+
+func TestExpandedTrackerTiersMatchDesktopPolicy(t *testing.T) {
+	for _, raw := range []string{"https://www.clarity.ms/tag/abc", "https://bat.bing.com/bat.js", "https://analytics.tiktok.com/i18n/pixel/events.js", "https://hm.baidu.com/hm.js", "https://dpm.demdex.net/id"} {
+		if !shouldBlockTracker(raw, "https://example.com/", "standard") {
+			t.Fatalf("standard must block collection host %s", raw)
+		}
+	}
+	for _, raw := range []string{"https://connect.facebook.net/en_US/sdk.js", "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js", "https://static.criteo.net/js/ld/publishertag.js"} {
+		if shouldBlockTracker(raw, "https://example.com/", "standard") || !shouldBlockTracker(raw, "https://example.com/", "strict") {
+			t.Fatalf("%s must be strict-only", raw)
+		}
+	}
+	for _, raw := range []string{"https://accounts.google.com/o/oauth2/v2/auth", "https://appleid.apple.com/auth/authorize", "https://www.facebook.com/login.php"} {
+		if shouldBlockTracker(raw, "https://example.com/", "strict") {
+			t.Fatalf("sign-in host %s must stay reachable", raw)
+		}
+	}
+	if shouldBlockTracker("https://bat.bing.com/bat.js", "https://www.bing.com/", "standard") {
+		t.Fatal("a service's own site keeps its first-party analytics")
+	}
+}

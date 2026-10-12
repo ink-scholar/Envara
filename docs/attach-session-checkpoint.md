@@ -113,3 +113,23 @@ Then, to hand the feature to the user: register the currently installed componen
 rebuild the component and the authorization carrier, update `PF_NOTION_TRIAL_CANDIDATE`, run
 `scripts/verify-package-resources.mjs`, package a new `release-verified-N` and open it. The user then
 clicks "Update network component" once (one password) and attaches an application manually.
+
+
+## Where phase 2 stands (2026-10-12)
+
+Two pieces of phase 2 are done and verified here:
+
+- Keeper reports bind to each run's own profile, so a cold-profile application
+  that ends on its own is reported as ended instead of staying "running".
+- Per-application filter rules stay in their own top-level anchor. This was
+  established by trying the nested layout first and measuring that it is
+  unrepresentable: 90 bytes against two separate 64-byte fields
+  (`ProductionPlan.anchor` and `rule.owner`).
+
+What remains is the shared-root-hook work itself: the call-line writer, the
+two-level ledger lock (shared for live keepers, exclusive for deleting the hook),
+the registry change that lets five applications share one hook, and the
+five-slot limit with per-application resource split in the controller. None of it
+is started. It needs the real machine, because every native invariant it touches
+(`BEGIN_ADDRS` clearing the global `pf_pabuf`, original root rule counts of 7 or
+8, the keeper's exclusive ledger lock) can only be settled against actual PF.

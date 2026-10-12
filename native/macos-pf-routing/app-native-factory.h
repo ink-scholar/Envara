@@ -5,7 +5,10 @@
 
 #define ENVARA_APP_BOUND_LEASE_SCHEMA "envara.macos-pf-app-bound-lease/v1"
 #define ENVARA_APP_BOUND_CLOCK_SCHEMA "envara.macos-pf-app-context-clock/v1"
-#define ENVARA_APP_BOUND_MAX_LEASE_MS 180000U
+/* The sealed lease is an outer bound for a session-bound attached application;
+ * the controller heartbeat (awake time) is what ends a stalled controller. */
+#define ENVARA_APP_BOUND_MAX_LEASE_MS ENVARA_LAUNCH_GUARDIAN_MAX_LEASE_MS
+#define ENVARA_APP_HEARTBEAT_TIMEOUT_MS 15000U
 
 /* Constructed ONLY by the same installed native transport process from its
  * original descriptors and direct child observations. No RPC decoder accepts
@@ -61,6 +64,12 @@ const struct envara_app_supervisor_provider *envara_app_native_factory_provider(
  * No resume or production readiness follows from a successful receipt. */
 int envara_app_native_factory_apply(envara_app_native_factory *factory,
                                    EnvaraPFProductionMode mode, EnvaraPFProductionResult *out);
+/* The single live routing mode this factory's registered profile owns, and its
+ * fixed diagnostic label. Derived only from the exact registered snapshot that
+ * this factory opened. Never a caller field, a wire value or a readiness claim:
+ * neither profile is generic application protection. */
+EnvaraPFProductionMode envara_app_native_factory_live_mode(envara_app_native_factory *factory);
+const char *envara_app_native_factory_profile(envara_app_native_factory *factory);
 int envara_app_native_factory_release_safe(envara_app_native_factory *factory);
 /* Irreversible cleanup authority on the original custodian only. It never
  * restores a provider or FRONT admission. Unknown PF writes remain poisoned;

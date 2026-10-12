@@ -27,6 +27,13 @@ static int64_t monotonic_ms(void) {
     if (clock_gettime(CLOCK_MONOTONIC, &now)) return -1;
     return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
+/* Darwin CLOCK_MONOTONIC keeps counting while the Mac sleeps. A heartbeat gap
+ * must count only awake time, or every lid close would revoke on wake. */
+static int64_t awake_ms(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_UPTIME_RAW, &now)) return -1;
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
 static int same_identity(const struct envara_identity *a, const struct envara_identity *b) {
     return a->pid == b->pid && a->parent_pid == b->parent_pid &&
         a->uid == b->uid && a->ruid == b->ruid && a->saved_uid == b->saved_uid &&
@@ -159,7 +166,10 @@ int envara_launch_guard_run(const struct envara_launch_guard_request *request,
     if (!request || !authority || !out || !authority->verify_persistent_deny ||
         !authority->verify_scope_quiescent || (request->fixture_only != 0 && request->fixture_only != 1) ||
         request->dependency_count < 1 || request->dependency_count > ENVARA_LAUNCH_GUARDIAN_MAX_PEERS ||
-        !request->lease_milliseconds || request->lease_milliseconds > 3600000 ||
+        !request->lease_milliseconds || request->lease_milliseconds > ENVARA_LAUNCH_GUARDIAN_MAX_LEASE_MS ||
+        (request->heartbeat_timeout_milliseconds && (request->heartbeat_timeout_milliseconds < ENVARA_LAUNCH_GUARDIAN_MIN_HEARTBEAT_MS ||
+            request->heartbeat_timeout_milliseconds > ENVARA_LAUNCH_GUARDIAN_MAX_HEARTBEAT_MS)) ||
+        (!request->fixture_only && !request->heartbeat_timeout_milliseconds) ||
         request->child.identity.parent_pid != getpid() || request->child.identity.pid <= 1 ||
         request->lease_fd == request->recovery_fd || request->lease_fd == request->retained_fd ||
         request->recovery_fd == request->retained_fd) return reject(EINVAL);
@@ -218,13 +228,19 @@ int envara_launch_guard_run(const struct envara_launch_guard_request *request,
     const int64_t deadline = started + request->lease_milliseconds;
     report.owns_retained_fd = 1; report.persistent_deny_observed = 1;
     observe(authority, ENVARA_GUARD_ARMED, &report);
-    int lease_open = 1, recovery_open = 1;
-    int64_t execution_deadline = -1;
+    int lease_open = 1, recovery_open = 1, heartbeat_armed = 0;
+    int64_t execution_deadline = -1, last_heartbeat = -1;
     for (;;) {
         if (requested_signal) guardian_revoke(request, authority, &report, ENVARA_GUARD_SIGNAL, -1);
         int64_t now = monotonic_ms();
         if (now < 0) guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1);
         else if (now >= deadline) guardian_revoke(request, authority, &report, ENVARA_GUARD_LEASE_EXPIRED, -1);
+        if (heartbeat_armed) {
+            int64_t awake = awake_ms();
+            if (awake < 0) guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1);
+            else if (awake - last_heartbeat >= (int64_t)request->heartbeat_timeout_milliseconds)
+                guardian_revoke(request, authority, &report, ENVARA_GUARD_HEARTBEAT_LOST, -1);
+        }
         if (!report.child_reaped) {
             int reaped = child_reap(request, &report);
             if (reaped == 1) { observe(authority, ENVARA_GUARD_CHILD_REAPED, &report);
@@ -306,7 +322,13 @@ int envara_launch_guard_run(const struct envara_launch_guard_request *request,
                             continue;
                         }
                         execution_deadline = execution_started + 5000;
-                    } else if (bytes[j] != 'K') guardian_revoke(request, authority, &report,
+                    } else if (bytes[j] == 'K') {
+                        /* A heartbeat proves only that the fixed controller is
+                         * still scheduling work. It never extends the lease. */
+                        int64_t awake = awake_ms();
+                        if (awake < 0) guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1);
+                        else if (request->heartbeat_timeout_milliseconds) { last_heartbeat = awake; heartbeat_armed = 1; }
+                    } else guardian_revoke(request, authority, &report,
                         bytes[j] == 'S' ? ENVARA_GUARD_LEASE_CLOSED : ENVARA_GUARD_INVALID_COMMAND, -1);
                 } else if (bytes[j] == 'R') {
                     /* 'R' carries no authority. Only the fixed native checks

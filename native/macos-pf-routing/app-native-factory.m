@@ -49,6 +49,12 @@ struct envara_app_native_factory {
     int lease_fd, lock_fd, run_fd, runtime_fd, pf_fd, journal_fd, poisoned;
     unsigned sequence;
     int staged, journal_removed, guard_live;
+    /* Selected once from the exact registered snapshot, never from a caller
+     * field. 1 = the fixed Notion front profile (sandbox-exec + held loopback
+     * SOCKS front, PF FRONT); 0 = the generic cold profile (direct sealed
+     * snapshot exec, PF ROUTED). Both are real owned-process scopes; neither
+     * is generic application readiness. */
+    int notion_front;
     int journal_created;
     struct envara_journal_retirement retirement;
     int cleanup_only, cleanup_reconciled, cleanup_reconciling, pending_intent, pending_write_attempted;
@@ -239,9 +245,18 @@ static NSData *serialize_hook(NSDictionary *hook) {
     /* The exact native scalar lease parser intentionally refuses JSON escapes. */
     return [NSJSONSerialization dataWithJSONObject:hook options:NSJSONWritingWithoutEscapingSlashes error:NULL];
 }
+/* Records the fixed profile from the registered snapshot and refuses anything
+ * that is neither the exact supported Notion front target nor a sealed
+ * registered snapshot. Notion keeps its own supported-version and signature
+ * inspection; every other app must be a sealed registered snapshot, so a caller
+ * cannot substitute an arbitrary path, an unsigned bundle or a modified copy.
+ * The probe result selects the profile only; it is never a readiness or
+ * protection claim. */
 static int application_prepared(struct envara_app_native_factory *f) {
-    /* Both checks use the POSIX 0-success/-1-refusal convention. */
-    return envara_gui_request_validate(&f->app.snapshot,&f->request,0)==0&&envara_notion_supported(&f->app.snapshot)==0;
+    if(envara_gui_request_validate(&f->app.snapshot,&f->request,0))return 0;
+    if(envara_notion_supported(&f->app.snapshot)==0){f->notion_front=1;return 1;}
+    f->notion_front=0;
+    return envara_gui_sealed_snapshot_validate(&f->app.snapshot)?0:1;
 }
 static int load_bound(struct envara_app_native_factory *f,const char *run,const char *env) {
     if(getuid()||geteuid()||!uuid(run)||!uuid(env))return refuse(EACCES);
@@ -396,6 +411,15 @@ static int pf_running(struct envara_app_native_factory *f) {
 static int dependencies(struct envara_app_native_factory *f) {
     return root_process(&f->owned.controller,INSTALL "/node",0)&&root_process(&f->owned.core,INSTALL "/mihomo",getpid())&&root_process(&f->owned.frontend,INSTALL "/node",getpid());
 }
+/* The single live routing mode for this factory's profile. FRONT is the scoped
+ * Notion loopback exception under its child Seatbelt boundary; ROUTED is the
+ * generic owned-utun route. Neither is generic application readiness. */
+static EnvaraPFProductionMode live_mode(const struct envara_app_native_factory *f) {
+    return f->notion_front?ENVARA_PF_PRODUCTION_FRONT:ENVARA_PF_PRODUCTION_ROUTED;
+}
+static int mode_is_live(EnvaraPFProductionMode mode) {
+    return mode==ENVARA_PF_PRODUCTION_FRONT||mode==ENVARA_PF_PRODUCTION_ROUTED;
+}
 static int basic(struct envara_app_native_factory *f,int live) {
     return (!f->poisoned||(f->cleanup_only&&f->cleanup_reconciled))&&immutable_lease(f,f->cleanup_only&&!live?-1:live)&&utun_original(f)&&listener_original(f)&&pipes_original(f)&&(!live||(dependencies(f)&&pf_running(f)))&&f->hook&&envara_pf_hook_filter_guard(f->hook,f->pf_fd)&&(f->cleanup_only||loopback_filtering());
 }
@@ -451,23 +475,26 @@ int envara_app_native_factory_apply(envara_app_native_factory *f,EnvaraPFProduct
     envara_app_native_failure_begin();
     native_failure_reason="NATIVE_PF_GUARD_REFUSED";
     if(!f||!out)return refuse(EINVAL);memset(out,0,sizeof(*out));
-    if(mode!=ENVARA_PF_PRODUCTION_DENY&&mode!=ENVARA_PF_PRODUCTION_EMPTY&&mode!=ENVARA_PF_PRODUCTION_FRONT)return refuse(ENOTSUP);
-    if(f->cleanup_only&&mode==ENVARA_PF_PRODUCTION_FRONT)return refuse(ECANCELED);
+    if(mode!=ENVARA_PF_PRODUCTION_DENY&&mode!=ENVARA_PF_PRODUCTION_EMPTY&&!mode_is_live(mode))return refuse(ENOTSUP);
+    /* A live mode is only ever the one this factory's registered profile owns.
+     * DENY/EMPTY remain available to either profile for refusal and cleanup. */
+    if(mode_is_live(mode)&&mode!=live_mode(f))return refuse(ENOTSUP);
+    if(f->cleanup_only&&mode_is_live(mode))return refuse(ECANCELED);
     @autoreleasepool {
-        if(f->sequence>=16||!basic(f,mode==ENVARA_PF_PRODUCTION_FRONT)||
-            (mode==ENVARA_PF_PRODUCTION_FRONT&&!f->staged&&envara_app_scope_gid_absent(f->plan.realm_gid)!=1))return refuse(EACCES);
+        if(f->sequence>=16||!basic(f,mode_is_live(mode))||
+            (mode_is_live(mode)&&!f->staged&&envara_app_scope_gid_absent(f->plan.realm_gid)!=1))return refuse(EACCES);
         if(!verify_mode(f,f->mode,0))return operation_refuse("NATIVE_FILTER_READBACK_REFUSED",EACCES);
         NSDictionary *intent=@{@"schema":@"envara.macos-pf-app-filter-event/v1",@"runId":@(f->plan.run_id),@"leaseId":@(f->plan.lease_id),@"generation":@(f->plan.generation),@"sequence":@(f->sequence),@"previous":@(f->mode),@"next":@(mode),@"writerPid":@(getpid())};
         f->pending_intent=1;f->pending_mode=mode;f->pending_write_attempted=0;memset(&f->pending_result,0,sizeof(f->pending_result));
         if(!journal_write(f,@"intent",intent)){int error=errno;f->poisoned=1;f->cleanup_reconciled=0;return operation_refuse("NATIVE_JOURNAL_REFUSED",error);}
-        f->guard_live=mode==ENVARA_PF_PRODUCTION_FRONT;
+        f->guard_live=mode_is_live(mode);
         EnvaraPFProductionContext c;int initialized=context(f,&c),ok=0;
         if(initialized){f->pending_write_attempted=1;ok=EnvaraPFProductionApply(&c,mode,out)==1&&out->verified&&!out->uncertain;}
         int apply_error=out->os_error?out->os_error:(errno?errno:EIO);f->pending_result=*out;f->guard_live=0;
         if(!ok){f->poisoned=1;f->cleanup_reconciled=0;return operation_refuse("NATIVE_FILTER_TRANSACTION_REFUSED",apply_error);}
         NSDictionary *ack=@{@"schema":@"envara.macos-pf-app-filter-receipt/v1",@"runId":@(f->plan.run_id),@"leaseId":@(f->plan.lease_id),@"generation":@(f->plan.generation),@"sequence":@(f->sequence),@"mode":@(mode),@"writerPid":@(out->writer_pid),@"revision":@(out->ticket),@"ruleCount":@(out->actual_count)};
         if(!journal_write(f,@"receipt",ack)){int error=errno;f->poisoned=1;f->cleanup_reconciled=0;return operation_refuse("NATIVE_JOURNAL_REFUSED",error);}
-        if(!basic(f,mode==ENVARA_PF_PRODUCTION_FRONT)){f->poisoned=1;f->cleanup_reconciled=0;return operation_refuse("NATIVE_PF_GUARD_REFUSED",EACCES);}
+        if(!basic(f,mode_is_live(mode))){f->poisoned=1;f->cleanup_reconciled=0;return operation_refuse("NATIVE_PF_GUARD_REFUSED",EACCES);}
         f->receipt=*out;f->mode=mode;f->sequence++;f->pending_intent=0;return 0;
     }
 }
@@ -516,10 +543,10 @@ int envara_app_native_factory_cleanup_deny(envara_app_native_factory *f) {
 static int persistent_deny(void *opaque) {
     struct envara_app_native_factory *f=opaque;
     if(verify_mode(f,ENVARA_PF_PRODUCTION_DENY,0))return 1;
-    /* FRONT is a scoped exception under the fixed child Seatbelt boundary,
-     * not broad network protection. This callback never revokes admission
-     * during guard's pre-fork checks. Final release must remove the exception. */
-    return verify_mode(f,ENVARA_PF_PRODUCTION_FRONT,0);
+    /* A live mode is a scoped exception under the child's own boundary, not
+     * broad network protection. This callback never revokes admission during
+     * guard's pre-fork checks. Final release must remove the exception. */
+    return verify_mode(f,live_mode(f),0);
 }
 static int scope_absent(void *opaque){struct envara_app_native_factory *f=opaque;return immutable_lease(f,f->cleanup_only?-1:0)&&envara_app_scope_gid_absent(f->plan.realm_gid)==1;}
 static int ticket_verify(const struct envara_app_registration *app,const struct envara_gui_request *request,const char *run,const char *hash,void *opaque) {
@@ -540,8 +567,8 @@ static int ticket_verify(const struct envara_app_registration *app,const struct 
      * verify_resume immediately before SIGCONT. */
     @autoreleasepool {
         if(!f->staged&&!TICKET_REGISTERED_APP(f))return operation_refuse("NATIVE_APP_IDENTITY_REFUSED",EACCES);
-        int ok=!f->staged?TICKET_VERIFY_MODE(f,ENVARA_PF_PRODUCTION_FRONT,1):
-            (TICKET_VERIFY_MODE(f,ENVARA_PF_PRODUCTION_FRONT,0)||TICKET_VERIFY_MODE(f,ENVARA_PF_PRODUCTION_DENY,0));
+        int ok=!f->staged?TICKET_VERIFY_MODE(f,live_mode(f),1):
+            (TICKET_VERIFY_MODE(f,live_mode(f),0)||TICKET_VERIFY_MODE(f,ENVARA_PF_PRODUCTION_DENY,0));
         return ok?0:operation_refuse("NATIVE_TICKET_FILTER_REFUSED",EACCES);
     }
 #undef TICKET_REGISTERED_APP
@@ -564,9 +591,16 @@ static int exact_staged_child(struct envara_app_native_factory *f,const struct e
 static int verify_resume(const struct envara_child *child,void *opaque) {
     struct envara_app_native_factory *f=opaque;@autoreleasepool {
         struct envara_gui_session graphics;char path[PROC_PIDPATHINFO_MAXSIZE];struct envara_notion_context c={.front_port=f->config.tcp_front_port};struct envara_notion_plan plan;strcpy(c.registration_id,f->plan.registration_id);
-        return exact_staged_child(f,child,1)&&verify_mode(f,ENVARA_PF_PRODUCTION_FRONT,1)&&registered_app(f)&&
-            !envara_gui_request_validate(&f->app.snapshot,&f->request,0)&&!envara_gui_session_read(&graphics)&&graphics.console_uid==f->plan.console_uid&&graphics.audit_session==f->request.gui_audit_session&&graphics.audit_has_console_graphics&&graphics.security_has_graphics&&
-            !envara_notion_plan(&f->app,&f->request,&c,&plan)&&proc_pidpath(child->identity.pid,path,sizeof(path))>0&&!strcmp(path,ENVARA_GUI_NATIVE_PATH)&&exact_staged_child(f,child,1);
+        if(!exact_staged_child(f,child,1)||!verify_mode(f,live_mode(f),1)||!registered_app(f)||
+            envara_gui_request_validate(&f->app.snapshot,&f->request,0)||envara_gui_session_read(&graphics)||
+            graphics.console_uid!=f->plan.console_uid||graphics.audit_session!=f->request.gui_audit_session||
+            !graphics.audit_has_console_graphics||!graphics.security_has_graphics)return 0;
+        if(proc_pidpath(child->identity.pid,path,sizeof(path))<=0||strcmp(path,ENVARA_GUI_NATIVE_PATH))return 0;
+        /* The generic cold profile runs the sealed snapshot directly, so there
+         * is no fixed sandbox-exec chain and no front plan to re-derive. The
+         * Notion front profile additionally re-derives its exact plan. */
+        if(f->notion_front&&envara_notion_plan(&f->app,&f->request,&c,&plan))return 0;
+        return exact_staged_child(f,child,1);
     }
 }
 static int running_signature(pid_t pid,const struct envara_gui_manifest *manifest) {
@@ -581,12 +615,16 @@ done:if(requirement)CFRelease(requirement);if(info)CFRelease(info);if(code)CFRel
 }
 static int verify_executed(const struct envara_child *child,void *opaque) {
     struct envara_app_native_factory *f=opaque;@autoreleasepool {
-        char path[PROC_PIDPATHINFO_MAXSIZE];if(!exact_staged_child(f,child,0)||!verify_mode(f,ENVARA_PF_PRODUCTION_FRONT,1)||proc_pidpath(child->identity.pid,path,sizeof(path))<=0)return -1;
-        if(!strcmp(path,ENVARA_GUI_NATIVE_PATH)||!strcmp(path,"/usr/bin/sandbox-exec"))return 0;
-        /* Fixed root-owned sandbox-exec receives only the native constructed
-         * profile and exact signed snapshot argv. Its successful exec chain
-         * plus actual target identity is observable; this is NOT a private
-         * sandbox policy reader or a claim that all external delegates obey. */
+        char path[PROC_PIDPATHINFO_MAXSIZE];if(!exact_staged_child(f,child,0)||!verify_mode(f,live_mode(f),1)||proc_pidpath(child->identity.pid,path,sizeof(path))<=0)return -1;
+        if(!strcmp(path,ENVARA_GUI_NATIVE_PATH))return 0;
+        /* The Notion front profile interposes fixed root-owned sandbox-exec,
+         * which is not itself the executed target. The generic cold profile has
+         * no wrapper, so any non-snapshot image is a refusal rather than a
+         * still-in-progress state. */
+        if(f->notion_front&&!strcmp(path,"/usr/bin/sandbox-exec"))return 0;
+        /* Fixed root-owned argv plus actual target identity is observable; this
+         * is NOT a private sandbox policy reader or a claim that all external
+         * delegates obey. */
         return !strcmp(path,f->app.snapshot.executable)&&running_signature(child->identity.pid,&f->app.snapshot)&&exact_staged_child(f,child,0)?1:-1;
     }
 }
@@ -602,16 +640,65 @@ static int prepare_guard(const struct envara_app_registration *app,const struct 
         int error=(a<0||b<0||c<0)?errno:EACCES;if(a>=0)close(a);if(b>=0)close(b);if(c>=0)close(c);return operation_refuse("NATIVE_GUARD_DESCRIPTOR_REFUSED",error);}
     uint64_t now,boot;if(clock_values(&now,&boot)||now>=f->expires){int error=errno?errno:ETIMEDOUT;close(a);close(b);close(c);return operation_refuse("NATIVE_LEASE_EXPIRED_REFUSED",error);}
     memset(guard,0,sizeof(*guard));guard->retained_fd=a;guard->lease_fd=b;guard->recovery_fd=c;strcpy(guard->tunnel_name,f->owned.tunnel_name);guard->lease_milliseconds=(unsigned)(f->expires-now);
+    guard->heartbeat_timeout_milliseconds=ENVARA_APP_HEARTBEAT_TIMEOUT_MS;
     guard->dependencies[0]=f->owned.controller;guard->dependencies[1]=f->owned.core;guard->dependencies[2]=f->owned.frontend;guard->dependency_count=3;
     guard->verify_resume=verify_resume;guard->verify_executed=verify_executed;guard->resume_context=f;
     memset(authority,0,sizeof(*authority));authority->verify_persistent_deny=persistent_deny;authority->verify_scope_quiescent=scope_absent;authority->context=f;return 0;
 }
+/* Fixed sub-operation -> fixed refusal reason. Every value is a compile-time
+ * string constant; no path, account, PID, node, credential or errno text is
+ * ever composed here. The base reason is retained for the coarse class so an
+ * older reader still sees a known value, while a current reader can localize
+ * the exact predicate/syscall that refused first. */
+static const char *notion_suboperation_reason(const char *fallback) {
+    switch (envara_notion_suboperation()) {
+        case ENVARA_NOTION_SUBOP_SUPPORTED_ARGUMENT: return "NATIVE_NOTION_SUPPORTED_ARGUMENT_REFUSED";
+        case ENVARA_NOTION_SUBOP_SUPPORTED_PLIST: return "NATIVE_NOTION_SUPPORTED_PLIST_REFUSED";
+        case ENVARA_NOTION_SUBOP_SUPPORTED_VERSION: return "NATIVE_NOTION_SUPPORTED_VERSION_REFUSED";
+        case ENVARA_NOTION_SUBOP_SUPPORTED_SIGNATURE: return "NATIVE_NOTION_SUPPORTED_SIGNATURE_REFUSED";
+        case ENVARA_NOTION_SUBOP_PLAN_ARGUMENT: return "NATIVE_NOTION_PLAN_ARGUMENT_REFUSED";
+        case ENVARA_NOTION_SUBOP_PLAN_REGISTRY: return "NATIVE_NOTION_PLAN_REGISTRY_REFUSED";
+        case ENVARA_NOTION_SUBOP_PLAN_CONTEXT: return "NATIVE_NOTION_PLAN_CONTEXT_REFUSED";
+        case ENVARA_NOTION_SUBOP_PLAN_REQUEST: return "NATIVE_NOTION_PLAN_REQUEST_REFUSED";
+        case ENVARA_NOTION_SUBOP_PLAN_SEALED: return "NATIVE_NOTION_PLAN_SEALED_REFUSED";
+        case ENVARA_NOTION_SUBOP_PLAN_SUPPORTED: return "NATIVE_NOTION_PLAN_SUPPORTED_REFUSED";
+        case ENVARA_NOTION_SUBOP_PLAN_DIGEST: return "NATIVE_NOTION_PLAN_DIGEST_REFUSED";
+        case ENVARA_NOTION_SUBOP_PLAN_CDHASH: return "NATIVE_NOTION_PLAN_CDHASH_REFUSED";
+        case ENVARA_NOTION_SUBOP_PLAN_REQUIREMENT: return "NATIVE_NOTION_PLAN_REQUIREMENT_REFUSED";
+        case ENVARA_NOTION_SUBOP_PLAN_DATA: return "NATIVE_NOTION_PLAN_DATA_REFUSED";
+        case ENVARA_NOTION_SUBOP_PLAN_ALLOCATION: return "NATIVE_NOTION_PLAN_ALLOCATION_REFUSED";
+        case ENVARA_NOTION_SUBOP_DATA_ARGUMENT: return "NATIVE_NOTION_DATA_ARGUMENT_REFUSED";
+        case ENVARA_NOTION_SUBOP_DATA_ENTRY: return "NATIVE_NOTION_DATA_ENTRY_REFUSED";
+        case ENVARA_NOTION_SUBOP_DATA_ANCESTOR: return "NATIVE_NOTION_DATA_ANCESTOR_REFUSED";
+        case ENVARA_NOTION_SUBOP_DATA_LEAF: return "NATIVE_NOTION_DATA_LEAF_REFUSED";
+        case ENVARA_NOTION_SUBOP_DATA_DENY: return "NATIVE_NOTION_DATA_DENY_REFUSED";
+        case ENVARA_NOTION_SUBOP_STAGE_ARGUMENT: return "NATIVE_NOTION_STAGE_ARGUMENT_REFUSED";
+        case ENVARA_NOTION_SUBOP_STAGE_AUTHORITY: return "NATIVE_NOTION_STAGE_AUTHORITY_REFUSED";
+        case ENVARA_NOTION_SUBOP_STAGE_ENTRY: return "NATIVE_NOTION_STAGE_ENTRY_REFUSED";
+        case ENVARA_NOTION_SUBOP_STAGE_SESSION: return "NATIVE_NOTION_STAGE_SESSION_REFUSED";
+        case ENVARA_NOTION_SUBOP_STAGE_ORIGINAL_RUNNING: return "NATIVE_NOTION_STAGE_ORIGINAL_RUNNING_REFUSED";
+        case ENVARA_NOTION_SUBOP_STAGE_ACCOUNT: return "NATIVE_NOTION_STAGE_ACCOUNT_REFUSED";
+        case ENVARA_NOTION_SUBOP_STAGE_ENVIRONMENT: return "NATIVE_NOTION_STAGE_ENVIRONMENT_REFUSED";
+        case ENVARA_NOTION_SUBOP_STAGE_DATA: return "NATIVE_NOTION_STAGE_DATA_REFUSED";
+        case ENVARA_NOTION_SUBOP_STAGE_RECHECK: return "NATIVE_NOTION_STAGE_RECHECK_REFUSED";
+        case ENVARA_NOTION_SUBOP_STAGE_SPAWN: return "NATIVE_NOTION_STAGE_SPAWN_REFUSED";
+        case ENVARA_NOTION_SUBOP_STAGE_STOPPED: return "NATIVE_NOTION_STAGE_STOPPED_REFUSED";
+        default: return fallback;
+    }
+}
 static int notion_stage(const struct envara_app_registration *app,const struct envara_gui_request *request,const struct envara_gui_stage_authority *authority,struct envara_gui_lifecycle *out,void *opaque) {
     struct envara_app_native_factory *f=opaque;struct envara_notion_context c={.front_port=f->config.tcp_front_port};strcpy(c.registration_id,f->plan.registration_id);
-    if(envara_notion_data_prepare(app,request,&c,authority)){int error=errno;return operation_refuse("NATIVE_NOTION_DATA_PREPARE_REFUSED",error);}
+    /* Each instrumented call resets the latch so a refusal is never attributed
+     * to a sub-operation observed during a previous, separate invocation. */
+    envara_notion_suboperation_begin();
+    if(envara_notion_data_prepare(app,request,&c,authority)){int error=errno;return operation_refuse(notion_suboperation_reason("NATIVE_NOTION_DATA_PREPARE_REFUSED"),error);}
     int result=envara_notion_stage(app,request,&c,authority,out),error=errno;
     if(out&&out->child.identity.pid>1){f->stage_child=out->child;f->staged=1;}
-    return result?operation_refuse("NATIVE_NOTION_STAGE_REFUSED",error):0;
+    /* A refused stage keeps its own first attribution. A failure with an owned
+     * partial child must never be reported under the same label as a pure
+     * pre-fork refusal, because that child still needs exact cleanup. */
+    if(result)return operation_refuse(notion_suboperation_reason(out&&out->child.identity.pid>1?"NATIVE_NOTION_STAGE_CHILD_REFUSED":"NATIVE_NOTION_STAGE_REFUSED"),error);
+    return 0;
 }
 static int ticket_never_adopt(const struct envara_app_ticket *ticket,struct envara_gui_lifecycle *child,void *opaque) {
     (void)ticket;(void)child;(void)opaque;
@@ -622,7 +709,12 @@ static int ticket_never_adopt(const struct envara_app_ticket *ticket,struct enva
 static void provider_initialize(struct envara_app_native_factory *f) {
     f->provider.ticket.inspect=ticket_inspect;f->provider.ticket.verify=ticket_verify;
     f->provider.ticket.adopt=ticket_never_adopt;f->provider.ticket.context=f;
-    f->provider.prepare_guard=prepare_guard;f->provider.context=f;f->provider.stage=notion_stage;f->provider.execution_profile=ENVARA_APP_EXECUTION_NOTION_FRONT_ONLY;
+    f->provider.prepare_guard=prepare_guard;f->provider.context=f;
+    /* Profile is fixed by the registered snapshot above, never a caller field.
+     * Notion keeps its front-only adapter; every other app leaves stage NULL so
+     * the supervisor uses the generic cold GUI launch (envara_gui_stage). */
+    f->provider.stage=f->notion_front?notion_stage:NULL;
+    f->provider.execution_profile=f->notion_front?ENVARA_APP_EXECUTION_NOTION_FRONT_ONLY:ENVARA_APP_EXECUTION_COLD;
 }
 int envara_app_native_factory_open(const struct envara_app_native_owned_context *owned,envara_app_native_factory **out) {
     envara_app_native_failure_begin();
@@ -665,9 +757,11 @@ failed:dispose(f);return refuse(error);
     }
 }
 const struct envara_app_supervisor_provider *envara_app_native_factory_provider(envara_app_native_factory *f){return f&&f->owner==getpid()&&!f->poisoned&&!f->cleanup_only?&f->provider:NULL;}
+EnvaraPFProductionMode envara_app_native_factory_live_mode(envara_app_native_factory *f){return f?live_mode(f):ENVARA_PF_PRODUCTION_EMPTY;}
+const char *envara_app_native_factory_profile(envara_app_native_factory *f){return f&&f->notion_front?"seatbelt-front-only":"cold";}
 int envara_app_native_factory_admission(envara_app_native_factory *f,struct envara_app_native_admission *out) {
     if(!out)return refuse(EINVAL);memset(out,0,sizeof(*out));
-    if(!f||f->cleanup_only||!verify_mode(f,ENVARA_PF_PRODUCTION_FRONT,1)||(!f->staged&&!scope_absent(f)))return refuse(EACCES);
+    if(!f||f->cleanup_only||!verify_mode(f,live_mode(f),1)||(!f->staged&&!scope_absent(f)))return refuse(EACCES);
     struct envara_identity keeper;if(envara_identity_read(getpid(),&keeper)||!envara_identity_matches(&keeper,0,0))return refuse(ESTALE);
     out->keeper=keeper;strcpy(out->run_id,f->plan.run_id);strcpy(out->environment_id,f->plan.environment_id);strcpy(out->lease_id,f->plan.lease_id);strcpy(out->generation,f->plan.generation);strcpy(out->lease_sha256,f->plan.lease_sha256);
     out->frontend=f->owned.frontend;out->front_port=f->config.tcp_front_port;out->gid=f->plan.realm_gid;out->filter_revision=f->receipt.ticket;out->writer_pid=f->receipt.writer_pid;out->expires_monotonic_ms=f->expires;out->boot_time_seconds=f->boot;return 0;
@@ -678,7 +772,7 @@ static int retirement_guard(void *opaque) {
 }
 int envara_app_native_factory_release_safe(envara_app_native_factory *f) {
     if(!f||!cleanup_reconcile(f)||!scope_absent(f)||!basic(f,0))return 0;
-    if(f->mode==ENVARA_PF_PRODUCTION_FRONT){EnvaraPFProductionResult r;if(envara_app_native_factory_apply(f,ENVARA_PF_PRODUCTION_DENY,&r))return 0;}
+    if(mode_is_live(f->mode)){EnvaraPFProductionResult r;if(envara_app_native_factory_apply(f,ENVARA_PF_PRODUCTION_DENY,&r))return 0;}
     if(f->mode==ENVARA_PF_PRODUCTION_DENY){EnvaraPFProductionResult r;if(envara_app_native_factory_apply(f,ENVARA_PF_PRODUCTION_EMPTY,&r))return 0;}
     if(!verify_mode(f,ENVARA_PF_PRODUCTION_EMPTY,0)||!scope_absent(f))return 0;
     if(f->journal_removed)return f->retirement.complete&&retirement_guard(f);

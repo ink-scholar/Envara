@@ -42,7 +42,7 @@ test('native launch guardian: real death watches, direct-child ownership and ret
       'production-unprivileged', 'alias-pipe', 'invalid-custody'];
     const reasons = { stop: [1], eof: [1], malformed: [2], signal: [6],
       'dependency-death': [3, 4], 'dependency-exec': [4], 'parent-death': [1, 3, 4],
-      expiry: [5], descendant: [1], 'deny-loss': [8] };
+      expiry: [5], descendant: [1], 'deny-loss': [8], 'heartbeat-lost': [12], 'heartbeat-kept': [1] };
     for (const scenario of ['resume-slow-final-deny', 'resume-expired-final-deny']) {
       const result = spawnSync(executable, [scenario], { encoding: 'utf8', timeout: 15_000 });
       assert.equal(result.status, 0, `${scenario}: ${result.stderr}\n${result.stdout}`);
@@ -54,7 +54,8 @@ test('native launch guardian: real death watches, direct-child ownership and ret
       assert.equal(report.activatesSystem, false); assert.equal(report.fixtureOnly, true);
     }
     for (const scenario of ['descriptors', ...refused, 'stop', 'eof', 'malformed', 'signal',
-      'dependency-death', 'dependency-exec', 'parent-death', 'expiry', 'descendant', 'deny-loss']) {
+      'dependency-death', 'dependency-exec', 'parent-death', 'expiry', 'descendant', 'deny-loss',
+      'heartbeat-lost', 'heartbeat-kept']) {
       const result = spawnSync(executable, [scenario], { encoding: 'utf8', timeout: 15_000 });
       assert.equal(result.status, 0, `${scenario}: ${result.stderr}\n${result.stdout}`);
       const report = JSON.parse(result.stdout.trim());

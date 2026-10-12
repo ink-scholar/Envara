@@ -16,7 +16,7 @@ import { LocalApplicationCatalog } from './local-application-catalog.mjs';
 import { NativeApplicationRouting } from './application-routing.mjs';
 import { MacOSApplicationRouting } from './macos-application-routing.mjs';
 import { MacOSPFApplicationRouting } from './macos-pf-application-routing.mjs';
-import { exportPFNotionTrialDiagnostics } from './macos-pf-notion-trial.mjs';
+import { exportPFNotionTrialDiagnostics, PF_NOTION_TRIAL_CARRIER } from './macos-pf-notion-trial.mjs';
 import { NotionDiagnosticsStore } from './notion-diagnostics-store.mjs';
 import { verifyPFInstallation } from '../native/macos-pf-routing/controller.mjs';
 import { applicationWorkspaceContext } from './workspace-context.mjs';
@@ -80,9 +80,12 @@ async function fullWorkspaceSnapshot(value) {
         message: '应用网络组件尚未通过完整验证，软件暂不能启动。',
         status: 'incomplete',
       } : {}) };
-    applicationState.applications = await Promise.all(applicationState.applications.map(async item => item.identity === 'bundle:notion.id'
-      ? { ...item, notionTrial: applications.routing.controlledNotionTrialSnapshot({ applicationId: item.id }),
-        notionTrialHistory: await notionDiagnostics?.read(item.id).catch(() => null) ?? null } : item));
+    /* Trials are per saved binding, whichever software was added. The fixed
+     * native carrier still decides whether a given bundle may launch. */
+    applicationState.applications = await Promise.all(applicationState.applications.map(async item =>
+      typeof item?.identity === 'string' && item.identity
+        ? { ...item, notionTrial: applications.routing.controlledNotionTrialSnapshot({ applicationId: item.id }),
+          notionTrialHistory: await notionDiagnostics?.read(item.id).catch(() => null) ?? null } : item));
   }
   return workspaceSnapshot({ ...value, ...applicationState });
 }
@@ -96,17 +99,21 @@ async function getNotionTrialAvailability({ force = false } = {}) {
   return notionTrialAvailabilityPending;
 }
 
-function findNotionTrialApplication(args) {
+/* Any locally added application may be attached. The fixed native carrier and
+ * sealed registry decide whether a given bundle can actually launch; this
+ * lookup only resolves the saved binding the renderer referenced. */
+function findAttachmentApplication(args) {
   if (!args || Object.keys(args).length !== 1 || typeof args.id !== 'string' || !applications ||
-      typeof applications.routing?.controlledNotionTrial !== 'function') throw Object.assign(new Error('当前桌面版本不支持 Notion 试运行。'), { code: 'PF_NOTION_TRIAL_NOT_ENABLED' });
+      typeof applications.routing?.controlledNotionTrial !== 'function') throw Object.assign(new Error('当前桌面版本不支持软件附加。'), { code: 'PF_NOTION_TRIAL_NOT_ENABLED' });
   const application = applications.find(args.id);
-  if (application.path !== '/Applications/Notion.app' || application.identity !== 'bundle:notion.id') throw Object.assign(new Error('试运行仅支持已添加的 Notion。'), { code: 'PF_NOTION_TRIAL_REQUEST_INVALID' });
+  if (!application || typeof application.path !== 'string' || !application.path.endsWith('.app') ||
+      typeof application.identity !== 'string' || !application.identity) throw Object.assign(new Error('请先添加要附加的本地软件。'), { code: 'PF_NOTION_TRIAL_REQUEST_INVALID' });
   return application;
 }
 
 function assertNotionTrialContextIdle({ allowReservation = false } = {}) {
   const state = applications?.routing?.controlledNotionTrialSnapshot?.() ?? null;
-  if ((!allowReservation && notionTrialReserved) || state?.active === true || state?.cleanupUncertain === true) throw Object.assign(new Error('请先结束试运行并确认清理，再修改环境。'), { code: 'PF_OWNED_RUNTIME_NOT_EMPTY' });
+  if ((!allowReservation && notionTrialReserved) || state?.active === true || state?.cleanupUncertain === true) throw Object.assign(new Error('请先停止附加软件并确认清理，再修改环境。'), { code: 'PF_OWNED_RUNTIME_NOT_EMPTY' });
 }
 
 async function shutdownOwnedServices() {
@@ -159,14 +166,14 @@ async function handleCall(method, args = {}, caller = window) {
   if (!allowedMethods.has(method)) throw new Error('不支持的操作');
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('操作参数无效。');
   if (['runNotionTrial', 'stopNotionTrial', 'notionTrialSnapshot', 'exportNotionDiagnostics'].includes(method)) {
-    const application = findNotionTrialApplication(args);
+    const application = findAttachmentApplication(args);
     if (method === 'notionTrialSnapshot') return { applicationId: application.id,
       notionTrial: applications.routing.controlledNotionTrialSnapshot({ applicationId: application.id }) };
     if (method === 'exportNotionDiagnostics') {
       const current = applications.routing.controlledNotionTrialSnapshot({ applicationId: application.id });
       const report = exportPFNotionTrialDiagnostics(current) ?? await notionDiagnostics?.read(application.id);
-      if (!report) throw Object.assign(new Error('尚无可导出的试运行诊断。'), { code: 'PF_NOTION_DIAGNOSTICS_UNAVAILABLE' });
-      const choice = await dialog.showSaveDialog(caller, { title: '导出试运行诊断',
+      if (!report) throw Object.assign(new Error('尚无可导出的附加软件诊断。'), { code: 'PF_NOTION_DIAGNOSTICS_UNAVAILABLE' });
+      const choice = await dialog.showSaveDialog(caller, { title: '导出附加软件诊断',
         defaultPath: `Envara-Notion-${report.runId}.json`, filters: [{ name: 'JSON', extensions: ['json'] }] });
       if (choice.canceled || !choice.filePath) return { canceled: true };
       await writeFile(choice.filePath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
@@ -177,12 +184,12 @@ async function handleCall(method, args = {}, caller = window) {
     assertNotionTrialContextIdle();
     notionTrialReserved = true;
     return applications.serialized(async () => {
-      const application = findNotionTrialApplication(args);
+      const application = findAttachmentApplication(args);
       assertNotionTrialContextIdle({ allowReservation: true });
       await applications.checkProfile(application.profileId);
       applications.assertProfileIdle(application.profileId);
       const available = await getNotionTrialAvailability({ force: true });
-      if (available.controlledNotionTrialAvailable !== true) throw Object.assign(new Error('Notion 试运行组件尚未就绪。'), { code: available.errorCode ?? 'PF_NOTION_TRIAL_NOT_ENABLED' });
+      if (available.controlledNotionTrialAvailable !== true) throw Object.assign(new Error('附加软件组件尚未就绪。'), { code: available.errorCode ?? 'PF_NOTION_TRIAL_NOT_ENABLED' });
       // A renderer provides only the saved binding id. Network credentials and
       // activation intent are constructed by this main-process action.
       let context;
@@ -212,7 +219,18 @@ async function handleCall(method, args = {}, caller = window) {
   if (applicationMethods.has(method)) {
     if (!applications) throw new Error('附加软件需要完整桌面应用。');
     if (['saveApplication', 'deleteApplication', 'setupApplicationRouting'].includes(method)) assertNotionTrialContextIdle();
-    return applications[method](args);
+    if (method !== 'setupApplicationRouting') return applications[method](args);
+    /* The upgrade button is driven by the cached trial availability. Without a
+     * fresh read after installing, the stale "component outdated" answer kept
+     * the button visible for up to 30 seconds and the update looked like it
+     * needed a second click. Wait out any read already in flight, then force a
+     * new one, whatever the installation's outcome. */
+    try { return await applications[method](args); }
+    finally {
+      await notionTrialAvailabilityPending?.catch(() => {});
+      await getNotionTrialAvailability({ force: true }).catch(() => {});
+      void publish();
+    }
   }
   if (method === 'pickApplication') {
     const choice = await dialog.showOpenDialog(caller, { title: '选择本地软件', properties: ['openFile'], filters: process.platform === 'win32' ? [{ name: 'Application', extensions: ['exe'] }] : process.platform === 'darwin' ? [{ name: 'Application', extensions: ['app'] }] : [{ name: 'Application', extensions: ['*'] }] });
@@ -461,8 +479,7 @@ if (ownsLock) void app.whenReady().then(async () => {
         peerVerifierPath: path.join(routingRoot, 'macos-local/EnvaraPeerVerifier'),
         bundledAppPath: path.join(routingRoot, 'macos-local/Resources/Mitmproxy Redirector.app'),
       }) : new MacOSPFApplicationRouting({ helperPath: pfHelperPath, installerPath: path.join(routingRoot, 'macos-pf/EnvaraPFInstall'),
-        notionAuthorizerPath: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'),
-          'local-authorization/EnvaraPFAuthorization-4b9f859585a1-scope-recovery-r2-20261010.app/Contents/Resources/app-routing/macos-pf/EnvaraPFInstall'),
+        notionAuthorizerPath: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), PF_NOTION_TRIAL_CARRIER),
         onNotionTrialEvent: event => { console.info('Envara Notion trial', JSON.stringify(event)); void publish(); },
         onNotionTrialDiagnostics: report => notionDiagnostics.save(report),
       })

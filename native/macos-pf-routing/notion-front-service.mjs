@@ -12,6 +12,11 @@ export const NOTION_FRONT_PROTOCOL = 'envara.macos-pf-notion-front/v1'
 export const NOTION_ADMISSION_PROTOCOL = 'envara.macos-pf-notion-admission/v1'
 const native = `${PF_INSTALL_ROOT}/envara-pf-native`, node = `${PF_INSTALL_ROOT}/node`
 const clockSchema = 'envara.macos-pf-app-context-clock/v1', leaseSchema = 'envara.macos-pf-app-bound-lease/v1'
+// A session-bound attached application runs until it is stopped; this is only
+// the sealed lease's outer bound (30 days), matching the native guardian.
+const MAXIMUM_LEASE_MS = 2592000000
+// Node clamps any timer delay above 2^31-1 ms to 1 ms.
+const MAXIMUM_TIMER_MS = 2147483647
 const idKeys = ['runId', 'environmentId', 'leaseId', 'generation']
 const leaseKeys = ['schema', 'runId', 'environmentId', 'realmId', 'leaseId', 'generation', 'registrationId', 'versionId', 'consoleUID', 'gid', 'cwd', 'timezone', 'locale', 'issuedMonotonicMs', 'expiresMonotonicMs', 'bootTimeSeconds', 'controllerPid', 'controllerBirth', 'ipv4Address', 'rootHookLease']
 const admissionKeys = ['schema', 'operation', ...idKeys, 'leaseSHA256', 'keeperPID', 'keeperBirth', 'frontPID', 'frontBirth', 'frontPort', 'gid', 'filterRevision', 'writerPid', 'profile', 'rulesVerified', 'poolsVerified', 'lo0FilteringVerified', 'originalListenerHeld', 'originalUTunHeld', 'expiresMonotonicMs', 'bootTimeSeconds', 'ready', 'protected']
@@ -91,7 +96,7 @@ function validateLease(record, context) {
       [...idKeys, 'realmId', 'registrationId', 'versionId'].some(key => !isPFRoutingRunId(value[key])) || idKeys.some(key => value[key] !== context[key]) ||
       !uint(value.consoleUID) || value.consoleUID < 1 || !Number.isInteger(value.gid) || value.gid < 7100 || value.gid > 7999 || !pid(value.controllerPid) || !birth(value.controllerBirth) ||
       ['issuedMonotonicMs', 'expiresMonotonicMs', 'bootTimeSeconds'].some(key => !uint(value[key])) || value.bootTimeSeconds < 1 ||
-      value.expiresMonotonicMs <= value.issuedMonotonicMs || value.expiresMonotonicMs - value.issuedMonotonicMs > 180000 ||
+      value.expiresMonotonicMs <= value.issuedMonotonicMs || value.expiresMonotonicMs - value.issuedMonotonicMs > MAXIMUM_LEASE_MS ||
       typeof value.cwd !== 'string' || !value.cwd.startsWith('/') || /[\0\r\n]/.test(value.cwd) ||
       ['timezone', 'locale'].some(key => typeof value[key] !== 'string' || !value[key] || /[\0\r\n]/.test(value[key])) ||
       !['198.18.1.1', '198.18.2.1'].includes(value.ipv4Address) || value.rootHookLease?.runId !== context.runId) fail('LEASE_REFUSED')
@@ -142,6 +147,15 @@ export async function runNotionFrontService({ input = process.stdin, output = pr
   }
   const reject = (error, at = 'liveness') => { failed = true; phase = at; reason = reasons.has(error?.reason) ? error.reason : 'PRIVATE_NATIVE_FRONT_REFUSED'
     void stop().catch(() => resolveDone(Object.freeze(safeState()))) }
+  // A long sealed lease is watched in bounded steps; only the real fixed
+  // deadline refuses, never an early timer wake.
+  const armExpiry = () => {
+    clearTimeout(expiryTimer)
+    if (ended) return
+    const remaining = Number((fixedDeadline - monotonic()) / 1000000n)
+    if (remaining <= 0) { reject(refused('LEASE_EXPIRED')); return }
+    expiryTimer = setTimeout(armExpiry, Math.min(remaining, MAXIMUM_TIMER_MS))
+  }
   const fresh = async (force = false) => {
     if (ended || !initialized) fail()
     const started = monotonic()
@@ -166,7 +180,7 @@ export async function runNotionFrontService({ input = process.stdin, output = pr
       fixedDeadline = fixedDeadline === null || deadline < fixedDeadline ? deadline : fixedDeadline
       const remaining = Number((fixedDeadline - monotonic()) / 1000000n)
       if (remaining <= 0) fail('LEASE_EXPIRED')
-      clearTimeout(expiryTimer); expiryTimer = setTimeout(() => reject(refused('LEASE_EXPIRED')), remaining)
+      armExpiry()
       cached = { clock, started }
       return clock
     })().finally(() => { checking = null })

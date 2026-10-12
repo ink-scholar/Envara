@@ -7,6 +7,12 @@
  * a production caller is exposed here. Only explicit INSERT/DELETE callers
  * may invoke the mutating APIs. Inspect never creates a directory or file. */
 #define ENVARA_PF_RUN_LEDGER_ROOT "/Library/PrivilegedHelperTools/io.envara.pf-run-ledger"
+/* Terminal receipts (root restored, namespace absent) are moved to this sibling
+ * so a long-lived installation cannot exhaust the live inventory. An archived
+ * UUID still blocks reuse: allocation refuses a name that already exists in
+ * either directory. */
+#define ENVARA_PF_RUN_LEDGER_ARCHIVE_ROOT "/Library/PrivilegedHelperTools/io.envara.pf-run-ledger-archive"
+#define ENVARA_PF_RUN_LEDGER_ARCHIVE_MAX 512
 #define ENVARA_PF_RUN_LEDGER_MAX_RUNS 64
 #define ENVARA_PF_RUN_UUID_BYTES 37
 #define ENVARA_PF_RUN_ANCHOR_BYTES 54

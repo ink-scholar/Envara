@@ -5,9 +5,15 @@ import { randomUUID } from 'node:crypto';
 import { pfRoutingAnchor } from '../native/macos-pf-routing/policy.mjs';
 
 export const PF_NOTION_CHANNEL_LIFETIME_MS = 180000;
+/* A session-bound attached application keeps running until it is stopped, the
+ * application exits, or Envara quits. Its authorized channel therefore has no
+ * total lifetime, and only each individual request stays bounded. */
+export const PF_SESSION_CHANNEL_LIFETIME_MS = Infinity;
 export const PF_NOTION_CLEANUP_RESERVE_MS = 40000;
 export const PF_NOTION_CLOSE_RESERVE_MS = 10000;
 export const PF_NOTION_RESUME_TIMEOUT_MS = 60000;
+// Node clamps any timer delay above 2^31-1 ms to 1 ms.
+const MAXIMUM_TIMER_MS = 2147483647;
 const failed = code => Object.assign(new Error('Bounded Notion channel refused'), { code });
 const notionMethods = new Set(['prepareNotionApplication', 'resumeNotionApplication', 'stopNotionApplication', 'applicationSnapshot']);
 const canonicalUUID = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
@@ -15,13 +21,27 @@ const exact = (value, keys, optional = []) => value !== null && typeof value ===
   keys.every(key => Object.hasOwn(value, key)) && Object.keys(value).every(key => [...keys, ...optional].includes(key));
 const text = value => typeof value === 'string' && value.length > 0 && !/[\0\r\n]/.test(value);
 const absolute = value => text(value) && value.startsWith('/') && value.length <= 4095;
+/* A bounded candidate executable inside a ".app" bundle: either the bundle
+ * itself or a nested path beneath it. The fixed native registry independently
+ * inspects and seals the real signed bundle, so this is not an identity claim. */
+const boundApplicationPath = value => {
+  if (!absolute(value) || !value.endsWith('.app') && !value.includes('.app/')) return false;
+  if (value.split('/').some(segment => segment === '.' || segment === '..')) return false;
+  const segments = value.split('/');
+  const index = segments.findIndex((segment, position) => position > 0 && segment.endsWith('.app'));
+  return index > 0 && segments[index].length >= 5;
+};
 export function validatePFNotionSessionRequest(method, params) {
   if (method === 'status') {
     if (!exact(params, [], ['runId']) || Object.hasOwn(params, 'runId') && !canonicalUUID(params.runId)) throw failed('PF_HELPER_REQUEST_INVALID');
   } else if (method === 'prepareRoute') {
+    /* Any locally added application may be bound. The executable must be a
+     * bounded absolute path ending in ".app" or lying directly inside such a
+     * bundle; the fixed native registry independently inspects and seals the
+     * real signed bundle, so this is a candidate path, not an identity claim. */
     if (!exact(params, ['application', 'workspace', 'route', 'managedRoute']) ||
         !exact(params.application, ['id', 'profileId', 'executablePath']) || ['id', 'profileId'].some(key => !/^[A-Za-z0-9_-]{1,128}$/.test(params.application[key] ?? '')) ||
-        !['/Applications/Notion.app', '/Applications/Notion.app/Contents/MacOS/Notion'].includes(params.application.executablePath) ||
+        !boundApplicationPath(params.application.executablePath) ||
         !exact(params.workspace, ['cwd', 'timezone', 'locale'], ['timezoneSource']) || !absolute(params.workspace.cwd) || !text(params.workspace.timezone) || params.workspace.timezone.length > 100 ||
         !/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}$/.test(params.workspace.locale ?? '') ||
         Object.hasOwn(params.workspace, 'timezoneSource') && !['proxy', 'proxy-egress', 'fixed'].includes(params.workspace.timezoneSource) ||
@@ -50,20 +70,25 @@ export function validatePFNotionStatusOnlyCloseEvidence(value, requestedRunId = 
     value.runId === requestedRunId && Number.isInteger(value.statusRequests) && value.statusRequests >= 1 && value.statusRequests <= 64 &&
     truths.every(key => value[key] === true) && falsehoods.every(key => value[key] === false);
 }
+/* Host PF, routes and DNS are observed, not owned. They must be reported as
+ * booleans, but a change there does not make Envara's own cleanup incomplete;
+ * every owned-resource fact must still be true. */
+const unrelatedObservationKeys = ['unrelatedPFUnchanged', 'unrelatedRoutesUnchanged', 'hostDNSUnchanged'];
+const observationsReported = evidence => unrelatedObservationKeys.every(key => typeof evidence?.[key] === 'boolean');
 export function validatePFNotionCleanupReceipt(result, requestedRunId) {
   const evidence = result?.cleanupEvidence;
   const truths = ['coreReaped', 'frontReaped', 'scopeQuiescentObserved', 'originalUTunClosed', 'originalListenerClosed', 'filterEmptyVerified',
     'privateJournalRetired', 'transportExitConfirmed', 'ownedGIDProcessesAbsent', 'ownedGroupsRemoved', 'ownedRootHookRemoved', 'originalRootRestored',
-    'namespaceReclaimed', 'receiptRetired', 'ownedPFReferenceReleased', 'unrelatedPFUnchanged', 'unrelatedRoutesUnchanged', 'hostDNSUnchanged', 'sealedContextRetired', 'registryReleased'];
+    'namespaceReclaimed', 'receiptRetired', 'ownedPFReferenceReleased', 'sealedContextRetired', 'registryReleased'];
   return canonicalUUID(requestedRunId) && result?.runId === requestedRunId && canonicalUUID(result.environmentId) && result.phase === 'cleaned' &&
     result.cleanupComplete === true && result.cleanupUncertain === false && result.profile === 'seatbelt-front-only' &&
     ['ready', 'protected', 'productionReady', 'genericApplicationRouting', 'udpSupported'].every(key => result[key] === false) &&
-    exact(evidence, ['schema', 'source', 'runId', 'environmentId', 'profile', 'complete', 'cleanupUncertain', 'childReaped', ...truths], ['childAbsent']) &&
+    exact(evidence, ['schema', 'source', 'runId', 'environmentId', 'profile', 'complete', 'cleanupUncertain', 'childReaped', ...truths, ...unrelatedObservationKeys], ['childAbsent']) &&
     evidence.schema === 'envara.macos-pf-notion-cleanup/v1' && evidence.source === 'native-notion-controller' && evidence.runId === requestedRunId &&
     evidence.environmentId === result.environmentId && evidence.profile === result.profile && evidence.complete === true && evidence.cleanupUncertain === false &&
     (!Object.hasOwn(evidence, 'childAbsent') || typeof evidence.childAbsent === 'boolean') &&
     (evidence.childReaped === true && evidence.childAbsent !== true || evidence.childReaped === false && evidence.childAbsent === true) &&
-    truths.every(key => evidence[key] === true);
+    truths.every(key => evidence[key] === true) && observationsReported(evidence);
 }
 
 // A failed preparation can release its resources without ever staging an app.
@@ -72,16 +97,16 @@ export function validatePFNotionPrestageCleanupReceipt(result, requestedRunId) {
   const evidence = result?.cleanupEvidence;
   const truths = ['coreReaped', 'frontReaped', 'originalUTunVerified', 'originalListenerVerified', 'originalUTunClosed', 'originalListenerClosed',
     'filterJournalAbsent', 'transportExitConfirmed', 'nativeGIDScopeAbsentBeforeExit', 'ownedEffectiveGIDProcessesAbsentAtCleanup', 'ownedGroupsRemoved',
-    'ownedRootHookRemoved', 'originalRootRestored', 'namespaceReclaimed', 'receiptRetired', 'ownedPFReferenceReleased', 'unrelatedPFUnchanged',
-    'unrelatedRoutesUnchanged', 'hostDNSUnchanged', 'sealedContextRetired', 'registryReleased'];
+    'ownedRootHookRemoved', 'originalRootRestored', 'namespaceReclaimed', 'receiptRetired', 'ownedPFReferenceReleased',
+    'sealedContextRetired', 'registryReleased'];
   const falsehoods = ['staged', 'resumed', 'notionLaunched', 'lifecyclePassed', 'denyAttempted', 'filterWriteAttempted', 'launchCommandAccepted', 'coldStageAttempted'];
   return canonicalUUID(requestedRunId) && result?.runId === requestedRunId && canonicalUUID(result.environmentId) && result.phase === 'prestage-cleaned' &&
     result.prestageAborted === true && result.staged === false && result.resumed === false && result.cleanupComplete === true && result.cleanupUncertain === false &&
     result.profile === 'seatbelt-front-only' && ['ready', 'protected', 'productionReady', 'genericApplicationRouting', 'udpSupported'].every(key => result[key] === false) &&
-    exact(evidence, ['schema', 'source', 'runId', 'environmentId', 'profile', 'complete', 'cleanupUncertain', ...truths, ...falsehoods]) &&
+    exact(evidence, ['schema', 'source', 'runId', 'environmentId', 'profile', 'complete', 'cleanupUncertain', ...truths, ...unrelatedObservationKeys, ...falsehoods]) &&
     evidence.schema === 'envara.macos-pf-notion-prestage-cleanup/v1' && evidence.source === 'native-notion-controller' && evidence.runId === requestedRunId &&
     evidence.environmentId === result.environmentId && evidence.profile === result.profile && evidence.complete === true && evidence.cleanupUncertain === false &&
-    truths.every(key => evidence[key] === true) && falsehoods.every(key => evidence[key] === false);
+    truths.every(key => evidence[key] === true) && observationsReported(evidence) && falsehoods.every(key => evidence[key] === false);
 }
 
 // A direct native preflight refusal has no app/core/front resource receipt.
@@ -92,7 +117,7 @@ export function validatePFNotionPreflightCleanupReceipt(result, requestedRunId) 
   const truths = ['sealedContextVerified', 'nativePrivateChildrenAbsentBeforeExit', 'nativeGIDScopeAbsentBeforeExit',
     'nativeOwnedFilterClassesEmptyBeforeExit', 'filterJournalAbsent', 'bootstrapExitConfirmed', 'ownedFilterEmptyAtCleanup',
     'ownedEffectiveGIDProcessesAbsentAtCleanup', 'ownedGroupsRemoved', 'ownedRootHookRemoved', 'originalRootRestored', 'namespaceReclaimed',
-    'receiptRetired', 'ownedPFReferenceReleased', 'unrelatedPFUnchanged', 'unrelatedRoutesUnchanged', 'hostDNSUnchanged', 'sealedContextRetired', 'registryReleased'];
+    'receiptRetired', 'ownedPFReferenceReleased', 'sealedContextRetired', 'registryReleased'];
   const falsehoods = ['staged', 'resumed', 'notionLaunched', 'lifecyclePassed', 'bootstrapAttempted', 'transportAttempted', 'filterWriteAttempted', 'coldStageAttempted'];
   return canonicalUUID(requestedRunId) && result?.runId === requestedRunId && canonicalUUID(result.environmentId) && result.phase === 'preflight-cleaned' &&
     result.preflightAborted === true && result.prestageAborted === false && result.staged === false && result.resumed === false &&
@@ -100,10 +125,10 @@ export function validatePFNotionPreflightCleanupReceipt(result, requestedRunId) 
     ['ready', 'protected', 'productionReady', 'genericApplicationRouting', 'udpSupported'].every(key => result[key] === false) &&
     result.failure?.stage === 'transport' && result.failure?.code === 'APPLICATION_APP_NATIVE_REFUSED' && exact(native, ['stage', 'reason', 'error']) &&
     native.stage === 'preflight' && operationReasons.has(native.reason) && Number.isInteger(native.error) && native.error > 0 && native.error <= 1024 &&
-    exact(evidence, ['schema', 'source', 'runId', 'environmentId', 'profile', 'complete', 'cleanupUncertain', ...truths, ...falsehoods]) &&
+    exact(evidence, ['schema', 'source', 'runId', 'environmentId', 'profile', 'complete', 'cleanupUncertain', ...truths, ...unrelatedObservationKeys, ...falsehoods]) &&
     evidence.schema === 'envara.macos-pf-notion-preflight-cleanup/v1' && evidence.source === 'native-notion-controller' && evidence.runId === requestedRunId &&
     evidence.environmentId === result.environmentId && evidence.profile === result.profile && evidence.complete === true && evidence.cleanupUncertain === false &&
-    truths.every(key => evidence[key] === true) && falsehoods.every(key => evidence[key] === false);
+    truths.every(key => evidence[key] === true) && observationsReported(evidence) && falsehoods.every(key => evidence[key] === false);
 }
 
 const methods = new Set(['status', 'prepareRoute', ...notionMethods]);
@@ -111,7 +136,11 @@ const cleanupMethods = new Set(['status', 'stopNotionApplication', 'applicationS
 const timingSchema = 'envara.macos-pf-notion-call-timing/v1';
 const timingSource = 'verified-authorizer-session-client';
 export function validatePFNotionCallTimingDiagnostic(value) {
-  const boundedMs = number => Number.isInteger(number) && number >= 0 && number <= PF_NOTION_CHANNEL_LIFETIME_MS;
+  /* An unbounded session reports its bounded per-request numbers instead of a
+   * fabricated remaining lifetime: a request that is still pending has no
+   * remaining or elapsed value, and every bound that does exist is the
+   * per-request timeout, exactly as before. */
+  const boundedMs = number => number === null || Number.isInteger(number) && number >= 0;
   return exact(value, ['schema', 'source', 'diagnosticOnly', 'sequence', 'method', 'requestedTimeoutMs', 'effectiveTimeoutMs',
     'cleanupReserveMs', 'remainingMsAtStart', 'elapsedMs', 'remainingMsAtFinish', 'outcome', 'lateResponseObserved']) &&
     value.schema === timingSchema && value.source === timingSource && value.diagnosticOnly === true &&
@@ -121,7 +150,7 @@ export function validatePFNotionCallTimingDiagnostic(value) {
     Number.isInteger(value.effectiveTimeoutMs) && value.effectiveTimeoutMs >= 1 && value.effectiveTimeoutMs <= value.requestedTimeoutMs &&
     (cleanupMethods.has(value.method) ? [PF_NOTION_CLOSE_RESERVE_MS, PF_NOTION_CLEANUP_RESERVE_MS].includes(value.cleanupReserveMs)
       : value.cleanupReserveMs === PF_NOTION_CLEANUP_RESERVE_MS) && boundedMs(value.remainingMsAtStart) &&
-    value.effectiveTimeoutMs <= value.remainingMsAtStart - value.cleanupReserveMs &&
+    (value.remainingMsAtStart === null || value.effectiveTimeoutMs <= value.remainingMsAtStart - value.cleanupReserveMs) &&
     (value.elapsedMs === null || boundedMs(value.elapsedMs)) && (value.remainingMsAtFinish === null || boundedMs(value.remainingMsAtFinish)) &&
     ['pending', 'result', 'error', 'deadline', 'aborted', 'closed'].includes(value.outcome) && typeof value.lateResponseObserved === 'boolean' &&
     (!value.lateResponseObserved || ['deadline', 'aborted'].includes(value.outcome));
@@ -132,7 +161,7 @@ const flags = ['ready', 'protected', 'productionReady', 'genericApplicationRouti
 const nativeErrorCodes = new Set(['APPLICATION_ROUTING_AUTHORIZATION_REQUIRED', 'APPLICATION_ROUTING_NOT_READY',
   'APPLICATION_PROXY_UNAVAILABLE', 'APPLICATION_ROUTING_PROTOCOL_ERROR', 'APPLICATION_APP_CONTEXT_REFUSED',
   'APPLICATION_APP_IDENTITY_REFUSED', 'APPLICATION_APP_NATIVE_REFUSED', 'APPLICATION_APP_STAGE_UNCONFIRMED',
-  'APPLICATION_APP_TRANSPORT_UNCONFIRMED', 'APPLICATION_APP_STAGE_TIMEOUT', 'APPLICATION_APP_RESUME_TIMEOUT', 'APPLICATION_APP_RESUME_UNCONFIRMED', 'APPLICATION_APP_CLEANUP_UNCONFIRMED',
+  'APPLICATION_APP_TRANSPORT_UNCONFIRMED', 'APPLICATION_APP_STAGE_TIMEOUT', 'APPLICATION_APP_RESUME_TIMEOUT', 'APPLICATION_APP_STOP_TIMEOUT', 'APPLICATION_APP_RELEASE_TIMEOUT', 'APPLICATION_APP_RESUME_UNCONFIRMED', 'APPLICATION_APP_CLEANUP_UNCONFIRMED',
   'APPLICATION_ROUTING_CLEANUP_UNCONFIRMED', 'APPLICATION_NATIVE_REFUSED']);
 const safeNativeCode = error => nativeErrorCodes.has(error?.code) ? error.code : 'PF_HELPER_RESPONSE_INVALID';
 const appFailureStages = new Set(['register', 'inspect', 'lock', 'baseline', 'registry-lock', 'root-hook', 'group', 'group-allocation',
@@ -140,7 +169,7 @@ const appFailureStages = new Set(['register', 'inspect', 'lock', 'baseline', 're
 const appNativeStages = new Set(['register', 'preflight', 'gui-session', 'route-read', 'transport-start', 'front-listen', 'front-spawn', 'front-handshake',
   'factory-open', 'deny-commit', 'transport-ack', 'front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'guardian']);
 const registerReasons = new Set(['INVALID_NATIVE_APP_REQUEST', 'FIXED_ROOT_NATIVE_ENTRY_REQUIRED', 'APP_REGISTRY_UNAVAILABLE', 'NATIVE_APP_OPERATION_REFUSED']);
-const operationReasons = new Set(['NATIVE_OPERATION_REFUSED', 'NATIVE_CONTEXT_LOAD_REFUSED', 'NATIVE_CONTROLLER_BINDING_REFUSED', 'NATIVE_ORIGINAL_SOCKET_REFUSED', 'NATIVE_LISTENER_CREDENTIAL_REFUSED', 'NATIVE_PIPE_BINDING_REFUSED', 'NATIVE_GUI_SESSION_REFUSED', 'NATIVE_APP_IDENTITY_REFUSED', 'NATIVE_HOOK_LEASE_REFUSED', 'NATIVE_PF_OPEN_REFUSED', 'NATIVE_PF_GUARD_REFUSED', 'NATIVE_FILTER_READBACK_REFUSED', 'NATIVE_FILTER_TRANSACTION_REFUSED', 'NATIVE_JOURNAL_REFUSED', 'NATIVE_TICKET_BINDING_REFUSED', 'NATIVE_TICKET_FILTER_REFUSED', 'NATIVE_SCOPE_CHECK_REFUSED', 'NATIVE_GUARD_DESCRIPTOR_REFUSED', 'NATIVE_LEASE_EXPIRED_REFUSED', 'NATIVE_NOTION_DATA_PREPARE_REFUSED', 'NATIVE_NOTION_STAGE_REFUSED']);
+const operationReasons = new Set(['NATIVE_OPERATION_REFUSED', 'NATIVE_CONTEXT_LOAD_REFUSED', 'NATIVE_CONTROLLER_BINDING_REFUSED', 'NATIVE_ORIGINAL_SOCKET_REFUSED', 'NATIVE_LISTENER_CREDENTIAL_REFUSED', 'NATIVE_PIPE_BINDING_REFUSED', 'NATIVE_GUI_SESSION_REFUSED', 'NATIVE_APP_IDENTITY_REFUSED', 'NATIVE_HOOK_LEASE_REFUSED', 'NATIVE_PF_OPEN_REFUSED', 'NATIVE_PF_GUARD_REFUSED', 'NATIVE_FILTER_READBACK_REFUSED', 'NATIVE_FILTER_TRANSACTION_REFUSED', 'NATIVE_JOURNAL_REFUSED', 'NATIVE_TICKET_BINDING_REFUSED', 'NATIVE_TICKET_FILTER_REFUSED', 'NATIVE_SCOPE_CHECK_REFUSED', 'NATIVE_GUARD_DESCRIPTOR_REFUSED', 'NATIVE_LEASE_EXPIRED_REFUSED', 'NATIVE_NOTION_DATA_PREPARE_REFUSED', 'NATIVE_NOTION_STAGE_REFUSED', 'NATIVE_NOTION_SUPPORTED_ARGUMENT_REFUSED', 'NATIVE_NOTION_SUPPORTED_PLIST_REFUSED', 'NATIVE_NOTION_SUPPORTED_VERSION_REFUSED', 'NATIVE_NOTION_SUPPORTED_SIGNATURE_REFUSED', 'NATIVE_NOTION_PLAN_ARGUMENT_REFUSED', 'NATIVE_NOTION_PLAN_REGISTRY_REFUSED', 'NATIVE_NOTION_PLAN_CONTEXT_REFUSED', 'NATIVE_NOTION_PLAN_REQUEST_REFUSED', 'NATIVE_NOTION_PLAN_SEALED_REFUSED', 'NATIVE_NOTION_PLAN_SUPPORTED_REFUSED', 'NATIVE_NOTION_PLAN_DIGEST_REFUSED', 'NATIVE_NOTION_PLAN_CDHASH_REFUSED', 'NATIVE_NOTION_PLAN_REQUIREMENT_REFUSED', 'NATIVE_NOTION_PLAN_DATA_REFUSED', 'NATIVE_NOTION_PLAN_ALLOCATION_REFUSED', 'NATIVE_NOTION_DATA_ARGUMENT_REFUSED', 'NATIVE_NOTION_DATA_ENTRY_REFUSED', 'NATIVE_NOTION_DATA_ANCESTOR_REFUSED', 'NATIVE_NOTION_DATA_LEAF_REFUSED', 'NATIVE_NOTION_DATA_DENY_REFUSED', 'NATIVE_NOTION_STAGE_ARGUMENT_REFUSED', 'NATIVE_NOTION_STAGE_AUTHORITY_REFUSED', 'NATIVE_NOTION_STAGE_ENTRY_REFUSED', 'NATIVE_NOTION_STAGE_SESSION_REFUSED', 'NATIVE_NOTION_STAGE_ORIGINAL_RUNNING_REFUSED', 'NATIVE_NOTION_STAGE_ACCOUNT_REFUSED', 'NATIVE_NOTION_STAGE_ENVIRONMENT_REFUSED', 'NATIVE_NOTION_STAGE_DATA_REFUSED', 'NATIVE_NOTION_STAGE_RECHECK_REFUSED', 'NATIVE_NOTION_STAGE_SPAWN_REFUSED', 'NATIVE_NOTION_STAGE_STOPPED_REFUSED', 'NATIVE_NOTION_STAGE_CHILD_REFUSED']);
 const safeNativeFailure = value => exact(value, ['stage', 'reason', 'error']) && appNativeStages.has(value.stage) &&
   (value.stage === 'register' ? registerReasons.has(value.reason) : operationReasons.has(value.reason)) &&
   Number.isInteger(value.error) && value.error > 0 && value.error <= 1024 ? { stage: value.stage, reason: value.reason, error: value.error } : null;
@@ -179,7 +208,7 @@ export function validatePFNotionResponseDiagnostic(value, method, runId, environ
     safeErrorDiagnostic({ ...(value.native ? { nativeFailure: value.native } : {}), ...Object.fromEntries(['failureStage', 'initialFailure', 'cleanupFailure']
       .filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])) }) !== null;
   return value.kind === 'result' && exact(value, ['schema', 'source', 'kind', 'method', 'runId', 'environmentId', 'profile', 'diagnosticOnly',
-    'phase', 'staged', 'resumed', 'cleanupComplete', 'cleanupUncertain', 'failure'], ['initialFailure', 'cleanupFailure']) && phases.has(value.phase) &&
+    'phase', 'staged', 'resumed', 'cleanupComplete', 'cleanupUncertain', 'failure'], ['initialFailure', 'cleanupFailure', 'applicationEnded']) && phases.has(value.phase) &&
     ['staged', 'resumed', 'cleanupComplete', 'cleanupUncertain'].every(key => typeof value[key] === 'boolean') && diagnosticFailure(value.failure) !== undefined &&
     ['initialFailure', 'cleanupFailure'].every(key => !Object.hasOwn(value, key) || diagnosticFailure(value[key]) !== undefined);
 }
@@ -190,9 +219,16 @@ export function projectPFNotionResponseDiagnostic(method, result, runId, environ
   const value = { schema: diagnosticSchema, source: diagnosticSource, kind: 'result', method, runId, environmentId,
     profile: 'seatbelt-front-only', diagnosticOnly: true, phase: result.phase, staged: result.staged, resumed: result.resumed,
     cleanupComplete: result.cleanupComplete, cleanupUncertain: result.cleanupUncertain, failure };
+  /* The controller reports whether the guardian already stopped the exact
+   * child, which is what distinguishes a run that ended from one that is still
+   * running when the observation window closes. */
+  if (typeof result.applicationEnded === 'boolean') value.applicationEnded = result.applicationEnded;
   for (const key of ['initialFailure', 'cleanupFailure']) if (Object.hasOwn(result, key)) value[key] = diagnosticFailure(result[key]);
   return validatePFNotionResponseDiagnostic(value, method, runId, environmentId) ? value : null;
 }
+/* Only a boolean fact and its two booleans cross this boundary; nothing about
+ * the native channel or the child's private state does. */
+const entryRunningSignals = Object.freeze(['applicationEnded', 'endedChildReaped', 'endedChildSignalled']);
 const safeId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 const cleanupKind = (result, runId, environmentId) => result?.environmentId !== environmentId ? null :
   validatePFNotionCleanupReceipt(result, runId) ? 'normal' : validatePFNotionPrestageCleanupReceipt(result, runId) ? 'prestage' :
@@ -212,7 +248,11 @@ function publicResult(method, result) {
   if (method === 'prepareRoute') return { routeId: result.routeId, profileId: result.profileId ?? null,
     ready: false, failClosed: false, guardArmed: false, managedRouteVerified: false };
   const keys = ['runId', 'environmentId', 'routeId', 'profile', 'phase', 'staged', 'resumed', 'prestageAborted',
-    'preflightAborted', 'cleanupUncertain', 'cleanupComplete', ...flags];
+    'preflightAborted', 'cleanupUncertain', 'cleanupComplete',
+    /* The guardian already stopped the exact child: the run has ended even
+     * though no stop was requested, and the trial must not keep reporting it
+     * as running for the rest of its observation window. */
+    ...(entryRunningSignals), ...flags];
   const value = Object.fromEntries(keys.filter(key => Object.hasOwn(result, key)).map(key => [key, result[key]]));
   const kind = cleanupKind(result, result.runId, result.environmentId);
   value.cleanupEvidence = kind ? structuredClone(result.cleanupEvidence) : null;
@@ -230,16 +270,30 @@ function publicResult(method, result) {
 }
 
 /**
- * One verified main-process authorizer, one private JSONL stream, one Notion run.
- * The current native relay is bounded to 180 seconds. Callers must stop while
- * cleanupDue is true; no request or positive cleanup can extend that deadline.
- * This client exposes no protected launch capability and performs no spawning
- * until the first validated RPC invokes the supplied authorization callback.
+ * One verified main-process authorizer stream for one attached application.
+ * `lifetimeMs` bounds the whole channel: the default 180000 ms is the bounded
+ * trial. A session-bound application passes PF_SESSION_CHANNEL_LIFETIME_MS, so
+ * only each request is bounded and the run lasts until it is stopped. Passing
+ * `acquireChannel` shares one authorized root session between runs: every client
+ * gets its own virtual process, and a client that ends never tears down the
+ * shared session. This client exposes no protected launch capability and
+ * performs no spawning until the first validated RPC invokes the supplied
+ * authorization callback.
  */
-export function createPersistentPFNotionSessionClient({ spawnRootControlledLifecycle, maximumBytes = 65536,
-  now = () => performance.now() } = {}) {
-  if (typeof spawnRootControlledLifecycle !== 'function' || typeof now !== 'function' ||
+export function createPersistentPFNotionSessionClient({ spawnRootControlledLifecycle, acquireChannel = null,
+  lifetimeMs = PF_NOTION_CHANNEL_LIFETIME_MS, channelKey = null, disposable = false, maximumBytes = 65536,
+  now = () => performance.now(), requestSerial = null } = {}) {
+  if (typeof spawnRootControlledLifecycle !== 'function' && typeof acquireChannel !== 'function' ||
+      typeof now !== 'function' || typeof requestSerial !== 'function' ||
+      typeof lifetimeMs !== 'number' || !(lifetimeMs > 0) ||
+      channelKey !== null && typeof channelKey !== 'string' ||
       !Number.isInteger(maximumBytes) || maximumBytes < 1024 || maximumBytes > 131072) throw failed('PF_HELPER_REQUEST_INVALID');
+  const bounded = Number.isFinite(lifetimeMs);
+  const evaluate = operation => {
+    const result = requestSerial ? requestSerial(operation) : operation();
+    if (!result || typeof result.then !== 'function') throw failed('PF_HELPER_REQUEST_INVALID');
+    return result;
+  };
   let child, starting, startedAt = null, pending = null, buffer = Buffer.alloc(0), closing = false, closed = false,
     uncertain = false, terminalError = null, terminal = null, closePromise, preparedRoute = null, bound = null,
     stopKind = null, freshCleanupKind = null, resumeAttempted = false, stopAttempted = false, lastClock = null,
@@ -254,8 +308,10 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     if (!Number.isFinite(value) || value < 0 || lastClock != null && value < lastClock) throw failed('PF_HELPER_REQUEST_INVALID');
     lastClock = value; return value;
   };
-  const remaining = () => startedAt == null ? PF_NOTION_CHANNEL_LIFETIME_MS :
-    Math.max(0, PF_NOTION_CHANNEL_LIFETIME_MS - (clock() - startedAt));
+  const remaining = () => !bounded ? Infinity : startedAt == null ? lifetimeMs :
+    Math.max(0, lifetimeMs - (clock() - startedAt));
+  // Diagnostics never carry a number a timer or validator cannot represent.
+  const boundedMs = value => !bounded ? Math.min(value, MAXIMUM_TIMER_MS) : value;
   const failChannel = error => {
     uncertain = true; terminalError ??= error;
     if (pending) { const current = pending; pending = null; current.finish(error); }
@@ -359,20 +415,40 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     }
     if (buffer.length > maximumBytes) failChannel(failed('PF_HELPER_RESPONSE_TOO_LARGE'));
   };
-  const start = () => starting ??= Promise.resolve().then(spawnRootControlledLifecycle).then(process => {
-    if (!process?.stdin || !process?.stdout || typeof process.on !== 'function' || typeof process.kill !== 'function') throw failed('PF_HELPER_UNAVAILABLE');
+  /* A shared authorized session outlives this run, so the shared-channel error
+   * handlers must never latch this client. Only the direct (owned) child does. */
+  const shared = typeof acquireChannel === 'function';
+  const attach = process => {
     child = process;
-    child.stdin.on('error', () => failChannel(failed('PF_HELPER_INPUT_FAILED')));
-    child.stdout.on('data', onData); child.stderr?.on('data', () => {});
+    if (!shared) child.stdin.on('error', () => failChannel(failed('PF_HELPER_INPUT_FAILED')));
+    child.stdout.on('data', onData);
     child.stdout.once('end', () => { stdoutEOF = true; });
-    child.once('error', () => failChannel(failed('PF_HELPER_UNAVAILABLE')));
-    child.once('close', (exitCode, exitSignal) => {
-      closed = true; terminal = { exitCode, exitSignal };
-      if (buffer.length || pending || !closing || exitCode !== 0 || exitSignal) failChannel(failed('PF_HELPER_UNEXPECTED_EXIT'));
-      settleExit(terminal);
-    });
-    if (closing) child.stdin.end();
+    child.stderr?.on?.('data', () => {});
+    if (!shared) {
+      child.once('error', () => failChannel(failed('PF_HELPER_UNAVAILABLE')));
+      child.once('close', (exitCode, exitSignal) => {
+        closed = true; terminal = { exitCode, exitSignal };
+        if (buffer.length || pending || !closing || exitCode !== 0 || exitSignal) failChannel(failed('PF_HELPER_UNEXPECTED_EXIT'));
+        settleExit(terminal);
+      });
+    } else {
+      child.once('close', (exitCode, exitSignal) => {
+        closed = true; terminal = { exitCode: exitCode === 0 ? 0 : 1, exitSignal: null };
+        /* This run's virtual process ended, but the shared root session is
+         * still serving the other attached applications. */
+        settleExit(terminal);
+      });
+    }
     return child;
+  };
+  const start = () => starting ??= (shared
+    ? evaluate(() => acquireChannel({ key: channelKey, label: channelKey })).then(attach)
+    : Promise.resolve().then(spawnRootControlledLifecycle).then(process => {
+        if (!process?.stdin || !process?.stdout || typeof process.on !== 'function' || typeof process.kill !== 'function') throw failed('PF_HELPER_UNAVAILABLE');
+        return attach(process);
+      })).then(process => {
+    if (closing && !shared) process.stdin.end();
+    return process;
   }).catch(() => { closed = true; failChannel(failed('PF_HELPER_UNAVAILABLE')); settleExit(null); throw failed('PF_HELPER_UNAVAILABLE'); });
   const call = async (method, params = {}, { timeoutMs = method === 'resumeNotionApplication' ? PF_NOTION_RESUME_TIMEOUT_MS : 15000, signal } = {}) => {
     // The multi-step preparation includes a signed snapshot and cold staging.
@@ -388,9 +464,8 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
         (bound || params.routeId !== preparedRoute) || notionMethods.has(method) && method !== 'prepareNotionApplication' &&
         (!bound || params.runId !== bound.runId) || method === 'resumeNotionApplication' && (resumeAttempted || stopAttempted)) throw failed('PF_HELPER_REQUEST_INVALID');
     const reserve = cleanupMethods.has(method) && bound ? PF_NOTION_CLOSE_RESERVE_MS : PF_NOTION_CLEANUP_RESERVE_MS;
-    const requestedAt = clock(), remainingAtStart = startedAt == null ? PF_NOTION_CHANNEL_LIFETIME_MS :
-      Math.max(0, PF_NOTION_CHANNEL_LIFETIME_MS - (requestedAt - startedAt));
-    const limit = Math.floor(Math.min(timeoutMs, remainingAtStart - reserve));
+    const requestedAt = clock(), remainingAtStart = remaining();
+    const limit = Math.floor(!bounded ? timeoutMs : Math.min(timeoutMs, remainingAtStart - reserve));
     if (limit < 1) throw failed('PF_HELPER_DEADLINE');
     const id = randomUUID(), input = Buffer.from(JSON.stringify({ protocol: 'envara.application-routing', version: 1, id, method, params }) + '\n');
     if (input.length > maximumBytes) { input.fill(0); throw failed('PF_HELPER_REQUEST_TOO_LARGE'); }
@@ -402,7 +477,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     if (method === 'stopNotionApplication') stopAttempted = true;
     const timing = callTimings.length < 64 ? { schema: timingSchema, source: timingSource, diagnosticOnly: true,
       sequence: callTimings.length + 1, method, requestedTimeoutMs: timeoutMs, effectiveTimeoutMs: limit,
-      cleanupReserveMs: reserve, remainingMsAtStart: Math.floor(remainingAtStart), elapsedMs: null, remainingMsAtFinish: null,
+      cleanupReserveMs: reserve, remainingMsAtStart: boundedMs(Math.floor(remainingAtStart)), elapsedMs: null, remainingMsAtFinish: null,
       outcome: 'pending', lateResponseObserved: false } : null;
     if (timing) callTimings.push(timing);
     return new Promise((resolve, reject) => {
@@ -412,8 +487,8 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
         if (timing) {
           // Diagnostics never change the outcome if an injected clock fails.
           try { const finishedAt = clock();
-            timing.elapsedMs = Math.min(PF_NOTION_CHANNEL_LIFETIME_MS, Math.floor(finishedAt - requestedAt));
-            timing.remainingMsAtFinish = Math.floor(Math.max(0, PF_NOTION_CHANNEL_LIFETIME_MS - (finishedAt - startedAt)));
+            timing.elapsedMs = boundedMs(Math.floor(finishedAt - requestedAt));
+            timing.remainingMsAtFinish = boundedMs(Math.floor(remaining()));
           } catch { /* An unavailable timing is diagnostic only. */ }
           timing.outcome = !error ? 'result' : error.code === 'PF_HELPER_DEADLINE' ? 'deadline' :
             error.code === 'PF_HELPER_ABORTED' ? 'aborted' : error.code === 'PF_HELPER_CHANNEL_CLOSED' ? 'closed' : 'error';
@@ -463,13 +538,22 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
         await Promise.race([promise, new Promise(resolve => { timer = setTimeout(resolve, limit); })]); clearTimeout(timer);
       };
       await boundedWait(start().catch(() => {}));
-      child?.stdin.end(); // Keep stdout open through the actual close event.
+      /* A shared authorized session belongs to Envara, not to one attached
+       * application: ending this run must not close the root channel that the
+       * other runs still use. Ending the virtual process is the mux's own
+       * `end()`, and the shared child is torn down only by the manager's
+       * `dispose()` when Envara quits. */
+      if (!shared) child?.stdin.end(); // Keep stdout open through the actual close event.
+      else child?.stdin?.end?.();      // Ends only this run's virtual channel.
       await boundedWait(exit);
-      if (!closed) { uncertain = true; try { child?.kill('SIGTERM'); } catch {} }
+      if (!closed) { uncertain = true; try { child?.kill?.()?.catch?.(() => {}); } catch {} }
       const evidence = statusOnlyEvidence();
       if (evidence) return { closed: true, started: true, cleanupUncertain: false, statusOnlyEvidence: evidence };
+      /* A shared channel reports its own virtual-process close code; 0 means the
+       * run ended cleanly, 1 that the root session itself is gone. */
+      const expectedExit = shared ? [0, 1] : [0];
       return { closed, started: true, cleanupUncertain: uncertain || !bound || !freshCleanupKind || !closed ||
-        terminal?.exitCode !== 0 || terminal?.exitSignal != null };
+        !expectedExit.includes(terminal?.exitCode) || terminal?.exitSignal != null };
     })();
   };
   const signals = new Set(['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGPIPE', 'SIGKILL', 'SIGABRT', 'SIGSEGV', 'SIGBUS', 'SIGILL', 'SIGTRAP',
@@ -487,8 +571,8 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
       lastLatePrepare: lastLatePrepare ? structuredClone(lastLatePrepare) : null,
       lastApplicationSnapshot: lastApplicationSnapshot ? structuredClone(lastApplicationSnapshot) : null },
     statusOnlyEvidence: statusOnlyEvidence(),
-    maximumLifetimeSeconds: PF_NOTION_CHANNEL_LIFETIME_MS / 1000, remainingMs: Math.floor(remaining()),
-    cleanupDue: startedAt != null && remaining() <= PF_NOTION_CLEANUP_RESERVE_MS,
+    maximumLifetimeSeconds: bounded ? lifetimeMs / 1000 : null, remainingMs: bounded ? Math.floor(remaining()) : null,
+    cleanupDue: bounded && startedAt != null && remaining() <= PF_NOTION_CLEANUP_RESERVE_MS,
     ready: false, protected: false, productionReady: false, protectedLaunchAllowed: false, genericApplicationRouting: false });
   return call;
 }

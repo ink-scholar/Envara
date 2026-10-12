@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { spawn as spawnChild } from 'node:child_process';
+import { execFile, spawn as spawnChild } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, lstat, realpath, stat } from 'node:fs/promises';
 import { NativeApplicationRouting, applicationRoutingError, applicationRoutingReady, APPLICATION_ROUTING_CHECKS } from './application-routing.mjs';
@@ -16,6 +16,12 @@ const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-
 const checks = value => Object.fromEntries(MACOS_PF_ROUTING_CHECKS.map(key => [key, value?.[key] === true]));
 const reject = code => { throw applicationRoutingError({ code }); };
 const privateString = value => typeof value === 'string' && Buffer.byteLength(value) > 0 && Buffer.byteLength(value) <= 255 && !/[\0\r\n]/.test(value);
+/* A locally added application bundle. Bounded and absolute only; the fixed
+ * native registry independently inspects and seals the real signed bundle, so
+ * this is a candidate path rather than an identity claim. */
+const controlledTrialBundle = value => typeof value === 'string' && path.isAbsolute(value) && value.endsWith('.app') &&
+  value.length > 5 && value.length <= 4096 && !/[\0\r\n]/.test(value) &&
+  value.split('/').every(segment => segment !== '.' && segment !== '..') ? value : null;
 const args = value => {
   if (!Array.isArray(value) || value.length > 128 || value.some(item => typeof item !== 'string' || item.length > 8192 || /[\0\r\n]/.test(item))) reject('APPLICATION_ROUTING_PROTOCOL_ERROR');
   return [...value];
@@ -62,6 +68,25 @@ function installationReceipt(value) {
   return { schema: value.schema, action: 'installedResourcesOnly', installed: true, changed: value.changed,
     manifestSHA256: value.manifestSHA256, ready: false, productionReady: false };
 }
+// Only the authorizer's fixed result reasons are recognised; any other output,
+// including stderr or free text, keeps the generic authorization code.
+const INSTALLER_FAILURES = Object.freeze({
+  'administrator-authorization-canceled': 'APPLICATION_ROUTING_AUTHORIZATION_CANCELED',
+  'administrator-authorization-denied': 'APPLICATION_ROUTING_AUTHORIZATION_DENIED',
+  'controlled-runtime-still-present': 'APPLICATION_ROUTING_RUNTIME_PRESENT',
+  'existing-installation-conflict': 'APPLICATION_ROUTING_INSTALL_CONFLICT',
+  'owned-staging-review-required': 'APPLICATION_ROUTING_INSTALL_REVIEW',
+  'installation-maintenance-busy': 'APPLICATION_ROUTING_INSTALL_BUSY',
+  'installation-completion-unconfirmed': 'APPLICATION_ROUTING_INSTALL_INCOMPLETE',
+});
+const INSTALLER_FAILURE_CODES = Object.freeze(['APPLICATION_ROUTING_AUTHORIZATION_REQUIRED', ...Object.values(INSTALLER_FAILURES)]);
+function installerFailure(output) {
+  try {
+    const value = JSON.parse(output);
+    if (value?.schema === 'envara.macos-pf-install/v1' && value.installed === false && Object.hasOwn(INSTALLER_FAILURES, value.reason)) return INSTALLER_FAILURES[value.reason];
+  } catch {}
+  return 'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED';
+}
 function executeInstallation(installerPath, { spawn, timeoutMs, maxBytes = 65536 }) {
   return new Promise((resolve, rejectPromise) => {
     let child, settled = false, output = '', bytes = 0;
@@ -85,7 +110,7 @@ function executeInstallation(installerPath, { spawn, timeoutMs, maxBytes = 65536
       child.once('error', () => finish('APPLICATION_ROUTING_UNAVAILABLE'));
       child.once('close', (exitCode, signal) => {
         if (settled) return;
-        if (exitCode !== 0 || signal != null) { finish('APPLICATION_ROUTING_AUTHORIZATION_REQUIRED'); return; }
+        if (exitCode !== 0 || signal != null) { finish(signal == null ? installerFailure(output) : 'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED'); return; }
         try { finish(null, JSON.parse(output)); } catch { finish('APPLICATION_ROUTING_PROTOCOL_ERROR'); }
       });
       child.stdin.end();
@@ -94,9 +119,33 @@ function executeInstallation(installerPath, { spawn, timeoutMs, maxBytes = 65536
 }
 
 /** PF requires a privileged guard, not an Apple NE identity. Plans grant no routing protection. */
+/* The root processes a trial session can leave behind. Matched by exact
+ * installed path (or the fixed authorizer arguments), never by name alone. */
+const OWNED_ROOT_PREFIXES = Object.freeze(['/Library/PrivilegedHelperTools/io.envara.pf-routing/envara-pf-native ',
+  '/Library/PrivilegedHelperTools/io.envara.pf-routing/node ', '/Library/PrivilegedHelperTools/io.envara.pf-routing/mihomo ']);
+export function ownedRootSessionInProcessList(commands) {
+  return commands.split('\n').some(line => { const command = line.trim();
+    return OWNED_ROOT_PREFIXES.some(prefix => command.startsWith(prefix)) ||
+      /\/EnvaraPFInstall --(run|request)-controlled-experiment(\s|$)/.test(command); });
+}
+/* An unreadable process list is treated as a live session: the only outcome of
+ * a wrong "absent" here would be quitting while a keeper still depends on the
+ * managed route. */
+async function ownedRootSessionAlive() {
+  try {
+    const { stdout } = await new Promise((resolve, reject) => execFile('/bin/ps', ['-axo', 'command='],
+      { timeout: 5000, maxBuffer: 4 * 1024 * 1024, env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' } },
+      (error, out) => error ? reject(error) : resolve({ stdout: String(out) })));
+    return ownedRootSessionInProcessList(stdout);
+  } catch { return true; }
+}
+
 export class MacOSPFApplicationRouting {
   constructor({ helperPath, installerPath, native, spawn = spawnChild, executeInstaller,
-    installationTimeoutMs = 130000, inspectApplication = inspectLocalApplication, notionTrial, notionAuthorizerPath, onNotionTrialEvent, onNotionTrialDiagnostics } = {}) {
+    installationTimeoutMs = 130000, inspectApplication = inspectLocalApplication, notionTrial, notionAuthorizerPath, onNotionTrialEvent, onNotionTrialDiagnostics,
+    rootSessionAlive = ownedRootSessionAlive } = {}) {
+    if (typeof rootSessionAlive !== 'function') reject('APPLICATION_ROUTING_PROTOCOL_ERROR');
+    this.rootSessionAlive = rootSessionAlive;
     if (installerPath != null && (typeof installerPath !== 'string' || !path.isAbsolute(installerPath) ||
         path.basename(installerPath) !== 'EnvaraPFInstall' || /[\0\r\n]/.test(installerPath))) reject('APPLICATION_ROUTING_UNAVAILABLE');
     if (!Number.isSafeInteger(installationTimeoutMs) || installationTimeoutMs < 1 || installationTimeoutMs > 180000 ||
@@ -197,7 +246,7 @@ export class MacOSPFApplicationRouting {
         let raw;
         try { raw = await this.executeInstaller(this.installerPath); }
         catch (error) {
-          const code = ['APPLICATION_ROUTING_TIMEOUT', 'APPLICATION_ROUTING_PROTOCOL_ERROR', 'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED'].includes(error?.code)
+          const code = ['APPLICATION_ROUTING_TIMEOUT', 'APPLICATION_ROUTING_PROTOCOL_ERROR', ...INSTALLER_FAILURE_CODES].includes(error?.code)
             ? error.code : 'APPLICATION_ROUTING_UNAVAILABLE';
           reject(code);
         }
@@ -302,7 +351,11 @@ export class MacOSPFApplicationRouting {
   }
   async controlledNotionTrial({ application, context, activationAuthorized } = {}) {
     this.assertOpen();
-    if (activationAuthorized !== true || application?.path !== '/Applications/Notion.app' || (application.args?.length ?? 0) !== 0)
+    /* Any locally added application whose bundle this process can inspect and
+     * seal may be attached. The request still carries a real bundle path; the
+     * renderer never supplies a route, credential or activation intent. */
+    const requestedBundle = controlledTrialBundle(application?.path);
+    if (activationAuthorized !== true || !requestedBundle || !safeId(application?.id) || !safeId(application?.profileId) || (application.args?.length ?? 0) !== 0)
       reject('PF_NOTION_TRIAL_REQUEST_INVALID');
     // Recheck before using a private route. Main also checks before resolving it.
     const availability = await this.notionTrial.available();
@@ -332,7 +385,17 @@ export class MacOSPFApplicationRouting {
       this.notionTrial.stop(this.notionTrial.state.applicationId);
       await this.notionTrial.pending;
     }
-    if (this.notionTrial.state?.cleanupUncertain === true) reject('APPLICATION_ROUTING_CLEANUP_UNCONFIRMED');
+    /* Quitting Envara ends every attached application and the one shared
+     * authorized root session the launch opened. The session is closed here so
+     * the root controller cleans up and exits; no privileged daemon is left
+     * behind. A recycled Electron process must not inherit a finished session. */
+    await this.notionTrial.disposeShared().catch(() => {});
+    /* An unconfirmed cleanup used to make the app impossible to quit, even after
+     * the system was verified clean and no Envara root process remained, which
+     * forced a kill. Quitting changes no root state; what must not happen is
+     * withdrawing the managed route while a root keeper may still depend on it.
+     * So refuse only while such a process is actually alive. */
+    if (this.notionTrial.state?.cleanupUncertain === true && await this.rootSessionAlive()) reject('APPLICATION_ROUTING_CLEANUP_UNCONFIRMED');
     for (const routeId of this.routes.keys()) await this.reclaim(routeId);
     await this.native.shutdown(); this.closed = true;
   }

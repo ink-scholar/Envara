@@ -34,7 +34,16 @@ export const PF_APP_COLD_STAGE_TIMEOUT_MS = 60000;
 // executed identity. Give that whole native operation its own bounded wait;
 // the desktop client additionally reserves time for stop/snapshot/close.
 export const PF_APP_RESUME_TIMEOUT_MS = 45000;
-const NOTION_BUNDLE = '/Applications/Notion.app';
+// A session-bound attached application runs until it is stopped, the
+// application exits, or Envara quits. The sealed lease is only an outer bound
+// (30 days); the native guardian ends a stalled controller by its awake-time
+// heartbeat, which the controller feeds every second.
+export const PF_APP_SESSION_LEASE_SECONDS = 30 * 24 * 60 * 60;
+export const PF_APP_SESSION_LEASE_MS = PF_APP_SESSION_LEASE_SECONDS * 1000;
+const PF_APP_HEARTBEAT_INTERVAL_MS = 1000;
+const PF_APP_VERIFY_INTERVAL_MS = 5000;
+// Node clamps any timer delay above 2^31-1 ms to 1 ms.
+const MAXIMUM_TIMER_MS = 2147483647;
 const APP_NATIVE_STAGES = new Set(['register', 'preflight', 'gui-session', 'route-read', 'transport-start', 'front-listen', 'front-spawn', 'front-handshake',
   'factory-open', 'deny-commit', 'transport-ack', 'front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'guardian']);
 const APP_ACTIVE_NATIVE_FAILURE_STAGES = new Set(['front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'guardian']);
@@ -48,11 +57,46 @@ const APP_NATIVE_FAILURE_REASONS = new Set(['NATIVE_OPERATION_REFUSED', 'NATIVE_
   'NATIVE_APP_IDENTITY_REFUSED', 'NATIVE_HOOK_LEASE_REFUSED', 'NATIVE_PF_OPEN_REFUSED', 'NATIVE_PF_GUARD_REFUSED',
   'NATIVE_FILTER_READBACK_REFUSED', 'NATIVE_FILTER_TRANSACTION_REFUSED', 'NATIVE_JOURNAL_REFUSED', 'NATIVE_TICKET_BINDING_REFUSED',
   'NATIVE_TICKET_FILTER_REFUSED', 'NATIVE_SCOPE_CHECK_REFUSED', 'NATIVE_GUARD_DESCRIPTOR_REFUSED', 'NATIVE_LEASE_EXPIRED_REFUSED',
-  'NATIVE_NOTION_DATA_PREPARE_REFUSED', 'NATIVE_NOTION_STAGE_REFUSED']);
+  'NATIVE_NOTION_DATA_PREPARE_REFUSED', 'NATIVE_NOTION_STAGE_REFUSED',
+  'NATIVE_NOTION_SUPPORTED_ARGUMENT_REFUSED',
+  'NATIVE_NOTION_SUPPORTED_PLIST_REFUSED',
+  'NATIVE_NOTION_SUPPORTED_VERSION_REFUSED',
+  'NATIVE_NOTION_SUPPORTED_SIGNATURE_REFUSED',
+  'NATIVE_NOTION_PLAN_ARGUMENT_REFUSED',
+  'NATIVE_NOTION_PLAN_REGISTRY_REFUSED',
+  'NATIVE_NOTION_PLAN_CONTEXT_REFUSED',
+  'NATIVE_NOTION_PLAN_REQUEST_REFUSED',
+  'NATIVE_NOTION_PLAN_SEALED_REFUSED',
+  'NATIVE_NOTION_PLAN_SUPPORTED_REFUSED',
+  'NATIVE_NOTION_PLAN_DIGEST_REFUSED',
+  'NATIVE_NOTION_PLAN_CDHASH_REFUSED',
+  'NATIVE_NOTION_PLAN_REQUIREMENT_REFUSED',
+  'NATIVE_NOTION_PLAN_DATA_REFUSED',
+  'NATIVE_NOTION_PLAN_ALLOCATION_REFUSED',
+  'NATIVE_NOTION_DATA_ARGUMENT_REFUSED',
+  'NATIVE_NOTION_DATA_ENTRY_REFUSED',
+  'NATIVE_NOTION_DATA_ANCESTOR_REFUSED',
+  'NATIVE_NOTION_DATA_LEAF_REFUSED',
+  'NATIVE_NOTION_DATA_DENY_REFUSED',
+  'NATIVE_NOTION_STAGE_ARGUMENT_REFUSED',
+  'NATIVE_NOTION_STAGE_AUTHORITY_REFUSED',
+  'NATIVE_NOTION_STAGE_ENTRY_REFUSED',
+  'NATIVE_NOTION_STAGE_SESSION_REFUSED',
+  'NATIVE_NOTION_STAGE_ORIGINAL_RUNNING_REFUSED',
+  'NATIVE_NOTION_STAGE_ACCOUNT_REFUSED',
+  'NATIVE_NOTION_STAGE_ENVIRONMENT_REFUSED',
+  'NATIVE_NOTION_STAGE_DATA_REFUSED',
+  'NATIVE_NOTION_STAGE_RECHECK_REFUSED',
+  'NATIVE_NOTION_STAGE_SPAWN_REFUSED',
+  'NATIVE_NOTION_STAGE_STOPPED_REFUSED',
+  'NATIVE_NOTION_STAGE_CHILD_REFUSED']);
 const validAppNativeFailure = value => value && Object.keys(value).sort().join('|') === 'error|reason|stage' && APP_NATIVE_STAGES.has(value.stage) &&
   (value.stage === 'register' ? APP_REGISTER_FAILURE_REASONS.has(value.reason) : APP_NATIVE_FAILURE_REASONS.has(value.reason)) &&
   Number.isInteger(value.error) && value.error > 0 && value.error <= 1024;
 const nativeBirth = value => typeof value === 'string' && /^[1-9][0-9]{0,19}:[0-9]{6}$/.test(value);
+/* Unrelated host state is reported as observed, not asserted. */
+const unrelatedObservations = run => ({ unrelatedPFUnchanged: run.foreignStateDrift?.pf === false,
+  unrelatedRoutesUnchanged: run.foreignStateDrift?.routes === false, hostDNSUnchanged: run.foreignStateDrift?.dns === false });
 const appFlags = () => ({ ready: false, protected: false, productionReady: false, profile: 'seatbelt-front-only', genericApplicationRouting: false, udpSupported: false });
 const APP_ABORT_FACTS = Object.freeze(['originalUTunVerified', 'originalListenerVerified', 'coreReaped', 'frontReaped', 'gidScopeAbsent',
   'filterJournalAbsent', 'originalUTunClosed', 'originalListenerClosed']);
@@ -165,6 +209,19 @@ const failure = (code, message = 'Mac application routing operation did not comp
 const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 const uuid = isPFRoutingRunId;
 const absolute = value => typeof value === 'string' && path.isAbsolute(value) && !/[\0\r\n]/.test(value);
+/* Resolve the containing ".app" bundle from a selected executable path. Accepts
+ * either the bundle itself or an executable nested inside it, and refuses when
+ * no bounded bundle component exists. This only derives a candidate path: the
+ * fixed native registry independently inspects and seals the real signed bundle,
+ * so a caller cannot turn this into a path or identity claim. */
+const applicationBundle = value => {
+  if (!absolute(value) || value.length > 4096) return null;
+  const segments = value.split('/');
+  const index = segments.findIndex((segment, position) => position > 0 && segment.endsWith('.app'));
+  if (index < 1 || segments[index].length < 5) return null;
+  const bundle = segments.slice(0, index + 1).join('/');
+  return bundle && bundle !== '/' ? bundle : null;
+};
 const digest = value => createHash('sha256').update(value).digest('hex');
 export function validatePFAppBoundLease(value) {
   const keys = ['schema', 'runId', 'environmentId', 'realmId', 'leaseId', 'generation', 'registrationId', 'versionId', 'consoleUID', 'gid', 'cwd', 'timezone', 'locale',
@@ -175,7 +232,7 @@ export function validatePFAppBoundLease(value) {
       !absolute(value.cwd) || value.cwd.length > 4095 || !nativeBirth(value.controllerBirth) || !Number.isSafeInteger(value.controllerPid) || value.controllerPid < 2 ||
       typeof value.timezone !== 'string' || value.timezone.length > 100 || typeof value.locale !== 'string' || !/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}$/.test(value.locale) ||
       value.ipv4Address !== '198.18.1.1' || ['issuedMonotonicMs', 'expiresMonotonicMs', 'bootTimeSeconds'].some(key => !Number.isSafeInteger(value[key]) || value[key] < 1) ||
-      value.expiresMonotonicMs <= value.issuedMonotonicMs || value.expiresMonotonicMs - value.issuedMonotonicMs > 180000) throw failure('APPLICATION_APP_CONTEXT_REFUSED');
+      value.expiresMonotonicMs <= value.issuedMonotonicMs || value.expiresMonotonicMs - value.issuedMonotonicMs > PF_APP_SESSION_LEASE_MS) throw failure('APPLICATION_APP_CONTEXT_REFUSED');
   try { new Intl.DateTimeFormat('en', { timeZone: value.timezone }); validatePFRootHookLease(value.rootHookLease, value.runId); }
   catch { throw failure('APPLICATION_APP_CONTEXT_REFUSED'); }
   return structuredClone(value);
@@ -222,8 +279,10 @@ export function normalizePFRouteTable(text) {
     if (!family || !header) throw failure('APPLICATION_ROUTING_NOT_READY');
     const fields = line.split(/\s+/), selected = ['Destination', 'Gateway', 'Flags', 'Netif'].map(key => fields[header.indexOf(key)]);
     if (selected.some(value => !value || /[\0\r\n]/.test(value))) throw failure('APPLICATION_ROUTING_NOT_READY');
-    // Preserve every route's address, gateway, flags and interface. Dynamic
-    // Use/Refs/Expire counters do not change routing configuration.
+    // Preserve every configured route's address, gateway, flags and interface.
+    // Use/Refs/Expire counters and W (kernel-cloned ARP/neighbour and host
+    // cache) entries come and go with unrelated traffic, not configuration.
+    if (selected[2].includes('W')) continue;
     entries.push([family, ...selected].join('|'));
   }
   if (!entries.length) throw failure('APPLICATION_ROUTING_NOT_READY');
@@ -238,8 +297,13 @@ const projectAppFailure = value => value && !Array.isArray(value) &&
   ? { stage: value.stage, code: value.code, ...(value.native ? { native: { ...value.native } } : {}) } : null;
 function rememberAppFailure(run, stage, error, cleanup = false) {
   const projected = appFailure(stage, error);
-  if (cleanup) { run.cleanupFailure = projected; run.cleanupFailedCode = projected.code; }
-  else if (!run.initialFailure) {
+  /* Cleanup records its own cause. The first launch failure is immutable once
+   * recorded, so a later cleanup fault can never overwrite or restate it. */
+  if (cleanup) {
+    if (!run.cleanupFailure || run.cleanupFailure.code === 'APPLICATION_APP_CLEANUP_UNCONFIRMED') {
+      run.cleanupFailure = projected; run.cleanupFailedCode = projected.code;
+    }
+  } else if (!run.initialFailure) {
     run.initialFailure = projected; run.failedStage = projected.stage; run.failedCode = projected.code;
     if (projected.native) run.nativeFailure = projected.native;
   }
@@ -248,7 +312,9 @@ function outwardAppFailure(run, code = run.initialFailure?.code ?? 'APPLICATION_
   const error = failure(code);
   if (run.initialFailure) Object.assign(error, { initialFailure: structuredClone(run.initialFailure), failureStage: run.initialFailure.stage,
     ...(run.initialFailure.native ? { nativeFailure: structuredClone(run.initialFailure.native) } : {}) });
-  if (run.cleanupFailure) error.cleanupFailure = structuredClone(run.cleanupFailure);
+  /* Present only a genuine cleanup record. Attaching the first failure under a
+   * cleanup key is what previously made one refusal look like two. */
+  if (run.cleanupFailure && run.cleanupFailure.code !== 'APPLICATION_APP_CLEANUP_UNCONFIRMED') error.cleanupFailure = structuredClone(run.cleanupFailure);
   if (typeof run.cleanupRetryable === 'boolean') error.cleanupRetryable = run.cleanupRetryable;
   return error;
 }
@@ -874,9 +940,24 @@ export class MacOSPFExecutor {
       binding, deadline: Date.now() + 15000, phase: 'starting', child: null, uncertain: false, exited: false, waiters: [], events: [], pendingBytes: 0 };
     this.appTransports.set(runId, entry);
     const transportError = () => {
-      const native = entry.cleanupFailure ?? entry.failure;
+      /* Cleanup reports only its own cause. Borrowing entry.failure here is what
+       * previously re-labelled the first launch refusal as the cleanup failure,
+       * so a stop timeout or a lost channel looked like a second identical
+       * native rejection. Each cleanup cause is now kept separately. */
+      const cleanup = entry.stoppingRequested === true || entry.releasing === true;
+      if (cleanup) {
+        if (entry.cleanupFailure) return Object.assign(failure('APPLICATION_APP_NATIVE_REFUSED'), { nativeFailure: { ...entry.cleanupFailure } });
+        return failure(entry.cleanupWaitFailure ?? 'APPLICATION_APP_CLEANUP_UNCONFIRMED');
+      }
+      const native = entry.failure;
       return Object.assign(failure(native ? 'APPLICATION_APP_NATIVE_REFUSED' : entry.waitFailure ?? 'APPLICATION_APP_TRANSPORT_UNCONFIRMED'),
         native ? { nativeFailure: { ...native } } : {});
+    };
+    /* One helper so the cleanup-phase wait/terminal cause is never written into
+     * the launch-scope field (or the reverse). */
+    const rememberWaitFailure = code => {
+      if (entry.stoppingRequested === true || entry.releasing === true) entry.cleanupWaitFailure = code;
+      else entry.waitFailure = code;
     };
     const denyLaunch = () => {
       entry.cleanupOnly = true;
@@ -910,7 +991,12 @@ export class MacOSPFExecutor {
             const expected = ['schema', 'event', 'runId', 'environmentId', 'stage', 'reason', 'error', 'ready', 'protected'];
             if (Object.keys(event).sort().join('|') !== expected.sort().join('|') || !APP_NATIVE_STAGES.has(event.stage) || event.stage === 'register' || !APP_NATIVE_FAILURE_REASONS.has(event.reason) ||
                 !Number.isInteger(event.error) || event.error < 1 || event.error > 1024) throw new Error();
-            if (entry.failure && entry.cleanupOnly && (entry.stoppingRequested || entry.releasing)) {
+            /* A refusal that arrives while an S/R cleanup command is outstanding
+             * belongs to that operation, whether or not a launch refusal was
+             * already recorded and whether or not cleanup-only was latched yet.
+             * It is never merged into the first launch failure, and the first
+             * launch failure is never restated as a cleanup failure. */
+            if (entry.stoppingRequested || entry.releasing) {
               entry.cleanupFailure = Object.freeze({ stage: event.stage, reason: event.reason, error: event.error }); denyLaunch(); continue;
             }
             if (entry.failure || entry.phase !== 'starting' &&
@@ -933,11 +1019,19 @@ export class MacOSPFExecutor {
             if (event.schema !== PF_APP_TRANSPORT_SCHEMA || !['transport-cleanup-ready', 'transport-cleanup-stopping', 'transport-released'].includes(event.event)) {
               // Late launch ACKs cannot revive a refused run. A valid bound
               // old ACK is ignored; unknown output still poisons the channel.
-              if (event.schema === PF_APP_KEEPER_SCHEMA && ['stopped', 'resumed'].includes(event.event) &&
+              /* A successful guardian release emits its own released frame
+               * before the transport one, so refusing it here marked a run
+               * uncertain even though every native resource had been freed. */
+              const boundKeeperFrame = event.schema === PF_APP_KEEPER_SCHEMA && ['stopped', 'resumed', 'released'].includes(event.event) &&
                   event.ticketId === entry.ticketId && event.registrationId === entry.registrationId && event.versionId === entry.versionId &&
                   event.keeperPID === entry.ack?.keeperPID && Object.keys(event).sort().join('|') === APP_KEEPER_REPORT_KEYS &&
                   APP_KEEPER_REPORT_BOOLEANS.every(key => typeof event[key] === 'boolean') && event.profile === 'seatbelt-front-only' &&
-                  event.pid === entry.stoppedIdentity?.pid && event.birth === entry.stoppedIdentity?.birth) continue;
+                  (!entry.stoppedIdentity || event.pid === entry.stoppedIdentity.pid && event.birth === entry.stoppedIdentity.birth);
+              if (boundKeeperFrame) {
+                if (event.event === 'released' && entry.guardianArmed === true && event.childReaped === true &&
+                    event.persistentDenyObserved === true && event.scopeQuiescentObserved === true) entry.guardianReleased = true;
+                continue;
+              }
               throw new Error();
             }
             if (event.event === 'transport-cleanup-ready' && (entry.phase !== 'starting' || !entry.failure ||
@@ -961,8 +1055,13 @@ export class MacOSPFExecutor {
             // Capture only the first exact stopped child. It also binds a
             // revocation arriving in the same chunk as the stopped ACK.
             if (!entry.stoppedIdentity && event.event === 'stopped' && boundKeeper &&
-                Number.isSafeInteger(event.pid) && event.pid > 1 && nativeBirth(event.birth))
+                Number.isSafeInteger(event.pid) && event.pid > 1 && nativeBirth(event.birth)) {
               entry.stoppedIdentity = Object.freeze({ pid: event.pid, birth: event.birth });
+              // The guardian owns the stopped child from this ACK until it
+              // emits its own released frame, which decides what S can expect.
+              entry.guardianArmed = true; entry.guardianReleased = false;
+            }
+            if (event.event === 'released' && boundKeeper && entry.guardianArmed === true) entry.guardianReleased = true;
             if (APP_KEEPER_RESUME_NEGATIVE_EVENTS.has(event.event) && entry.stoppedIdentity && !entry.stoppingRequested &&
                 !entry.releasing && ['transport-started', 'stopped'].includes(entry.phase)) {
               if (!boundKeeper || Object.keys(event).sort().join('|') !== APP_KEEPER_REPORT_KEYS ||
@@ -973,11 +1072,23 @@ export class MacOSPFExecutor {
               entry.events.push(event); entry.resumeRefused = true;
               entry.waitFailure = 'APPLICATION_APP_RESUME_UNCONFIRMED'; denyLaunch(); continue;
             }
+            /* A revocation that arrives while the application is running has
+             * already stopped its exact child. Recording it keeps the snapshot
+             * honest instead of showing a run that had already ended. */
+            /* A stop the controller itself requested is not the application
+             * ending on its own, even though the keeper reports it the same way. */
+            if (event.event === 'stopping' && boundKeeper && entry.phase === 'resumed' &&
+                entry.stoppingRequested !== true && entry.releasing !== true &&
+                Object.keys(event).sort().join('|') === APP_KEEPER_REPORT_KEYS &&
+                APP_KEEPER_REPORT_BOOLEANS.every(key => typeof event[key] === 'boolean') && event.profile === 'seatbelt-front-only') {
+              entry.applicationEnded = Object.freeze({ pid: event.pid, birth: event.birth,
+                childReaped: event.childReaped === true, childSignalled: event.cancelSent === true });
+            }
           }
           entry.events.push(event);
           for (const waiter of [...entry.waiters]) if (waiter.predicate(event)) {
             // A delayed event loop must not turn an expired ACK into success.
-            if (Date.now() >= waiter.deadline) { entry.waitFailure = waiter.timeoutCode; poison(); break; }
+            if (Date.now() >= waiter.deadline) { rememberWaitFailure(waiter.timeoutCode); poison(); break; }
             entry.waiters.splice(entry.waiters.indexOf(waiter), 1); clearTimeout(waiter.timer); waiter.resolve(event);
           }
         } catch { poison(); }
@@ -989,11 +1100,20 @@ export class MacOSPFExecutor {
       else if (entry.phase === 'preflight-abort-receipt' && entry.preflightAbortReceipt && code === 1 && signal === null && pending.length === 0 && !entry.uncertain) entry.phase = 'preflight-aborted';
       else if (code !== 0 || entry.phase !== 'released' || pending.length !== 0 || signal != null) poison();
     });
-    entry.wait = (predicate, timeoutMs = 15000, timeoutCode = null) => new Promise((resolve, reject) => {
+    /* The fixed keeper emits a revocation exactly once: launch-guardian
+     * returns immediately when a reason is already recorded, so the 'S' byte
+     * that follows an earlier revocation produces no second frame. A frame
+     * that arrived while no waiter matched it is therefore still the only
+     * proof of that transition, and replaying it is what makes the later stop
+     * observable. This is the same bounded re-read the startup path already
+     * performs for 'transport-started'. */
+    entry.wait = (predicate, timeoutMs = 15000, timeoutCode = null, replay = false) => new Promise((resolve, reject) => {
       if (entry.uncertain) return reject(transportError());
+      const captured = replay ? entry.events.find(predicate) : null;
+      if (captured) return resolve(captured);
       const limit = entry.phase === 'starting' || entry.refusalPending ? Math.max(1, Math.min(timeoutMs, entry.deadline - Date.now())) : timeoutMs;
       const waiter = { predicate, resolve, reject, timer: null, deadline: Date.now() + limit, timeoutCode };
-      waiter.timer = setTimeout(() => { entry.waitFailure = timeoutCode; poison(); }, limit); entry.waiters.push(waiter);
+      waiter.timer = setTimeout(() => { rememberWaitFailure(timeoutCode); poison(); }, limit); entry.waiters.push(waiter);
     });
     try { entry.bootstrapIdentity = await this.identify(entry.child.pid); }
     catch { entry.bootstrapIdentityUnavailable = true; }
@@ -1062,16 +1182,33 @@ export class MacOSPFExecutor {
     if (command === 'B') { if (entry.resumeAttempted || entry.phase !== 'stopped') throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED'); entry.resumeAttempted = true; expected = 'resumed'; }
     if (command === 'S') { entry.stoppingRequested = true; expected = 'stopping'; }
     if (command === 'R') { entry.releasing = true; expected = 'released'; }
+    /* Cleanup-only S used to wait for the transport-cleanup-stopping frame,
+     * which only the native main loop emits. A run whose launch authority was
+     * burned while the guardian held the child never reaches that loop, so the
+     * wait could not be satisfied by any native behaviour and the run was left
+     * requiring root recovery. While the guardian owns the child, its own
+     * keeper stopping frame is the proof. */
+    const guardianOnly = entry.cleanupOnly === true && entry.guardianArmed === true && entry.guardianReleased !== true;
     const waiting = expected ? entry.wait(event => command === 'R' ? event.schema === PF_APP_TRANSPORT_SCHEMA && event.event === 'transport-released' :
+      command === 'S' && guardianOnly ? event.schema === PF_APP_KEEPER_SCHEMA && event.event === 'stopping' && event.ticketId === entry.ticketId :
       command === 'S' && entry.cleanupOnly ? event.schema === PF_APP_TRANSPORT_SCHEMA && event.event === 'transport-cleanup-stopping' :
       event.schema === PF_APP_KEEPER_SCHEMA && event.event === expected && event.ticketId === entry.ticketId,
       command === 'L' ? PF_APP_COLD_STAGE_TIMEOUT_MS : command === 'B' ? PF_APP_RESUME_TIMEOUT_MS : 15000,
-      command === 'L' ? 'APPLICATION_APP_STAGE_TIMEOUT' : command === 'B' ? 'APPLICATION_APP_RESUME_TIMEOUT' : null) : null;
+      /* S and R previously shared a null timeout code, so an ACK that never
+       * arrived was indistinguishable from any other cleanup fault. */
+      command === 'L' ? 'APPLICATION_APP_STAGE_TIMEOUT' : command === 'B' ? 'APPLICATION_APP_RESUME_TIMEOUT' :
+      command === 'S' ? 'APPLICATION_APP_STOP_TIMEOUT' : command === 'R' ? 'APPLICATION_APP_RELEASE_TIMEOUT' : null,
+      /* Only the keeper stopping frame is a one-shot transition. 'R' is
+       * answered per request, so a stale release frame must never satisfy it. */
+      command === 'S' && (!entry.cleanupOnly || guardianOnly)) : null;
     entry.child.stdin.write(`${command}${command === 'L' ? ` ${ticketId}` : ''}\n`);
     if (!waiting) return { acknowledged: false, ...appFlags() };
     const event = await waiting;
     if (entry.uncertain) throw failure(command === 'B' && entry.resumeRefused ? 'APPLICATION_APP_RESUME_UNCONFIRMED' : 'APPLICATION_APP_TRANSPORT_UNCONFIRMED');
-    if (command === 'S' && entry.cleanupOnly) {
+    /* The main loop's cleanup frame and the guardian's keeper frame are
+     * different proofs from different native states; each is checked by its own
+     * exact binding and never against the other's shape. */
+    if (command === 'S' && entry.cleanupOnly && !guardianOnly) {
       const keys = ['schema', 'event', 'runId', 'environmentId', 'keeperPID', 'keeperBirth', 'childReaped', 'childAbsent', 'scopeQuiescentObserved', 'persistentDenyObserved', 'ready', 'protected'];
       if (Object.keys(event).sort().join('|') !== keys.sort().join('|') || event.keeperBirth !== entry.ack.keeperBirth ||
           ['scopeQuiescentObserved', 'persistentDenyObserved'].some(key => event[key] !== true) ||
@@ -1079,16 +1216,37 @@ export class MacOSPFExecutor {
         entry.poison(); throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
       }
     }
+    /* The replayed guardian frame must clear the same exact binding the live
+     * negative-event path applies, or it is not proof of anything. */
+    if (command === 'S' && guardianOnly) {
+      if (Object.keys(event).sort().join('|') !== APP_KEEPER_REPORT_KEYS ||
+          APP_KEEPER_REPORT_BOOLEANS.some(key => typeof event[key] !== 'boolean') || event.profile !== 'seatbelt-front-only' ||
+          event.keeperPID !== entry.ack.keeperPID || event.persistentDenyObserved !== true ||
+          event.pid !== entry.stoppedIdentity?.pid || event.birth !== entry.stoppedIdentity?.birth) {
+        entry.poison(); throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
+      }
+    }
     if (command === 'R') {
       const keys = ['schema', 'event', 'runId', 'environmentId', 'keeperPID', 'ready', 'protected', 'childAbsent', ...APP_RELEASE_FACTS];
-      if (Object.keys(event).sort().join('|') !== keys.sort().join('|') || !appReleasedFactsVerified(event)) {
+      if (Object.keys(event).sort().join('|') !== keys.sort().join('|') || !appReleasedFactsVerified(event) ||
+          entry.guardianArmed === true && entry.guardianReleased !== true) {
         entry.poison(); throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
       }
     }
     if (event.keeperPID !== entry.ack.keeperPID || command !== 'R' && !entry.cleanupOnly && (event.registrationId !== entry.registrationId || event.versionId !== entry.versionId) ||
         ['L', 'S'].includes(command) && event.persistentDenyObserved !== true) { entry.poison(); throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED'); }
+    /* A guardian release answers S and R, but it is the guardian's own frame,
+     * and only the sequence above may claim the phase transition. */
     entry.phase = command === 'R' ? 'released' : expected;
     return structuredClone(event);
+  }
+  /* A cleaned run keeps its route only as long as it is needed for its own
+   * receipts. Once its resources are reclaimed, the route goes too: a long
+   * session must not accumulate routes, and their listener credentials, for
+   * every application it ever attached. */
+  retireApplicationRoute(run) {
+    const selected = this.routes.get(run.routeId);
+    if (selected) { selected.active = false; selected.proxy = null; this.routes.delete(run.routeId); }
   }
   applicationCleanupAvailable(runId) {
     const entry = this.appTransports.get(runId);
@@ -1103,6 +1261,50 @@ export class MacOSPFExecutor {
       transportAckVerified: !!entry.ack, stoppedIdentityRecorded: !!entry.stoppedIdentity, resumeAttempted: entry.resumeAttempted === true,
       launchAuthorityBurned: entry.cleanupOnly === true || entry.uncertain === true || entry.refusalPending === true,
       channelPoisoned: entry.uncertain === true };
+  }
+  /* Controller liveness for one running application. The byte goes straight to
+   * that run's own keeper, never through this executor's serialized queue, so a
+   * long operation for another attached application cannot starve the native
+   * guardian's awake-time heartbeat window. It is not a verification: the
+   * recorded liveness check still runs on its own schedule. */
+  applicationHeartbeat(runId) {
+    const entry = this.appTransports.get(runId);
+    if (!entry || entry.uncertain || entry.exited || entry.refusalPending || entry.fault || !entry.child?.stdin ||
+        !['stopped', 'resumed'].includes(entry.phase)) return false;
+    try { entry.child.stdin.write('K\n'); return true; } catch { return false; }
+  }
+  /* One root controller session serves many sequential attached applications.
+   * A fresh run is only allowed once every per-run latch is at its initial
+   * value and every per-run resource is released; anything else refuses, so an
+   * unconfirmed cleanup is never papered over by a new run. */
+  beginNextApplicationRun() {
+    const failed = code => failure(code);
+    if (this.kind !== 'native') {
+      if (this.lock || this.runtimeRunId || this.appLeases.size || this.appTransports.size) throw failed('APPLICATION_ROUTING_NOT_READY');
+      this.runDirectories.clear(); this.groups.clear(); this.groupIdentities.clear(); this.groupDeleteIntents.clear(); this.groupIntents.clear();
+      this.retiredAppLeases = new Set();
+      return true;
+    }
+    if (this.lock || this.runtimeParent || this.runtimeDirectory || this.runtimeRunId || this.runDirectories.size ||
+        this.registryIdentity != null || this.registryUnlinkAttempted || this.lockUnlinkAttempted) throw failed('APPLICATION_ROUTING_NOT_READY');
+    if (this.rootHookLease || this.rootHookMutationUncertain || this.rootHookDeleteAttempted || !this.rootHookRetiredProof?.originalRootRestored ||
+        this.rootHookRetiredProof.namespaceReclaimed !== true || this.rootHookRetiredProof.receiptRetired !== true) throw failed('APPLICATION_ROUTING_NOT_READY');
+    if (this.pfToken || this.pfReferenceMutationAttempted || this.pfReferenceReleased !== true) throw failed('APPLICATION_ROUTING_NOT_READY');
+    if (this.filterCommitted != null || this.filterReplacementBusy || this.filterReplacementUncertain) throw failed('APPLICATION_ROUTING_NOT_READY');
+    if (this.groups.size || this.groupIdentities.size || this.groupIntents.size || this.groupDeleteIntents.size) throw failed('APPLICATION_ROUTING_NOT_READY');
+    if (this.appLeases.size || this.appTransports.size) throw failed('APPLICATION_ROUTING_NOT_READY');
+    for (const entry of this.guardians.values()) if (!entry.exited) throw failed('APPLICATION_ROUTING_NOT_READY');
+    for (const entry of this.fixtureGuardians.values()) if (!entry.exited) throw failed('APPLICATION_ROUTING_NOT_READY');
+    // Reset every per-run latch. The maps above are shared containers whose own
+    // emptiness is the precondition, so they are cleared rather than replaced.
+    this.rootHookLease = null; this.rootHookMutationUncertain = false; this.rootHookDeleteAttempted = false;
+    this.rootHookRetiredProof = null; this.pfReferenceMutationAttempted = false; this.pfReferenceReleased = false; this.pfToken = null;
+    this.filterCommitted = null; this.filterReplacementBusy = false; this.filterReplacementUncertain = false;
+    this.registryUnlinkAttempted = false; this.lockUnlinkAttempted = false;
+    this.runDirectories.clear(); this.groups.clear(); this.groupIdentities.clear(); this.groupDeleteIntents.clear();
+    this.groupIntents.clear(); this.guardians.clear(); this.fixtureGuardians.clear(); this.appLeases.clear(); this.appTransports.clear();
+    this.retiredAppLeases = new Set();
+    return true;
   }
   async confirmApplicationTransportExited(runId) {
     const entry = this.appTransports.get(runId);
@@ -1512,7 +1714,8 @@ export class MacOSPFExecutor {
     const output = await this.command('/bin/ps', ['-axo', 'pid=,uid=,gid=']);
     const gids = new Set(realms.map(realm => realm.gid));
     for (const line of output.stdout.split('\n').filter(line => line.trim())) {
-      const fields = /^\s*([0-9]+)\s+([0-9]+)\s+([0-9]+)\s*$/.exec(line);
+      // macOS prints nobody/nogroup credentials as -2/-1.
+      const fields = /^\s*([0-9]+)\s+(-?[0-9]+)\s+(-?[0-9]+)\s*$/.exec(line);
       if (!fields || fields.slice(1).some(value => !Number.isSafeInteger(Number(value))) || Number(fields[1]) < 1 || gids.has(Number(fields[3]))) throw failure('APPLICATION_ROUTING_NOT_READY');
     }
     return true;
@@ -1548,10 +1751,12 @@ export class MacOSPFExecutor {
     const { stdout } = await this.command('/usr/bin/dscl', ['.', '-list', '/Groups', 'PrimaryGroupID']);
     let present = false;
     for (const line of stdout.split('\n').filter(value => value.trim())) {
-      const match = /^\s*(\S+)\s+([0-9]+)\s*$/.exec(line);
+      // Every Mac lists nobody -2 and nogroup -1, and a record may lack the
+      // attribute. Only our exact record, with exactly its own GID, decides.
+      const match = /^\s*(\S+)(?:\s+(-?[0-9]+))?\s*$/.exec(line);
       if (!match) throw failure('APPLICATION_ROUTING_NOT_READY');
       if (`/Groups/${match[1]}` === groupPath) {
-        if (present || Number(match[2]) !== gid) throw failure('APPLICATION_ROUTING_NOT_READY'); present = true;
+        if (present || match[2] === undefined || Number(match[2]) !== gid) throw failure('APPLICATION_ROUTING_NOT_READY'); present = true;
       }
     }
     return present;
@@ -1657,7 +1862,10 @@ export class MacOSPFController {
       noStateNativeAvailable: state.operatingSystem.noStateNativeAvailable === true,
       routes: [...this.routes.values()].map(route => this.publicRoute(route)),
       runs: [...this.runs.values()].map(run => ({ runId: run.runId, phase: run.phase, cleanupUncertain: run.cleanupUncertain === true, caseFailure: caseFailure(run) })),
-      applications: [...this.appRuns.values()].map(run => this.publicApplication(run)),
+      /* A cleaned run is history, not live inventory. Reporting it as live
+       * inventory would make the desktop client treat its own verified cleanup
+       * as an unknown run and refuse the next attachment in the same session. */
+      applications: [...this.appRuns.values()].filter(run => !appCleanPhase(run.phase)).map(run => this.publicApplication(run)),
       reason: state.installation.reason ?? 'Native application-family, DNS, state-cleanup and whole-guard acceptance remain unverified' };
   }
   async setup() { return { ...(await this.status()), readOnly: true, installationPlan: pfInstallationPlan(), activated: false }; }
@@ -1705,22 +1913,48 @@ export class MacOSPFController {
   applicationSnapshot(input = {}) {
     this.assertOpen();
     if (!input || Object.keys(input).sort().join('|') !== 'runId' || !uuid(input.runId) || !this.appRuns.has(input.runId)) throw failure('APPLICATION_ROUTING_PROTOCOL_ERROR');
-    return this.publicApplication(this.appRuns.get(input.runId));
+    const run = this.appRuns.get(input.runId), entry = this.executor.appTransports?.get(input.runId);
+    /* A revocation the guardian already performed has stopped the exact child,
+     * so the run is over even though no stop was requested yet. Reporting that
+     * is what keeps the snapshot from claiming the application is running. */
+    /* The fact stays true after cleanup: a run whose child the guardian already
+     * stopped did not end because the caller asked it to, and the trial reports
+     * that to the user rather than implying a normal stop. */
+    const ended = entry?.applicationEnded;
+    return { ...this.publicApplication(run),
+      // The recorded revocation is an object; its presence is the fact.
+      applicationEnded: ended != null,
+      ...(ended ? { endedChildReaped: entry.applicationEnded.childReaped === true, endedChildSignalled: entry.applicationEnded.childSignalled === true } : {}) };
   }
   prepareNotionApplication(input = {}) {
     return this.serialized(async () => {
       this.assertOpen();
       if (!input || Object.keys(input).sort().join('|') !== ['routeId', 'runId', 'environmentId', 'lifetimeSeconds', 'activationAuthorized'].sort().join('|') ||
-          !validId(input.routeId) || !uuid(input.runId) || !uuid(input.environmentId) || !Number.isInteger(input.lifetimeSeconds) || input.lifetimeSeconds < 10 || input.lifetimeSeconds > 180) throw failure('APPLICATION_ROUTING_PROTOCOL_ERROR');
+          !validId(input.routeId) || !uuid(input.runId) || !uuid(input.environmentId) || !Number.isInteger(input.lifetimeSeconds) ||
+          input.lifetimeSeconds < 10 || input.lifetimeSeconds > PF_APP_SESSION_LEASE_SECONDS) throw failure('APPLICATION_ROUTING_PROTOCOL_ERROR');
       if (input.activationAuthorized !== true) throw failure('APPLICATION_ROUTING_AUTHORIZATION_REQUIRED');
       const selected = this.routes.get(input.routeId);
-      if (!selected?.active || !selected.proxy || ![NOTION_BUNDLE, `${NOTION_BUNDLE}/Contents/MacOS/Notion`].includes(selected.application.executablePath) ||
-          !absolute(selected.workspace.cwd) || typeof selected.workspace.timezone !== 'string' || typeof selected.workspace.locale !== 'string' || this.usedRunIds.size) throw failure('APPLICATION_APP_CONTEXT_REFUSED');
+      // Any locally selected application is accepted here; the fixed native
+      // registry independently re-inspects and seals the exact signed bundle.
+      // This layer binds the selected executable to its containing bundle and
+      // never assumes a specific product.
+      const bundlePath = applicationBundle(selected?.application?.executablePath);
+      /* One root controller session serves many sequential attached
+       * applications. A second run is allowed only after every earlier run has
+       * been cleaned and every per-run resource released. */
+      for (const previous of this.appRuns.values())
+        if (!appCleanPhase(previous.phase) || previous.cleanupUncertain) throw failure('APPLICATION_ROUTING_NOT_READY');
+      if (this.appRuns.size && typeof this.executor.beginNextApplicationRun !== 'function') throw failure('APPLICATION_ROUTING_NOT_READY');
+      if (!selected?.active || !selected.proxy || !bundlePath || !absolute(selected.workspace.cwd) ||
+          typeof selected.workspace.timezone !== 'string' || typeof selected.workspace.locale !== 'string') throw failure('APPLICATION_APP_CONTEXT_REFUSED');
       const state = await this.state({ runId: input.runId });
       if (!state.authorized) throw failure('APPLICATION_ROUTING_AUTHORIZATION_REQUIRED');
       if (state.operatingSystem.ownedRootHook?.canCreateOwnedHook !== true || state.operatingSystem.ownedRootHook?.pfDisabled !== true ||
           state.operatingSystem.ownedRootHook?.pinsVerified !== true || state.operatingSystem.ownedRootHook?.originalRootCompatible !== true ||
           state.operatingSystem.pf?.lo0SkipVerified !== true || state.operatingSystem.noStateNativeAvailable !== true) throw failure('APPLICATION_ROUTING_NOT_READY');
+      /* A later run in the same controller session starts from a fresh executor
+       * latch set, and only once every earlier run's resources are released. */
+      if (this.appRuns.size) this.executor.beginNextApplicationRun();
       for (const method of ['applicationContextClock', 'sealApplicationLease', 'verifyApplicationLease', 'startApplicationTransport', 'applicationTransportControl',
         'confirmApplicationTransportExited', 'retireApplicationLease']) if (typeof this.executor[method] !== 'function') throw failure('APPLICATION_ROUTING_NOT_READY');
       await this.authenticateProxy(selected.proxy);
@@ -1738,7 +1972,7 @@ export class MacOSPFController {
         if (!this.applicationCommands) { const { NativeApplicationCommands } = await import('./helper-production-native.mjs');
           this.applicationCommands = new NativeApplicationCommands({ controlledSession: this.identity.controlledSession === true, inspectInstallation: this.inspectInstallation }); }
         run.registrationId = randomUUID(); run.versionId = randomUUID(); run.ticketId = randomUUID();
-        const registered = await this.applicationCommands.register({ registrationId: run.registrationId, versionId: run.versionId, bundlePath: NOTION_BUNDLE });
+        const registered = await this.applicationCommands.register({ registrationId: run.registrationId, versionId: run.versionId, bundlePath });
         if (registered?.applicationIdentityVerified !== true || registered.registrationId !== run.registrationId || registered.versionId !== run.versionId) throw failure('APPLICATION_APP_IDENTITY_REFUSED');
         run.stage = 'registry-lock'; await this.executor.acquireLock(run.runId); run.lockAcquired = true;
         run.baseline = await this.executor.snapshotUnrelatedNetwork();
@@ -1774,18 +2008,37 @@ export class MacOSPFController {
         const staged = await this.executor.applicationTransportControl(run.runId, 'L', run.ticketId);
         if (staged.stoppedBeforeExec !== true || staged.persistentDenyObserved !== true || !nativeBirth(staged.birth) || !Number.isSafeInteger(staged.pid) || staged.pid < 2) throw failure('APPLICATION_APP_STAGE_UNCONFIRMED');
         run.applicationChild = { pid: staged.pid, birth: staged.birth }; run.staged = true; run.phase = 'staged'; await this.executor.persistRun(run);
-        run.heartbeat = setInterval(() => { this.serialized(async () => {
-          if (['staged', 'running'].includes(run.phase)) await this.executor.applicationTransportControl(run.runId, 'K');
+        /* Heartbeat: a direct write, deliberately not serialized, so preparing a
+         * second attached application cannot starve the native guardian's
+         * awake-time liveness window. A lost channel is not fatal here; the
+         * verification tick below decides, and a real loss revokes natively. */
+        run.heartbeat = setInterval(() => { try { this.executor.applicationHeartbeat?.(run.runId); } catch { /* verification decides */ } },
+          PF_APP_HEARTBEAT_INTERVAL_MS);
+        run.heartbeat.unref?.();
+        /* Liveness verification stays on its own schedule: the sealed lease file,
+         * the keeper identity and the channel state are re-read, and any doubt
+         * fails closed into cleanup-required rather than leaving a run that only
+         * looks alive. */
+        run.liveness = setInterval(() => { this.serialized(async () => {
+          if (!['staged', 'running'].includes(run.phase)) return;
+          await this.executor.verifyApplicationLease(run.runId);
+          const entry = this.executor.appTransports?.get(run.runId);
+          if (!entry?.ack || entry.uncertain || entry.exited || entry.refusalPending) throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
+          const keeper = await this.executor.identify(entry.ack.keeperPID);
+          if (!nativeBirth(keeper.birth) || keeper.birth !== entry.ack.keeperBirth || keeper.path !== `${PF_INSTALL_ROOT}/envara-pf-native`)
+            throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
         }).catch(error => this.serialized(async () => {
-          clearInterval(run.heartbeat); rememberAppFailure(run, 'resume', error);
+          clearInterval(run.heartbeat); clearInterval(run.liveness); rememberAppFailure(run, 'resume', error);
           run.cleanupUncertain = true; run.phase = 'cleanup-required';
           if (this.executor.applicationCleanupAvailable?.(run.runId) === true) run.cleanupMode = 'native-refusal';
           else this.executor.appTransports?.get(run.runId)?.poison?.();
           try { await this.executor.persistRun(run); } catch (persistError) { rememberAppFailure(run, 'cleanup', persistError, true); }
-        }).catch(() => {})); }, 1000); run.heartbeat.unref?.();
+        }).catch(() => {})); }, PF_APP_VERIFY_INTERVAL_MS);
+        run.liveness.unref?.();
         const now = await this.executor.applicationContextClock();
-        if (now.bootTimeSeconds !== sealed.bootTimeSeconds || now.nowMonotonicMilliseconds >= sealed.expiresMonotonicMs - 1000) throw failure('APPLICATION_APP_CONTEXT_REFUSED');
-        run.timer = setTimeout(() => this.stopNotionApplication({ runId: run.runId }).catch(() => {}), sealed.expiresMonotonicMs - now.nowMonotonicMilliseconds - 1000); run.timer.unref?.();
+        /* The sealed lease is only an outer bound; a run ends when it is stopped,
+         * when the application exits, or when Envara quits. */
+        if (now.bootTimeSeconds !== sealed.bootTimeSeconds || now.nowMonotonicMilliseconds >= sealed.expiresMonotonicMs) throw failure('APPLICATION_APP_CONTEXT_REFUSED');
         return this.publicApplication(run);
       } catch (error) {
         run.cleanupUncertain = true; run.phase = 'cleanup-required'; rememberAppFailure(run, run.stage, error);
@@ -1861,11 +2114,18 @@ export class MacOSPFController {
     Object.assign(run, { ownedRootHookRemoved: true, originalRootRestored: true, namespaceReclaimed: true, rootHookReceiptRetired: true });
     completed.hookRetired = true; await this.persistApplicationCleanupRun(run);
     await this.executor.removeGroups(run.realms); completed.groupsRemoved = true;
-    const after = await this.executor.snapshotUnrelatedNetwork();
     run.ownedResourcesReclaimed = true;
-    run.foreignStateDrift = { pf: after.pfDigest !== run.baseline.pfDigest, routes: after.routeDigest !== run.baseline.routeDigest,
-      dns: after.dnsDigest !== run.baseline.dnsDigest, aggregate: after.digest !== run.baseline.digest };
-    if (Object.values(run.foreignStateDrift).some(Boolean)) throw failure('APPLICATION_APP_CLEANUP_UNCONFIRMED');
+    /* Host PF, routes and DNS are not Envara's to restore, and every owned
+     * resource is already reclaimed at this point. A difference from the
+     * baseline is therefore recorded as an observation and reported, never used
+     * to abandon the lease and lock: that left the runtime directory behind and
+     * blocked every later trial and component update. A snapshot that cannot
+     * be taken is reported as not proven unchanged. */
+    let after = null;
+    try { after = await this.executor.snapshotUnrelatedNetwork(); } catch {}
+    run.foreignStateDrift = after && run.baseline ? { pf: after.pfDigest !== run.baseline.pfDigest, routes: after.routeDigest !== run.baseline.routeDigest,
+      dns: after.dnsDigest !== run.baseline.dnsDigest, aggregate: after.digest !== run.baseline.digest } : { pf: true, routes: true, dns: true, aggregate: true };
+    await this.persistApplicationCleanupRun(run);
     if (!completed.leaseRetired) { await this.executor.retireApplicationLease(run.runId); completed.leaseRetired = true; }
   }
   async persistApplicationCleanupRun(run) {
@@ -1877,7 +2137,7 @@ export class MacOSPFController {
   stopNotionApplication(input = {}) {
     return this.serialized(async () => {
       if (!input || Object.keys(input).sort().join('|') !== 'runId' || !uuid(input.runId) || !this.appRuns.has(input.runId)) throw failure('APPLICATION_ROUTING_PROTOCOL_ERROR');
-      const run = this.appRuns.get(input.runId); clearInterval(run.heartbeat); clearTimeout(run.timer);
+      const run = this.appRuns.get(input.runId); clearInterval(run.heartbeat); clearInterval(run.liveness); clearTimeout(run.timer);
       if (appCleanPhase(run.phase)) return this.publicApplication(run);
       if (run.preflightAbort && ['preflight-aborted', 'cleanup-required'].includes(run.phase)) {
         run.cleanupMode = 'preflight';
@@ -1897,6 +2157,7 @@ export class MacOSPFController {
           await this.persistApplicationCleanupRun(run);
           await this.executor.releaseLock(); run.lockAcquired = false;
           run.phase = 'preflight-cleaned'; run.cleanupUncertain = false;
+          this.retireApplicationRoute(run);
           run.cleanupEvidence = { schema: 'envara.macos-pf-notion-preflight-cleanup/v1', source: run.native ? 'native-notion-controller' : 'simulated-notion-controller',
             runId: run.runId, environmentId: run.environmentId, profile: 'seatbelt-front-only', complete: true, cleanupUncertain: false,
             staged: false, resumed: false, notionLaunched: false, lifecyclePassed: false, bootstrapAttempted: false, transportAttempted: false,
@@ -1904,7 +2165,7 @@ export class MacOSPFController {
             ...Object.fromEntries(['sealedContextVerified', 'nativePrivateChildrenAbsentBeforeExit', 'nativeGIDScopeAbsentBeforeExit',
               'nativeOwnedFilterClassesEmptyBeforeExit', 'filterJournalAbsent', 'bootstrapExitConfirmed', 'ownedFilterEmptyAtCleanup',
               'ownedEffectiveGIDProcessesAbsentAtCleanup', 'ownedGroupsRemoved', 'ownedRootHookRemoved', 'originalRootRestored', 'namespaceReclaimed',
-              'receiptRetired', 'ownedPFReferenceReleased', 'unrelatedPFUnchanged', 'unrelatedRoutesUnchanged', 'hostDNSUnchanged', 'sealedContextRetired', 'registryReleased'].map(key => [key, true])) };
+              'receiptRetired', 'ownedPFReferenceReleased', 'unrelatedPFUnchanged', 'unrelatedRoutesUnchanged', 'hostDNSUnchanged', 'sealedContextRetired', 'registryReleased'].map(key => [key, true])), ...unrelatedObservations(run) };
           return this.publicApplication(run);
         } catch (error) {
           run.cleanupUncertain = true; run.phase = 'cleanup-required'; rememberAppFailure(run, 'cleanup', error, true);
@@ -1926,13 +2187,14 @@ export class MacOSPFController {
           await this.persistApplicationCleanupRun(run);
           await this.executor.releaseLock(); run.lockAcquired = false;
           run.phase = 'prestage-cleaned'; run.cleanupUncertain = false;
+          this.retireApplicationRoute(run);
           run.cleanupEvidence = { schema: 'envara.macos-pf-notion-prestage-cleanup/v1', source: run.native ? 'native-notion-controller' : 'simulated-notion-controller',
             runId: run.runId, environmentId: run.environmentId, profile: 'seatbelt-front-only', complete: true, cleanupUncertain: false,
             staged: false, resumed: false, notionLaunched: false, lifecyclePassed: false, denyAttempted: false, filterWriteAttempted: false, launchCommandAccepted: false, coldStageAttempted: false,
             ...Object.fromEntries(['coreReaped', 'frontReaped', 'originalUTunVerified', 'originalListenerVerified', 'originalUTunClosed', 'originalListenerClosed',
               'filterJournalAbsent', 'transportExitConfirmed', 'nativeGIDScopeAbsentBeforeExit', 'ownedEffectiveGIDProcessesAbsentAtCleanup', 'ownedGroupsRemoved',
               'ownedRootHookRemoved', 'originalRootRestored', 'namespaceReclaimed', 'receiptRetired', 'ownedPFReferenceReleased', 'unrelatedPFUnchanged',
-              'unrelatedRoutesUnchanged', 'hostDNSUnchanged', 'sealedContextRetired', 'registryReleased'].map(key => [key, true])) };
+              'unrelatedRoutesUnchanged', 'hostDNSUnchanged', 'sealedContextRetired', 'registryReleased'].map(key => [key, true])), ...unrelatedObservations(run) };
           return this.publicApplication(run);
         } catch (error) {
           run.cleanupUncertain = true; run.phase = 'cleanup-required'; rememberAppFailure(run, 'cleanup', error, true);
@@ -1962,12 +2224,13 @@ export class MacOSPFController {
         await this.persistApplicationCleanupRun(run);
         await this.executor.releaseLock(); run.lockAcquired = false;
         run.phase = 'cleaned'; run.cleanupUncertain = false;
+        this.retireApplicationRoute(run);
         run.cleanupEvidence = { schema: 'envara.macos-pf-notion-cleanup/v1', source: run.native ? 'native-notion-controller' : 'simulated-notion-controller', runId: run.runId,
           environmentId: run.environmentId, profile: 'seatbelt-front-only', complete: true, cleanupUncertain: false,
           ...Object.fromEntries(['coreReaped', 'frontReaped', 'childReaped', 'scopeQuiescentObserved', 'originalUTunClosed', 'originalListenerClosed',
             'filterEmptyVerified', 'privateJournalRetired', 'transportExitConfirmed', 'ownedGIDProcessesAbsent', 'ownedGroupsRemoved',
             'ownedRootHookRemoved', 'originalRootRestored', 'namespaceReclaimed', 'receiptRetired', 'ownedPFReferenceReleased',
-            'unrelatedPFUnchanged', 'unrelatedRoutesUnchanged', 'hostDNSUnchanged', 'sealedContextRetired', 'registryReleased'].map(key => [key, true])),
+            'unrelatedPFUnchanged', 'unrelatedRoutesUnchanged', 'hostDNSUnchanged', 'sealedContextRetired', 'registryReleased'].map(key => [key, true])), ...unrelatedObservations(run),
           childReaped: run.applicationReleaseFacts.childReaped, childAbsent: run.applicationReleaseFacts.childAbsent };
         return this.publicApplication(run);
       } catch (error) { run.cleanupUncertain = true; run.phase = 'cleanup-required'; rememberAppFailure(run, 'cleanup', error, true);
@@ -2278,7 +2541,7 @@ export class MacOSPFController {
   }
   async shutdown() {
     for (const run of this.appRuns.values()) {
-      clearInterval(run.heartbeat); clearTimeout(run.timer);
+      clearInterval(run.heartbeat); clearInterval(run.liveness); clearTimeout(run.timer);
       if (!appCleanPhase(run.phase)) await this.stopNotionApplication({ runId: run.runId }).catch(() => {});
       if (!appCleanPhase(run.phase)) this.executor.appTransports?.get(run.runId)?.poison?.();
     }

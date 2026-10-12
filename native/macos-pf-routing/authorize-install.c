@@ -43,6 +43,12 @@ typedef struct { const char *manifest_sha256; const EnvaraPFInstallFile *files; 
 #include "installer-upgrade-43b.h"
 #include "installer-upgrade-acfc.h"
 #include "installer-upgrade-c34.h"
+#include "installer-upgrade-4b9f85.h"
+#include "installer-upgrade-43392e.h"
+#include "installer-upgrade-f0b99f.h"
+#include "installer-upgrade-f39101.h"
+#include "installer-upgrade-a8bd00.h"
+#include "installer-upgrade-da6e7c.h"
 static const InstallSnapshot *const known_prior_snapshots[] = {
     &ENVARA_PF_UPGRADE_F8_SNAPSHOT, &ENVARA_PF_UPGRADE_E940_SNAPSHOT,
     &ENVARA_PF_UPGRADE_518_SNAPSHOT, &ENVARA_PF_UPGRADE_2A7_SNAPSHOT,
@@ -52,7 +58,10 @@ static const InstallSnapshot *const known_prior_snapshots[] = {
     &ENVARA_PF_UPGRADE_F99_SNAPSHOT, &ENVARA_PF_UPGRADE_05D6_SNAPSHOT,
     &ENVARA_PF_UPGRADE_14B87_SNAPSHOT, &ENVARA_PF_UPGRADE_DBCF_SNAPSHOT,
     &ENVARA_PF_UPGRADE_43B_SNAPSHOT, &ENVARA_PF_UPGRADE_ACFC_SNAPSHOT,
-    &ENVARA_PF_UPGRADE_C34_SNAPSHOT
+    &ENVARA_PF_UPGRADE_C34_SNAPSHOT, &ENVARA_PF_UPGRADE_4B9F85_SNAPSHOT,
+    &ENVARA_PF_UPGRADE_43392E_SNAPSHOT, &ENVARA_PF_UPGRADE_F0B99F_SNAPSHOT,
+    &ENVARA_PF_UPGRADE_F39101_SNAPSHOT, &ENVARA_PF_UPGRADE_A8BD00_SNAPSHOT,
+    &ENVARA_PF_UPGRADE_DA6E7C_SNAPSHOT
 };
 #define KNOWN_PRIOR_COUNT (sizeof(known_prior_snapshots) / sizeof(known_prior_snapshots[0]))
 
@@ -65,7 +74,10 @@ static const InstallSnapshot *const known_prior_snapshots[] = {
 #define MAX_TOTAL_BYTES (1024ULL * 1024ULL * 1024ULL)
 #define ACTUAL_FILE_COUNT (sizeof(ENVARA_PF_INSTALL_FILES) / sizeof(ENVARA_PF_INSTALL_FILES[0]))
 #define RELAY_BYTES 65536
-#define RELAY_SECONDS 180.0
+/* Zero means: relay until Envara ends this session or the root controller
+ * exits. The session is bounded by the heartbeat the controller sends and by
+ * the native lease ceiling, never by a wall-clock deadline here. */
+#define RELAY_SECONDS 0.0
 #define STAGE_PREFIX "." INSTALL_NAME "-stage-"
 static const InstallSnapshot current_snapshot = { ENVARA_PF_INSTALL_MANIFEST_SHA256, ENVARA_PF_INSTALL_FILES,
     sizeof(ENVARA_PF_INSTALL_FILES) / sizeof(ENVARA_PF_INSTALL_FILES[0]) };
@@ -719,9 +731,9 @@ static bool relay_helper(int fd, double seconds) {
     if (!signal_changed) okay = false;
     RelayBuffer input = {0}, output = {0};
     bool input_ended = false, root_ended = false, write_ended = false;
-    double deadline = clock_seconds() + seconds;
+    double deadline = seconds > 0.0 ? clock_seconds() + seconds : 0.0;
     while (okay && (!root_ended || output.length)) {
-        if (clock_seconds() >= deadline) { okay = fail("controlled-session-deadline"); break; }
+        if (deadline > 0.0 && clock_seconds() >= deadline) { okay = fail("controlled-session-deadline"); break; }
         if (input_ended && !input.length && !write_ended) {
             if (shutdown(fd, SHUT_WR) && errno != ENOTCONN) { okay = false; break; }
             write_ended = true;
@@ -836,7 +848,7 @@ static int request_controlled_experiment(const char *executable) {
     if (lease < 0 || flock(lease, LOCK_SH | LOCK_NB)) { if (lease >= 0) close(lease); experiment_failure("installation-maintenance-busy"); return 1; }
     if (!installed_helper_verified()) { close(lease); experiment_failure(failure); return 1; }
     AuthorizationRef reference = NULL; FILE *communications = NULL;
-    const char prompt[] = "Envara: run one separately approved PF routing experiment, at most 180 seconds, two dedicated groups and two tunnels. Existing VPN settings stay unchanged. Temporary owned rules require verified cleanup. No permanent daemon is installed.";
+    const char prompt[] = "Envara: route applications you attach to a selected network group through temporary, owned PF rules and one dedicated tunnel per application, until you stop them or quit Envara. Existing VPN settings stay unchanged. Quitting Envara removes every temporary rule; the administrator password is asked once per Envara launch and no permanent daemon is installed.";
     if (!authorized_self(executable, "--run-controlled-experiment", prompt, &reference, &communications)) { close(lease); experiment_failure(failure); return 1; }
     bool okay = relay_helper(fileno(communications), RELAY_SECONDS);
     fclose(communications); AuthorizationFree(reference, kAuthorizationFlagDestroyRights);

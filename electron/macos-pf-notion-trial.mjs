@@ -4,19 +4,28 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, realpath } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
-import { verifyPFInstallation, PF_INSTALL_ROOT } from '../native/macos-pf-routing/controller.mjs';
+import { verifyPFInstallation, PF_INSTALL_ROOT, PF_APP_SESSION_LEASE_SECONDS } from '../native/macos-pf-routing/controller.mjs';
 import { pfRoutingAnchor } from '../native/macos-pf-routing/policy.mjs';
+import { createPFAuthorizedChannelMux } from './macos-pf-channel-mux.mjs';
 import { createPersistentPFNotionSessionClient, validatePFNotionSessionRequest,
-  PF_NOTION_RESUME_TIMEOUT_MS, validatePFNotionCallTimingDiagnostic,
+  PF_NOTION_RESUME_TIMEOUT_MS, PF_SESSION_CHANNEL_LIFETIME_MS, validatePFNotionCallTimingDiagnostic,
   validatePFNotionStatusOnlyCloseEvidence,
   validatePFNotionResponseDiagnostic, projectPFNotionResponseDiagnostic, projectPFNotionFailureDiagnostic,
   validatePFNotionCleanupReceipt, validatePFNotionPrestageCleanupReceipt,
   validatePFNotionPreflightCleanupReceipt } from './macos-pf-notion-session.mjs';
+/* The controller and this manager are polled, not pushed: a running attached
+ * application is checked often enough to notice that it exited on its own,
+ * without flooding the one authorized channel. */
+export const PF_ATTACH_POLL_INTERVAL_MS = 2000;
 
 export const PF_NOTION_TRIAL_CANDIDATE = Object.freeze({
-  authorizerSHA256: 'e752db63f629567e7201a9444775897fd5dd662b0a1a0e4877e3f51043f8842d',
-  manifestSHA256: '4b9f859585a10e31eb98d43682595a9e152b3f93439ebea6ef1de0a4659ba557',
+  authorizerSHA256: 'd8451ce285fbf37f6130a635b68b052d354e60bce6f582105600859fca1fb3f3',
+  manifestSHA256: '03245359a948d31c9f4b87fe88dd1b3cb6a270228fbfc13fe873de50cdcce7da',
 });
+/* The bundled carrier is named after the manifest it carries. Deriving the path
+ * from the pin keeps a single source of truth: a pinned candidate with a stale
+ * hard-coded carrier path made the app look for a carrier it did not ship. */
+export const PF_NOTION_TRIAL_CARRIER = `local-authorization/EnvaraPFAuthorization-${PF_NOTION_TRIAL_CANDIDATE.manifestSHA256.slice(0, 12)}.app/Contents/Resources/app-routing/macos-pf/EnvaraPFInstall`;
 const fixedFlags = Object.freeze({ ready: false, protected: false, productionReady: false, genericApplicationRouting: false, udpSupported: false });
 const suffix = '/Contents/Resources/app-routing/macos-pf/EnvaraPFInstall';
 const error = code => Object.assign(new Error('Controlled Notion trial refused'), { code });
@@ -28,12 +37,12 @@ const codes = new Set(['PF_INSTALLED_CANDIDATE_MISMATCH', 'PF_NOTION_CARRIER_MIS
   'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED', 'APPLICATION_ROUTING_NOT_READY', 'APPLICATION_PROXY_UNAVAILABLE',
   'APPLICATION_ROUTING_PROTOCOL_ERROR', 'APPLICATION_APP_CONTEXT_REFUSED', 'APPLICATION_APP_IDENTITY_REFUSED',
   'APPLICATION_APP_NATIVE_REFUSED', 'APPLICATION_APP_STAGE_UNCONFIRMED', 'APPLICATION_APP_TRANSPORT_UNCONFIRMED',
-  'APPLICATION_APP_STAGE_TIMEOUT', 'APPLICATION_APP_RESUME_TIMEOUT', 'APPLICATION_APP_RESUME_UNCONFIRMED', 'APPLICATION_APP_CLEANUP_UNCONFIRMED', 'APPLICATION_ROUTING_CLEANUP_UNCONFIRMED', 'APPLICATION_NATIVE_REFUSED']);
+  'APPLICATION_APP_STAGE_TIMEOUT', 'APPLICATION_APP_RESUME_TIMEOUT', 'APPLICATION_APP_STOP_TIMEOUT', 'APPLICATION_APP_RELEASE_TIMEOUT', 'APPLICATION_APP_RESUME_UNCONFIRMED', 'APPLICATION_APP_CLEANUP_UNCONFIRMED', 'APPLICATION_ROUTING_CLEANUP_UNCONFIRMED', 'APPLICATION_NATIVE_REFUSED']);
 const safeCode = value => codes.has(value?.code) ? value.code : 'PF_NOTION_TRIAL_FAILED';
 const nativeStages = new Set(['register', 'preflight', 'gui-session', 'route-read', 'transport-start', 'front-listen', 'front-spawn',
   'front-handshake', 'factory-open', 'deny-commit', 'transport-ack', 'front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'guardian']);
 const registerReasons = new Set(['INVALID_NATIVE_APP_REQUEST', 'FIXED_ROOT_NATIVE_ENTRY_REQUIRED', 'APP_REGISTRY_UNAVAILABLE', 'NATIVE_APP_OPERATION_REFUSED']);
-const operationReasons = new Set(['NATIVE_OPERATION_REFUSED', 'NATIVE_CONTEXT_LOAD_REFUSED', 'NATIVE_CONTROLLER_BINDING_REFUSED', 'NATIVE_ORIGINAL_SOCKET_REFUSED', 'NATIVE_LISTENER_CREDENTIAL_REFUSED', 'NATIVE_PIPE_BINDING_REFUSED', 'NATIVE_GUI_SESSION_REFUSED', 'NATIVE_APP_IDENTITY_REFUSED', 'NATIVE_HOOK_LEASE_REFUSED', 'NATIVE_PF_OPEN_REFUSED', 'NATIVE_PF_GUARD_REFUSED', 'NATIVE_FILTER_READBACK_REFUSED', 'NATIVE_FILTER_TRANSACTION_REFUSED', 'NATIVE_JOURNAL_REFUSED', 'NATIVE_TICKET_BINDING_REFUSED', 'NATIVE_TICKET_FILTER_REFUSED', 'NATIVE_SCOPE_CHECK_REFUSED', 'NATIVE_GUARD_DESCRIPTOR_REFUSED', 'NATIVE_LEASE_EXPIRED_REFUSED', 'NATIVE_NOTION_DATA_PREPARE_REFUSED', 'NATIVE_NOTION_STAGE_REFUSED']);
+const operationReasons = new Set(['NATIVE_OPERATION_REFUSED', 'NATIVE_CONTEXT_LOAD_REFUSED', 'NATIVE_CONTROLLER_BINDING_REFUSED', 'NATIVE_ORIGINAL_SOCKET_REFUSED', 'NATIVE_LISTENER_CREDENTIAL_REFUSED', 'NATIVE_PIPE_BINDING_REFUSED', 'NATIVE_GUI_SESSION_REFUSED', 'NATIVE_APP_IDENTITY_REFUSED', 'NATIVE_HOOK_LEASE_REFUSED', 'NATIVE_PF_OPEN_REFUSED', 'NATIVE_PF_GUARD_REFUSED', 'NATIVE_FILTER_READBACK_REFUSED', 'NATIVE_FILTER_TRANSACTION_REFUSED', 'NATIVE_JOURNAL_REFUSED', 'NATIVE_TICKET_BINDING_REFUSED', 'NATIVE_TICKET_FILTER_REFUSED', 'NATIVE_SCOPE_CHECK_REFUSED', 'NATIVE_GUARD_DESCRIPTOR_REFUSED', 'NATIVE_LEASE_EXPIRED_REFUSED', 'NATIVE_NOTION_DATA_PREPARE_REFUSED', 'NATIVE_NOTION_STAGE_REFUSED', 'NATIVE_NOTION_SUPPORTED_ARGUMENT_REFUSED', 'NATIVE_NOTION_SUPPORTED_PLIST_REFUSED', 'NATIVE_NOTION_SUPPORTED_VERSION_REFUSED', 'NATIVE_NOTION_SUPPORTED_SIGNATURE_REFUSED', 'NATIVE_NOTION_PLAN_ARGUMENT_REFUSED', 'NATIVE_NOTION_PLAN_REGISTRY_REFUSED', 'NATIVE_NOTION_PLAN_CONTEXT_REFUSED', 'NATIVE_NOTION_PLAN_REQUEST_REFUSED', 'NATIVE_NOTION_PLAN_SEALED_REFUSED', 'NATIVE_NOTION_PLAN_SUPPORTED_REFUSED', 'NATIVE_NOTION_PLAN_DIGEST_REFUSED', 'NATIVE_NOTION_PLAN_CDHASH_REFUSED', 'NATIVE_NOTION_PLAN_REQUIREMENT_REFUSED', 'NATIVE_NOTION_PLAN_DATA_REFUSED', 'NATIVE_NOTION_PLAN_ALLOCATION_REFUSED', 'NATIVE_NOTION_DATA_ARGUMENT_REFUSED', 'NATIVE_NOTION_DATA_ENTRY_REFUSED', 'NATIVE_NOTION_DATA_ANCESTOR_REFUSED', 'NATIVE_NOTION_DATA_LEAF_REFUSED', 'NATIVE_NOTION_DATA_DENY_REFUSED', 'NATIVE_NOTION_STAGE_ARGUMENT_REFUSED', 'NATIVE_NOTION_STAGE_AUTHORITY_REFUSED', 'NATIVE_NOTION_STAGE_ENTRY_REFUSED', 'NATIVE_NOTION_STAGE_SESSION_REFUSED', 'NATIVE_NOTION_STAGE_ORIGINAL_RUNNING_REFUSED', 'NATIVE_NOTION_STAGE_ACCOUNT_REFUSED', 'NATIVE_NOTION_STAGE_ENVIRONMENT_REFUSED', 'NATIVE_NOTION_STAGE_DATA_REFUSED', 'NATIVE_NOTION_STAGE_RECHECK_REFUSED', 'NATIVE_NOTION_STAGE_SPAWN_REFUSED', 'NATIVE_NOTION_STAGE_STOPPED_REFUSED', 'NATIVE_NOTION_STAGE_CHILD_REFUSED']);
 const statusFacts = ['rootOwnedInstallationVerified', 'callerConsoleUIDVerified', 'privilegedOperationsAuthorized',
   'privilegedRuntimeVerified', 'ownedRootHookCanCreate', 'priorPFAnchorsCompatible', 'lo0FilteringVerified'];
 const canonicalUUID = value => /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value ?? '');
@@ -126,8 +135,13 @@ export async function verifyNotionTrialSignature(application) {
     return true;
   } catch { throw error('PF_NOTION_SIGNATURE_REFUSED'); }
 }
-/** Read-only on every invocation; fixed local candidate, never renderer pins. */
-export async function verifyNotionTrialCandidate({ authorizerPath } = {}) {
+/**
+ * Read-only on every invocation; fixed local candidate, never renderer pins.
+ * The application to verify is the one this trial was bound to for the current
+ * run; candidate verification of the carrier itself stays fixed. Nothing here
+ * upgrades a signature check into a routing or protection claim.
+ */
+export async function verifyNotionTrialCandidate({ authorizerPath, applicationPath } = {}) {
   if (process.platform !== 'darwin') throw error('PF_NOTION_TRIAL_PLATFORM_REQUIRED');
   if (typeof authorizerPath !== 'string' || !path.isAbsolute(authorizerPath) || !authorizerPath.endsWith(`.app${suffix}`) || /[\0\r\n]/.test(authorizerPath))
     throw error('PF_NOTION_TRIAL_NOT_ENABLED');
@@ -141,35 +155,101 @@ export async function verifyNotionTrialCandidate({ authorizerPath } = {}) {
       await hashFile(path.join(path.dirname(authorizerPath), 'manifest.json'), 'PF_NOTION_CARRIER_MISMATCH') !== pin.manifestSHA256)
     throw error('PF_NOTION_CARRIER_MISMATCH');
   await verifyNotionTrialSignature(authorizerPath.slice(0, -suffix.length));
-  await verifyNotionTrialSignature('/Applications/Notion.app');
+  // The bound application is signature-checked here too. The native fixed
+  // registry additionally re-inspects and seals the exact signed bundle, so a
+  // caller cannot substitute a different or modified application at this layer.
+  const bundle = applicationPath ?? '/Applications/Notion.app';
+  if (!trialBundlePath(bundle)) throw error('PF_NOTION_TRIAL_REQUEST_INVALID');
+  await verifyNotionTrialSignature(bundle);
   return true;
 }
+const trialBundlePath = value => typeof value === 'string' && path.isAbsolute(value) && value.endsWith('.app') && value.length <= 4096 && !/[\0\r\n]/.test(value) ? value : null;
+/* Derive the containing ".app" from a bound executable path. Candidate only:
+ * the fixed native registry independently seals the real signed bundle. */
+const applicationBundleFor = value => {
+  if (typeof value !== 'string' || !path.isAbsolute(value) || value.length > 4096 || /[\0\r\n]/.test(value)) return null;
+  const segments = value.split('/');
+  const index = segments.findIndex((segment, position) => position > 0 && segment.endsWith('.app'));
+  if (index < 1 || segments[index].length < 5) return null;
+  const bundle = segments.slice(0, index + 1).join('/');
+  return bundle && bundle !== '/' ? bundle : null;
+};
 const cleanKind = (value, runId, environmentId) => value?.environmentId !== environmentId ? null :
   validatePFNotionCleanupReceipt(value, runId) ? 'normal' : validatePFNotionPrestageCleanupReceipt(value, runId) ? 'prestage' :
     validatePFNotionPreflightCleanupReceipt(value, runId) ? 'preflight' : null;
 
 export class MacOSPFNotionTrial {
-  constructor({ authorizerPath, verifyCandidate = () => verifyNotionTrialCandidate({ authorizerPath }), verifyNotion = () => verifyNotionTrialSignature('/Applications/Notion.app'),
-    createClient = () => createPersistentPFNotionSessionClient({ spawnRootControlledLifecycle: () => spawn(authorizerPath,
-      ['--request-controlled-experiment'], { shell: false, cwd: '/', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, stdio: ['pipe', 'pipe', 'pipe'] }) }),
-    observationMs = 45000, onEvent = () => {}, persistDiagnostics = async () => {} } = {}) {
+  constructor({ authorizerPath, verifyCandidate = ({ applicationPath } = {}) => verifyNotionTrialCandidate({ authorizerPath, applicationPath }),
+    verifyNotion = bundle => verifyNotionTrialSignature(bundle ?? '/Applications/Notion.app'),
+    createClient = ({ runId } = {}) => {
+      /* One authorized root session per Envara launch: the carrier is spawned
+       * inside the shared mux on the first attach and reused by every later
+       * attach, so the administrator password is asked once. Each run gets its
+       * own virtual channel, so ending one run never disturbs another. */
+      if (!runId) throw error('PF_NOTION_TRIAL_REQUEST_INVALID');
+      const target = this.acquireRunChannel(runId);
+      this.activeTarget = target;
+      return createPersistentPFNotionSessionClient({ spawnRootControlledLifecycle: null, acquireChannel: () => target,
+        lifetimeMs: PF_SESSION_CHANNEL_LIFETIME_MS, channelKey: runId });
+    },
+    observationMs = 0, onEvent = () => {}, persistDiagnostics = async () => {} } = {}) {
     if (![verifyCandidate, verifyNotion, createClient, onEvent, persistDiagnostics].every(value => typeof value === 'function') ||
         !Number.isInteger(observationMs) || observationMs < 0 || observationMs > 45000) throw error('PF_NOTION_TRIAL_REQUEST_INVALID');
     this.verifyCandidate = verifyCandidate; this.verifyNotion = verifyNotion; this.createClient = createClient;
     this.observationMs = observationMs; this.onEvent = onEvent; this.persistDiagnostics = persistDiagnostics;
-    this.state = null; this.pending = null; this.stopObservation = null;
+    this.observationSeconds = observationMs > 0 ? observationMs / 1000 : null;
+    this.state = null; this.pending = null; this.stopObservation = null; this.closed = false;
+    this.mux = null; this.activeTarget = null; this.runTargets = new Map();
+    this.authorizerPath = authorizerPath;
+  }
+  stateFlags() { return { active: false, phase: 'idle', staged: false, resumed: false, cleanupComplete: false, cleanupUncertain: false,
+    lifecyclePassed: false, errorCode: null, events: [], ...fixedFlags, initialFailure: null, cleanupFailure: null,
+    maximumLifetimeSeconds: PF_APP_SESSION_LEASE_SECONDS,
+    observationSeconds: this.observationMs > 0 ? this.observationMs / 1000 : null }; }
+  /* One authorized root session per Envara launch. The first attach opens it and
+   * the system asks for the administrator password once; every later attach in
+   * this launch reuses it, and quitting Envara is what closes it. The carrier is
+   * spawned inside the mux, so nothing runs and no dialog appears until the
+   * first attach actually acquires a run channel. */
+  ensureMux() {
+    return this.mux ??= createPFAuthorizedChannelMux({ spawnRootControlledLifecycle: () => this.spawnSharedCarrier() });
+  }
+  /* Only the verified fixed carrier is ever spawned, and only here. */
+  spawnSharedCarrier() {
+    return spawn(this.authorizerPath, ['--request-controlled-experiment'],
+      { shell: false, cwd: '/', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  }
+  acquireRunChannel(key) {
+    const target = this.ensureMux().acquire({ key });
+    this.runTargets.set(key, target);
+    return target;
+  }
+  /* Ending one run's channel leaves the shared authorized session open for the
+   * next attach; only disposeShared() closes the root session itself. */
+  closeRunChannel() {
+    const target = this.activeTarget; this.activeTarget = null;
+    if (target?.key) this.runTargets.delete(target.key);
+    try { target?.end?.(); } catch { /* already ended */ }
+    return Promise.resolve({ closed: true, cleanupUncertain: false });
+  }
+  async disposeShared() {
+    const mux = this.mux;
+    this.mux = null;
+    if (mux) await mux.dispose();
   }
   snapshot(applicationId) {
-    if (!this.state || applicationId && this.state.applicationId !== applicationId) return { applicationId: applicationId ?? null, active: false, phase: 'idle', staged: false,
-      resumed: false, cleanupComplete: false, cleanupUncertain: false, lifecyclePassed: false, errorCode: null, events: [], ...fixedFlags,
-      initialFailure: null, cleanupFailure: null, maximumLifetimeSeconds: 180, observationSeconds: this.observationMs / 1000 };
+    if (!this.state || applicationId && this.state.applicationId !== applicationId) return { applicationId: applicationId ?? null, ...this.stateFlags() };
     return structuredClone(this.state);
   }
   emit(stage, failure) {
     if (failure) this.captureFailure(failure, stage === 'stopping');
     const event = { sequence: this.state.events.length ? this.state.events.at(-1).sequence + 1 : 1, stage,
       ...(failure ? { code: safeCode(failure), ...nativeDiagnostic(failure) } : {}),
-      ...(!this.state.active && this.state.sessionDiagnostics ? { diagnostics: structuredClone(this.state.sessionDiagnostics) } : {}) };
+      ...(!this.state.active && this.state.sessionDiagnostics ? {
+        /* A long session's per-request numbers are what stays comparable; the
+         * observation window, when one exists, is reported separately. */
+        diagnostics: { ...structuredClone(this.state.sessionDiagnostics),
+          ...(Number.isFinite(this.observationSeconds) ? { observationSeconds: this.observationSeconds } : {}) } } : {}) };
     this.state.events.push(event); if (this.state.events.length > 64) this.state.events.shift();
     if (failure) this.state.errorCode ??= event.code;
     try { this.onEvent({ applicationId: this.state.applicationId, profileId: this.state.profileId, ...event })?.catch?.(() => {}); } catch { /* UI logging cannot alter cleanup. */ }
@@ -187,12 +267,16 @@ export class MacOSPFNotionTrial {
     else if (!this.state[key].native && failure.native && this.state[key].code === failure.code)
       this.state[key] = { ...failure };
   }
+  /* A snapshot the trial took while the application was still running must
+   * not erase the fact that it ended: the later cleanup receipts carry no such
+   * field, and silently dropping it would report a finished run as live. */
   captureSnapshot(value) {
     const first = projectPFNotionFailureDiagnostic(value?.initialFailure ?? value?.failure);
     if (first) this.captureFailure(first);
     const cleanup = projectPFNotionFailureDiagnostic(value?.cleanupFailure);
     if (cleanup) this.captureFailure({ cleanupFailure: cleanup }, true);
   }
+  /** Availability is a property of the fixed carrier, not of one application. */
   async available() {
     try { await this.verifyCandidate(); return { controlledNotionTrialAvailable: true, errorCode: null, ...fixedFlags }; }
     catch (failure) { return { controlledNotionTrialAvailable: false, errorCode: safeCode(failure), ...fixedFlags }; }
@@ -201,6 +285,52 @@ export class MacOSPFNotionTrial {
     if (this.pending && this.state.applicationId === applicationId) { this.state.stopRequested = true; this.stopObservation?.(); }
     return this.snapshot(applicationId);
   }
+  /* The running application is polled until it is stopped, it ends on its own,
+   * the owner quits, or a bounded trial's own window elapses. A poll is
+   * scheduled only after the previous one settled, so the channel never carries
+   * two outstanding requests and a finished run is never reported as unverified. */
+  async observe(call, runId, windowMs) {
+    let done = false, timer = null, settle;
+    const settleObservation = new Promise(resolve => { settle = resolve; });
+    const finish = () => { if (done) return; done = true; clearTimeout(timer); this.stopObservation = null;
+      Promise.resolve(this.observationInFlight).catch(() => {}).then(() => settle()); };
+    const poll = () => {
+      if (done) return;
+      if (this.state.stopRequested || this.closed ||
+          Number.isFinite(windowMs) && Date.now() - this.observedAt >= windowMs) {
+        if (Number.isFinite(windowMs)) this.state.observationCompleted = true;
+        finish(); return;
+      }
+      this.observationInFlight = (async () => {
+        try {
+          const current = await call('applicationSnapshot', { runId }, { timeoutMs: 5000 });
+          this.captureSnapshot(current);
+          if (current.applicationEnded === true) {
+            this.state.applicationEnded = true; this.state.applicationEndedChildReaped = current.endedChildReaped === true;
+            finish(); return;
+          }
+        } catch { /* A failed poll is not evidence; the run continues. */ }
+        if (!done) timer = setTimeout(poll, PF_ATTACH_POLL_INTERVAL_MS);
+      })();
+    };
+    this.observedAt = Date.now();
+    this.stopObservation = finish;
+    timer = setTimeout(poll, PF_ATTACH_POLL_INTERVAL_MS);
+    await settleObservation;
+  }
+  /* Stops the attached application and then tears the shared authorized session
+   * down. This is the quit path: Envara does not exit while a run is still live,
+   * and the root controller is closed here rather than left behind. */
+  async shutdownAll({ onProgress = () => {} } = {}) {
+    this.closed = true;
+    const pending = this.pending;
+    if (pending) { this.state.stopRequested = true; this.stopObservation?.(); }
+    try { await pending; } catch { /* the run records its own first failure */ }
+    try { await this.closeRunChannel(); } catch { /* a failed end is reported by the run */ }
+    try { await this.disposeShared(); } catch { /* dispose never spawns and never throws */ }
+    onProgress({ closed: true, cleanupUncertain: this.state?.cleanupUncertain === true });
+    return this.snapshot();
+  }
   run({ request, applicationId, activationAuthorized }) {
     if (this.pending || this.state?.cleanupUncertain) return Promise.reject(error(this.state?.cleanupUncertain ? 'PF_OWNED_RUNTIME_NOT_EMPTY' : 'PF_NOTION_TRIAL_BUSY'));
     if (activationAuthorized !== true || typeof applicationId !== 'string' || request?.application?.id !== applicationId)
@@ -208,7 +338,9 @@ export class MacOSPFNotionTrial {
     try { validatePFNotionSessionRequest('prepareRoute', request); } catch { return Promise.reject(error('PF_NOTION_TRIAL_REQUEST_INVALID')); }
     this.state = { applicationId, profileId: request.application.profileId, active: true, phase: 'verifying', staged: false, resumed: false,
       stopRequested: false, cleanupComplete: false, cleanupUncertain: false, lifecyclePassed: false, errorCode: null,
-      initialFailure: null, cleanupFailure: null, events: [], ...fixedFlags, maximumLifetimeSeconds: 180, observationSeconds: this.observationMs / 1000 };
+      initialFailure: null, cleanupFailure: null, events: [], ...fixedFlags,
+      maximumLifetimeSeconds: PF_APP_SESSION_LEASE_SECONDS,
+      observationSeconds: this.observationMs > 0 ? this.observationMs / 1000 : null };
     const task = this.execute(request); this.pending = task;
     task.finally(() => { if (this.pending === task) this.pending = null; }).catch(() => {});
     return task;
@@ -220,8 +352,12 @@ export class MacOSPFNotionTrial {
     const advance = (phase, failure) => { this.state.phase = phase; this.emit(phase, failure); };
     const checkStop = () => { if (this.state.stopRequested) throw error('PF_NOTION_TRIAL_STOPPED'); };
     try {
-      advance('verifying'); await this.verifyCandidate(); checkStop();
-      call = this.createClient(); advance('authorizing');
+      /* Both the carrier and the bound application are re-verified read-only.
+       * The bound bundle comes from the sealed request, never from the renderer
+       * at this point. */
+      const boundBundle = applicationBundleFor(request.application.executablePath);
+      advance('verifying'); await this.verifyCandidate({ applicationPath: boundBundle }); checkStop();
+      call = this.createClient({ runId }); advance('authorizing');
       const status = await call('status', { runId }, { timeoutMs: 60000 });
       if (status.anchor !== pfRoutingAnchor(runId)) throw error('PF_HELPER_RESPONSE_INVALID');
       this.state.statusFacts = Object.fromEntries(statusFacts.map(key => [key, status[key] === true]));
@@ -231,9 +367,10 @@ export class MacOSPFNotionTrial {
       const route = await call('prepareRoute', request, { timeoutMs: 15000 }); checkStop();
       prepared = true;
       // Register, first transport ACK and cold-stage ACK each have independent
-      // native deadlines. The client still clamps this wait to the 180s channel
-      // lifetime while reserving 40s for cleanup.
-      const stage = await call('prepareNotionApplication', { routeId: route.routeId, runId, environmentId, lifetimeSeconds: 180, activationAuthorized: true }, { timeoutMs: 110000 });
+      // native deadlines. A session-bound run has no channel lifetime to clamp
+      // to, so each of these waits is bounded only by its own timeout.
+      const stage = await call('prepareNotionApplication', { routeId: route.routeId, runId, environmentId,
+        lifetimeSeconds: PF_APP_SESSION_LEASE_SECONDS, activationAuthorized: true }, { timeoutMs: 110000 });
       this.captureSnapshot(stage);
       if (stage.phase !== 'staged' || stage.staged !== true || stage.resumed !== false)
         throw Object.assign(error(safeCode(stage.failure?.code ? stage.failure : { code: 'APPLICATION_APP_STAGE_UNCONFIRMED' })),
@@ -241,18 +378,19 @@ export class MacOSPFNotionTrial {
       this.state.staged = true; advance('staged'); checkStop();
       await this.verifyNotion(); checkStop(); advance('resuming');
       // This covers controller preflight plus cold native validation and ACK.
-      // The session client caps it at the remaining lifetime minus 40s cleanup.
       const resumed = await call('resumeNotionApplication', { runId, activationAuthorized: true }, { timeoutMs: PF_NOTION_RESUME_TIMEOUT_MS });
       this.captureSnapshot(resumed);
       if (resumed.phase !== 'running' || resumed.resumed !== true) throw error('APPLICATION_APP_RESUME_UNCONFIRMED');
       this.state.resumed = true; advance('running');
-      const observation = Math.min(this.observationMs, Math.max(0, call.snapshot().remainingMs - 40000));
-      if (!this.state.stopRequested && observation > 0) await new Promise(resolve => {
-        const timer = setTimeout(() => { this.stopObservation = null; resolve(); }, observation);
-        this.stopObservation = () => { clearTimeout(timer); this.stopObservation = null; resolve(); };
-      });
+      /* The application runs until it is stopped, it exits on its own, or
+       * Envara quits. There is no observation window: the run is kept honest by
+       * polling the controller, so an application that ended is reported as
+       * ended instead of being shown as running. A bounded trial keeps its
+       * window as an upper limit only. */
+      await this.observe(call, runId, this.observationMs > 0 ? this.observationMs : Infinity);
     } catch (failure) { this.emit('failed', failure); }
     finally {
+      this.stopObservation?.();
       this.stopObservation = null;
       if (prepared && call) {
         advance('stopping');
@@ -270,6 +408,9 @@ export class MacOSPFNotionTrial {
         try { const closed = await call.close({ timeoutMs: 15000 }); closeConfirmed = closed.closed === true && closed.cleanupUncertain === false;
           statusOnlyClosed = !prepared && closeConfirmed && validatePFNotionStatusOnlyCloseEvidence(closed.statusOnlyEvidence, runId); }
         catch (failure) { this.emit('stopping', failure); }
+        /* This run's virtual channel ends here; the shared authorized session
+         * stays open so the next attach asks for no password. */
+        try { await this.closeRunChannel(); } catch { /* reported by the run above */ }
         try { this.state.sessionDiagnostics = sessionDiagnostics(call.snapshot().diagnostics, runId, environmentId);
           if (this.state.sessionDiagnostics && this.state.applicationSnapshotDiagnostic)
             this.state.sessionDiagnostics.lastApplicationSnapshot = structuredClone(this.state.applicationSnapshotDiagnostic); }

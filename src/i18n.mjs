@@ -12,7 +12,7 @@ import { networkFlowTranslations } from './network-flow-translations.mjs';
 export const english = {
   "首次错误": "Initial failure",
   "清理错误": "Cleanup failure",
-  "上次试运行": "Previous trial",
+  "上次附加": "Previous attachment",
   "导出诊断": "Export diagnostics",
 
   "欢迎使用 Envara": "Welcome to Envara",

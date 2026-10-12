@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { localeForInterfaceLanguage } from "../shared/interface-languages.mjs";
 import { savedNetworkPresentation } from "./network-flow-state.mjs";
-import { notionTrialControls, notionTrialLogLine, notionTrialFailureLine, notionTrialPhaseLabels } from "./notion-trial-state.mjs";
+import { notionTrialControls, notionTrialLogLine, notionTrialFailureLine, notionTrialPhaseLabels, notionTrialErrorHint } from "./notion-trial-state.mjs";
 import { Stack, GlobeHemisphereWest, FolderOpen, Plus, Play, Stop, Trash, Desktop, ShieldCheck, WarningCircle, ArrowRight, PencilSimple, Browsers, TerminalWindow, Clock } from "@phosphor-icons/react";
 const live = new Set(["starting", "running", "stopping"]);
 function WorkspaceEmpty({
@@ -125,6 +125,11 @@ export function ApplicationsWorkspace({
   const rows = tab === "all" ? applications : applications.filter(item => item.profileId === selectedId);
   const ready = routing?.ready === true;
   const canInstall = desktop && routing?.backend === "pf-utun" && routing?.installed !== true && routing?.component?.available === true && routing?.component?.verified === true;
+  /* An installed component that predates this app build is self-consistent, so
+   * it still reports installed. The fixed carrier pin is what detects it, which
+   * is why the upgrade button keys off that error rather than installed. */
+  const staleComponent = desktop && routing?.backend === "pf-utun" && routing?.controlledNotionTrialErrorCode === "PF_INSTALLED_CANDIDATE_MISMATCH";
+  const canUpgrade = staleComponent && routing?.component?.available === true && routing?.component?.verified === true;
   const routingChecks = { tcp: "TCP 转发", udp: "UDP 转发或阻断", dns: "DNS 出口", childProcesses: "子进程接管", failClosed: "断线阻断", ...(routing?.backend === "pf-utun" ? { guard: "守护进程保护", unrelatedApps: "其他软件网络", nativeAcceptance: "实机验证" } : {}) };
   return <div className="applications-workspace">
     <div className="application-context-strip">
@@ -134,6 +139,7 @@ export function ApplicationsWorkspace({
     </div>
     {!ready && <div className="routing-readiness" role="status"><ShieldCheck size={19} /><div><strong>{t(!desktop ? "本地软件需要桌面应用" : routing?.status === "prepared" ? "网络组件已准备" : routing?.status === "authorization-required" ? "需要系统授权" : "网络接管尚未就绪")}</strong><span>{t(routing?.message || "完成系统网络组件安装后，才能启动附加软件。")}</span>{desktop && routing?.component && <details className="routing-checks"><summary>{t("查看验证进度")}</summary><div><span>{routing.component.name}{routing.component.version ? ` · ${routing.component.version}` : ""}</span>{Object.entries(routingChecks).map(([key, label]) => <span key={key}>{t(label)}<small>{t((routing.verification?.checks?.[key] ?? routing.systemChecks?.[key]) === true ? "已验证" : "待验证")}</small></span>)}</div></details>}</div>{desktop && <button className="button" onClick={onSetup} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "检查中…" : "检查系统组件")}</button>}</div>}
     {canInstall && <div className="detail-actions"><button className="button" onClick={onInstall} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "安装中…" : "安装网络组件")}</button></div>}
+    {canUpgrade && <div className="detail-actions"><button className="button primary" onClick={onInstall} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "更新中…" : "更新网络组件")}</button><span className="routing-upgrade-note">{t("已安装的网络组件早于当前应用版本，需要更新后才能附加软件。")}</span></div>}
     {ready && <div className="routing-ready"><ShieldCheck size={16} /><span>{t("网络接管已就绪")}</span></div>}
     <div className="workspace-segments"><button className={tab === "environment" ? "selected" : ""} onClick={() => setTab("environment")}>{t("当前境舱")}</button><button className={tab === "all" ? "selected" : ""} onClick={() => setTab("all")}>{t("全部软件")}<span>{applications.length}</span></button></div>
     {rows.length ? <div className="application-list">{rows.map(application => {
@@ -142,24 +148,28 @@ export function ApplicationsWorkspace({
         const controlled = notionTrialControls(application, routing, desktop, pending);
         const diagnostics = controlled.trial?.events.length > 0 ? controlled.trial : controlled.history;
         const historicalDiagnostics = diagnostics != null && diagnostics === controlled.history;
-        const capabilityError = desktop && application.identity === "bundle:notion.id" && !controlled.available && typeof routing?.controlledNotionTrialErrorCode === "string" && /^PF_[A-Z0-9_]{1,80}$/.test(routing.controlledNotionTrialErrorCode) ? routing.controlledNotionTrialErrorCode : null;
+        const capabilityError = desktop && typeof application.identity === "string" && application.identity && !controlled.available && typeof routing?.controlledNotionTrialErrorCode === "string" && /^PF_[A-Z0-9_]{1,80}$/.test(routing.controlledNotionTrialErrorCode) ? routing.controlledNotionTrialErrorCode : null;
+        const trialHint = notionTrialErrorHint(controlled.trial?.errorCode ?? diagnostics?.initialFailure?.code);
         const busy = pending[`startApplication:${application.id}`] || pending[`stopApplication:${application.id}`] || pending[`deleteApplication:${application.id}`] || controlled.active || controlled.stopPending;
         return <div className="application-row" key={application.id}>
         <div className="application-icon"><Desktop size={24} /></div>
         <div className="application-copy"><strong>{application.name}</strong><span>{owner?.name || t("环境不可用")}</span><small title={application.path}>{application.path}</small>{application.lastError && <p className="application-error"><WarningCircle size={14} />{t(typeof application.lastError === "string" ? application.lastError : application.lastError.message)}</p>}
           {capabilityError && <p className="notion-trial-error" role="status">{t("错误码")} · <code>{capabilityError}</code></p>}
           {controlled.show && <div className="notion-trial-panel">
-            <div className="notion-trial-actions">{controlled.available && <button className="button" disabled={!owner || !controlled.canRun || active} onClick={() => onRunNotionTrial(application)}><Play size={14} />{t("试运行 Notion")}</button>}{controlled.trial?.active && <button className="button" disabled={!controlled.canStop} onClick={() => onStopNotionTrial(application)}><Stop size={14} />{t("停止试运行")}</button>}</div>
-            <p className="notion-trial-scope">{t(controlled.active ? "测试中 · 最长3分钟 · 接管未验收" : "最长3分钟 · 接管未验收")}</p>
+            <div className="notion-trial-actions">{controlled.available && <button className="button" disabled={!owner || !controlled.canRun || active} onClick={() => onRunNotionTrial(application)}><Play size={14} />{t("附加软件")}</button>}{controlled.trial?.active && <button className="button" disabled={!controlled.canStop} onClick={() => onStopNotionTrial(application)}><Stop size={14} />{t("停止附加")}</button>}</div>
+            <p className="notion-trial-scope">{t(controlled.active ? "附加中 · 不会自动结束 · 接管未验收" : "不会自动结束 · 接管未验收")}</p>
+            <p className="notion-trial-scope">{t("附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。")}</p>
+            {controlled.active && <p className="notion-trial-scope">{t("首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。")}</p>}
             {controlled.trial && <div className="notion-trial-status" role="status"><span>{t("阶段")} · {t(notionTrialPhaseLabels[controlled.trial.phase])}</span>{controlled.trial.errorCode && <span className="notion-trial-error">{t("错误码")} · <code>{controlled.trial.errorCode}</code></span>}</div>}
-            {historicalDiagnostics && <p className="notion-trial-scope">{t("上次试运行")}</p>}
+            {historicalDiagnostics && <p className="notion-trial-scope">{t("上次附加")}</p>}
             {diagnostics?.initialFailure && <p className="notion-trial-error"><span>{t("首次错误")} · </span><code>{notionTrialFailureLine(diagnostics.initialFailure)}</code></p>}
+            {trialHint && <p className="notion-trial-scope">{t(trialHint)}</p>}
             {diagnostics?.cleanupFailure && <p className="notion-trial-error"><span>{t("清理错误")} · </span><code>{notionTrialFailureLine(diagnostics.cleanupFailure)}</code></p>}
             {diagnostics?.events.length > 0 && <details className="notion-trial-log"><summary>{t(historicalDiagnostics ? "查看日志" : "查看本次日志")}</summary><div>{diagnostics.events.map((event, index) => <code key={`${event.sequence}-${index}`}>{notionTrialLogLine(event)}</code>)}</div></details>}
             {(diagnostics?.events.length > 0 || diagnostics?.initialFailure) && typeof onExportNotionDiagnostics === "function" && <button className="button" disabled={pending[`exportNotionDiagnostics:${application.id}`]} onClick={() => onExportNotionDiagnostics(application)}>{t("导出诊断")}</button>}
           </div>}
         </div>
-        <span className={`status status-${controlled.active ? "starting" : application.status}`}><span className="status-dot" />{controlled.active ? t("测试中") : t({
+        <span className={`status status-${controlled.active ? "starting" : application.status}`}><span className="status-dot" />{controlled.active ? t("附加中") : t({
               stopped: "已停止",
               starting: "启动中",
               running: "运行中",

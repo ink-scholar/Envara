@@ -116,9 +116,11 @@ static void guardian(const char *scenario, pid_t controller, pid_t peer, int lea
     if (child < 0) _exit(84);
     if (!child) { close(scope[0]); own_child(scope[1], !strcmp(scenario, "descendant")); }
     close(scope[1]);
+    int heartbeat = !strcmp(scenario, "heartbeat-lost") || !strcmp(scenario, "heartbeat-kept");
     struct envara_launch_guard_request request = {.fixture_only = 1, .dependency_count = 2,
         .lease_fd = lease_reader, .recovery_fd = recovery_reader, .retained_fd = original_fd,
-        .lease_milliseconds = !strcmp(scenario, "expiry") ? 250 : 5000};
+        .lease_milliseconds = !strcmp(scenario, "expiry") ? 250 : 5000,
+        .heartbeat_timeout_milliseconds = heartbeat ? 1000 : 0};
     if (envara_identity_read(child, &request.child.identity) ||
         envara_identity_read(controller, &request.dependencies[0]) ||
         envara_identity_read(peer, &request.dependencies[1])) { kill(child, SIGKILL); waitpid(child, NULL, 0); _exit(85); }
@@ -338,6 +340,17 @@ int main(int argc, char **argv) {
                 if (write(command[1], "K", 1) != 1) failed = 1;
                 nanosleep(&keep_delay, NULL);
                 if (write(command[1], "K", 1) != 1) failed = 1;
+            } else if (!strcmp(scenario, "heartbeat-lost")) {
+                /* One heartbeat arms the 1s awake-time window; silence revokes. */
+                if (write(command[1], "K", 1) != 1) failed = 1;
+            } else if (!strcmp(scenario, "heartbeat-kept")) {
+                /* Heartbeats well past the window keep custody; only S revokes. */
+                struct timespec beat = {0, 250000000};
+                for (int i = 0; i < 9 && !failed; i++) {
+                    if (write(command[1], "K", 1) != 1) failed = 1;
+                    nanosleep(&beat, NULL);
+                }
+                if (!failed && write(command[1], "S", 1) != 1) failed = 1;
             } else if (write(command[1], &fault, 1) != 1) failed = 1;
             if (!failed && wait_event(report[0], ENVARA_GUARD_REVOKED, &record)) failed = 1;
             reason = record.report.reason;

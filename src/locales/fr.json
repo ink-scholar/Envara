@@ -566,6 +566,6 @@
   "TLS 服务器名称 / SNI（选填）": "Nom du serveur TLS / SNI (facultatif)",
   "首次错误": "Erreur initiale",
   "清理错误": "Erreur de nettoyage",
-  "上次试运行": "Essai précédent",
+  "上次附加": "Joint précédemment",
   "导出诊断": "Exporter le diagnostic"
 }

@@ -10,13 +10,20 @@
  * loop in its own process (independent of the JavaScript controller). */
 #define ENVARA_LAUNCH_GUARDIAN_READY 0
 #define ENVARA_LAUNCH_GUARDIAN_MAX_PEERS 3
+/* A session-bound attached application keeps running until it is stopped,
+ * exits, or Envara quits. The sealed lease is only an outer bound (30 days);
+ * liveness comes from the controller heartbeat below. */
+#define ENVARA_LAUNCH_GUARDIAN_MAX_LEASE_MS 2592000000U
+#define ENVARA_LAUNCH_GUARDIAN_MIN_HEARTBEAT_MS 1000U
+#define ENVARA_LAUNCH_GUARDIAN_MAX_HEARTBEAT_MS 60000U
 
 enum envara_launch_guard_reason {
     ENVARA_GUARD_NONE, ENVARA_GUARD_LEASE_CLOSED, ENVARA_GUARD_INVALID_COMMAND,
     ENVARA_GUARD_DEPENDENCY_EXITED, ENVARA_GUARD_DEPENDENCY_CHANGED,
     ENVARA_GUARD_LEASE_EXPIRED, ENVARA_GUARD_SIGNAL, ENVARA_GUARD_CHILD_EXITED,
     ENVARA_GUARD_DENY_UNCONFIRMED, ENVARA_GUARD_INSPECTION_UNAVAILABLE,
-    ENVARA_GUARD_RESUME_REFUSED, ENVARA_GUARD_EXECUTION_UNVERIFIED
+    ENVARA_GUARD_RESUME_REFUSED, ENVARA_GUARD_EXECUTION_UNVERIFIED,
+    ENVARA_GUARD_HEARTBEAT_LOST
 };
 enum envara_launch_guard_event {
     ENVARA_GUARD_ARMED, ENVARA_GUARD_REVOKED, ENVARA_GUARD_CHILD_REAPED,
@@ -48,7 +55,12 @@ struct envara_launch_guard_request {
     int lease_fd, recovery_fd; /* Distinct anonymous pipe read ends, CLOEXEC. */
     int retained_fd; /* Held original utun FD; fixture: own AF_UNIX socket. */
     char tunnel_name[16]; /* Production must agree with the held utun socket. */
-    unsigned lease_milliseconds; /* Fixed nonrenewable 1..3,600,000 ms lease. */
+    unsigned lease_milliseconds; /* Fixed nonrenewable 1..MAX_LEASE_MS lease. */
+    /* Controller heartbeat window, measured in awake time (CLOCK_UPTIME_RAW,
+     * so a sleeping Mac does not revoke on wake). The first 'K' arms it; any
+     * later gap at least this long revokes once. 0 disables it and is accepted
+     * only for fixtures; production requires MIN..MAX_HEARTBEAT_MS. */
+    unsigned heartbeat_timeout_milliseconds;
     /* Optional compiled authority; never supplied over the command protocol.
      * B is once, only for the exact stopped native child. verify_resume must
      * freshly inspect the sealed target and live policy; verify_executed is
@@ -62,8 +74,9 @@ struct envara_launch_guard_request {
 /* On successful arming this takes custody of a CLOEXEC duplicate, preserving
  * the caller's FD. Faults terminate only the unreaped direct child and retain
  * custody indefinitely. Recovery 'R' releases only after child reap plus BOTH
- * fixed native checks. Lease 'K' is a no-op; 'S', EOF, malformed bytes, watched
- * process exit/exec/identity changes, expiry, or TERM/INT/HUP revoke once.
+ * fixed native checks. Lease 'K' is the controller heartbeat; 'S', EOF,
+ * malformed bytes, watched process exit/exec/identity changes, expiry, a lost
+ * heartbeat, or TERM/INT/HUP revoke once.
  * Optional B sends SIGCONT once after fresh native checks, then waits at most
  * five seconds for exact execution proof before emitting RESUMED. SIGCONT
  * alone is not success. B without both callbacks or repeated B revokes.

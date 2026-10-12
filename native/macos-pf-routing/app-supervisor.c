@@ -57,7 +57,8 @@ static int reader(int fd, struct stat *info) {
 static int guard_preflight(struct keeper *k, int fixture) {
     struct envara_launch_guard_request *g = &k->guard; struct stat a, b, socket;
     if (g->fixture_only != fixture || g->dependency_count < 1 || g->dependency_count > 3 ||
-        (!fixture && g->dependency_count != 3) || !g->lease_milliseconds || g->lease_milliseconds > 3600000 ||
+        (!fixture && g->dependency_count != 3) || !g->lease_milliseconds || g->lease_milliseconds > ENVARA_LAUNCH_GUARDIAN_MAX_LEASE_MS ||
+        (!fixture && !g->heartbeat_timeout_milliseconds) ||
         !k->authority.verify_persistent_deny || !k->authority.verify_scope_quiescent ||
         g->lease_fd == g->recovery_fd || g->lease_fd == g->retained_fd || g->recovery_fd == g->retained_fd ||
         !reader(g->lease_fd, &a) || !reader(g->recovery_fd, &b) || (a.st_dev == b.st_dev && a.st_ino == b.st_ino) ||

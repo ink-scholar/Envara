@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #define LEDGER_NAME "io.envara.pf-run-ledger"
+#define ARCHIVE_LEAF "io.envara.pf-run-ledger-archive"
 #define EVENT_LIMIT ENVARA_PF_RUN_LEASE_LIMIT
 #define LEASE_SCHEMA "envara.macos-pf-owned-root-hook-lease/v2"
 #define ALLOCATION_SCHEMA "envara.macos-pf-run-allocation/v2"
@@ -337,8 +338,82 @@ static int read_run(int run,const char *run_id,RunRecord *record) {
     }
     return 1;
 }
+/* An archived run UUID is consumed forever: allocation refuses it, and it is
+ * reported as retired rather than unused, so no live state is ever adopted from
+ * an archived receipt. Read-only and bounded, like the live inventory. */
+static int archived_run(LedgerRoot *base,const char *wanted,int *found) {
+    *found=0;
+    int directory=openat(base->parent,ARCHIVE_LEAF,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if(directory<0) return errno==ENOENT ? 1 : 0;
+    struct stat held,path_stat;
+    if(!safe_directory(directory,1,0,&held) || fstatat(base->parent,ARCHIVE_LEAF,&path_stat,AT_SYMLINK_NOFOLLOW) ||
+        !identity(&held,&path_stat)) { close(directory); return refused(EPERM); }
+    DIR *listing=fdopendir(directory);
+    if(!listing) { close(directory); return 0; }
+    struct dirent *entry; errno=0;
+    while((entry=readdir(listing))) {
+        if(!strcmp(entry->d_name,".") || !strcmp(entry->d_name,"..")) continue;
+        if(!strcmp(entry->d_name,wanted)) { *found=1; break; }
+    }
+    int scan_error=errno; closedir(listing);
+    if(scan_error) return refused(EIO);
+    return 1;
+}
+/* Terminal receipts are moved out of the live inventory into the archive
+ * directory. Only a fully read_run-verified RETIRED row can move, and the move
+ * is name-exclusive: an existing archive entry is never overwritten. */
+static int archive_open(LedgerRoot *base) {
+    if(mkdirat(base->parent,ARCHIVE_LEAF,0700) && errno!=EEXIST) return 0;
+    int directory=openat(base->parent,ARCHIVE_LEAF,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if(directory<0) return 0;
+    struct stat held,path;
+    int okay=safe_directory(directory,1,0,&held) && !fstatat(base->parent,ARCHIVE_LEAF,&path,AT_SYMLINK_NOFOLLOW) &&
+        identity(&path,&held);
+    if(!okay) { int saved=errno; close(directory); errno=saved; return 0; }
+    return directory;
+}
+static int archive_rename(LedgerRoot *base,int directory,const char *name) {
+    if(renameatx_np(base->root,name,directory,name,RENAME_EXCL)==0) return 1;
+    if(errno!=EEXIST) return 0;
+    /* The name is already archived. Accept it only as a full, safe directory
+     * of this owner, never as a partial or foreign entry. */
+    int existing=openat(directory,name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if(existing<0) return 0;
+    struct stat held; int okay=safe_directory(existing,1,0,&held);
+    close(existing); return okay;
+}
+static int archive_prune(int directory) {
+    struct Entry { time_t seconds; long nanoseconds; char name[NAME_MAX+1]; } rows[ENVARA_PF_RUN_LEDGER_ARCHIVE_MAX];
+    size_t count=0; DIR *listing=fdopendir(dup(directory));
+    if(!listing) return 0;
+    struct dirent *entry; errno=0;
+    while((entry=readdir(listing))) {
+        if(!strcmp(entry->d_name,".") || !strcmp(entry->d_name,"..")) continue;
+        if(!envara_pf_run_uuid_valid(entry->d_name)) continue;
+        struct stat info;
+        if(fstatat(directory,entry->d_name,&info,AT_SYMLINK_NOFOLLOW)) continue;
+        if(count<ENVARA_PF_RUN_LEDGER_ARCHIVE_MAX) {
+            rows[count].seconds=info.st_mtimespec.tv_sec; rows[count].nanoseconds=info.st_mtimespec.tv_nsec;
+            strncpy(rows[count].name,entry->d_name,NAME_MAX); rows[count].name[NAME_MAX]=0; count++;
+        }
+        errno=0;
+    }
+    int scan_error=errno; closedir(listing);
+    if(scan_error) return refused(EIO);
+    /* Oldest first, bounded: a stale archive entry is evidence with no live
+     * authority, so dropping the oldest is safe. A failed delete is retried on
+     * the next allocation rather than treated as a fatal ledger fault. */
+    while(count>ENVARA_PF_RUN_LEDGER_ARCHIVE_MAX-1) {
+        size_t oldest=0;
+        for(size_t i=1;i<count;i++) if(rows[i].seconds<rows[oldest].seconds ||
+            (rows[i].seconds==rows[oldest].seconds && rows[i].nanoseconds<rows[oldest].nanoseconds)) oldest=i;
+        if(unlinkat(directory,rows[oldest].name,AT_REMOVEDIR) && errno!=ENOENT) return 0;
+        memcpy(&rows[oldest],&rows[count-1],sizeof(rows[0])); count--;
+    }
+    return 1;
+}
 /* Validate every bounded sibling record, not merely the requested name. */
-static int inventory(LedgerRoot *base,const char *wanted,RunRecord *record,int *found,size_t *count) {
+static int inventory(LedgerRoot *base,const char *wanted,RunRecord *record,int *found,size_t *count,int archive_terminal) {
     *found=0; *count=0; if(record) { memset(record,0,sizeof(*record)); record->state=ENVARA_PF_RUN_UNUSED; }
     if(base->root<0) return 1;
     if(!held_base(base)) return 0;
@@ -357,6 +432,58 @@ static int inventory(LedgerRoot *base,const char *wanted,RunRecord *record,int *
     }
     int scan_error=errno; closedir(directory);
     if(!okay || scan_error || !held_base(base)) return refused(EPROTO);
+    if(archive_terminal && *count) {
+        /* Only fully verified terminal receipts leave the live inventory, and
+         * only while this exclusive handle holds the ledger lock. The requested
+         * record is never moved: the caller is about to decide on it. A run
+         * that cannot be archived stays live and keeps consuming a slot, so an
+         * unclear record is never silently discarded. */
+        int archived_directory=archive_open(base);
+        if(archived_directory>=0) {
+            char(*names)[NAME_MAX+1]=calloc(ENVARA_PF_RUN_LEDGER_MAX_RUNS,sizeof(*names));
+            size_t terminal_count=0;
+            DIR *listing=fdopendir(dup(base->root));
+            if(names && listing) {
+                struct dirent *row; errno=0;
+                while((row=readdir(listing))) {
+                    if(!envara_pf_run_uuid_valid(row->d_name) || !strcmp(row->d_name,wanted)) { errno=0; continue; }
+                    int run=openat(base->root,row->d_name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+                    RunRecord candidate; struct stat held,path;
+                    int terminal=run>=0 && safe_directory(run,1,0,&held) && read_run(run,row->d_name,&candidate) &&
+                        !fstatat(base->root,row->d_name,&path,AT_SYMLINK_NOFOLLOW) && identity(&held,&path) &&
+                        candidate.state==ENVARA_PF_RUN_RETIRED &&
+                        candidate.retirement==ENVARA_PF_RUN_ROOT_RESTORED_NAMESPACE_ABSENT;
+                    if(run>=0) close(run);
+                    if(terminal && terminal_count<ENVARA_PF_RUN_LEDGER_MAX_RUNS)
+                        strncpy(names[terminal_count++],row->d_name,NAME_MAX);
+                    errno=0;
+                }
+                int sweep_error=errno; closedir(listing);
+                if(!sweep_error && terminal_count) {
+                    int moved=0;
+                    for(size_t i=0;i<terminal_count;i++) if(archive_rename(base,archived_directory,names[i])) moved++;
+                    if(moved) { (void)fsync(base->root); (void)fsync(archived_directory); (void)archive_prune(archived_directory); }
+                }
+            } else if(listing) closedir(listing);
+            free(names);
+            close(archived_directory);
+            /* The caller's live count is re-derived after the sweep. */
+            *count=0;
+            DIR *after=fdopendir(dup(base->root));
+            if(!after) return 0;
+            struct dirent *leftover; errno=0;
+            while((leftover=readdir(after))) if(envara_pf_run_uuid_valid(leftover->d_name) && ++*count>ENVARA_PF_RUN_LEDGER_MAX_RUNS) break;
+            int residual=errno; closedir(after);
+            if(residual) return refused(EIO);
+            if(!held_base(base)) return 0;
+        }
+    }
+    if(!*found) {
+        int archived=0;
+        if(!archived_run(base,wanted,&archived)) return 0;
+        if(archived) { *found=1; if(record) { record->state=ENVARA_PF_RUN_RETIRED;
+            record->retirement=ENVARA_PF_RUN_ROOT_RESTORED_NAMESPACE_ABSENT; } }
+    }
     return 1;
 }
 static int inspect_internal(const char *run_id,const char *lease,size_t length,int exact,EnvaraPFRunLedgerState *state) {
@@ -364,7 +491,7 @@ static int inspect_internal(const char *run_id,const char *lease,size_t length,i
     if(!state || !envara_pf_run_uuid_valid(run_id) || (exact && !canonical_lease(run_id,lease,length))) return refused(EINVAL);
     LedgerRoot base; if(!open_base(0,0,&base)) return 0;
     RunRecord record; int found; size_t count;
-    int okay=inventory(&base,run_id,&record,&found,&count);
+    int okay=inventory(&base,run_id,&record,&found,&count,0);
     if(okay && exact && (!found || !record.issued_length || record.issued_length!=length || memcmp(record.issued,lease,length))) okay=refused(EPROTO);
     if(okay) *state=found?record.state:count>=ENVARA_PF_RUN_LEDGER_MAX_RUNS?ENVARA_PF_RUN_CAPACITY_EXHAUSTED:ENVARA_PF_RUN_UNUSED;
     close_base(&base); return okay;
@@ -406,7 +533,7 @@ static int write_event(EnvaraPFRunLedger *ledger,const char *name,const char *by
 }
 static int refresh(EnvaraPFRunLedger *ledger) {
     if(!held_run(ledger)) return 0; RunRecord record; int found; size_t count;
-    if(!inventory(&ledger->base,ledger->run_id,&record,&found,&count) || !found || !held_run(ledger)) return refused(EPROTO);
+    if(!inventory(&ledger->base,ledger->run_id,&record,&found,&count,0) || !found || !held_run(ledger)) return refused(EPROTO);
     if(ledger->record.issued_length && (record.issued_length!=ledger->record.issued_length ||
         memcmp(record.issued,ledger->record.issued,record.issued_length))) return refused(EPROTO);
     ledger->record=record; return 1;
@@ -416,7 +543,7 @@ int envara_pf_run_ledger_allocate(const char *run_id,EnvaraPFRunLedger **out) {
     EnvaraPFRunLedger *ledger=new_handle(); if(!ledger) return 0;
     if(!open_base(1,1,&ledger->base)) goto failed;
     RunRecord record; int found; size_t count;
-    if(!inventory(&ledger->base,run_id,&record,&found,&count)) goto failed;
+    if(!inventory(&ledger->base,run_id,&record,&found,&count,1)) goto failed;
     if(found) { refused(EEXIST); goto failed; }
     if(count>=ENVARA_PF_RUN_LEDGER_MAX_RUNS) { refused(ENOSPC); goto failed; }
     strcpy(ledger->run_id,run_id); if(!envara_pf_run_anchor(run_id,ledger->anchor)) goto failed;
@@ -441,7 +568,7 @@ int envara_pf_run_ledger_open_issued(const char *run_id,const char *lease,size_t
     EnvaraPFRunLedger *ledger=new_handle(); if(!ledger) return 0;
     if(!open_base(0,1,&ledger->base) || ledger->base.root<0) goto failed;
     int found; size_t count;
-    if(!inventory(&ledger->base,run_id,&ledger->record,&found,&count) || !found ||
+    if(!inventory(&ledger->base,run_id,&ledger->record,&found,&count,0) || !found ||
         ledger->record.state!=ENVARA_PF_RUN_ISSUED || ledger->record.issued_length!=length ||
         memcmp(ledger->record.issued,lease,length)) { refused(EPERM); goto failed; }
     strcpy(ledger->run_id,run_id); if(!envara_pf_run_anchor(run_id,ledger->anchor)) goto failed;

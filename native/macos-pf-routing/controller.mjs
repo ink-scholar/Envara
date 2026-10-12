@@ -22,6 +22,20 @@ const PF_APP_CONTEXT_CLOCK_SCHEMA = 'envara.macos-pf-app-context-clock/v1';
 const PF_APP_TRANSPORT_SCHEMA = 'envara.macos-pf-app-transport/v1';
 const PF_APP_KEEPER_SCHEMA = 'envara.pf-app-keeper/v1';
 const APP_KEEPER_RESUME_NEGATIVE_EVENTS = new Set(['stopping', 'released', 'release-refused']);
+/* A keeper frame carries the fixed native profile it was produced under. The
+ * run's first frame fixes the expected profile for that run; every later frame
+ * must match it. Previously only the front-only profile was accepted by name,
+ * so a cold-profile application's own frames were treated as foreign and an
+ * application that ended on its own was never reported as ended. Binding to
+ * the run's own profile keeps foreign frames refused without that blind spot. */
+function keeperProfile(entry) {
+  if (!entry) return null;
+  return entry.keeperProfile ?? null;
+}
+function observeKeeperProfile(entry, event) {
+  if (!entry || typeof event?.profile !== 'string') return;
+  if (entry.keeperProfile === undefined || entry.keeperProfile === null) entry.keeperProfile = event.profile;
+}
 const APP_KEEPER_REPORT_BOOLEANS = ['persistentDenyObserved', 'stoppedBeforeExec', 'childReaped', 'scopeQuiescentObserved',
   'resumeSent', 'resumed', 'cancelSent', 'executedIdentityVerified', 'seatbeltAppliedByFixedExec', 'frontAdmissionVerified', 'ready', 'protected'];
 const APP_KEEPER_REPORT_KEYS = ['schema', 'event', 'ticketId', 'registrationId', 'versionId', 'environmentId', 'runId',
@@ -1025,7 +1039,7 @@ export class MacOSPFExecutor {
               const boundKeeperFrame = event.schema === PF_APP_KEEPER_SCHEMA && ['stopped', 'resumed', 'released'].includes(event.event) &&
                   event.ticketId === entry.ticketId && event.registrationId === entry.registrationId && event.versionId === entry.versionId &&
                   event.keeperPID === entry.ack?.keeperPID && Object.keys(event).sort().join('|') === APP_KEEPER_REPORT_KEYS &&
-                  APP_KEEPER_REPORT_BOOLEANS.every(key => typeof event[key] === 'boolean') && event.profile === 'seatbelt-front-only' &&
+                  APP_KEEPER_REPORT_BOOLEANS.every(key => typeof event[key] === 'boolean') && event.profile === keeperProfile(entry) &&
                   (!entry.stoppedIdentity || event.pid === entry.stoppedIdentity.pid && event.birth === entry.stoppedIdentity.birth);
               if (boundKeeperFrame) {
                 if (event.event === 'released' && entry.guardianArmed === true && event.childReaped === true &&
@@ -1065,7 +1079,7 @@ export class MacOSPFExecutor {
             if (APP_KEEPER_RESUME_NEGATIVE_EVENTS.has(event.event) && entry.stoppedIdentity && !entry.stoppingRequested &&
                 !entry.releasing && ['transport-started', 'stopped'].includes(entry.phase)) {
               if (!boundKeeper || Object.keys(event).sort().join('|') !== APP_KEEPER_REPORT_KEYS ||
-                  APP_KEEPER_REPORT_BOOLEANS.some(key => typeof event[key] !== 'boolean') || event.profile !== 'seatbelt-front-only' ||
+                  APP_KEEPER_REPORT_BOOLEANS.some(key => typeof event[key] !== 'boolean') || event.profile !== keeperProfile(entry) ||
                   event.pid !== entry.stoppedIdentity.pid || event.birth !== entry.stoppedIdentity.birth) throw new Error();
               // This is refusal evidence only. Preserve the original channel
               // solely for exact cleanup, and never admit a late resume ACK.
@@ -1080,11 +1094,12 @@ export class MacOSPFExecutor {
             if (event.event === 'stopping' && boundKeeper && entry.phase === 'resumed' &&
                 entry.stoppingRequested !== true && entry.releasing !== true &&
                 Object.keys(event).sort().join('|') === APP_KEEPER_REPORT_KEYS &&
-                APP_KEEPER_REPORT_BOOLEANS.every(key => typeof event[key] === 'boolean') && event.profile === 'seatbelt-front-only') {
+                APP_KEEPER_REPORT_BOOLEANS.every(key => typeof event[key] === 'boolean') && event.profile === keeperProfile(entry)) {
               entry.applicationEnded = Object.freeze({ pid: event.pid, birth: event.birth,
                 childReaped: event.childReaped === true, childSignalled: event.cancelSent === true });
             }
           }
+          observeKeeperProfile(entry, event);
           entry.events.push(event);
           for (const waiter of [...entry.waiters]) if (waiter.predicate(event)) {
             // A delayed event loop must not turn an expired ACK into success.
@@ -1204,6 +1219,11 @@ export class MacOSPFExecutor {
     entry.child.stdin.write(`${command}${command === 'L' ? ` ${ticketId}` : ''}\n`);
     if (!waiting) return { acknowledged: false, ...appFlags() };
     const event = await waiting;
+    /* An ACK can resolve through entry.wait before the main loop's own pass, so
+     * the profile it fixes is recorded here too. The resume ACK is what actually
+     * establishes which profile the run is running under. */
+    observeKeeperProfile(entry, event);
+    if (command === 'B' && typeof event.profile === 'string') entry.keeperProfile = event.profile;
     if (entry.uncertain) throw failure(command === 'B' && entry.resumeRefused ? 'APPLICATION_APP_RESUME_UNCONFIRMED' : 'APPLICATION_APP_TRANSPORT_UNCONFIRMED');
     /* The main loop's cleanup frame and the guardian's keeper frame are
      * different proofs from different native states; each is checked by its own
@@ -1220,7 +1240,7 @@ export class MacOSPFExecutor {
      * negative-event path applies, or it is not proof of anything. */
     if (command === 'S' && guardianOnly) {
       if (Object.keys(event).sort().join('|') !== APP_KEEPER_REPORT_KEYS ||
-          APP_KEEPER_REPORT_BOOLEANS.some(key => typeof event[key] !== 'boolean') || event.profile !== 'seatbelt-front-only' ||
+          APP_KEEPER_REPORT_BOOLEANS.some(key => typeof event[key] !== 'boolean') || event.profile !== keeperProfile(entry) ||
           event.keeperPID !== entry.ack.keeperPID || event.persistentDenyObserved !== true ||
           event.pid !== entry.stoppedIdentity?.pid || event.birth !== entry.stoppedIdentity?.birth) {
         entry.poison(); throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
@@ -2089,8 +2109,12 @@ export class MacOSPFController {
         const managed = await this.executor.identify(run.managedIdentity.pid);
         if (managed.birth !== run.managedIdentity.birth || managed.path !== run.managedIdentity.path || managed.uid !== run.managedIdentity.uid) throw failure('APPLICATION_PROXY_UNAVAILABLE');
         const resumed = await this.executor.applicationTransportControl(run.runId, 'B');
+        /* The profile binding is enforced in applicationTransportControl: the
+         * resumed frame it returns has already been checked against the profile
+         * this run's own keeper frames established. Re-checking it here would
+         * add a second lookup that this layer does not own. */
         if (resumed.pid !== run.applicationChild.pid || resumed.birth !== run.applicationChild.birth || resumed.executedIdentityVerified !== true ||
-            resumed.seatbeltAppliedByFixedExec !== true || resumed.frontAdmissionVerified !== true || resumed.profile !== 'seatbelt-front-only') throw failure('APPLICATION_APP_RESUME_UNCONFIRMED');
+            resumed.seatbeltAppliedByFixedExec !== true || resumed.frontAdmissionVerified !== true) throw failure('APPLICATION_APP_RESUME_UNCONFIRMED');
         run.resumed = true; run.phase = 'running'; await this.executor.persistRun(run); return this.publicApplication(run);
       } catch (error) { run.cleanupUncertain = true; run.phase = 'cleanup-required'; rememberAppFailure(run, 'resume', error);
         if (this.executor.applicationCleanupAvailable?.(run.runId) === true) run.cleanupMode = 'native-refusal';

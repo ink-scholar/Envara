@@ -222,7 +222,10 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
    * the trial showing 'running' for 44 s after the child had stopped. */
   revokeAfterResume = false,
   abort = null, abortExit = 1, abortSignal = null, abortTrailing = '', refusalStage = 'factory-open', fragmentAbort = false, omitAbort = false, omitRefusal = false,
-  preflightAbort = null, preflightBeforeIdentity = false, unavailableIdentity = false, preflightRefusalStage = 'preflight', duplicatePreflightKey = false } = {}) {
+  preflightAbort = null, preflightBeforeIdentity = false, unavailableIdentity = false, preflightRefusalStage = 'preflight', duplicatePreflightKey = false,
+  /* profile: which fixed native profile this run's keeper frames report. The
+   * binding under test is that every later frame must match the run's own. */
+  profile = 'seatbelt-front-only' } = {}) {
   const context = lease(), keeperPID = forked ? 8991 : 8990;
   context.controllerPid = process.pid;
   const child = Object.assign(new EventEmitter(), { pid: 8990, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() });
@@ -265,7 +268,7 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
   const controlCommands = [];
   const emitKeeper = (event, changes = {}) => emit({ schema: 'envara.pf-app-keeper/v1', event, ticketId: ticket,
     registrationId: context.registrationId, versionId: context.versionId, environmentId: context.environmentId, runId: context.runId,
-    pid: 8994, birth: '8994:000001', keeperPID, profile: 'seatbelt-front-only', persistentDenyObserved: true,
+    pid: 8994, birth: '8994:000001', keeperPID, profile, persistentDenyObserved: true,
     stoppedBeforeExec: false, childReaped: false, scopeQuiescentObserved: false, resumeSent: false, resumed: false, cancelSent: true,
     executedIdentityVerified: false, seatbeltAppliedByFixedExec: false, frontAdmissionVerified: false, ready: false, protected: false, ...changes });
   child.stdin.on('data', bytes => { commands += bytes; let newline;
@@ -306,14 +309,14 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
           ownsOriginalUTunFD: true, ownsOriginalListenerFD: !missingListener, ready: false, protected: false, ...(malformed ? { callerProof: true } : {}) });
       } else if (command.startsWith('L ')) { ticket = command.slice(2); guardianArmed = true; const stopped = { schema: 'envara.pf-app-keeper/v1', event: 'stopped', ticketId: ticket,
         registrationId: context.registrationId, versionId: context.versionId, runId: context.runId, environmentId: context.environmentId,
-        keeperPID, pid: 8994, birth: '8994:000001', profile: 'seatbelt-front-only', persistentDenyObserved: true, stoppedBeforeExec: true,
+        keeperPID, pid: 8994, birth: '8994:000001', profile, persistentDenyObserved: true, stoppedBeforeExec: true,
         ...Object.fromEntries(['childReaped', 'scopeQuiescentObserved', 'resumeSent', 'resumed', 'cancelSent', 'executedIdentityVerified', 'seatbeltAppliedByFixedExec', 'frontAdmissionVerified'].map(key => [key, false])), ready: false, protected: false };
         if (coldStageDelay) setTimeout(() => emit(stopped), coldStageDelay); else emit(stopped);
       } else if (command === 'B') {
         const resumed = { schema: 'envara.pf-app-keeper/v1', event: 'resumed', ticketId: ticket,
           registrationId: context.registrationId, versionId: context.versionId, runId: context.runId, environmentId: context.environmentId,
           keeperPID, pid: 8994, birth: '8994:000001', executedIdentityVerified: true, seatbeltAppliedByFixedExec: true,
-          frontAdmissionVerified: true, profile: 'seatbelt-front-only', persistentDenyObserved: false, stoppedBeforeExec: false, childReaped: false, scopeQuiescentObserved: false, resumeSent: true, resumed: true, cancelSent: false, ready: false, protected: false };
+          frontAdmissionVerified: true, profile: profile, persistentDenyObserved: false, stoppedBeforeExec: false, childReaped: false, scopeQuiescentObserved: false, resumeSent: true, resumed: true, cancelSent: false, ready: false, protected: false };
         if (resumeDelay) setTimeout(() => emit(resumed), resumeDelay); else emit(resumed);
         if (revokeAfterResume) setImmediate(() => {
           /* The guardian revokes once, on its own: the exact child is stopped
@@ -529,6 +532,35 @@ test('exact negative keeper ACKs reject a pending B immediately and freeze out i
     await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'B'), { code: 'APPLICATION_APP_RESUME_UNCONFIRMED' });
     assert.equal(f.child.stdin.writableEnded, false);
   }
+});
+test('a cold-profile run accepts its own keeper frames and reports its ended child, while a frame claiming another profile is still refused', async () => {
+  /* The keeper profile gates used to accept only 'seatbelt-front-only' by name,
+   * so a cold-profile application's own frames were treated as foreign: its
+   * ended child was never reported and the run stayed 'running'. Binding to the
+   * run's own profile fixes that without admitting a foreign frame. */
+  const cold = streamFixture({ profile: 'cold' }); await startStream(cold);
+  const coldEntry = cold.executor.appTransports.get(cold.context.runId);
+  await cold.executor.applicationTransportControl(cold.context.runId, 'L', randomUUID());
+  cold.emitKeeper('stopped'); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(coldEntry.uncertain, false, 'a cold run accepts its own stopped frame');
+  const resumed = await cold.executor.applicationTransportControl(cold.context.runId, 'B');
+  assert.equal(resumed.profile, 'cold');
+  assert.equal(coldEntry.keeperProfile, 'cold', 'the resume ACK establishes the run profile');
+  const ended = streamFixture({ profile: 'cold' }); await startStream(ended);
+  await ended.executor.applicationTransportControl(ended.context.runId, 'L', randomUUID());
+  ended.emitKeeper('stopped'); await new Promise(resolve => setImmediate(resolve));
+  await ended.executor.applicationTransportControl(ended.context.runId, 'B');
+  ended.emitKeeper('stopping');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.notEqual(ended.executor.appTransports.get(ended.context.runId).applicationEnded, undefined,
+    'a cold-profile application that ended on its own is reported as ended');
+  /* A frame that claims a different profile than the run established is refused. */
+  const foreign = streamFixture({ resumeDelay: 1000 }); await startStream(foreign);
+  await foreign.executor.applicationTransportControl(foreign.context.runId, 'L', randomUUID());
+  const refused = assert.rejects(foreign.executor.applicationTransportControl(foreign.context.runId, 'B'), { code: 'APPLICATION_APP_TRANSPORT_UNCONFIRMED' });
+  assert.equal(foreign.executor.appTransports.get(foreign.context.runId).keeperProfile, 'seatbelt-front-only');
+  await new Promise(resolve => setImmediate(resolve)); foreign.emitKeeper('stopping', { profile: 'cold' }); await refused;
+  assert.equal(foreign.executor.appTransports.get(foreign.context.runId).uncertain, true);
 });
 test('foreign identities and malformed negative keeper reports poison without becoming a bound resume refusal', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });

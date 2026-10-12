@@ -19,6 +19,13 @@ typedef enum { ENVARA_PF_PRODUCTION_EMPTY = 0, ENVARA_PF_PRODUCTION_DENY = 1,
     ENVARA_PF_PRODUCTION_FRONT = 3 } EnvaraPFProductionMode;
 typedef struct {
     char run_id[37], realm_id[37];
+    /* One shared root hook serves up to five attached applications. Each
+     * application keeps its own rules in a sub-anchor below the shared anchor;
+     * the shared anchor holds only the fixed call lines that reach them.
+     * session_run_id is the shared (hook) run; run_id stays the application's
+     * own run. An empty session_run_id keeps the original single-run layout,
+     * where the anchor is the run itself. */
+    char session_run_id[37];
     uint32_t gid;
     char utun[16];
     uint8_t route_ipv4[4];

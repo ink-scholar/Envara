@@ -62,6 +62,9 @@ export class LocalApplicationCatalog {
       scanComplete: this.cached.scanComplete, truncated: !this.cached.scanComplete || matches.length > limit };
   }
 
+  /** Whether the last scan listed this exact bundle; never scans. */
+  knows(target) { return validPath(target) && this.cached?.applications.some(item => item.path === target) === true; }
+
   async scan() {
     const applications = [], identities = new Set(), paths = new Set(), queue = [];
     const deadline = this.now() + this.timeoutMs, maxDepth = this.platform === 'darwin' ? 2 : 3;

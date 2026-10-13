@@ -12,6 +12,7 @@ import { LanguageWelcome } from "./LanguageWelcome.jsx";
 import { languageOptions, localeForInterfaceLanguage } from "../shared/interface-languages.mjs";
 import { BrowserWorkspace } from "./BrowserWorkspace.jsx";
 import { ApplicationsWorkspace, ContextDetail, EnvironmentOverview, MonitorWorkspace } from "./workspace-pages.jsx";
+import { ApplicationIcon } from "./ApplicationIcon.jsx";
 const initialSnapshot = {
   profiles: [],
   proxies: [],
@@ -692,10 +693,10 @@ function AttachApplicationForm({ profiles, proxies, groups, applications, select
       <div className="search-input application-picker-search"><MagnifyingGlass size={17} /><input value={query} onChange={event => setQuery(event.target.value)} maxLength={256} placeholder={t("搜索本地软件")} aria-label={t("搜索本地软件")} /></div>
       <div className="local-application-list" aria-live="polite">{loading ? <div className="application-picker-empty"><ArrowsClockwise className="spin" size={23} /><span>{t("正在读取本地软件…")}</span></div> : error ? <div className="application-picker-empty"><WarningCircle size={24} /><span>{t(error)}</span><Button type="button" onClick={() => setRetry(value => value + 1)}>{t("重新读取")}</Button></div> : catalog?.applications.length ? catalog.applications.map(application => {
         const attached = isApplicationAlreadyAttached(application, applications);
-        return <button type="button" key={application.identity || application.path} className={`local-application-choice ${picked?.path === application.path ? "selected" : ""}`} disabled={attached} aria-pressed={picked?.path === application.path} title={application.path} onClick={() => setPicked(application)}><Desktop size={24} /><span>{application.name}</span>{attached ? <small>{t("已附加")}</small> : picked?.path === application.path && <CheckCircle size={18} />}</button>;
+        return <button type="button" key={application.identity || application.path} className={`local-application-choice ${picked?.path === application.path ? "selected" : ""}`} disabled={attached} aria-pressed={picked?.path === application.path} title={application.path} onClick={() => setPicked(application)}><ApplicationIcon path={application.path} size={30} className="choice-icon" /><span>{application.name}</span>{attached ? <small>{t("已附加")}</small> : picked?.path === application.path && <CheckCircle size={18} />}</button>;
       }) : <div className="application-picker-empty"><Desktop size={27} /><span>{t(query ? "没有匹配的软件" : "未找到本地软件")}</span></div>}</div>
       {catalog?.truncated && <p className="field-hint">{t("列表可能不完整，可搜索名称或选择文件。")}</p>}
-      <div className="application-picker-file"><Button type="button" icon={FolderOpen} onClick={chooseFromFile} disabled={saving}>{t("从文件选择…")}</Button>{picked && <strong title={picked.path}>{picked.name || picked.path.split(/[\\/]/).pop()}</strong>}</div>
+      <div className="application-picker-file"><Button type="button" icon={FolderOpen} onClick={chooseFromFile} disabled={saving}>{t("从文件选择…")}</Button>{picked && <span className="application-picked"><ApplicationIcon path={picked.path} size={22} className="choice-icon" /><strong title={picked.path}>{picked.name || picked.path.split(/[\\/]/).pop()}</strong></span>}</div>
       <p className="field-hint">{t("使用已确认的网络环境；定位支持取决于软件。")}</p>
     </>}{step === "network" && error && <p className="field-error" role="alert">{t(error)}</p>}</div>
     <div className="modal-footer"><Button type="button" disabled={saving} onClick={step === "network" ? onClose : () => { setStep("network"); setError(""); }}>{t(step === "network" ? "取消" : "上一步")}</Button><Button className="primary" disabled={saving || !choice || step === "application" && (!picked || isApplicationAlreadyAttached(picked, applications))} onClick={async () => {

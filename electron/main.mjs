@@ -14,6 +14,7 @@ import { resolveTerminalView, terminalViewSnapshot } from './terminal-view.mjs';
 import { ProxyCoreManager } from './proxy-core-manager.mjs';
 import { ApplicationService, inspectLocalApplication } from './application-service.mjs';
 import { LocalApplicationCatalog } from './local-application-catalog.mjs';
+import { createApplicationIcons, electronApplicationIcon } from './application-icons.mjs';
 import { NativeApplicationRouting } from './application-routing.mjs';
 import { MacOSApplicationRouting } from './macos-application-routing.mjs';
 import { MacOSPFApplicationRouting } from './macos-pf-application-routing.mjs';
@@ -53,6 +54,10 @@ let notionTrialAvailabilityPending = null;
 let notionTrialReserved = false;
 let notionDiagnostics;
 const localApplications = new LocalApplicationCatalog();
+const pickedApplicationPaths = new Set();
+const applicationIcon = createApplicationIcons({ render: electronApplicationIcon({ app, nativeImage }),
+  isKnown: async target => localApplications.knows(target) || pickedApplicationPaths.has(target) ||
+    !!applications && (await applications.snapshot()).applications.some(item => item.path === target) });
 const views = new Map();
 const terminalWindows = new Map();
 let quitting = false;
@@ -140,7 +145,7 @@ async function publish() {
 }
 const allowedMethods = new Set(['snapshot','createProfile','updateProfile','cloneProfile','deleteProfile','clearProfile','startProfile','stopProfile','focusProfile','saveProxy','deleteProxy','checkProxy','saveSettings','installEngine','importProfiles','cancelImport','exportProfiles','openDataDirectory','openDocumentation','previewLegacyMigration','migrateLegacy','saveGroup','deleteGroup','clearGroupProxy','bulkProfiles','exportAutomationConfig','openTerminalWindow', ...TERMINAL_METHODS]);
 const applicationMethods = new Set(['saveApplication', 'startApplication', 'stopApplication', 'deleteApplication', 'getApplicationRoutingStatus', 'setupApplicationRouting']);
-for (const method of [...applicationMethods, 'pickApplication', 'listLocalApplications', 'previewProxyNetwork', 'checkEnvironmentNetwork', 'openNetworkLocationMap']) allowedMethods.add(method);
+for (const method of [...applicationMethods, 'pickApplication', 'listLocalApplications', 'applicationIcon', 'previewProxyNetwork', 'checkEnvironmentNetwork', 'openNetworkLocationMap']) allowedMethods.add(method);
 for (const method of ['runNotionTrial', 'stopNotionTrial', 'notionTrialSnapshot', 'exportNotionDiagnostics', 'applicationStorage', 'reclaimApplicationStorage']) allowedMethods.add(method);
 
 async function protectApplicationMutation(method, args, operation) {
@@ -250,6 +255,7 @@ async function handleCall(method, args = {}, caller = window) {
     });
   }
   if (method === 'listLocalApplications') return localApplications.list(args);
+  if (method === 'applicationIcon') return applicationIcon(args);
   if (method === 'openNetworkLocationMap') {
     const location = parseGoogleMapsLocation(args.url);
     if (!location) throw new Error('请先选择网络位置。');
@@ -280,6 +286,9 @@ async function handleCall(method, args = {}, caller = window) {
     const choice = await dialog.showOpenDialog(caller, { title: '选择本地软件', properties: ['openFile'], filters: process.platform === 'win32' ? [{ name: 'Application', extensions: ['exe'] }] : process.platform === 'darwin' ? [{ name: 'Application', extensions: ['app'] }] : [{ name: 'Application', extensions: ['*'] }] });
     if (choice.canceled || !choice.filePaths[0]) return null;
     const selected = await inspectLocalApplication(choice.filePaths[0]);
+    // A bundle the user chose in the system dialog may show its own icon too.
+    if (pickedApplicationPaths.size >= 64) pickedApplicationPaths.delete(pickedApplicationPaths.values().next().value);
+    pickedApplicationPaths.add(selected.path);
     return { path: selected.path, name: selected.name };
   }
   if (method === 'checkEnvironmentNetwork') {

@@ -485,3 +485,25 @@ test('zero close without observed stdout EOF cannot claim status-only closure', 
   assert.equal(call.snapshot().diagnostics.terminalExitCode, 0); assert.equal(call.snapshot().diagnostics.stdoutEOF, false);
   child.stdout.end(); child.stderr.end();
 });
+
+test('routine observations are counted, so a long run still records the stop sequence that explains its cleanup', async t => {
+  /* A real attached run polled every two seconds; the bounded history filled
+   * after about two minutes and the stop, the one call a failed cleanup
+   * depends on, was never recorded. */
+  const value = request(), running = { ...stage(value), phase: 'running', resumed: true }, clean = cleanup(value);
+  const polls = 70;
+  const { call } = peer(t, [routed, stage(value), running, ...Array(polls).fill(running), clean, clean]);
+  await prepare(call, value);
+  await call('resumeNotionApplication', { runId: value.runId, activationAuthorized: true });
+  await assert.rejects(call('resumeNotionApplication', { runId: value.runId, activationAuthorized: true }, { observation: true }), { code: 'PF_HELPER_REQUEST_INVALID' });
+  await assert.rejects(call('applicationSnapshot', { runId: value.runId }, { observation: 'yes' }), { code: 'PF_HELPER_REQUEST_INVALID' });
+  for (let index = 0; index < polls; index++) await call('applicationSnapshot', { runId: value.runId }, { timeoutMs: 5000, observation: true });
+  const { stopped, snapshot } = await stopAndSnapshot(call, value);
+  assert.equal(stopped.cleanupComplete, true); assert.equal(snapshot.cleanupComplete, true);
+  const diagnostics = call.snapshot().diagnostics;
+  assert.deepEqual(diagnostics.callHistory, ['prepareRoute', 'prepareNotionApplication', 'resumeNotionApplication', 'stopNotionApplication', 'applicationSnapshot']);
+  assert.equal(diagnostics.callHistoryComplete, true);
+  assert.equal(diagnostics.callTimings.length, diagnostics.callHistory.length);
+  assert.deepEqual(diagnostics.callTimings.map(timing => timing.sequence), [1, 2, 3, 4, 5]);
+  assert.equal(diagnostics.observationPolls, polls); assert.equal(diagnostics.observationPollFailures, 0);
+});

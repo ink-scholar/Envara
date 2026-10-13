@@ -34,6 +34,7 @@ const upgradeInputs = ['installer-upgrade-f8.h', 'known-installations/f8.manifes
   'installer-upgrade-c34.h', 'known-installations/c34.manifest.json',
   'installer-upgrade-4b9f85.h', 'known-installations/4b9f85.manifest.json',
   'installer-upgrade-43392e.h', 'known-installations/43392e.manifest.json', 'installer-upgrade-03245359.h', 'known-installations/03245359.manifest.json',
+  'installer-upgrade-2059a0.h', 'known-installations/2059a0.manifest.json',
   'installer-upgrade-f0b99f.h', 'known-installations/f0b99f.manifest.json',
   'installer-upgrade-f39101.h', 'known-installations/f39101.manifest.json',
   'installer-upgrade-a8bd00.h', 'known-installations/a8bd00.manifest.json',
@@ -243,6 +244,6 @@ test('PF acceptance fixture inputs must match the current dedicated source inven
 
 test('a self-authored complete manifest cannot replace the pinned source build', { skip }, async t => {
   const value = await fixture(t);
-  assert.equal(Object.keys(value.manifest.nativeSourceFiles).length, 97);
+  assert.equal(Object.keys(value.manifest.nativeSourceFiles).length, 99);
   await assert.rejects(value.inspect(), { code: 'ENOENT' });
 });

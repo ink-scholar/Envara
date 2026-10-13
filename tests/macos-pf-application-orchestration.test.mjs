@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { MacOSPFController, MacOSPFExecutor, validatePFAppBoundLease, validatePFRootHookLease, validatePFApplicationPrestageAbort, validatePFApplicationPreflightAbort, PF_APP_BOUND_LEASE_SCHEMA, PF_APP_SESSION_LEASE_MS, PF_ROOT_HOOK_LEASE_SCHEMA, PF_INSTALL_ROOT, PF_RUNTIME_ROOT, dispatchPFRequest } from '../native/macos-pf-routing/controller.mjs';
+import { MacOSPFController, MacOSPFExecutor, validatePFAppBoundLease, validatePFRootHookLease, validatePFApplicationPrestageAbort, validatePFApplicationPreflightAbort, PF_APP_BOUND_LEASE_SCHEMA, PF_APP_SESSION_LEASE_MS, PF_APP_RELEASE_RETRY_MS, PF_ROOT_HOOK_LEASE_SCHEMA, PF_INSTALL_ROOT, PF_RUNTIME_ROOT, dispatchPFRequest } from '../native/macos-pf-routing/controller.mjs';
 import { pfRoutingAnchor } from '../native/macos-pf-routing/policy.mjs';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
@@ -225,7 +225,12 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
   preflightAbort = null, preflightBeforeIdentity = false, unavailableIdentity = false, preflightRefusalStage = 'preflight', duplicatePreflightKey = false,
   /* profile: which fixed native profile this run's keeper frames report. The
    * binding under test is that every later frame must match the run's own. */
-  profile = 'seatbelt-front-only' } = {}) {
+  profile = 'seatbelt-front-only',
+  /* refuseReleases: how many 'R' requests the armed guardian refuses before it
+   * releases. The real guardian refuses, without any frame, while a helper of
+   * the application is still in the owned group. */
+  refuseReleases = 0 } = {}) {
+  let refusedReleases = 0;
   const context = lease(), keeperPID = forked ? 8991 : 8990;
   context.controllerPid = process.pid;
   const child = Object.assign(new EventEmitter(), { pid: 8990, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() });
@@ -340,6 +345,7 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
          * released frame before the transport one. An unrevoked guardian
          * revokes first, exactly as the fixed native side does. */
         if (!guardianRevoked) { guardianRevoked = true; emitKeeper('stopping', { childReaped: true, cancelSent: true }); continue; }
+        if (refusedReleases < refuseReleases) { refusedReleases++; continue; }
         emitKeeper('released', { childReaped: true, persistentDenyObserved: true, scopeQuiescentObserved: true, stoppedBeforeExec: false });
         emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-released', runId: context.runId, environmentId: context.environmentId,
           keeperPID, ready: false, protected: false, ...Object.fromEntries(['coreReaped', 'frontReaped', 'scopeQuiescentObserved', 'originalUTunClosed', 'originalListenerClosed', 'filterEmptyVerified', 'privateJournalRetired'].map(key => [key, true])),
@@ -430,6 +436,42 @@ test('actual persistent transport parser binds exec or one verified launchctl fo
     const stopping = await f.executor.applicationTransportControl(f.context.runId, 'S'); assert.equal(stopping.event, 'stopping');
     await f.executor.applicationTransportControl(f.context.runId, 'R'); assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
   }
+});
+test('a release refused while the application family is still leaving is asked again until it is confirmed', async () => {
+  /* On a real stop the guardian kills only the main process, and the release
+   * it was asked for at once was refused while the helpers were still in the
+   * owned group. Asked only once, the run waited out its deadline and the
+   * timeout stranded the guardian with no way to receive another request. */
+  const f = streamFixture({ refuseReleases: 3 });
+  await startStream(f);
+  await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  assert.equal((await f.executor.applicationTransportControl(f.context.runId, 'S')).event, 'stopping');
+  const startedAt = Date.now();
+  const released = await f.executor.applicationTransportControl(f.context.runId, 'R');
+  assert.equal(released.event, 'transport-released');
+  const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(entry.guardianReleased, true); assert.equal(entry.uncertain, false);
+  assert.equal(f.controlCommands.filter(command => command === 'R').length, 4, 'three refusals, then the release');
+  assert.ok(Date.now() - startedAt < 4 * PF_APP_RELEASE_RETRY_MS + 1000);
+  assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+});
+test('release requests stop once their bounded wait ends, and never continue after it', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  const f = streamFixture({ refuseReleases: Infinity });
+  await startStream(f);
+  await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  await f.executor.applicationTransportControl(f.context.runId, 'S');
+  const release = f.executor.applicationTransportControl(f.context.runId, 'R');
+  release.catch(() => {});
+  await new Promise(resolve => setImmediate(resolve));
+  for (let elapsed = 0; elapsed < 15000; elapsed += PF_APP_RELEASE_RETRY_MS) {
+    t.mock.timers.tick(PF_APP_RELEASE_RETRY_MS); await new Promise(resolve => setImmediate(resolve));
+  }
+  await assert.rejects(release, { code: 'APPLICATION_APP_RELEASE_TIMEOUT' });
+  const sent = f.controlCommands.filter(command => command === 'R').length;
+  assert.ok(sent > 1, 'the request was repeated within the wait');
+  t.mock.timers.tick(10 * PF_APP_RELEASE_RETRY_MS); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.controlCommands.filter(command => command === 'R').length, sent, 'nothing is sent after the wait ended');
 });
 test('a signed cold stage completing after the former 15-second deadline remains bound and accepted', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });

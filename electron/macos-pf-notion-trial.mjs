@@ -19,8 +19,8 @@ import { createPersistentPFNotionSessionClient, validatePFNotionSessionRequest,
 export const PF_ATTACH_POLL_INTERVAL_MS = 2000;
 
 export const PF_NOTION_TRIAL_CANDIDATE = Object.freeze({
-  authorizerSHA256: '47b270174eeb9455c4b0e409ec914f34984878088169e50edd4bf5ff2e1a9af1',
-  manifestSHA256: '2059a0870f88f6fa6caa89c9dbd751e41ee3b2cbf4101933c8519efa32f08b68',
+  authorizerSHA256: 'fcc24434df11a4d1fef838f9f3eb0ebad8d5a788e25aa34fa64fbddd63dc614d',
+  manifestSHA256: '7bcd5e17b50714399816e0dee86e69d2bef57f7d9acfac2772f31399c876d774',
 });
 /* The bundled carrier is named after the manifest it carries. Deriving the path
  * from the pin keeps a single source of truth: a pinned candidate with a stale
@@ -60,6 +60,8 @@ function sessionDiagnostics(value, runId, environmentId) {
   if (value.terminalExitSignal === null || /^(?:SIG(?:TERM|INT|HUP|PIPE|KILL|ABRT|SEGV|BUS|ILL|TRAP|QUIT|ALRM|USR1|USR2|FPE|XCPU|XFSZ|PROF|VTALRM|STOP|TSTP|TTIN|TTOU|CONT|CHLD|WINCH|URG|IO|SYS)|unknown)$/.test(value.terminalExitSignal ?? ''))
     output.terminalExitSignal = value.terminalExitSignal;
   if (Number.isInteger(value.bufferedBytes) && value.bufferedBytes >= 0 && value.bufferedBytes <= 262144) output.bufferedBytes = value.bufferedBytes;
+  for (const key of ['observationPolls', 'observationPollFailures'])
+    if (Number.isInteger(value[key]) && value[key] >= 0 && value[key] <= 2147483647) output[key] = value[key];
   if (Array.isArray(value.callHistory) && value.callHistory.length <= 64 && value.callHistory.every(method => sessionMethods.has(method))) output.callHistory = [...value.callHistory];
   if (Array.isArray(value.callTimings) && value.callTimings.length === output.callHistory?.length && value.callTimings.length <= 64 && value.callTimings.every((timing, index) =>
       validatePFNotionCallTimingDiagnostic(timing) && timing.sequence === index + 1 && timing.method === output.callHistory?.[index]))
@@ -317,7 +319,7 @@ export class MacOSPFNotionTrial {
       }
       this.observationInFlight = (async () => {
         try {
-          const current = await call('applicationSnapshot', { runId }, { timeoutMs: 5000 });
+          const current = await call('applicationSnapshot', { runId }, { timeoutMs: 5000, observation: true });
           this.captureSnapshot(current);
           if (current.applicationEnded === true) {
             this.state.applicationEnded = true; this.state.applicationEndedChildReaped = current.endedChildReaped === true;

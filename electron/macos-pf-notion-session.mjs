@@ -300,7 +300,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     stopKind = null, freshCleanupKind = null, resumeAttempted = false, stopAttempted = false, lastClock = null,
     selectedStatusRunId = null, lastStatusRunId = null, lastStatusInventory = null, lastStatusReadOnly = false,
     stdoutEOF = false, nonStatusRequestAttempted = false, historyComplete = true, lastSuccessfulStatusHistoryLength = 0,
-    lastLatePrepare = null, lastApplicationSnapshot = null;
+    lastLatePrepare = null, lastApplicationSnapshot = null, observationPolls = 0, observationPollFailures = 0;
   const callHistory = [], callTimings = [];
   const retired = new Map(); let settleExit;
   const exit = new Promise(resolve => { settleExit = resolve; });
@@ -467,9 +467,15 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     if (closing && !shared) process.stdin.end();
     return process;
   }).catch(() => { closed = true; failChannel(failed('PF_HELPER_UNAVAILABLE')); settleExit(null); throw failed('PF_HELPER_UNAVAILABLE'); });
-  const call = async (method, params = {}, { timeoutMs = method === 'resumeNotionApplication' ? PF_NOTION_RESUME_TIMEOUT_MS : 15000, signal } = {}) => {
+  const call = async (method, params = {}, { timeoutMs = method === 'resumeNotionApplication' ? PF_NOTION_RESUME_TIMEOUT_MS : 15000, signal,
+    observation = false } = {}) => {
     // The multi-step preparation includes a signed snapshot and cold staging.
     // All requests still share the fixed lifetime and reserve cleanup time.
+    /* An observation is the routine check that a running application is still
+     * running. It is counted rather than recorded one by one: recorded, a run
+     * longer than about two minutes filled the bounded history with them, and
+     * the stop sequence that explains a failed cleanup was never recorded. */
+    if (observation !== false && (observation !== true || method !== 'applicationSnapshot')) throw failed('PF_HELPER_REQUEST_INVALID');
     if (!methods.has(method) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > (method === 'prepareNotionApplication' ? 110000 : 60000) ||
         signal?.aborted || closing || closed || pending || terminalError || uncertain && !cleanupMethods.has(method))
       throw failed(uncertain ? 'PF_HELPER_CLEANUP_UNCERTAIN' : 'PF_HELPER_REQUEST_INVALID');
@@ -488,11 +494,12 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     if (input.length > maximumBytes) { input.fill(0); throw failed('PF_HELPER_REQUEST_TOO_LARGE'); }
     if (startedAt == null) startedAt = requestedAt;
     if (method === 'status' && params.runId) selectedStatusRunId ??= params.runId;
-    if (callHistory.length < 64) callHistory.push(method); else historyComplete = false;
+    if (observation) observationPolls = Math.min(observationPolls + 1, 2147483647);
+    else if (callHistory.length < 64) callHistory.push(method); else historyComplete = false;
     if (method === 'prepareNotionApplication') bound = { runId: params.runId, environmentId: params.environmentId };
     if (method === 'resumeNotionApplication') resumeAttempted = true;
     if (method === 'stopNotionApplication') stopAttempted = true;
-    const timing = callTimings.length < 64 ? { schema: timingSchema, source: timingSource, diagnosticOnly: true,
+    const timing = !observation && callTimings.length < 64 ? { schema: timingSchema, source: timingSource, diagnosticOnly: true,
       sequence: callTimings.length + 1, method, requestedTimeoutMs: timeoutMs, effectiveTimeoutMs: limit,
       cleanupReserveMs: reserve, remainingMsAtStart: boundedMs(Math.floor(remainingAtStart)), elapsedMs: null, remainingMsAtFinish: null,
       outcome: 'pending', lateResponseObserved: false } : null;
@@ -510,6 +517,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
           timing.outcome = !error ? 'result' : error.code === 'PF_HELPER_DEADLINE' ? 'deadline' :
             error.code === 'PF_HELPER_ABORTED' ? 'aborted' : error.code === 'PF_HELPER_CHANNEL_CLOSED' ? 'closed' : 'error';
         }
+        if (error && observation) observationPollFailures = Math.min(observationPollFailures + 1, 2147483647);
         error ? reject(error) : resolve(value);
       };
       const abandon = code => {
@@ -599,6 +607,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
       terminalExitSignal: terminal?.exitSignal == null ? null : signals.has(terminal.exitSignal) ? terminal.exitSignal : 'unknown',
       stdoutEOF, pending: pending != null, bufferedBytes: buffer.length, uncertaintyLatched: uncertain,
       nonStatusRequestAttempted, callHistory: [...callHistory], callHistoryComplete: historyComplete,
+      observationPolls, observationPollFailures,
       callTimings: structuredClone(callTimings),
       lastLatePrepare: lastLatePrepare ? structuredClone(lastLatePrepare) : null,
       lastApplicationSnapshot: lastApplicationSnapshot ? structuredClone(lastApplicationSnapshot) : null },

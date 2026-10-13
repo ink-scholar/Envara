@@ -48,6 +48,12 @@ export const PF_APP_COLD_STAGE_TIMEOUT_MS = 60000;
 // executed identity. Give that whole native operation its own bounded wait;
 // the desktop client additionally reserves time for stop/snapshot/close.
 export const PF_APP_RESUME_TIMEOUT_MS = 45000;
+/* The guardian answers each release request on its own and refuses, without
+ * any frame, while a process of the application family is still in the owned
+ * group. It stops only the exact main process, so the helpers leave a moment
+ * after the stop is confirmed; the request is repeated at this interval until
+ * the release is confirmed or its bounded wait ends. */
+export const PF_APP_RELEASE_RETRY_MS = 500;
 // A session-bound attached application runs until it is stopped, the
 // application exits, or Envara quits. The sealed lease is only an outer bound
 // (30 days); the native guardian ends a stalled controller by its awake-time
@@ -1217,6 +1223,19 @@ export class MacOSPFExecutor {
        * answered per request, so a stale release frame must never satisfy it. */
       command === 'S' && (!entry.cleanupOnly || guardianOnly)) : null;
     entry.child.stdin.write(`${command}${command === 'L' ? ` ${ticketId}` : ''}\n`);
+    /* A single 'R' sent while the helpers were still leaving was refused in
+     * silence, and the run then waited out its whole deadline for an answer
+     * that could not come; the timeout poisoned the channel and stranded the
+     * guardian with no way to receive another 'R'. 'R' carries no authority:
+     * the guardian re-checks reap, denial and scope itself each time. */
+    if (command === 'R' && waiting) {
+      const resend = setInterval(() => {
+        if (entry.uncertain || entry.exited || !entry.child?.stdin) return;
+        try { entry.child.stdin.write('R\n'); } catch { /* the wait reports the fault */ }
+      }, PF_APP_RELEASE_RETRY_MS);
+      const settle = () => clearInterval(resend);
+      waiting.then(settle, settle);
+    }
     if (!waiting) return { acknowledged: false, ...appFlags() };
     const event = await waiting;
     /* An ACK can resolve through entry.wait before the main loop's own pass, so

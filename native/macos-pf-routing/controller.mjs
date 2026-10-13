@@ -490,20 +490,25 @@ export function pfTunnelCoreConfig({ proxy: input, udpPolicy = 'block', ipv4Addr
 export class MacOSPFExecutor {
   constructor({ spawnChild = spawn, fileSystem = fs } = {}) {
     this.spawnChild = spawnChild; this.fs = fileSystem; this.kind = 'native';
-    this.groups = new Map(); this.groupIdentities = new Map(); this.groupDeleteIntents = new Set(); this.guardians = new Map(); this.lock = null; this.pfToken = null;
-    this.runtimeParent = null; this.runtimeDirectory = null; this.runtimeRunId = null;
-    this.runDirectories = new Map(); this.registryIdentity = null;
-    this.groupIntents = new Map();
-    this.rootHookLease = null; this.rootHookMutationUncertain = false; this.rootHookDeleteAttempted = false; this.rootHookRetiredProof = null;
-    this.pfReferenceMutationAttempted = false;
-    this.filterCommitted = null; this.filterReplacementBusy = false; this.filterReplacementUncertain = false;
     // A state owner/ioctl implementation is not available in macOS pfctl.
     // Never substitute -F states, -i utun -F states, or -k source-address.
     this.exactStateCleanupSupported = false;
     this.statelessControlledFixtures = true;
     this.fixtureOperations = [...CONTROLLED_CASES, 'cleanup'];
-    this.fixtureGuardians = new Map();
-    this.appLeases = new Map(); this.appTransports = new Map();
+    this.resetRunState();
+  }
+  /* Every per-run latch and container at its initial value. The constructor and
+   * beginNextApplicationRun share this one list, so a later run in the same root
+   * session cannot inherit a latch that a separate reset list forgot. */
+  resetRunState() {
+    this.groups = new Map(); this.groupIdentities = new Map(); this.groupDeleteIntents = new Set(); this.groupIntents = new Map();
+    this.guardians = new Map(); this.fixtureGuardians = new Map();
+    this.lock = null; this.runtimeParent = null; this.runtimeDirectory = null; this.runtimeRunId = null;
+    this.runDirectories = new Map(); this.registryIdentity = null; this.registryUnlinkAttempted = false; this.lockUnlinkAttempted = false;
+    this.rootHookLease = null; this.rootHookMutationUncertain = false; this.rootHookDeleteAttempted = false; this.rootHookRetiredProof = null;
+    this.pfToken = null; this.pfReferenceMutationAttempted = false; this.pfReferenceReleaseAttempted = false; this.pfReferenceReleased = false;
+    this.filterCommitted = null; this.filterReplacementBusy = false; this.filterReplacementUncertain = false;
+    this.appLeases = new Map(); this.appTransports = new Map(); this.retiredAppLeases = new Set();
   }
   command(executable, argv, stdin = '', timeoutMs = 5000, { cancelSignal = 'SIGKILL', captureHookFailure = false } = {}) {
     if (!this.allowedCommand(executable, argv) || captureHookFailure &&
@@ -927,6 +932,7 @@ export class MacOSPFExecutor {
     // Recheck the same private directory and absence, never adopt a new journal.
     try { await this.fs.lstat(`${PF_RUNTIME_ROOT}/${runId}/app-filter-events`); throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED'); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
+    entry.exitConfirmed = true;
     return { ...receipt, transportExitConfirmed: true };
   }
   async confirmApplicationPreflightAborted(runId) {
@@ -947,6 +953,7 @@ export class MacOSPFExecutor {
     }
     try { await this.fs.lstat(`${PF_RUNTIME_ROOT}/${runId}/app-filter-events`); throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED'); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
+    entry.exitConfirmed = true;
     return { ...receipt, transportExitConfirmed: true };
   }
   async startApplicationTransport({ runId, environmentId, proxy, udpPolicy, leaseSHA256, consoleUID }) {
@@ -1306,9 +1313,13 @@ export class MacOSPFExecutor {
     try { entry.child.stdin.write('K\n'); return true; } catch { return false; }
   }
   /* One root controller session serves many sequential attached applications.
-   * A fresh run is only allowed once every per-run latch is at its initial
-   * value and every per-run resource is released; anything else refuses, so an
-   * unconfirmed cleanup is never papered over by a new run. */
+   * A fresh run is allowed only once every resource of the earlier run is
+   * released and every latch sits at its initial value or at its own confirmed
+   * end. A clean run necessarily leaves its attempts recorded (the lock it
+   * unlinked, the hook it deleted, the PF reference it released, the group it
+   * removed), so requiring initial values alone refused every second attach.
+   * An attempt without its confirmation still refuses, so an unconfirmed
+   * cleanup is never papered over by a new run. */
   beginNextApplicationRun() {
     const failed = code => failure(code);
     if (this.kind !== 'native') {
@@ -1317,25 +1328,26 @@ export class MacOSPFExecutor {
       this.retiredAppLeases = new Set();
       return true;
     }
-    if (this.lock || this.runtimeParent || this.runtimeDirectory || this.runtimeRunId || this.runDirectories.size ||
-        this.registryIdentity != null || this.registryUnlinkAttempted || this.lockUnlinkAttempted) throw failed('APPLICATION_ROUTING_NOT_READY');
-    if (this.rootHookLease || this.rootHookMutationUncertain || this.rootHookDeleteAttempted || !this.rootHookRetiredProof?.originalRootRestored ||
-        this.rootHookRetiredProof.namespaceReclaimed !== true || this.rootHookRetiredProof.receiptRetired !== true) throw failed('APPLICATION_ROUTING_NOT_READY');
-    if (this.pfToken || this.pfReferenceMutationAttempted || this.pfReferenceReleased !== true) throw failed('APPLICATION_ROUTING_NOT_READY');
+    // releaseLock clears these only after both registry files are confirmed
+    // absent and the runtime directory is flushed.
+    if (this.lock || this.runtimeParent || this.runtimeDirectory || this.runtimeRunId || this.runDirectories.size || this.registryIdentity != null)
+      throw failed('APPLICATION_ROUTING_NOT_READY');
+    const proof = this.rootHookRetiredProof;
+    const hookUntouched = this.rootHookLease == null && proof == null && !this.rootHookDeleteAttempted;
+    const hookRetired = this.rootHookLease != null && proof?.ownedRootHookRemoved === true && proof.originalRootRestored === true &&
+      proof.namespaceReclaimed === true && proof.receiptRetired === true && proof.cleanupPending === false;
+    if (this.rootHookMutationUncertain || !hookUntouched && !hookRetired) throw failed('APPLICATION_ROUTING_NOT_READY');
+    const referenceUntouched = !this.pfReferenceMutationAttempted && !this.pfReferenceReleaseAttempted && !this.pfReferenceReleased;
+    const referenceReleased = this.pfReferenceMutationAttempted && this.pfReferenceReleaseAttempted && this.pfReferenceReleased === true;
+    if (this.pfToken != null || !referenceUntouched && !referenceReleased) throw failed('APPLICATION_ROUTING_NOT_READY');
     if (this.filterCommitted != null || this.filterReplacementBusy || this.filterReplacementUncertain) throw failed('APPLICATION_ROUTING_NOT_READY');
-    if (this.groups.size || this.groupIdentities.size || this.groupIntents.size || this.groupDeleteIntents.size) throw failed('APPLICATION_ROUTING_NOT_READY');
-    if (this.appLeases.size || this.appTransports.size) throw failed('APPLICATION_ROUTING_NOT_READY');
-    for (const entry of this.guardians.values()) if (!entry.exited) throw failed('APPLICATION_ROUTING_NOT_READY');
-    for (const entry of this.fixtureGuardians.values()) if (!entry.exited) throw failed('APPLICATION_ROUTING_NOT_READY');
-    // Reset every per-run latch. The maps above are shared containers whose own
-    // emptiness is the precondition, so they are cleared rather than replaced.
-    this.rootHookLease = null; this.rootHookMutationUncertain = false; this.rootHookDeleteAttempted = false;
-    this.rootHookRetiredProof = null; this.pfReferenceMutationAttempted = false; this.pfReferenceReleased = false; this.pfToken = null;
-    this.filterCommitted = null; this.filterReplacementBusy = false; this.filterReplacementUncertain = false;
-    this.registryUnlinkAttempted = false; this.lockUnlinkAttempted = false;
-    this.runDirectories.clear(); this.groups.clear(); this.groupIdentities.clear(); this.groupDeleteIntents.clear();
-    this.groupIntents.clear(); this.guardians.clear(); this.fixtureGuardians.clear(); this.appLeases.clear(); this.appTransports.clear();
-    this.retiredAppLeases = new Set();
+    // A removed group leaves its identity and delete intent as history; only a
+    // live group or an unfinished allocation refuses.
+    if (this.groups.size || this.groupIntents.size) throw failed('APPLICATION_ROUTING_NOT_READY');
+    if (this.appLeases.size || [...this.appTransports.values()].some(entry => entry.exitConfirmed !== true || entry.exited !== true || entry.uncertain))
+      throw failed('APPLICATION_ROUTING_NOT_READY');
+    for (const entry of [...this.guardians.values(), ...this.fixtureGuardians.values()]) if (!entry.exited) throw failed('APPLICATION_ROUTING_NOT_READY');
+    this.resetRunState();
     return true;
   }
   async confirmApplicationTransportExited(runId) {
@@ -1346,6 +1358,7 @@ export class MacOSPFExecutor {
       entry.child.once('close', code => { clearTimeout(timer); code === 0 && !entry.uncertain ? resolve() : reject(failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED')); });
     });
     if (!entry.exited || entry.exitCode !== 0 || entry.uncertain) throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
+    entry.exitConfirmed = true;
     return true;
   }
   async persistRun(run) {
@@ -2040,151 +2053,178 @@ export class MacOSPFController {
   }
   prepareNotionApplication(input = {}) {
     return this.serialized(async () => {
-      this.assertOpen();
-      if (!input || Object.keys(input).sort().join('|') !== ['routeId', 'runId', 'environmentId', 'lifetimeSeconds', 'activationAuthorized'].sort().join('|') ||
-          !validId(input.routeId) || !uuid(input.runId) || !uuid(input.environmentId) || !Number.isInteger(input.lifetimeSeconds) ||
-          input.lifetimeSeconds < 10 || input.lifetimeSeconds > PF_APP_SESSION_LEASE_SECONDS) throw failure('APPLICATION_ROUTING_PROTOCOL_ERROR');
-      if (input.activationAuthorized !== true) throw failure('APPLICATION_ROUTING_AUTHORIZATION_REQUIRED');
-      const selected = this.routes.get(input.routeId);
-      // Any locally selected application is accepted here; the fixed native
-      // registry independently re-inspects and seals the exact signed bundle.
-      // This layer binds the selected executable to its containing bundle and
-      // never assumes a specific product.
-      const bundlePath = applicationBundle(selected?.application?.executablePath);
-      /* One root controller session serves many sequential attached
-       * applications. A second run is allowed only after every earlier run has
-       * been cleaned and every per-run resource released. */
-      for (const previous of this.appRuns.values())
-        if (!appCleanPhase(previous.phase) || previous.cleanupUncertain) throw failure('APPLICATION_ROUTING_NOT_READY');
-      if (this.appRuns.size && typeof this.executor.beginNextApplicationRun !== 'function') throw failure('APPLICATION_ROUTING_NOT_READY');
-      if (!selected?.active || !selected.proxy || !bundlePath || !absolute(selected.workspace.cwd) ||
-          typeof selected.workspace.timezone !== 'string' || typeof selected.workspace.locale !== 'string') throw failure('APPLICATION_APP_CONTEXT_REFUSED');
-      const state = await this.state({ runId: input.runId });
-      if (!state.authorized) throw failure('APPLICATION_ROUTING_AUTHORIZATION_REQUIRED');
-      if (state.operatingSystem.ownedRootHook?.canCreateOwnedHook !== true || state.operatingSystem.ownedRootHook?.pfDisabled !== true ||
-          state.operatingSystem.ownedRootHook?.pinsVerified !== true || state.operatingSystem.ownedRootHook?.originalRootCompatible !== true ||
-          state.operatingSystem.pf?.lo0SkipVerified !== true || state.operatingSystem.noStateNativeAvailable !== true) throw failure('APPLICATION_ROUTING_NOT_READY');
-      /* A later run in the same controller session starts from a fresh executor
-       * latch set, and only once every earlier run's resources are released. */
-      if (this.appRuns.size) this.executor.beginNextApplicationRun();
-      for (const method of ['applicationContextClock', 'sealApplicationLease', 'verifyApplicationLease', 'startApplicationTransport', 'applicationTransportControl',
-        'confirmApplicationTransportExited', 'retireApplicationLease']) if (typeof this.executor[method] !== 'function') throw failure('APPLICATION_ROUTING_NOT_READY');
-      await this.authenticateProxy(selected.proxy);
-      const managedIdentity = await this.executor.identify(selected.managedRoute.corePid);
-      if (!nativeBirth(managedIdentity.birth) || managedIdentity.path !== `${PF_INSTALL_ROOT}/mihomo` &&
-          !managedIdentity.path?.endsWith('/proxy-core/mihomo') || managedIdentity.uid !== state.operatingSystem.consoleUID) throw failure('APPLICATION_PROXY_UNAVAILABLE');
-      const run = { kind: 'application', runId: input.runId, environmentId: input.environmentId, routeId: input.routeId,
-        native: this.executor.kind === 'native',
-        phase: 'preparing', stage: 'register', realms: [], stateless: true, cleanupUncertain: false,
-        lockAcquired: false, rootHookMutationAttempted: false, rootHookVerified: false, rootHookLease: null,
-        pfReferenceAttempted: false, pfReferenceAcquired: false, resumed: false, staged: false };
-      run.managedIdentity = { pid: selected.managedRoute.corePid, ...managedIdentity };
-      this.usedRunIds.add(run.runId); this.appRuns.set(run.runId, run);
-      try {
-        await this.ensureApplicationCommands();
-        run.registrationId = pfApplicationRegistrationId(bundlePath); run.ticketId = randomUUID();
-        run.versionId = await this.applicationVersion(run.registrationId, bundlePath);
-        run.stage = 'registry-lock'; await this.executor.acquireLock(run.runId); run.lockAcquired = true;
-        run.baseline = await this.executor.snapshotUnrelatedNetwork();
-        run.stage = 'root-hook'; run.rootHookMutationAttempted = true; await this.executor.persistRun(run);
-        run.rootHookLease = validatePFRootHookLease(await this.executor.installOwnedRootHook(run.runId), run.runId); run.rootHookVerified = true;
-        await this.executor.persistRun(run); await this.executor.requireEmptyOwnedAnchor();
-        run.stage = 'group-allocation'; const group = await this.executor.allocateGroup(run.environmentId);
-        const realm = { ...group, environmentId: run.environmentId, realmId: randomUUID(), mode: 'blocked',
-          consoleUID: state.operatingSystem.consoleUID, udpPolicy: 'block', tunnel: null, fixtures: [] };
-        run.realms.push(realm); await this.executor.persistRun(run);
-        run.stage = 'sealed-context';
-        const [clock, controller] = await Promise.all([this.executor.applicationContextClock(), this.executor.identify(process.pid)]);
-        if (!nativeBirth(controller.birth) || controller.uid !== 0 || controller.realUID !== 0 || controller.savedUID !== 0 || controller.path !== `${PF_INSTALL_ROOT}/node`) throw failure('APPLICATION_APP_CONTEXT_REFUSED');
-        const sealed = validatePFAppBoundLease({ schema: PF_APP_BOUND_LEASE_SCHEMA, runId: run.runId, environmentId: run.environmentId, realmId: realm.realmId,
-          leaseId: randomUUID(), generation: randomUUID(), registrationId: run.registrationId, versionId: run.versionId,
-          consoleUID: realm.consoleUID, gid: realm.gid, cwd: selected.workspace.cwd, timezone: selected.workspace.timezone, locale: selected.workspace.locale,
-          issuedMonotonicMs: clock.nowMonotonicMilliseconds, expiresMonotonicMs: clock.nowMonotonicMilliseconds + input.lifetimeSeconds * 1000,
-          bootTimeSeconds: clock.bootTimeSeconds, controllerPid: process.pid, controllerBirth: controller.birth,
-          ipv4Address: '198.18.1.1', rootHookLease: run.rootHookLease });
-        const lease = await this.executor.sealApplicationLease(sealed);
-        if (!/^[0-9a-f]{64}$/.test(lease.leaseSHA256 ?? '')) throw failure('APPLICATION_APP_CONTEXT_REFUSED'); run.leaseSHA256 = lease.leaseSHA256;
-        await this.executor.persistRun(run);
-        run.stage = 'pf-reference'; run.pfReferenceAttempted = true; await this.executor.persistRun(run);
-        const enabled = await this.executor.enableOwnedReference(); run.pfReferenceAcquired = true;
-        if (enabled?.existingForeignPFStatesAbsentBeforeEnable !== true) throw failure('APPLICATION_ROUTING_NOT_READY'); await this.executor.persistRun(run);
-        run.stage = 'transport';
-        run.transport = await this.executor.startApplicationTransport({ runId: run.runId, environmentId: run.environmentId,
-          proxy: selected.proxy, udpPolicy: 'block', leaseSHA256: run.leaseSHA256, consoleUID: realm.consoleUID });
-        await this.executor.persistRun(run);
-        const coreNow = await this.executor.identify(selected.managedRoute.corePid);
-        if (coreNow.birth !== managedIdentity.birth || coreNow.path !== managedIdentity.path || coreNow.uid !== managedIdentity.uid) throw failure('APPLICATION_PROXY_UNAVAILABLE');
-        run.stage = 'cold-stage';
-        const staged = await this.executor.applicationTransportControl(run.runId, 'L', run.ticketId);
-        if (staged.stoppedBeforeExec !== true || staged.persistentDenyObserved !== true || !nativeBirth(staged.birth) || !Number.isSafeInteger(staged.pid) || staged.pid < 2) throw failure('APPLICATION_APP_STAGE_UNCONFIRMED');
-        run.applicationChild = { pid: staged.pid, birth: staged.birth }; run.staged = true; run.phase = 'staged'; await this.executor.persistRun(run);
-        /* Heartbeat: a direct write, deliberately not serialized, so preparing a
-         * second attached application cannot starve the native guardian's
-         * awake-time liveness window. A lost channel is not fatal here; the
-         * verification tick below decides, and a real loss revokes natively. */
-        run.heartbeat = setInterval(() => { try { this.executor.applicationHeartbeat?.(run.runId); } catch { /* verification decides */ } },
-          PF_APP_HEARTBEAT_INTERVAL_MS);
-        run.heartbeat.unref?.();
-        /* Liveness verification stays on its own schedule: the sealed lease file,
-         * the keeper identity and the channel state are re-read, and any doubt
-         * fails closed into cleanup-required rather than leaving a run that only
-         * looks alive. */
-        run.liveness = setInterval(() => { this.serialized(async () => {
-          if (!['staged', 'running'].includes(run.phase)) return;
-          await this.executor.verifyApplicationLease(run.runId);
-          const entry = this.executor.appTransports?.get(run.runId);
-          if (!entry?.ack || entry.uncertain || entry.exited || entry.refusalPending) throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
-          const keeper = await this.executor.identify(entry.ack.keeperPID);
-          if (!nativeBirth(keeper.birth) || keeper.birth !== entry.ack.keeperBirth || keeper.path !== `${PF_INSTALL_ROOT}/envara-pf-native`)
-            throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
-        }).catch(error => this.serialized(async () => {
-          clearInterval(run.heartbeat); clearInterval(run.liveness); rememberAppFailure(run, 'resume', error);
-          run.cleanupUncertain = true; run.phase = 'cleanup-required';
-          if (this.executor.applicationCleanupAvailable?.(run.runId) === true) run.cleanupMode = 'native-refusal';
-          else this.executor.appTransports?.get(run.runId)?.poison?.();
-          try { await this.executor.persistRun(run); } catch (persistError) { rememberAppFailure(run, 'cleanup', persistError, true); }
-        }).catch(() => {})); }, PF_APP_VERIFY_INTERVAL_MS);
-        run.liveness.unref?.();
-        const now = await this.executor.applicationContextClock();
-        /* The sealed lease is only an outer bound; a run ends when it is stopped,
-         * when the application exits, or when Envara quits. */
-        if (now.bootTimeSeconds !== sealed.bootTimeSeconds || now.nowMonotonicMilliseconds >= sealed.expiresMonotonicMs) throw failure('APPLICATION_APP_CONTEXT_REFUSED');
-        return this.publicApplication(run);
-      } catch (error) {
-        run.cleanupUncertain = true; run.phase = 'cleanup-required'; rememberAppFailure(run, run.stage, error);
-        if (run.stage === 'transport' && error.preflightAborted === true && typeof this.executor.confirmApplicationPreflightAborted === 'function' &&
-            run.staged === false && run.resumed === false && !run.applicationChild && !run.resumeAttempted && !run.transport) {
-          try {
-            const proof = await this.executor.confirmApplicationPreflightAborted(run.runId), realm = run.realms[0];
-            if (proof.runId !== run.runId || proof.environmentId !== run.environmentId || proof.realmId !== realm?.realmId || proof.gid !== realm?.gid ||
-                proof.leaseSHA256 !== run.leaseSHA256 || proof.transportExitConfirmed !== true || APP_PREFLIGHT_ABORT_FACTS.some(key => proof[key] !== true) ||
-                APP_PREFLIGHT_ABORT_FALSE.some(key => proof[key] !== false) || proof.exitStatus !== 1 || proof.stage !== 'preflight' ||
-                run.nativeFailure?.stage !== 'preflight') throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
-            run.preflightAbort = structuredClone(proof); run.cleanupUncertain = false; run.phase = 'preflight-aborted';
-          } catch {}
+      const progress = { created: false };
+      try { return await this.prepareNotionApplicationRun(input, progress); }
+      catch (error) {
+        /* Refused before its run existed: nothing was acquired except the route
+         * prepared for this attempt, so the route is retired with the refusal.
+         * A fresh status then shows the caller that the attempt left nothing.
+         * Its run id still names that one attempt and is never reused. */
+        if (!progress.created) {
+          this.retireRefusedRoute(input?.routeId);
+          if (uuid(input?.runId)) this.usedRunIds.add(input.runId);
         }
-        if (run.stage === 'transport' && error.prestageAborted === true && typeof this.executor.confirmApplicationPrestageAborted === 'function' &&
-            run.staged === false && run.resumed === false && !run.applicationChild && !run.resumeAttempted) {
-          try {
-            const proof = await this.executor.confirmApplicationPrestageAborted(run.runId), realm = run.realms[0];
-            if (proof.runId !== run.runId || proof.environmentId !== run.environmentId || proof.realmId !== realm?.realmId || proof.gid !== realm?.gid ||
-                proof.leaseSHA256 !== run.leaseSHA256 || proof.transportExitConfirmed !== true || APP_ABORT_FACTS.some(key => proof[key] !== true) ||
-                APP_ABORT_FALSE.some(key => proof[key] !== false) || proof.exitStatus !== 1 || proof.stage !== 'factory-open') throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
-            run.prestageAbort = structuredClone(proof); run.cleanupUncertain = false; run.phase = 'prestage-aborted';
-          } catch {}
-        }
-        if (run.cleanupUncertain && this.executor.applicationCleanupAvailable?.(run.runId) === true) {
-          run.cleanupMode = 'native-refusal';
-          const transport = this.executor.appTransports?.get(run.runId)?.ack;
-          if (transport) run.transport = structuredClone(transport);
-        } else if (run.cleanupUncertain) this.executor.appTransports?.get(run.runId)?.poison?.();
-        if (run.lockAcquired) try { await this.executor.persistRun(run); } catch (persistError) {
-          rememberAppFailure(run, 'cleanup', persistError, true); run.cleanupUncertain = true; run.phase = 'cleanup-required';
-          if (this.executor.applicationCleanupAvailable?.(run.runId) !== true) this.executor.appTransports?.get(run.runId)?.poison?.();
-        }
-        throw outwardAppFailure(run);
+        throw error;
       }
     });
+  }
+  // A route a run was created for is retired by that run's own cleanup.
+  retireRefusedRoute(routeId) {
+    if (!validId(routeId) || [...this.appRuns.values()].some(run => run.routeId === routeId)) return;
+    const selected = this.routes.get(routeId);
+    if (selected) { selected.active = false; selected.proxy = null; this.routes.delete(routeId); }
+  }
+  async prepareNotionApplicationRun(input, progress) {
+    this.assertOpen();
+    if (!input || Object.keys(input).sort().join('|') !== ['routeId', 'runId', 'environmentId', 'lifetimeSeconds', 'activationAuthorized'].sort().join('|') ||
+        !validId(input.routeId) || !uuid(input.runId) || !uuid(input.environmentId) || !Number.isInteger(input.lifetimeSeconds) ||
+        input.lifetimeSeconds < 10 || input.lifetimeSeconds > PF_APP_SESSION_LEASE_SECONDS) throw failure('APPLICATION_ROUTING_PROTOCOL_ERROR');
+    if (input.activationAuthorized !== true) throw failure('APPLICATION_ROUTING_AUTHORIZATION_REQUIRED');
+    if (this.usedRunIds.has(input.runId)) throw failure('APPLICATION_ROUTING_PROTOCOL_ERROR');
+    const selected = this.routes.get(input.routeId);
+    // Any locally selected application is accepted here; the fixed native
+    // registry independently re-inspects and seals the exact signed bundle.
+    // This layer binds the selected executable to its containing bundle and
+    // never assumes a specific product.
+    const bundlePath = applicationBundle(selected?.application?.executablePath);
+    /* One root controller session serves many sequential attached
+     * applications. A second run is allowed only after every earlier run has
+     * been cleaned and every per-run resource released. */
+    for (const previous of this.appRuns.values())
+      if (!appCleanPhase(previous.phase) || previous.cleanupUncertain) throw failure('APPLICATION_ROUTING_NOT_READY');
+    if (this.appRuns.size && typeof this.executor.beginNextApplicationRun !== 'function') throw failure('APPLICATION_ROUTING_NOT_READY');
+    if (!selected?.active || !selected.proxy || !bundlePath || !absolute(selected.workspace.cwd) ||
+        typeof selected.workspace.timezone !== 'string' || typeof selected.workspace.locale !== 'string') throw failure('APPLICATION_APP_CONTEXT_REFUSED');
+    const state = await this.state({ runId: input.runId });
+    if (!state.authorized) throw failure('APPLICATION_ROUTING_AUTHORIZATION_REQUIRED');
+    if (state.operatingSystem.ownedRootHook?.canCreateOwnedHook !== true || state.operatingSystem.ownedRootHook?.pfDisabled !== true ||
+        state.operatingSystem.ownedRootHook?.pinsVerified !== true || state.operatingSystem.ownedRootHook?.originalRootCompatible !== true ||
+        state.operatingSystem.pf?.lo0SkipVerified !== true || state.operatingSystem.noStateNativeAvailable !== true) throw failure('APPLICATION_ROUTING_NOT_READY');
+    /* A later run in the same controller session starts from a fresh executor
+     * latch set, and only once every earlier run's resources are released. */
+    if (this.appRuns.size) this.executor.beginNextApplicationRun();
+    for (const method of ['applicationContextClock', 'sealApplicationLease', 'verifyApplicationLease', 'startApplicationTransport', 'applicationTransportControl',
+      'confirmApplicationTransportExited', 'retireApplicationLease']) if (typeof this.executor[method] !== 'function') throw failure('APPLICATION_ROUTING_NOT_READY');
+    await this.authenticateProxy(selected.proxy);
+    const managedIdentity = await this.executor.identify(selected.managedRoute.corePid);
+    if (!nativeBirth(managedIdentity.birth) || managedIdentity.path !== `${PF_INSTALL_ROOT}/mihomo` &&
+        !managedIdentity.path?.endsWith('/proxy-core/mihomo') || managedIdentity.uid !== state.operatingSystem.consoleUID) throw failure('APPLICATION_PROXY_UNAVAILABLE');
+    /* The registry keeps one registration per application and no per-run
+     * resource, so a registry refusal is a refusal before the run exists. Its
+     * native diagnostic still travels with the error. */
+    const registrationId = pfApplicationRegistrationId(bundlePath);
+    let versionId;
+    try { await this.ensureApplicationCommands(); versionId = await this.applicationVersion(registrationId, bundlePath); }
+    catch (error) { const refused = {}; rememberAppFailure(refused, 'register', error); throw outwardAppFailure(refused); }
+    const run = { kind: 'application', runId: input.runId, environmentId: input.environmentId, routeId: input.routeId,
+      native: this.executor.kind === 'native',
+      phase: 'preparing', stage: 'register', realms: [], stateless: true, cleanupUncertain: false,
+      lockAcquired: false, rootHookMutationAttempted: false, rootHookVerified: false, rootHookLease: null,
+      pfReferenceAttempted: false, pfReferenceAcquired: false, resumed: false, staged: false };
+    run.managedIdentity = { pid: selected.managedRoute.corePid, ...managedIdentity };
+    this.usedRunIds.add(run.runId); this.appRuns.set(run.runId, run); progress.created = true;
+    try {
+      run.registrationId = registrationId; run.ticketId = randomUUID(); run.versionId = versionId;
+      run.stage = 'registry-lock'; await this.executor.acquireLock(run.runId); run.lockAcquired = true;
+      run.baseline = await this.executor.snapshotUnrelatedNetwork();
+      run.stage = 'root-hook'; run.rootHookMutationAttempted = true; await this.executor.persistRun(run);
+      run.rootHookLease = validatePFRootHookLease(await this.executor.installOwnedRootHook(run.runId), run.runId); run.rootHookVerified = true;
+      await this.executor.persistRun(run); await this.executor.requireEmptyOwnedAnchor();
+      run.stage = 'group-allocation'; const group = await this.executor.allocateGroup(run.environmentId);
+      const realm = { ...group, environmentId: run.environmentId, realmId: randomUUID(), mode: 'blocked',
+        consoleUID: state.operatingSystem.consoleUID, udpPolicy: 'block', tunnel: null, fixtures: [] };
+      run.realms.push(realm); await this.executor.persistRun(run);
+      run.stage = 'sealed-context';
+      const [clock, controller] = await Promise.all([this.executor.applicationContextClock(), this.executor.identify(process.pid)]);
+      if (!nativeBirth(controller.birth) || controller.uid !== 0 || controller.realUID !== 0 || controller.savedUID !== 0 || controller.path !== `${PF_INSTALL_ROOT}/node`) throw failure('APPLICATION_APP_CONTEXT_REFUSED');
+      const sealed = validatePFAppBoundLease({ schema: PF_APP_BOUND_LEASE_SCHEMA, runId: run.runId, environmentId: run.environmentId, realmId: realm.realmId,
+        leaseId: randomUUID(), generation: randomUUID(), registrationId: run.registrationId, versionId: run.versionId,
+        consoleUID: realm.consoleUID, gid: realm.gid, cwd: selected.workspace.cwd, timezone: selected.workspace.timezone, locale: selected.workspace.locale,
+        issuedMonotonicMs: clock.nowMonotonicMilliseconds, expiresMonotonicMs: clock.nowMonotonicMilliseconds + input.lifetimeSeconds * 1000,
+        bootTimeSeconds: clock.bootTimeSeconds, controllerPid: process.pid, controllerBirth: controller.birth,
+        ipv4Address: '198.18.1.1', rootHookLease: run.rootHookLease });
+      const lease = await this.executor.sealApplicationLease(sealed);
+      if (!/^[0-9a-f]{64}$/.test(lease.leaseSHA256 ?? '')) throw failure('APPLICATION_APP_CONTEXT_REFUSED'); run.leaseSHA256 = lease.leaseSHA256;
+      await this.executor.persistRun(run);
+      run.stage = 'pf-reference'; run.pfReferenceAttempted = true; await this.executor.persistRun(run);
+      const enabled = await this.executor.enableOwnedReference(); run.pfReferenceAcquired = true;
+      if (enabled?.existingForeignPFStatesAbsentBeforeEnable !== true) throw failure('APPLICATION_ROUTING_NOT_READY'); await this.executor.persistRun(run);
+      run.stage = 'transport';
+      run.transport = await this.executor.startApplicationTransport({ runId: run.runId, environmentId: run.environmentId,
+        proxy: selected.proxy, udpPolicy: 'block', leaseSHA256: run.leaseSHA256, consoleUID: realm.consoleUID });
+      await this.executor.persistRun(run);
+      const coreNow = await this.executor.identify(selected.managedRoute.corePid);
+      if (coreNow.birth !== managedIdentity.birth || coreNow.path !== managedIdentity.path || coreNow.uid !== managedIdentity.uid) throw failure('APPLICATION_PROXY_UNAVAILABLE');
+      run.stage = 'cold-stage';
+      const staged = await this.executor.applicationTransportControl(run.runId, 'L', run.ticketId);
+      if (staged.stoppedBeforeExec !== true || staged.persistentDenyObserved !== true || !nativeBirth(staged.birth) || !Number.isSafeInteger(staged.pid) || staged.pid < 2) throw failure('APPLICATION_APP_STAGE_UNCONFIRMED');
+      run.applicationChild = { pid: staged.pid, birth: staged.birth }; run.staged = true; run.phase = 'staged'; await this.executor.persistRun(run);
+      /* Heartbeat: a direct write, deliberately not serialized, so preparing a
+       * second attached application cannot starve the native guardian's
+       * awake-time liveness window. A lost channel is not fatal here; the
+       * verification tick below decides, and a real loss revokes natively. */
+      run.heartbeat = setInterval(() => { try { this.executor.applicationHeartbeat?.(run.runId); } catch { /* verification decides */ } },
+        PF_APP_HEARTBEAT_INTERVAL_MS);
+      run.heartbeat.unref?.();
+      /* Liveness verification stays on its own schedule: the sealed lease file,
+       * the keeper identity and the channel state are re-read, and any doubt
+       * fails closed into cleanup-required rather than leaving a run that only
+       * looks alive. */
+      run.liveness = setInterval(() => { this.serialized(async () => {
+        if (!['staged', 'running'].includes(run.phase)) return;
+        await this.executor.verifyApplicationLease(run.runId);
+        const entry = this.executor.appTransports?.get(run.runId);
+        if (!entry?.ack || entry.uncertain || entry.exited || entry.refusalPending) throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
+        const keeper = await this.executor.identify(entry.ack.keeperPID);
+        if (!nativeBirth(keeper.birth) || keeper.birth !== entry.ack.keeperBirth || keeper.path !== `${PF_INSTALL_ROOT}/envara-pf-native`)
+          throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
+      }).catch(error => this.serialized(async () => {
+        clearInterval(run.heartbeat); clearInterval(run.liveness); rememberAppFailure(run, 'resume', error);
+        run.cleanupUncertain = true; run.phase = 'cleanup-required';
+        if (this.executor.applicationCleanupAvailable?.(run.runId) === true) run.cleanupMode = 'native-refusal';
+        else this.executor.appTransports?.get(run.runId)?.poison?.();
+        try { await this.executor.persistRun(run); } catch (persistError) { rememberAppFailure(run, 'cleanup', persistError, true); }
+      }).catch(() => {})); }, PF_APP_VERIFY_INTERVAL_MS);
+      run.liveness.unref?.();
+      const now = await this.executor.applicationContextClock();
+      /* The sealed lease is only an outer bound; a run ends when it is stopped,
+       * when the application exits, or when Envara quits. */
+      if (now.bootTimeSeconds !== sealed.bootTimeSeconds || now.nowMonotonicMilliseconds >= sealed.expiresMonotonicMs) throw failure('APPLICATION_APP_CONTEXT_REFUSED');
+      return this.publicApplication(run);
+    } catch (error) {
+      run.cleanupUncertain = true; run.phase = 'cleanup-required'; rememberAppFailure(run, run.stage, error);
+      if (run.stage === 'transport' && error.preflightAborted === true && typeof this.executor.confirmApplicationPreflightAborted === 'function' &&
+          run.staged === false && run.resumed === false && !run.applicationChild && !run.resumeAttempted && !run.transport) {
+        try {
+          const proof = await this.executor.confirmApplicationPreflightAborted(run.runId), realm = run.realms[0];
+          if (proof.runId !== run.runId || proof.environmentId !== run.environmentId || proof.realmId !== realm?.realmId || proof.gid !== realm?.gid ||
+              proof.leaseSHA256 !== run.leaseSHA256 || proof.transportExitConfirmed !== true || APP_PREFLIGHT_ABORT_FACTS.some(key => proof[key] !== true) ||
+              APP_PREFLIGHT_ABORT_FALSE.some(key => proof[key] !== false) || proof.exitStatus !== 1 || proof.stage !== 'preflight' ||
+              run.nativeFailure?.stage !== 'preflight') throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
+          run.preflightAbort = structuredClone(proof); run.cleanupUncertain = false; run.phase = 'preflight-aborted';
+        } catch {}
+      }
+      if (run.stage === 'transport' && error.prestageAborted === true && typeof this.executor.confirmApplicationPrestageAborted === 'function' &&
+          run.staged === false && run.resumed === false && !run.applicationChild && !run.resumeAttempted) {
+        try {
+          const proof = await this.executor.confirmApplicationPrestageAborted(run.runId), realm = run.realms[0];
+          if (proof.runId !== run.runId || proof.environmentId !== run.environmentId || proof.realmId !== realm?.realmId || proof.gid !== realm?.gid ||
+              proof.leaseSHA256 !== run.leaseSHA256 || proof.transportExitConfirmed !== true || APP_ABORT_FACTS.some(key => proof[key] !== true) ||
+              APP_ABORT_FALSE.some(key => proof[key] !== false) || proof.exitStatus !== 1 || proof.stage !== 'factory-open') throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
+          run.prestageAbort = structuredClone(proof); run.cleanupUncertain = false; run.phase = 'prestage-aborted';
+        } catch {}
+      }
+      if (run.cleanupUncertain && this.executor.applicationCleanupAvailable?.(run.runId) === true) {
+        run.cleanupMode = 'native-refusal';
+        const transport = this.executor.appTransports?.get(run.runId)?.ack;
+        if (transport) run.transport = structuredClone(transport);
+      } else if (run.cleanupUncertain) this.executor.appTransports?.get(run.runId)?.poison?.();
+      if (run.lockAcquired) try { await this.executor.persistRun(run); } catch (persistError) {
+        rememberAppFailure(run, 'cleanup', persistError, true); run.cleanupUncertain = true; run.phase = 'cleanup-required';
+        if (this.executor.applicationCleanupAvailable?.(run.runId) !== true) this.executor.appTransports?.get(run.runId)?.poison?.();
+      }
+      throw outwardAppFailure(run);
+    }
   }
   resumeNotionApplication(input = {}) {
     return this.serialized(async () => {

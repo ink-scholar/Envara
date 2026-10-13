@@ -267,12 +267,17 @@ const uncertainResult = result => result?.cleanupUncertain === true || result?.c
 
 // Return a fixed public shape. Private stdin, stderr, unsolicited result fields
 // and arbitrary native error messages never cross back to renderer consumers.
-function publicResult(method, result) {
+function publicResult(method, result, request = {}) {
   if (method === 'status') {
     const keys = ['rootOwnedInstallationVerified', 'callerConsoleUIDVerified', 'privilegedOperationsAuthorized',
       'privilegedRuntimeVerified', 'ownedRootHookCanCreate', 'priorPFAnchorsCompatible', 'lo0FilteringVerified'];
-    return { ...Object.fromEntries(keys.map(key => [key, result[key] === true])), anchor: result.anchor, ready: false, protectedLaunchAllowed: false,
-      productionReady: false, protected: false };
+    /* Whether the controller still lists this status run as a live
+     * application: a run it created stays listed until its cleanup is
+     * confirmed, so an unlisted run after a refused preparation was never
+     * created and has nothing to stop. */
+    const applicationListed = Array.isArray(result.applications) && result.applications.some(item => item?.runId === request.statusRunId);
+    return { ...Object.fromEntries(keys.map(key => [key, result[key] === true])), anchor: result.anchor, applicationListed,
+      ready: false, protectedLaunchAllowed: false, productionReady: false, protected: false };
   }
   if (method === 'prepareRoute') return { routeId: result.routeId, profileId: result.profileId ?? null,
     ready: false, failClosed: false, guardArmed: false, managedRouteVerified: false };
@@ -333,7 +338,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     selectedStatusRunId = null, lastStatusRunId = null, lastStatusInventory = null, lastStatusReadOnly = false,
     stdoutEOF = false, nonStatusRequestAttempted = false, historyComplete = true, lastSuccessfulStatusHistoryLength = 0,
     lastLatePrepare = null, lastApplicationSnapshot = null, observationPolls = 0, observationPollFailures = 0,
-    authorizationRefusedBeforeExecution = false;
+    authorizationRefusedBeforeExecution = false, prepareRefused = false;
   const callHistory = [], callTimings = [];
   const retired = new Map(); let settleExit;
   const exit = new Promise(resolve => { settleExit = resolve; });
@@ -448,12 +453,13 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
         if (Object.hasOwn(response, 'error')) {
           const diagnostic = safeErrorDiagnostic(response.error);
           if (!diagnostic) throw failed('PF_HELPER_RESPONSE_INVALID');
+          if (current.method === 'prepareNotionApplication') prepareRefused = true;
           pending = null; current.finish(Object.assign(failed(safeNativeCode(response.error)), diagnostic));
         }
         else {
           if (!response.result || typeof response.result !== 'object' || Array.isArray(response.result)) throw failed('PF_HELPER_RESPONSE_INVALID');
           observe(current, response.result);
-          pending = null; current.finish(null, publicResult(current.method, response.result));
+          pending = null; current.finish(null, publicResult(current.method, response.result, current));
         }
       } catch { return failChannel(failed('PF_HELPER_RESPONSE_INVALID')); }
     }
@@ -608,6 +614,22 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     callHistory.every(method => method === 'status') && lastStatusReadOnly && lastStatusInventory &&
     lastSuccessfulStatusHistoryLength === callHistory.length && Object.values(lastStatusInventory).every(count => count === 0) &&
     lastStatusRunId === selectedStatusRunId && terminal?.exitCode === 0 && terminal?.exitSignal == null;
+  /* A preparation the controller refused before anything existed holds
+   * nothing either. Every request was answered (none abandoned, so nothing is
+   * uncertain), a prepare that was sent was refused rather than answered with
+   * a run, nothing was resumed, stopped or snapshotted, and the last request is
+   * a fresh read-only status listing no runs, applications or routes. That
+   * empty list is the controller's own word that the route prepared for this
+   * attempt was retired with its refusal. Without this, a node that was down
+   * or a bundle the registry refused left the run reported as needing
+   * cleanup, and every later attach was refused until Envara restarted. */
+  const refusedDetached = () => shared && startedAt != null && closing && closed && !uncertain && !terminalError &&
+    nonStatusRequestAttempted && !pending && !buffer.length && historyComplete && observationPolls === 0 && callHistory.length > 2 &&
+    callHistory[0] === 'status' && callHistory.at(-1) === 'status' &&
+    callHistory.every(method => ['status', 'prepareRoute', 'prepareNotionApplication'].includes(method)) && (!bound || prepareRefused) &&
+    lastStatusReadOnly && lastStatusInventory && lastSuccessfulStatusHistoryLength === callHistory.length &&
+    Object.values(lastStatusInventory).every(count => count === 0) && lastStatusRunId === selectedStatusRunId &&
+    terminal?.exitCode === 0 && terminal?.exitSignal == null;
   call.close = ({ timeoutMs = 10000 } = {}) => {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 20000) return Promise.reject(failed('PF_HELPER_REQUEST_INVALID'));
     return closePromise ??= (async () => {
@@ -635,6 +657,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
       const evidence = statusOnlyEvidence();
       if (evidence) return { closed: true, started: true, cleanupUncertain: false, statusOnlyEvidence: evidence };
       if (statusOnlyDetached()) return { closed: true, started: true, cleanupUncertain: false, statusOnlyDetached: true };
+      if (refusedDetached()) return { closed: true, started: true, cleanupUncertain: false, refusedDetached: true };
       /* A shared channel reports its own virtual-process close code; 0 means the
        * run ended cleanly, 1 that the root session itself is gone. */
       const expectedExit = shared ? [0, 1] : [0];
@@ -647,7 +670,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     'SIGTTIN', 'SIGTTOU', 'SIGCONT', 'SIGCHLD', 'SIGWINCH', 'SIGURG', 'SIGIO', 'SIGSYS']);
   call.snapshot = () => ({ started: startedAt != null, closed, closing, pending: pending != null,
     runId: bound?.runId ?? null, environmentId: bound?.environmentId ?? null,
-    cleanupUncertain: uncertain || startedAt != null && !statusOnlyEvidence() && !statusOnlyDetached() && (!bound || !freshCleanupKind), cleanupKind: freshCleanupKind,
+    cleanupUncertain: uncertain || startedAt != null && !statusOnlyEvidence() && !statusOnlyDetached() && !refusedDetached() && (!bound || !freshCleanupKind), cleanupKind: freshCleanupKind,
     diagnostics: { selectedStatusRunId, lastStatusRunId, lastStatusInventory: lastStatusInventory ? { ...lastStatusInventory } : null,
       lastStatusReadOnly, terminalExitCode: Number.isInteger(terminal?.exitCode) && terminal.exitCode >= 0 && terminal.exitCode <= 255 ? terminal.exitCode : null,
       terminalExitSignal: terminal?.exitSignal == null ? null : signals.has(terminal.exitSignal) ? terminal.exitSignal : 'unknown',

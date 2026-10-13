@@ -34,7 +34,11 @@ test('real helper RPC preserves first native refusal independently of cleanup an
   const status = new MacOSPFController({ inspectInstallation: async () => ({ verified: true, runtimeVerified: true }),
     identity: { uid: 0, euid: 0, callerUID: 501, controlledSession: true }, executor: { readOnlyStatus: async ({ runId } = {}) => ({ consoleUID: 501,
       pf: { priorAnchorsCompatible: true, lo0FilteringVerified: true }, ownedRootHook: { canCreateOwnedHook: !!runId, pfDisabled: true, pinsVerified: true, originalRootCompatible: true } }) } });
-  const controller = { closed: false, status: value => status.status(value), prepareRoute: async () => ({ routeId: 'owned_route', profileId: 'owned_profile',
+  /* This refusal is a native one after the run was created, so the controller
+   * keeps listing that run until its cleanup is confirmed, as the real one does. */
+  const listed = () => ({ ...flags, ...bound, profile: 'seatbelt-front-only', phase: 'cleanup-required', staged: false, resumed: false, cleanupComplete: false, cleanupUncertain: true });
+  const controller = { closed: false, status: async value => { const result = await status.status(value); return bound ? { ...result, applications: [listed()] } : result; },
+    prepareRoute: async () => ({ routeId: 'owned_route', profileId: 'owned_profile',
     ready: false, failClosed: false, guardArmed: false, managedRouteVerified: false }), prepareNotionApplication: async value => {
     bound = { runId: value.runId, environmentId: value.environmentId };
     throw Object.assign(new Error(privateText), { code: original.code, nativeFailure: original.native, failureStage: original.stage, initialFailure: original,

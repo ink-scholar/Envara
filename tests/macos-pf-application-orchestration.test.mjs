@@ -11,6 +11,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { parseNativeApplicationEnvelope } from '../native/macos-pf-routing/helper-production-native.mjs';
+import { projectPFHelperError } from '../native/macos-pf-routing/helper.mjs';
 import { safeNotionResponse } from '../scripts/accept-macos-pf-notion.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -712,20 +713,48 @@ test('post-start refusal rejects foreign bindings, invalid schemas and startup-o
     assert.equal(entry.uncertain, true); assert.equal(entry.failure, undefined); assert.equal(f.child.stdin.writableEnded, true);
   }
 });
-test('production native register envelope preserves errno13 and errno70 through controller snapshot and safe driver report', async () => {
+test('a native register refusal keeps errno13 and errno70, holds nothing, retires its route and blocks no later attach', async () => {
   for (const errno of [13, 70]) {
     const f = fixture(), route = await f.prepareRoute(), request = input(route.routeId);
     f.commands.register = async () => parseNativeApplicationEnvelope({ schema: 1, ok: false, error: errno, ready: false, protected: false,
       activatesSystem: false, applicationIdentityVerified: false, environmentLeaseVerified: false, ticketIssued: false,
       reason: 'NATIVE_APP_OPERATION_REFUSED', registrationId: '', versionId: '', ticketId: '', snapshotContentSHA256: '', privatePath: '/private/never-publish' }, {}, 'app-register');
-    await assert.rejects(f.controller.prepareNotionApplication(request), { code: 'APPLICATION_NATIVE_REFUSED' });
-    const snapshot = f.controller.applicationSnapshot({ runId: request.runId }), report = safeNotionResponse(snapshot, request.runId, request.environmentId);
-    assert.equal(snapshot.failure.stage, 'register'); assert.equal(report.failure.code, 'APPLICATION_NATIVE_REFUSED');
-    assert.deepEqual(report.failure.native, { stage: 'register', reason: 'NATIVE_APP_OPERATION_REFUSED', error: errno });
-    assert.equal(f.calls.includes('lock'), false); assert.equal(report.cleanupUncertain, true); assert.equal(report.cleanupEvidence, null);
-    assert.ok(!JSON.stringify(report).includes('never-publish')); assert.equal(report.ready, false); assert.equal(report.protected, false);
+    const refusal = await f.controller.prepareNotionApplication(request).then(() => null, error => error);
+    assert.equal(refusal?.code, 'APPLICATION_NATIVE_REFUSED');
+    // The diagnostic travels with the refusal itself, through the fixed RPC projection.
+    const projected = projectPFHelperError(refusal), native = { stage: 'register', reason: 'NATIVE_APP_OPERATION_REFUSED', error: errno };
+    assert.equal(projected.failureStage, 'register'); assert.deepEqual(projected.nativeFailure, native);
+    assert.deepEqual(projected.initialFailure, { stage: 'register', code: 'APPLICATION_NATIVE_REFUSED', native });
+    assert.ok(!JSON.stringify(projected).includes('never-publish'));
+    // The registry holds no per-run resource: no run, no lock, and the route is gone.
+    assert.equal(f.calls.includes('lock'), false);
+    assert.throws(() => f.controller.applicationSnapshot({ runId: request.runId }), { code: 'APPLICATION_ROUTING_PROTOCOL_ERROR' });
+    const status = await f.controller.status({ runId: request.runId });
+    assert.deepEqual([status.routes.length, status.applications.length, status.runs.length], [0, 0, 0]);
+    // A refused run id is never reused, and the next attach is admitted.
+    f.commands.register = async value => { f.registry.state = 'current'; f.registry.versionId = value.versionId; return { ...value, applicationIdentityVerified: true }; };
+    await assert.rejects(f.controller.prepareNotionApplication({ ...request, routeId: (await f.prepareRoute()).routeId }), { code: 'APPLICATION_ROUTING_PROTOCOL_ERROR' });
+    assert.equal((await f.controller.prepareNotionApplication(input((await f.prepareRoute()).routeId))).phase, 'staged');
     await f.controller.shutdown();
   }
+});
+test('one controller session admits a second attachment once the first is clean, and refuses a second beside a live one before touching anything', async () => {
+  const f = fixture({ beginNextApplicationRun: () => { f.calls.push('next-run'); return true; } });
+  const first = input((await f.prepareRoute()).routeId);
+  assert.equal((await f.controller.prepareNotionApplication(first)).phase, 'staged');
+  const besideRoute = await f.prepareRoute(), before = f.calls.length;
+  await assert.rejects(f.controller.prepareNotionApplication(input(besideRoute.routeId)), { code: 'APPLICATION_ROUTING_NOT_READY' });
+  assert.deepEqual(f.calls.slice(before), []);
+  const listed = await f.controller.status();
+  assert.deepEqual(listed.routes.map(route => route.routeId), [first.routeId], 'the refused attempt retired only its own route');
+  assert.deepEqual(listed.applications.map(run => run.runId), [first.runId]);
+  assert.equal((await f.controller.stopNotionApplication({ runId: first.runId })).phase, 'cleaned');
+  const second = input((await f.prepareRoute()).routeId), start = f.calls.length;
+  assert.equal((await f.controller.prepareNotionApplication(second)).phase, 'staged');
+  const calls = f.calls.slice(start);
+  assert.ok(calls.indexOf('next-run') >= 0 && calls.indexOf('next-run') < calls.indexOf('lock'), 'the executor confirms the earlier run released before the lock');
+  assert.equal((await f.controller.stopNotionApplication({ runId: second.runId })).phase, 'cleaned');
+  await f.controller.shutdown();
 });
 test('register diagnostics refuse unknown reasons, unbounded or Boolean errno and never relabel other native commands', () => {
   const value = { schema: 1, ok: false, error: 13, ready: false, protected: false, activatesSystem: false,

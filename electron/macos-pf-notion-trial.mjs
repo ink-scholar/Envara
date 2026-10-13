@@ -387,7 +387,8 @@ export class MacOSPFNotionTrial {
     return task;
   }
   async execute(request) {
-    let call, prepared = false, stoppedKind = null, snapshotKind = null, closeConfirmed = false, statusOnlyClosed = false, statusOnlyDetached = false;
+    let call, routeRequested = false, prepared = false, stoppedKind = null, snapshotKind = null, closeConfirmed = false, statusOnlyClosed = false,
+      statusOnlyDetached = false, refusedDetached = false;
     /* The environment's identity is derived from its own id, so the same
      * environment always reaches the same data. A non-UUID id used to be
      * replaced by a random one on every attach. */
@@ -407,8 +408,11 @@ export class MacOSPFNotionTrial {
       this.state.statusFacts = Object.fromEntries(statusFacts.map(key => [key, status[key] === true]));
       if (status.ownedRootHookCanCreate !== true) throw error('PF_OWNED_RUNTIME_NOT_EMPTY');
       if (statusFacts.some(key => status[key] !== true)) throw error('APPLICATION_ROUTING_NOT_READY');
-      checkStop(); advance('preparing');
-      const route = await call('prepareRoute', request, { timeoutMs: 15000 }); checkStop();
+      checkStop(); advance('preparing'); routeRequested = true;
+      /* No stop check between the route and the run: a route without its run
+       * has nothing to stop it by. A stop asked for meanwhile is honoured once
+       * the run is staged, before the application ever executes. */
+      const route = await call('prepareRoute', request, { timeoutMs: 15000 });
       prepared = true;
       // Register, first transport ACK and cold-stage ACK each have independent
       // native deadlines. A session-bound run has no channel lifetime to clamp
@@ -436,7 +440,18 @@ export class MacOSPFNotionTrial {
     finally {
       this.stopObservation?.();
       this.stopObservation = null;
-      if (prepared && call) {
+      /* A refused preparation may have been refused before the controller
+       * created anything for it. A fresh read-only status tells: a run the
+       * controller created stays listed until its cleanup is confirmed, so an
+       * unlisted run has nothing to stop. Asking it to stop anyway is what
+       * reported a refusal as an unconfirmed cleanup. The close below accepts
+       * "nothing held" only when that same status lists nothing at all. */
+      let runCreated = prepared;
+      if (routeRequested && call && !this.state.staged) {
+        try { const fresh = await call('status', { runId }, { timeoutMs: 15000 }); runCreated = prepared && fresh.applicationListed !== false; }
+        catch { /* unanswered, so the run is treated as created */ }
+      }
+      if (runCreated && call) {
         advance('stopping');
         try { const stopped = await call('stopNotionApplication', { runId }, { timeoutMs: 25000 }); stoppedKind = cleanKind(stopped, runId, environmentId);
           this.captureSnapshot(stopped);
@@ -453,7 +468,8 @@ export class MacOSPFNotionTrial {
           statusOnlyClosed = !prepared && closeConfirmed && validatePFNotionStatusOnlyCloseEvidence(closed.statusOnlyEvidence, runId);
           /* On the shared session the run detaches instead of the session
            * closing; the client establishes that it held nothing. */
-          statusOnlyDetached = !prepared && closeConfirmed && closed.statusOnlyDetached === true; }
+          statusOnlyDetached = !prepared && closeConfirmed && closed.statusOnlyDetached === true;
+          refusedDetached = !runCreated && closeConfirmed && closed.refusedDetached === true; }
         catch (failure) { this.emit('stopping', failure); }
         /* This run's virtual channel ends here; the shared authorized session
          * stays open so the next attach asks for no password. */
@@ -472,7 +488,8 @@ export class MacOSPFNotionTrial {
       this.state.cleanupComplete = prepared && stoppedKind != null && stoppedKind === snapshotKind && closeConfirmed;
       this.state.statusOnlySessionClosed = statusOnlyClosed;
       this.state.statusOnlyRunDetached = statusOnlyDetached;
-      this.state.cleanupUncertain = call != null && (!closeConfirmed || prepared && !this.state.cleanupComplete ||
+      this.state.refusedRunDetached = refusedDetached;
+      this.state.cleanupUncertain = call != null && (!closeConfirmed || prepared && !this.state.cleanupComplete && !refusedDetached ||
         this.state.errorCode === 'PF_OWNED_RUNTIME_NOT_EMPTY' && !statusOnlyClosed && !statusOnlyDetached);
       this.state.lifecyclePassed = this.state.resumed && this.state.cleanupComplete && !this.state.errorCode;
       this.state.active = false;

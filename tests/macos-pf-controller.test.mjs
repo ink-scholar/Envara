@@ -914,3 +914,137 @@ test('Directory Services cleanup reads real macOS listings with negative IDs, at
     await assert.rejects(busy.assertNoOwnedGroupProcesses([realm]), { code: 'APPLICATION_ROUTING_NOT_READY' });
   }
 });
+
+/* A small model of the host as one root session sees it across sequential
+ * attached applications: PF enable references by token, the one owned root
+ * hook, and Directory Services groups. Every command still passes the real
+ * executor's own allowlist. */
+function sequentialHost(executor) {
+  const host = { tokens: new Set(), nextToken: 1, hook: null, retired: new Map(), groups: new Map(), calls: [],
+    lostInsert: false, lostRelease: false, releaseApplied: false, lostDelete: false, keepGroup: false };
+  const status = lease => {
+    const base = { readOnly: true, priorAnchorsCompatible: true, priorRootDerivedAnchorCount: 7, priorRulesetCountsSHA256: 'c'.repeat(64),
+      originalRootSHA256: lease.rootBeforeSHA256, originalRootTextSHA256: lease.rootBeforeTextSHA256, pinsVerified: true, pfDisabled: host.tokens.size === 0 };
+    if (host.hook?.leaseId === lease.leaseId) return { ...base, ownedRootHookVerified: true, originalRootCompatible: true };
+    const state = host.retired.get(lease.leaseId) ?? 'absent';
+    return { ...base, ownedRootHookRemoved: true, originalRootRestored: true, receiptRetired: true, namespaceState: state,
+      namespaceReclaimed: state === 'absent', namespaceExists: state === 'present', cleanupPending: state !== 'absent' };
+  };
+  executor.nativeRootHookRequest = async (operation, params) => {
+    if (operation === 'insert-owned-root-hook') {
+      host.hook = leaseFor(params.runId);
+      if (host.lostInsert) throw new Error('insert reply lost');
+      return { lease: host.hook, ownedRootHookVerified: true, ticketSource: 'this-INSERT-return-only' };
+    }
+    if (operation === 'delete-owned-root-hook') {
+      host.hook = null; host.retired.set(params.lease.leaseId, host.lostDelete ? 'present' : 'absent');
+      if (host.lostDelete) throw new Error('delete reply lost');
+      return { ticketSource: 'this-INSERT-return-only', receiptRetired: true };
+    }
+    return status(params.lease);
+  };
+  executor.command = async (executable, argv) => {
+    assert.equal(executor.allowedCommand(executable, argv), true, `${executable} ${argv.join(' ')}`);
+    host.calls.push([executable, ...argv]);
+    if (executable === '/bin/ps') return { stdout: '1 0 0\n' };
+    if (executable === '/sbin/pfctl' && argv[0] === '-ss') return { stdout: '' };
+    if (executable === '/sbin/pfctl' && argv[0] === '-E') { const token = String(host.nextToken++); host.tokens.add(token); return { stdout: '', stderr: `Token : ${token}\n` }; }
+    if (executable === '/sbin/pfctl' && argv[0] === '-X') {
+      if (!host.lostRelease || host.releaseApplied) host.tokens.delete(argv[1]);
+      if (host.lostRelease) throw new Error('release reply lost');
+      return { stdout: '' };
+    }
+    const [, verb, groupPath, attribute, value] = argv;
+    if (verb === '-list') return { stdout: ['staff 20', 'nobody -2', ...[...host.groups].map(([name, group]) => `${name.slice('/Groups/'.length)} ${group.gid}`)].join('\n') + '\n' };
+    if (verb === '-create' && !attribute) { host.groups.set(groupPath, { gid: null, generatedUID: randomUUID().toUpperCase() }); return { stdout: '' }; }
+    if (verb === '-create' && attribute === 'PrimaryGroupID') { host.groups.get(groupPath).gid = Number(value); return { stdout: '' }; }
+    if (verb === '-create') return { stdout: '' };
+    if (verb === '-read') { const group = host.groups.get(groupPath); return { stdout: `GeneratedUID: ${group.generatedUID}\nPrimaryGroupID: ${group.gid}\n` }; }
+    if (verb === '-delete') { if (!host.keepGroup) host.groups.delete(groupPath); return { stdout: '' }; }
+    throw new Error(`unmodelled ${executable} ${argv.join(' ')}`);
+  };
+  return host;
+}
+const runState = executor => Object.fromEntries(Object.entries(executor).filter(([key]) => !['spawnChild', 'fs', 'command', 'nativeRootHookRequest'].includes(key))
+  .map(([key, value]) => [key, value instanceof Map || value instanceof Set ? [...value] : value]));
+async function holdOneRun(executor) {
+  const runId = randomUUID();
+  await executor.acquireLock(runId);
+  const lease = await executor.installOwnedRootHook(runId);
+  await executor.enableOwnedReference();
+  return { runId, lease, realm: await executor.allocateGroup(randomUUID()) };
+}
+// Every step runs even after an earlier one fails, so exactly the failed
+// release is the one left unconfirmed. Returns the first failure, or false.
+async function releaseOneRun(executor, { lease, realm }, { skip = null } = {}) {
+  const steps = { reference: () => executor.releaseOwnedReference(), hook: () => executor.removeOwnedRootHook(lease),
+    groups: () => executor.removeGroups([realm]), lock: () => executor.releaseLock() };
+  let failed = false;
+  for (const [name, step] of Object.entries(steps)) {
+    if (name === skip) continue;
+    try { await step(); } catch (error) { failed ||= error; }
+  }
+  return failed;
+}
+
+test('one root session runs a second attached application once the first is confirmed clean', async () => {
+  const fixture = runtimeFilesystem(), executor = new MacOSPFExecutor({ fileSystem: fixture.fileSystem }), host = sequentialHost(executor);
+  const initial = runState(new MacOSPFExecutor({ fileSystem: fixture.fileSystem }));
+  const first = await holdOneRun(executor);
+  assert.throws(() => executor.beginNextApplicationRun(), { code: 'APPLICATION_ROUTING_NOT_READY' });
+  assert.equal(await releaseOneRun(executor, first), false);
+  assert.equal(executor.beginNextApplicationRun(), true);
+  // Nothing the first run recorded survives into the second.
+  assert.deepEqual(runState(executor), initial);
+  const second = await holdOneRun(executor);
+  assert.equal(second.realm.gid, first.realm.gid, 'the freed group id is reused');
+  assert.equal(await releaseOneRun(executor, second), false);
+  // Each run releases its own PF reference; a stale latch would have skipped the second.
+  assert.deepEqual(host.calls.filter(call => call[0] === '/sbin/pfctl' && call[1] === '-X'), [['/sbin/pfctl', '-X', '1'], ['/sbin/pfctl', '-X', '2']]);
+  assert.equal(host.tokens.size, 0); assert.equal(host.hook, null); assert.equal(host.groups.size, 0);
+  assert.deepEqual(await fixture.fileSystem.readdir(PF_RUNTIME_ROOT), []);
+  assert.equal(executor.beginNextApplicationRun(), true);
+});
+
+test('a later run is refused while any release of the earlier run is unconfirmed', async () => {
+  for (const scenario of ['lock', 'reference-applied', 'reference-held', 'hook', 'groups']) {
+    const fixture = runtimeFilesystem(), executor = new MacOSPFExecutor({ fileSystem: fixture.fileSystem }), host = sequentialHost(executor);
+    const held = await holdOneRun(executor);
+    // A lost -X reply is unconfirmed even when PF did drop the reference; only
+    // the executor's own read-back may confirm it, and nothing here asked.
+    if (scenario.startsWith('reference')) Object.assign(host, { lostRelease: true, releaseApplied: scenario === 'reference-applied' });
+    if (scenario === 'hook') host.lostDelete = true;
+    if (scenario === 'groups') host.keepGroup = true;
+    const failed = await releaseOneRun(executor, held, { skip: scenario === 'lock' ? 'lock' : null });
+    // A lost DELETE is answered by read-only status: the namespace still exists,
+    // which the hook latch records for the caller instead of throwing.
+    if (scenario === 'hook') assert.equal(executor.rootHookMutationUncertain, true);
+    else assert.equal(Boolean(failed), scenario !== 'lock', scenario);
+    if (scenario === 'reference-applied') { assert.equal(host.tokens.size, 0); assert.equal(executor.pfToken, '1'); assert.equal(executor.lock, null); }
+    if (scenario === 'reference-held') assert.equal(host.tokens.size, 1, 'PF still holds the reference');
+    assert.throws(() => executor.beginNextApplicationRun(), { code: 'APPLICATION_ROUTING_NOT_READY' }, scenario);
+  }
+  // An INSERT whose reply was lost may have installed a hook this session holds
+  // no lease for. Everything else is released, and the next run still refuses.
+  const fixture = runtimeFilesystem(), executor = new MacOSPFExecutor({ fileSystem: fixture.fileSystem }), host = sequentialHost(executor);
+  host.lostInsert = true; const runId = randomUUID();
+  await executor.acquireLock(runId);
+  await assert.rejects(executor.installOwnedRootHook(runId));
+  await executor.releaseLock();
+  assert.equal(executor.rootHookLease, null); assert.equal(executor.rootHookMutationUncertain, true);
+  assert.throws(() => executor.beginNextApplicationRun(), { code: 'APPLICATION_ROUTING_NOT_READY' }, 'insert');
+});
+
+test('a transport or guardian of the earlier run must be confirmed ended before a later run', async () => {
+  const fixture = runtimeFilesystem(), executor = new MacOSPFExecutor({ fileSystem: fixture.fileSystem }); sequentialHost(executor);
+  assert.equal(await releaseOneRun(executor, await holdOneRun(executor)), false);
+  const child = new EventEmitter(), runId = randomUUID();
+  executor.appTransports.set(runId, { runId, phase: 'released', exited: true, exitCode: 0, uncertain: false, child });
+  assert.throws(() => executor.beginNextApplicationRun(), { code: 'APPLICATION_ROUTING_NOT_READY' });
+  assert.equal(await executor.confirmApplicationTransportExited(runId), true);
+  executor.guardians.set('tunnel', { exited: false });
+  assert.throws(() => executor.beginNextApplicationRun(), { code: 'APPLICATION_ROUTING_NOT_READY' });
+  executor.guardians.get('tunnel').exited = true;
+  assert.equal(executor.beginNextApplicationRun(), true);
+  assert.equal(executor.appTransports.size, 0); assert.equal(executor.guardians.size, 0);
+});

@@ -35,7 +35,7 @@ const refusalFrame = { protocol: 'envara.application-routing', version: 1, id: n
 
 /** One root session: a scripted controller behind the real helper envelope,
  *  answering status with the root controller's own logic. */
-function rootSession({ canCreate, onPrepareRoute, hangStatus = false }) {
+function rootSession({ canCreate, onPrepareRoute, hangStatus = false, refusePrepare = () => false, refusePrepareRoute = () => false, leaveRoute = () => false, answerUnstaged = () => false }) {
   const calls = [], prepared = [], reclaimed = []; let bound = null, shutdowns = 0;
   const statusController = new MacOSPFController({ inspectInstallation: async () => ({ verified: true, runtimeVerified: true }),
     identity: { uid: 0, euid: 0, callerUID: 501, controlledSession: true }, executor: { readOnlyStatus: async ({ runId } = {}) => ({ consoleUID: 501,
@@ -46,10 +46,20 @@ function rootSession({ canCreate, onPrepareRoute, hangStatus = false }) {
     source: 'native-notion-controller', ...bound, profile: 'seatbelt-front-only', complete: true, cleanupUncertain: false,
     ...Object.fromEntries(facts.map(key => [key, true])) } });
   const controller = { closed: false,
-    status: async params => { calls.push('status'); return hangStatus ? new Promise(() => {}) : statusController.status(params); },
-    prepareRoute: async value => { calls.push('prepareRoute'); if (onPrepareRoute) return onPrepareRoute();
+    status: async params => { calls.push('status'); if (hangStatus) return new Promise(() => {});
+      // A controller that kept a refused attempt's route would still list it.
+      const result = await statusController.status(params); return leaveRoute() ? { ...result, routes: [{ routeId: 'route_owned' }] } : result; },
+    prepareRoute: async value => { calls.push('prepareRoute');
+      if (refusePrepareRoute()) throw Object.assign(new Error('refused'), { code: 'APPLICATION_PROXY_UNAVAILABLE' });
+      if (onPrepareRoute) return onPrepareRoute();
       return { routeId: 'route_owned', profileId: value.application.profileId, ready: false, failClosed: false, guardArmed: false, managedRouteVerified: false }; },
-    prepareNotionApplication: async value => { calls.push('prepare'); prepared.push(value); bound = { runId: value.runId, environmentId: value.environmentId }; return state('staged'); },
+    prepareNotionApplication: async value => { calls.push('prepare'); prepared.push(value);
+      // Refused before the controller created the run: nothing is listed for it.
+      if (refusePrepare()) throw Object.assign(new Error('refused'), { code: 'APPLICATION_ROUTING_NOT_READY' });
+      bound = { runId: value.runId, environmentId: value.environmentId };
+      // Answered with a run that is not staged, by a controller that then lists nothing.
+      if (answerUnstaged()) { const answered = { ...state('preparing'), staged: false }; bound = null; return answered; }
+      return state('staged'); },
     applicationStorage: async () => { calls.push('storage');
       return { ...flags, profile: 'seatbelt-front-only', readOnly: true, attachedApplicationActive: false,
         registrations: [{ registrationId: storageIds.registration, identifier: 'notion.id', bundle: '/Applications/Notion.app', versions: 1, retired: false, bytes: 307232768 }],
@@ -66,7 +76,8 @@ function rootSession({ canCreate, onPrepareRoute, hangStatus = false }) {
 const storageIds = { registration: randomUUID(), environment: randomUUID() };
 
 /** Stands in for the authorization carrier: each spawn is one root session. */
-function carrierFactory({ canCreate = () => true, refuseFirst = false, refusalStage = 'AuthorizationCopyRights', dieOnPrepareRoute = false, hangStatus = false } = {}) {
+function carrierFactory({ canCreate = () => true, refuseFirst = false, refusalStage = 'AuthorizationCopyRights', dieOnPrepareRoute = false, hangStatus = false,
+  refusePrepare, refusePrepareRoute, leaveRoute, answerUnstaged } = {}) {
   const sessions = [];
   const spawnCarrier = () => {
     const input = new PassThrough(), child = new EventEmitter();
@@ -81,7 +92,7 @@ function carrierFactory({ canCreate = () => true, refuseFirst = false, refusalSt
       setImmediate(() => { child.stdout.write(`${JSON.stringify(frame)}\n`); child.stdout.end(); exit(1); });
       return child;
     }
-    session.root = rootSession({ canCreate, hangStatus,
+    session.root = rootSession({ canCreate, hangStatus, refusePrepare, refusePrepareRoute, leaveRoute, answerUnstaged,
       onPrepareRoute: dieOnPrepareRoute ? () => { exit(1); return new Promise(() => {}); } : null });
     servePFHelper({ controller: session.root.controller, input, output: child.stdout, signalSource: null })
       .then(() => { child.stdout.end(); exit(0); });
@@ -178,6 +189,48 @@ test('a run refused at its first status check holds nothing, demands no cleanup 
   f.setCanCreate(true);
   const next = await f.attach();
   assert.equal(next.phase, 'cleaned', JSON.stringify(next.events)); assert.equal(f.carrier.sessions.length, 1);
+  await f.trial.shutdownAll();
+});
+
+test('a preparation refused before its run exists is not stopped, holds nothing, and the next attach in the same launch works', async () => {
+  /* The second attach of a launch was refused this way, then asked to stop a
+   * run that never existed, and showed "cleanup unconfirmed" with every later
+   * attach refused until Envara restarted. */
+  let refuse = true;
+  const f = attachFixture({ refusePrepare: () => refuse });
+  const refused = await f.attach();
+  assert.equal(refused.errorCode, 'APPLICATION_ROUTING_NOT_READY');
+  assert.equal(refused.phase, 'failed'); assert.equal(refused.cleanupUncertain, false); assert.equal(refused.refusedRunDetached, true);
+  assert.equal(refused.cleanupFailure, null, 'a refusal is not reported as a cleanup failure');
+  const session = f.carrier.sessions[0];
+  assert.deepEqual(session.root.calls, ['status', 'prepareRoute', 'prepare', 'status']);
+  refuse = false;
+  const next = await f.attach();
+  assert.equal(next.phase, 'cleaned', JSON.stringify(next.events)); assert.equal(f.carrier.sessions.length, 1, 'no second password');
+  await f.trial.shutdownAll();
+});
+test('a refused route preparation holds nothing and leaves the next attach possible', async () => {
+  let refuse = true;
+  const f = attachFixture({ refusePrepareRoute: () => refuse });
+  const refused = await f.attach();
+  assert.equal(refused.errorCode, 'APPLICATION_PROXY_UNAVAILABLE');
+  assert.equal(refused.phase, 'failed'); assert.equal(refused.cleanupUncertain, false); assert.equal(refused.refusedRunDetached, true);
+  assert.deepEqual(f.carrier.sessions[0].root.calls, ['status', 'prepareRoute', 'status']);
+  refuse = false;
+  assert.equal((await f.attach()).phase, 'cleaned');
+  await f.trial.shutdownAll();
+});
+test('a refused preparation whose route the controller still lists stays fail-closed', async () => {
+  const f = attachFixture({ refusePrepare: () => true, leaveRoute: () => true });
+  const refused = await f.attach();
+  assert.equal(refused.refusedRunDetached, false); assert.equal(refused.cleanupUncertain, true); assert.equal(refused.phase, 'cleanup-required');
+  await f.trial.shutdownAll();
+});
+
+test('a preparation answered with a run is never taken for a refusal, even when no run is listed', async () => {
+  const f = attachFixture({ answerUnstaged: () => true });
+  const answered = await f.attach();
+  assert.equal(answered.refusedRunDetached, false); assert.equal(answered.cleanupUncertain, true);
   await f.trial.shutdownAll();
 });
 

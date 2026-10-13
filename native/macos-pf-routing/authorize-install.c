@@ -748,7 +748,10 @@ static bool relay_helper(int fd, double seconds) {
             { read_input ? STDIN_FILENO : -1, POLLIN, 0 },
             { output.length ? STDOUT_FILENO : -1, POLLOUT, 0 }
         };
-        double remaining = deadline - clock_seconds();
+        /* An unbounded session (deadline zero) still waits in poll. Computing
+         * the remaining time from a zero deadline gave a zero timeout, and the
+         * relay spun for as long as an attach session stayed open. */
+        double remaining = deadline > 0.0 ? deadline - clock_seconds() : 0.250;
         int wait_ms = remaining >= 0.250 ? 250 : remaining > 0 ? (int)(remaining * 1000.0) + 1 : 0;
         int observed = poll(waits, 3, wait_ms);
         if (observed < 0 && errno == EINTR) continue;

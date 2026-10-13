@@ -193,8 +193,27 @@ const relayHarness = `
 #include AUTHORIZE_SOURCE
 #undef main
 #include <sys/wait.h>
+#include <sys/resource.h>
 int main(int argc, char **argv) {
     if (argc != 2) return 90;
+    if (!strcmp(argv[1], "idle-unbounded")) {
+        /* The production session relay has no deadline. While its peer is idle
+         * it must wait in poll rather than spin. The relay's own CPU time over
+         * one idle second is reported for the test to bound. */
+        int idle[2]; if (socketpair(AF_UNIX, SOCK_STREAM, 0, idle)) return 110;
+        pid_t peer = fork(); if (peer < 0) return 111;
+        if (!peer) { close(idle[0]); usleep(1000000); close(idle[1]); _exit(0); }
+        close(idle[1]);
+        struct rusage before, after; if (getrusage(RUSAGE_SELF, &before)) return 112;
+        bool okay = relay_helper(idle[0], RELAY_SECONDS);
+        if (getrusage(RUSAGE_SELF, &after)) return 113;
+        close(idle[0]); int status = 0;
+        if (waitpid(peer, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status)) return 114;
+        long used = (long)(after.ru_utime.tv_sec - before.ru_utime.tv_sec) * 1000000L + (long)(after.ru_utime.tv_usec - before.ru_utime.tv_usec) +
+            (long)(after.ru_stime.tv_sec - before.ru_stime.tv_sec) * 1000000L + (long)(after.ru_stime.tv_usec - before.ru_stime.tv_usec);
+        printf("%ld\\n", used); fflush(stdout);
+        return okay ? 0 : 115;
+    }
     if (!strcmp(argv[1], "not-bidirectional")) {
         int descriptors[2]; if (pipe(descriptors)) return 91;
         bool okay = relay_helper(descriptors[0], 1.0);
@@ -264,6 +283,18 @@ test('production relay refuses a unidirectional pipe rather than pretending JSON
   }, { harness: relayHarness });
 });
 
+test('the unbounded session relay waits while its peer is idle instead of spinning', onlyMac, async () => {
+  /* A real attach session held its carrier at about 20% of a core for hours:
+   * the zero deadline that means "unbounded" produced a zero poll timeout.
+   * Measured: about 190 ms of CPU per idle second spinning, under 0.05 ms
+   * waiting, so the bound sits far from both. */
+  await fixture(async ({ binary }) => {
+    const result = await runRelay(binary, 'idle-unbounded');
+    assert.equal(result.code, 0, result.errors); assert.equal(result.errors, '');
+    const used = Number(result.output.toString().trim());
+    assert.ok(Number.isSafeInteger(used) && used >= 0 && used < 20000, `one idle second cost ${used} microseconds of CPU`);
+  }, { harness: relayHarness });
+});
 test('production relay bounds a silent owned socket peer and preserves timeout reason', onlyMac, async () => {
   await fixture(async ({ binary }) => {
     const result = await runRelay(binary, 'deadline');

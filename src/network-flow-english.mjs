@@ -66,6 +66,9 @@ export const networkFlowEnglish = {
     'An attached application keeps running until you stop it, it exits, or you quit Envara. The fingerprint browser and terminals are not counted.',
   '首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。':
     'The first attach asks for administrator authorization once; this Envara run will not ask again.',
+  '关闭窗口不会退出软件，点程序坞图标即可重新打开窗口；点停止会退出软件。':
+    'Closing its window does not quit the application; click its Dock icon to open the window again. Stop quits it.',
+  '再次启动会沿用这个境舱的登录数据。': 'Launching it again keeps this environment’s sign-in data.',
   '更新网络组件': 'Update network component',
   '更新中…': 'Updating…',
   '已安装的网络组件早于当前应用版本，需要更新后才能附加软件。': 'The installed network component predates this app version. Update it before attaching software.',

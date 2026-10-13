@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { localeForInterfaceLanguage } from "../shared/interface-languages.mjs";
 import { savedNetworkPresentation } from "./network-flow-state.mjs";
-import { notionTrialControls, notionTrialLogLine, notionTrialFailureLine, notionTrialPhaseLabels, notionTrialErrorHint } from "./notion-trial-state.mjs";
+import { notionTrialControls, notionTrialLogLine, notionTrialFailureLine, notionTrialPhaseLabels, notionTrialErrorHint, attachedApplicationStatus } from "./notion-trial-state.mjs";
 import { Stack, GlobeHemisphereWest, FolderOpen, Plus, Play, Stop, Trash, Desktop, ShieldCheck, WarningCircle, ArrowRight, PencilSimple, Browsers, TerminalWindow, Clock } from "@phosphor-icons/react";
 const live = new Set(["starting", "running", "stopping"]);
 function WorkspaceEmpty({
@@ -181,14 +181,20 @@ export function ApplicationsWorkspace({
         const capabilityError = desktop && typeof application.identity === "string" && application.identity && !controlled.available && typeof routing?.controlledNotionTrialErrorCode === "string" && /^PF_[A-Z0-9_]{1,80}$/.test(routing.controlledNotionTrialErrorCode) ? routing.controlledNotionTrialErrorCode : null;
         const trialHint = notionTrialErrorHint(controlled.trial?.errorCode ?? diagnostics?.initialFailure?.code);
         const busy = pending[`startApplication:${application.id}`] || pending[`stopApplication:${application.id}`] || pending[`deleteApplication:${application.id}`] || controlled.active || controlled.stopPending;
+        /* An application with an environment flow starts, runs and stops through
+         * that flow; the row's one button is its start and stop. */
+        const inEnvironment = controlled.show;
+        const rowStatus = inEnvironment ? attachedApplicationStatus(controlled) : application.status;
+        const rowLive = inEnvironment ? live.has(rowStatus) : active;
         return <div className="application-row" key={application.id}>
         <div className="application-icon"><Desktop size={24} /></div>
         <div className="application-copy"><strong>{application.name}</strong><span>{owner?.name || t("环境不可用")}</span><small title={application.path}>{application.path}</small>{application.lastError && <p className="application-error"><WarningCircle size={14} />{t(typeof application.lastError === "string" ? application.lastError : application.lastError.message)}</p>}
           {capabilityError && <p className="notion-trial-error" role="status">{t("错误码")} · <code>{capabilityError}</code></p>}
           {controlled.show && <div className="notion-trial-panel">
-            <div className="notion-trial-actions">{controlled.available && <button className="button" disabled={!owner || !controlled.canRun || active} onClick={() => onRunNotionTrial(application)}><Play size={14} />{t("附加软件")}</button>}{controlled.trial?.active && <button className="button" disabled={!controlled.canStop} onClick={() => onStopNotionTrial(application)}><Stop size={14} />{t("停止附加")}</button>}</div>
-            <p className="notion-trial-scope">{t(controlled.active ? "附加中 · 不会自动结束 · 接管未验收" : "不会自动结束 · 接管未验收")}</p>
+            <p className="notion-trial-scope">{t("不会自动结束 · 接管未验收")}</p>
             <p className="notion-trial-scope">{t("附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。")}</p>
+            <p className="notion-trial-scope">{t("关闭窗口不会退出软件，点程序坞图标即可重新打开窗口；点停止会退出软件。")}</p>
+            <p className="notion-trial-scope">{t("再次启动会沿用这个境舱的登录数据。")}</p>
             {controlled.active && <p className="notion-trial-scope">{t("首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。")}</p>}
             {controlled.trial && <div className="notion-trial-status" role="status"><span>{t("阶段")} · {t(notionTrialPhaseLabels[controlled.trial.phase])}</span>{controlled.trial.errorCode && <span className="notion-trial-error">{t("错误码")} · <code>{controlled.trial.errorCode}</code></span>}</div>}
             {historicalDiagnostics && <p className="notion-trial-scope">{t("上次附加")}</p>}
@@ -199,14 +205,14 @@ export function ApplicationsWorkspace({
             {(diagnostics?.events.length > 0 || diagnostics?.initialFailure) && typeof onExportNotionDiagnostics === "function" && <button className="button" disabled={pending[`exportNotionDiagnostics:${application.id}`]} onClick={() => onExportNotionDiagnostics(application)}>{t("导出诊断")}</button>}
           </div>}
         </div>
-        <span className={`status status-${controlled.active ? "starting" : application.status}`}><span className="status-dot" />{controlled.active ? t("附加中") : t({
+        <span className={`status status-${rowStatus}`}><span className="status-dot" />{t({
               stopped: "已停止",
               starting: "启动中",
               running: "运行中",
               stopping: "停止中",
               error: "异常"
-            }[application.status] || application.status)}</span>
-        <div className="application-actions"><button className={`button ${active ? "" : "primary"}`} disabled={busy || (active ? application.status !== "running" : !ready || !owner)} onClick={() => active ? onStop(application) : onStart(application)}>{active ? <Stop size={15} /> : <Play size={15} />}{t(active ? "停止" : "启动")}</button><button className="icon-button" disabled={active || busy || controlled.trial?.cleanupUncertain === true} onClick={() => onDelete(application)} aria-label={t("移除软件")}><Trash size={17} /></button></div>
+            }[rowStatus] || rowStatus)}</span>
+        <div className="application-actions"><button className={`button ${rowLive ? "" : "primary"}`} disabled={inEnvironment ? (rowLive ? !controlled.canStop : !owner || !controlled.canRun) : busy || (active ? application.status !== "running" : !ready || !owner)} onClick={() => inEnvironment ? (rowLive ? onStopNotionTrial(application) : onRunNotionTrial(application)) : active ? onStop(application) : onStart(application)}>{rowLive ? <Stop size={15} /> : <Play size={15} />}{t(rowLive ? "停止" : "启动")}</button><button className="icon-button" disabled={active || busy || controlled.trial?.cleanupUncertain === true} onClick={() => onDelete(application)} aria-label={t("移除软件")}><Trash size={17} /></button></div>
       </div>;
       })}</div> : <WorkspaceEmpty icon={Desktop} title={profile ? "添加软件到这个境舱" : "先创建网络环境"} action={desktop ? "添加软件" : undefined} onAction={onPick} t={t} />}
     {desktop && routing?.backend === "pf-utun" && typeof onCheckStorage === "function" &&

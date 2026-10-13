@@ -68,6 +68,18 @@ export function notionTrialControls(application, routing, desktop, pending = {})
     canStop: canonical && trial?.active === true && !stopPending && trial.phase !== 'stopping' };
 }
 
+/* The row status of an application started inside its environment. It shows
+ * running only once the application itself runs; a start that failed shows
+ * as an error until the next start, with its reason in the panel below. */
+export function attachedApplicationStatus(controlled) {
+  const trial = controlled?.trial;
+  if (controlled?.stopPending || trial?.active && trial.phase === 'stopping') return 'stopping';
+  if (trial?.active && trial.phase === 'running') return 'running';
+  if (controlled?.requestPending || trial?.active) return 'starting';
+  if (trial?.cleanupUncertain || ['failed', 'cleanup-required'].includes(trial?.phase)) return 'error';
+  return 'stopped';
+}
+
 export function notionTrialLogLine(event) {
   return [`${event.sequence}. ${event.stage}`, event.code, event.nativeStage, event.nativeReason, event.errno != null ? `errno=${event.errno}` : null].filter(Boolean).join(' · ');
 }

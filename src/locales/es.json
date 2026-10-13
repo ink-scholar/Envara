@@ -570,6 +570,8 @@
   "导出诊断": "Exportar diagnóstico",
   "附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。": "Una aplicación adjuntada sigue ejecutándose hasta que la detengas, la aplicación termine o cierres Envara. El navegador de huella y las terminales no cuentan.",
   "首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。": "Al adjuntar por primera vez se solicita una autorización de administrador; esta ejecución de Envara no volverá a preguntar.",
+  "关闭窗口不会退出软件，点程序坞图标即可重新打开窗口；点停止会退出软件。": "Cerrar la ventana no cierra la aplicación; haz clic en su icono del Dock para volver a abrir la ventana. Detener cierra la aplicación.",
+  "再次启动会沿用这个境舱的登录数据。": "Al iniciarla de nuevo se conservan los datos de inicio de sesión de este entorno.",
   "软件副本": "Copia de la aplicación",
   "登录数据": "Datos de inicio de sesión",
   "已删除的境舱": "Entorno eliminado",

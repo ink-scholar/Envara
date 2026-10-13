@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { safeNotionTrial, notionTrialControls, notionTrialLogLine, notionTrialErrorHint } from '../src/notion-trial-state.mjs';
+import { safeNotionTrial, notionTrialControls, notionTrialLogLine, notionTrialErrorHint, attachedApplicationStatus } from '../src/notion-trial-state.mjs';
 
 const application = { id: 'bound-notion', identity: 'bundle:notion.id' };
 const routing = { ready: false, controlledNotionTrialAvailable: true };
@@ -44,4 +44,17 @@ test('a refused PF baseline explains the restart and VPN causes without changing
   const hint = notionTrialErrorHint('PF_OWNED_RUNTIME_NOT_EMPTY');
   assert.match(hint, /重启电脑/); assert.match(hint, /VPN/);
   for (const code of [null, undefined, 42, 'PF_NOTION_TRIAL_FAILED', '__proto__', 'toString', 'constructor']) assert.equal(notionTrialErrorHint(code), null, String(code));
+});
+
+test('the row shows running only while the application itself runs, and a failed start as an error', () => {
+  const row = (trial, extra = {}) => attachedApplicationStatus({ trial, requestPending: false, stopPending: false, ...extra });
+  assert.equal(row(null), 'stopped');
+  assert.equal(row(null, { requestPending: true }), 'starting');
+  for (const phase of ['verifying', 'authorizing', 'preparing', 'staged', 'resuming']) assert.equal(row({ active: true, phase }), 'starting', phase);
+  assert.equal(row({ active: true, phase: 'running' }), 'running');
+  assert.equal(row({ active: true, phase: 'running' }, { stopPending: true }), 'stopping');
+  assert.equal(row({ active: true, phase: 'stopping' }), 'stopping');
+  assert.equal(row({ active: false, phase: 'cleaned' }), 'stopped', 'stopped, or ended on its own');
+  assert.equal(row({ active: false, phase: 'failed' }), 'error');
+  assert.equal(row({ active: false, phase: 'cleanup-required', cleanupUncertain: true }), 'error');
 });

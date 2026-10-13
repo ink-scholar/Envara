@@ -111,7 +111,8 @@ test('native default and explicit plans inspect real held file FDs without mutat
       'da6e7c9714ec57781f68d875d131e9ee178adbaab401793a153ac7b216ceef05',
       '03245359a948d31c9f4b87fe88dd1b3cb6a270228fbfc13fe873de50cdcce7da',
       '2059a0870f88f6fa6caa89c9dbd751e41ee3b2cbf4101933c8519efa32f08b68',
-      '127e8354fbc420e8c12e32a439129a517d2bad0e2950347fc18efaa6c24e9377'].includes(value.priorManifestSHA256));
+      '127e8354fbc420e8c12e32a439129a517d2bad0e2950347fc18efaa6c24e9377',
+      '010117dbf9fb8bf28ebc5ef92de19235d34774ef114c8c86b4ee3feda48c2374'].includes(value.priorManifestSHA256));
         assert.equal(value.requiresUpgradeApproval, true);
         assert.equal(value.canRequestInstall, (value.controlledRuntimeAbsent || value.privateRuntimeInspectionRequired) && !value.needsManualReview,
           'a verified prior may request an administrator precheck but cannot assume private runtime contents are empty');
@@ -421,7 +422,7 @@ test('upgrade allows only twenty pinned prior manifests and each exact file tabl
   }
 });
 
-test('the forty-one earlier reviewed prior inputs remain byte-for-byte pinned', async () => {
+test('the forty-two earlier reviewed prior inputs remain byte-for-byte pinned', async () => {
   const base = new URL('../native/macos-pf-routing/', import.meta.url);
   for (const [tag, headerSHA256, manifestSHA256] of [
     ['f8', '15f324849482024c72388bb5018f82d0755ea376c19df83d6cec2a78914dcd9f', 'f8fce1d14566fdf822d220ef1a3469cbb815a37924c7ed709a1098729b8bed8b'],
@@ -448,6 +449,7 @@ test('the forty-one earlier reviewed prior inputs remain byte-for-byte pinned', 
     ['03245359', '0da9db2c560a1c8351af69f781cddf34914007ae8d83691205b815b42468dcd2', '03245359a948d31c9f4b87fe88dd1b3cb6a270228fbfc13fe873de50cdcce7da'],
     ['2059a0', '25c0648936fc71b9ebeb9e3c9585c5f98854a24137b80cd8896ff2fe7a1a831d', '2059a0870f88f6fa6caa89c9dbd751e41ee3b2cbf4101933c8519efa32f08b68'],
     ['127e83', '9637d5d78916e67ec5060ae1319247c7f72b67ed0632bc52f2ecd9215293b5e1', '127e8354fbc420e8c12e32a439129a517d2bad0e2950347fc18efaa6c24e9377'],
+    ['010117', '4014fa9c71bdae71bc2c5445eedde653a878004d587df2a6a6749343c1a99eea', '010117dbf9fb8bf28ebc5ef92de19235d34774ef114c8c86b4ee3feda48c2374'],
     ['da6e7c', '4cc282fbb509c0c4e8fb328ffd46a8c7964e1202c44e1f1c58dd61f5ebb7144f', 'da6e7c9714ec57781f68d875d131e9ee178adbaab401793a153ac7b216ceef05'],
   ]) {
     assert.equal(digest(await readFile(new URL(`installer-upgrade-${tag}.h`, base))), headerSHA256);
@@ -458,7 +460,7 @@ test('the forty-one earlier reviewed prior inputs remain byte-for-byte pinned', 
 test('source trust tables classify exact 14-, 15- and 19-file priors independently of the current target', async () => {
   const contents = await readFile(source, 'utf8');
   const priors = contents.match(/known_prior_snapshots\[\]\s*=\s*\{([^}]+)\}/)?.[1];
-  assert.deepEqual([...priors.matchAll(/&ENVARA_PF_UPGRADE_([A-Z0-9]+)_SNAPSHOT/g)].map(([, tag]) => tag), ['F8', 'E940', '518', '2A7', '832', 'FF9', '6F8', '199', '46A', 'C37', 'F99', '05D6', '14B87', 'DBCF', '43B', 'ACFC', 'C34', '4B9F85', '43392E', 'F0B99F', 'F39101', 'A8BD00', 'DA6E7C', '03245359', '2059A0', '127E83']);
+  assert.deepEqual([...priors.matchAll(/&ENVARA_PF_UPGRADE_([A-Z0-9]+)_SNAPSHOT/g)].map(([, tag]) => tag), ['F8', 'E940', '518', '2A7', '832', 'FF9', '6F8', '199', '46A', 'C37', 'F99', '05D6', '14B87', 'DBCF', '43B', 'ACFC', 'C34', '4B9F85', '43392E', 'F0B99F', 'F39101', 'A8BD00', 'DA6E7C', '03245359', '2059A0', '127E83', '010117']);
   const targetNames = [...Object.keys(PF_MANIFEST_FILES), 'manifest.json'].sort();
   assert.equal(targetNames.length, 19); assert.equal(PF_MANIFEST_FILES['stateless-verifier.mjs'], false);
   const snapshotMatcher = contents.match(/static bool snapshot_matches\([^)]*\)\s*\{([\s\S]*?)\n\}/)?.[1];
@@ -468,12 +470,12 @@ test('source trust tables classify exact 14-, 15- and 19-file priors independent
   assert.doesNotMatch(snapshotMatcher, /ACTUAL_FILE_COUNT|ENVARA_PF_INSTALL_FILE_COUNT|ENVARA_PF_INSTALL_FILES/);
   const classifier = contents.match(/static int existing_installation\([^)]*\)\s*\{([\s\S]*?)\n\}/)?.[1];
   assert.ok(classifier.includes('snapshot_matches(fd, known_prior_snapshots[i], true)'));
-  for (const tag of ['f8', 'e940', '518', '2a7', '832', 'ff9', '6f8', '199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83']) {
+  for (const tag of ['f8', 'e940', '518', '2a7', '832', 'ff9', '6f8', '199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117']) {
     const header = await readFile(new URL(`../native/macos-pf-routing/installer-upgrade-${tag}.h`, import.meta.url), 'utf8');
     const entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
-    assert.equal(entries.length, ['199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83'].includes(tag) ? 19 : ['2a7', '832', 'ff9', '6f8'].includes(tag) ? 15 : 14);
+    assert.equal(entries.length, ['199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117'].includes(tag) ? 19 : ['2a7', '832', 'ff9', '6f8'].includes(tag) ? 15 : 14);
     const absentNewModules = ['helper-production-native.mjs', 'notion-front-service.mjs', 'notion-socks-front.mjs', 'notion-socks-reader.mjs'];
-    const absent = ['199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83'].includes(tag) ? [] : [...absentNewModules, ...(['2a7', '832', 'ff9', '6f8'].includes(tag) ? [] : ['stateless-verifier.mjs'])].sort();
+    const absent = ['199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117'].includes(tag) ? [] : [...absentNewModules, ...(['2a7', '832', 'ff9', '6f8'].includes(tag) ? [] : ['stateless-verifier.mjs'])].sort();
     assert.deepEqual(targetNames.filter(name => !entries.some(([, priorName]) => priorName === name)), absent);
     assert.match(header, /sizeof\(ENVARA_PF_UPGRADE_[A-Z0-9]+_FILES\)\/sizeof\(ENVARA_PF_UPGRADE_[A-Z0-9]+_FILES\[0\]\)/);
   }

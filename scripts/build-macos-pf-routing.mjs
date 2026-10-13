@@ -51,7 +51,7 @@ export async function buildMacOSPF({ root = ROOT, output = path.join(root, 'buil
       'installer-upgrade-f39101.h', 'known-installations/f39101.manifest.json',
       'installer-upgrade-a8bd00.h', 'known-installations/a8bd00.manifest.json',
       'installer-upgrade-da6e7c.h', 'known-installations/da6e7c.manifest.json',
-      'installer-upgrade-03245359.h', 'known-installations/03245359.manifest.json', 'installer-upgrade-2059a0.h', 'known-installations/2059a0.manifest.json', 'installer-upgrade-127e83.h', 'known-installations/127e83.manifest.json', 'pf-hook.c', 'pf-hook.h', 'pf-hook-abi.h', 'pf-run-ledger.c', 'pf-run-ledger.h',
+      'installer-upgrade-03245359.h', 'known-installations/03245359.manifest.json', 'installer-upgrade-2059a0.h', 'known-installations/2059a0.manifest.json', 'installer-upgrade-127e83.h', 'known-installations/127e83.manifest.json', 'installer-upgrade-010117.h', 'known-installations/010117.manifest.json', 'pf-hook.c', 'pf-hook.h', 'pf-hook-abi.h', 'pf-run-ledger.c', 'pf-run-ledger.h',
     'pf-filter-command.c', 'pf-filter-command.h',
     'pf-filter-transaction.c', 'pf-filter-transaction.h',
     'app-command.c', 'app-command.h',

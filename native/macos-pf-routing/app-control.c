@@ -50,8 +50,13 @@ int envara_app_control_dispatch(const struct envara_app_control_context *input, 
     }
     const char *command = argv[1]; int registration_command = !strcmp(command, "app-register");
     int plan = !strcmp(command, "app-plan"), retire = !strcmp(command, "app-retire"), prepare = !strcmp(command, "app-ticket-prepare"), inspect = !strcmp(command, "app-ticket-inspect");
+    /* Storage lifecycle: a registration is reused while exact and removed when
+     * nothing uses it, so the bounded inventories cannot fill up. */
+    int current = !strcmp(command, "app-current"), remove_registration = !strcmp(command, "app-delete"),
+        remove_data = !strcmp(command, "app-data-delete"), storage = !strcmp(command, "app-storage-inventory");
     if (!strcmp(command, "gui-launch-lease")) { error = ENOTSUP; reason = "PERSISTENT_NATIVE_SUPERVISOR_ENTRY_REQUIRED"; goto done; }
-    if (!(registration_command || plan || retire || prepare || inspect) ||
+    if (!(registration_command || plan || retire || prepare || inspect || current || remove_registration || remove_data || storage) ||
+        ((current || remove_registration || remove_data) && (argc != 3 || !uuid(argv[2]))) || (storage && argc != 2) ||
         (registration_command && (argc != 6 || !uuid(argv[2]) || !uuid(argv[3]) || (strcmp(argv[5], "-") && !uuid(argv[5])))) ||
         (plan && (argc != 6 || !uuid(argv[2]) || !uuid(argv[3]) || !uuid(argv[4]) || !uuid(argv[5]))) ||
         (retire && (argc != 3 || !uuid(argv[2]))) ||
@@ -60,7 +65,48 @@ int envara_app_control_dispatch(const struct envara_app_control_context *input, 
     if (prepare && (!ctx->authority || !ctx->authority->inspect || !ctx->authority->verify || !ctx->authority->adopt)) {
         error = ENOTSUP; reason = "LIVE_NATIVE_LAUNCH_AUTHORITY_REQUIRED"; goto done; /* No store creation. */
     }
+    if (remove_data) {
+        /* Data removal does not depend on a readable registry: a damaged or
+         * absent registry must not keep an environment's data on disk. */
+        result = envara_app_data_delete(ctx->fixture_only ? ctx->fixture_data_root : NULL, ctx->fixture_only ? ctx->fixture_registry_root : NULL,
+                                        ctx->fixture_only, argv[2]);
+        error = result ? (errno ? errno : EIO) : 0;
+        reason = !result ? "APPLICATION_DATA_DELETED" : error == EBUSY ? "APPLICATION_IN_USE" : error == ENOENT ? "APPLICATION_DATA_ABSENT" : "NATIVE_APP_OPERATION_REFUSED";
+        goto done;
+    }
     if (envara_app_registry_open(&registry, ctx->fixture_registry_root, ctx->fixture_only, registration_command)) { error = errno; reason = "APP_REGISTRY_UNAVAILABLE"; goto done; }
+    if (storage) {
+        int copy = dup(output); FILE *out = copy < 0 ? NULL : fdopen(copy, "w");
+        if (!out) { if (copy >= 0) close(copy); error = errno ? errno : EIO; reason = "NATIVE_APP_OPERATION_REFUSED"; goto done; }
+        result = envara_app_storage_inventory(&registry, ctx->fixture_only ? ctx->fixture_data_root : NULL, out);
+        int saved = errno; fclose(out); envara_app_registry_close(&registry);
+        if (!result) return 0;
+        error = saved ? saved : EIO; reason = "NATIVE_APP_OPERATION_REFUSED"; result = -1; goto done;
+    }
+    if (current) {
+        char version[37]; int reusable = 0;
+        result = envara_app_registry_current(&registry, argv[2], version, &reusable);
+        if (!result) {
+            if (!reusable || envara_app_registry_resolve(&registry, argv[2], version, &app)) {
+                memset(&app, 0, sizeof(app)); strcpy(app.registration_id, argv[2]); strcpy(app.version_id, version); reusable = 0;
+            }
+            app_valid = reusable; reason = "APPLICATION_CURRENT_VERSION";
+            /* The version is reported even when it cannot be reused: it is the
+             * one a new version must name as its predecessor. */
+            if (emit(output, 1, 0, app_valid, 0, 0, reason, &app, NULL)) { envara_app_registry_close(&registry); return -1; }
+            envara_app_registry_close(&registry); return 0;
+        }
+        error = errno ? errno : EIO;
+        reason = error == ENOENT ? "APPLICATION_NOT_REGISTERED" : error == EIDRM ? "APPLICATION_REGISTRATION_RETIRED" :
+            error == EINPROGRESS ? "APPLICATION_REGISTRATION_INCOMPLETE" : "NATIVE_APP_OPERATION_REFUSED";
+        goto done;
+    }
+    if (remove_registration) {
+        result = envara_app_registry_delete(&registry, argv[2]);
+        error = result ? (errno ? errno : EIO) : 0;
+        reason = !result ? "APPLICATION_REGISTRATION_DELETED" : error == EBUSY ? "APPLICATION_IN_USE" : error == ENOENT ? "APPLICATION_NOT_REGISTERED" : "NATIVE_APP_OPERATION_REFUSED";
+        goto done;
+    }
     if (registration_command) {
         result = envara_app_registry_register(&registry, argv[2], argv[3], argv[4], !strcmp(argv[5], "-") ? NULL : argv[5], NULL, &app);
         reason = "APPLICATION_SNAPSHOT_REGISTERED"; app_valid = result == 0;
@@ -82,6 +128,7 @@ int envara_app_control_dispatch(const struct envara_app_control_context *input, 
     }
     if (result) { error = errno ? errno : EIO; reason = "NATIVE_APP_OPERATION_REFUSED"; }
 done:
+    if (result && !error) error = EIO;
     envara_app_ticket_store_close(&store); envara_app_registry_close(&registry);
     if (emit(output, result == 0 && !error, error, app_valid, environment_valid, issued, reason, app_valid ? &app : NULL, ticket_id)) return -1;
     if (error || result) { errno = error ? error : EIO; return -1; } return 0;

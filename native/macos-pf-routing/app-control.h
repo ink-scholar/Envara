@@ -7,6 +7,8 @@ struct envara_app_control_context {
     int fixture_only;
     const char *fixture_registry_root, *fixture_ticket_root;
     const struct envara_app_ticket_authority *authority;
+    /* Last, so existing positional initializers keep their meaning. */
+    const char *fixture_data_root;
 };
 /* Exact positional native commands; no shell, caller argv/env/executable,
  * UID/GID or manifest override. Returns 0 or -1/errno; emits bounded JSON with

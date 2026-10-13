@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
         !strcmp(state.mode, "no-adopt") ? NULL : adopt_authority, &state};
     const struct envara_app_ticket_authority *selected = !strcmp(state.mode, "none") ? NULL : &authority;
     if (control) {
-        struct envara_app_control_context context = {1, registry_root, ticket_root, selected};
+        struct envara_app_control_context context = {1, registry_root, ticket_root, selected, NULL};
         return envara_app_control_dispatch(&context, argc - 7, (const char *const *)(argv + 6), STDOUT_FILENO) ? 1 : 0;
     }
     if (argc < 10) return 93;

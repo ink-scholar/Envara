@@ -9,6 +9,12 @@ export const APP_NATIVE_EXECUTABLE = '/Library/PrivilegedHelperTools/io.envara.p
 const flags = Object.freeze({ ready: false, protected: false, productionReady: false });
 const hash = /^[0-9a-f]{64}$/;
 const registerFailureReasons = new Set(['INVALID_NATIVE_APP_REQUEST', 'FIXED_ROOT_NATIVE_ENTRY_REQUIRED', 'APP_REGISTRY_UNAVAILABLE', 'NATIVE_APP_OPERATION_REFUSED']);
+/* Fixed refusals of the storage lifecycle commands that describe a state rather
+ * than a fault: a registration that does not exist, was retired, or was left by
+ * an interrupted copy; storage still in use; data that is already gone. */
+const lifecycleReasons = new Set(['APPLICATION_NOT_REGISTERED', 'APPLICATION_REGISTRATION_RETIRED', 'APPLICATION_REGISTRATION_INCOMPLETE',
+  'APPLICATION_IN_USE', 'APPLICATION_DATA_ABSENT']);
+const lifecycleOperations = new Set(['app-current', 'app-delete', 'app-data-delete']);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const refusal = reason => Object.assign(new Error('Native application operation refused'), { code: 'APPLICATION_NATIVE_REFUSED', reason });
 const fail = reason => { throw refusal(reason); };
@@ -31,11 +37,37 @@ export function parseNativeApplicationEnvelope(value, ids = {}, operation = null
     const error = refusal('NATIVE_OPERATION_REFUSED');
     if (operation === 'app-register' && value.error > 0 && value.error <= 1024 && registerFailureReasons.has(value.reason))
       error.nativeFailure = Object.freeze({ stage: 'register', reason: value.reason, error: value.error });
+    if (lifecycleOperations.has(operation) && lifecycleReasons.has(value.reason)) error.lifecycleReason = value.reason;
     throw error;
   }
   if (value.error || Object.entries(ids).some(([key, expected]) => value[key] !== expected) ||
       value.applicationIdentityVerified && (!isPFRoutingRunId(value.registrationId) || !isPFRoutingRunId(value.versionId) || !hash.test(value.snapshotContentSHA256))) fail('NATIVE_BINDING_INVALID');
   return Object.freeze({ ...value, ...flags });
+}
+/* The storage inventory is its own fixed shape: every registration with its
+ * identifier, original bundle, version count, retirement and size, and every
+ * environment's data size. Nothing else is admitted. */
+export function parseStorageInventory(value) {
+  if (object(value) && value.ok === false) fail('NATIVE_OPERATION_REFUSED');
+  if (!object(value) || Object.keys(value).sort().join('|') !== 'activatesSystem|environments|error|ok|protected|ready|registrations|schema' ||
+      value.schema !== 1 || value.ok !== true || value.error !== 0 || value.ready !== false || value.protected !== false || value.activatesSystem !== false ||
+      !Array.isArray(value.registrations) || !Array.isArray(value.environments) || value.registrations.length > 256 || value.environments.length > 256) fail('NATIVE_RESPONSE_INVALID');
+  const registrations = value.registrations.map(item => {
+    if (!object(item) || Object.keys(item).sort().join('|') !== 'bundle|bytes|identifier|registrationId|retired|versions' ||
+        !isPFRoutingRunId(item.registrationId) || typeof item.identifier !== 'string' || item.identifier.length > 255 ||
+        typeof item.bundle !== 'string' || item.bundle.length > 4095 || /[\0\r\n]/.test(item.bundle) ||
+        !Number.isSafeInteger(item.versions) || item.versions < 0 || item.versions > 64 || typeof item.retired !== 'boolean' ||
+        !Number.isSafeInteger(item.bytes) || item.bytes < 0) fail('NATIVE_RESPONSE_INVALID');
+    return Object.freeze({ ...item });
+  });
+  const environments = value.environments.map(item => {
+    if (!object(item) || Object.keys(item).sort().join('|') !== 'bytes|environmentId' || !isPFRoutingRunId(item.environmentId) ||
+        !Number.isSafeInteger(item.bytes) || item.bytes < 0) fail('NATIVE_RESPONSE_INVALID');
+    return Object.freeze({ ...item });
+  });
+  if (new Set(registrations.map(item => item.registrationId)).size !== registrations.length ||
+      new Set(environments.map(item => item.environmentId)).size !== environments.length) fail('NATIVE_RESPONSE_INVALID');
+  return Object.freeze({ registrations: Object.freeze(registrations), environments: Object.freeze(environments), ...flags });
 }
 
 /* Construct only within the installed authenticated helper. Dependencies are
@@ -63,7 +95,7 @@ export class NativeApplicationCommands {
     return this.#spawn(APP_NATIVE_EXECUTABLE, args, { shell: false,
       env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C' }, stdio: ['pipe', 'pipe', 'pipe'] });
   }
-  async #call(args, ids = {}, mutation = false) {
+  async #call(args, ids = {}, mutation = false, { maxBytes = 8192, parse = null } = {}) {
     await this.#installation(mutation);
     if (mutation && this.#closed) fail('HELPER_CHANNEL_CLOSED');
     return new Promise((resolve, reject) => {
@@ -71,13 +103,14 @@ export class NativeApplicationCommands {
       const finish = (error, value) => { if (settled) return; settled = true; buffer = Buffer.alloc(0); clearTimeout(timer); error ? reject(error) : resolve(value); };
       const timer = setTimeout(() => { try { child?.stdin?.end(); child?.kill('SIGTERM'); } catch {} finish(refusal('NATIVE_OPERATION_UNCERTAIN')); }, this.#timeout);
       try { child = this.#spawnNative(args); } catch { finish(refusal('NATIVE_UNAVAILABLE')); return; }
-      child.stdout.on('data', data => { if (settled) return; buffer = Buffer.concat([buffer, data]); if (buffer.length > 8192) { try { child.kill('SIGTERM'); } catch {} finish(refusal('NATIVE_RESPONSE_INVALID')); } });
+      child.stdout.on('data', data => { if (settled) return; buffer = Buffer.concat([buffer, data]); if (buffer.length > maxBytes) { try { child.kill('SIGTERM'); } catch {} finish(refusal('NATIVE_RESPONSE_INVALID')); } });
       child.stderr.on('data', () => {}); // Never print private native errors/paths.
       child.once('error', () => finish(refusal('NATIVE_UNAVAILABLE')));
       child.stdin.on('error', () => finish(refusal('NATIVE_CHANNEL_LOST')));
       child.once('close', code => {
         if (settled) return;
-        try { const value = parseNativeApplicationEnvelope(JSON.parse(buffer.toString('utf8').trim()), ids, args[0]); if (code !== 0) fail('NATIVE_OPERATION_REFUSED'); finish(null, value); }
+        try { const decoded = JSON.parse(buffer.toString('utf8').trim());
+          const value = parse ? parse(decoded) : parseNativeApplicationEnvelope(decoded, ids, args[0]); if (code !== 0) fail('NATIVE_OPERATION_REFUSED'); finish(null, value); }
         catch (error) { finish(error?.code === 'APPLICATION_NATIVE_REFUSED' ? error : refusal('NATIVE_RESPONSE_INVALID')); }
       });
       child.stdin.end();
@@ -96,6 +129,46 @@ export class NativeApplicationCommands {
       { registrationId: value.registrationId, versionId: value.versionId }, true);
   }
   async retire(input) { const value = request(input, ['registrationId']); return this.#call(['app-retire', value.registrationId], {}, true); }
+  /* The latest committed version of one registration and whether it can be
+   * reused for the current original. Read-only: never registers or copies. */
+  async current(input) {
+    const value = request(input, ['registrationId']);
+    try {
+      const result = await this.#call(['app-current', value.registrationId], { registrationId: value.registrationId });
+      if (!isPFRoutingRunId(result.versionId)) fail('NATIVE_BINDING_INVALID');
+      return Object.freeze({ state: result.applicationIdentityVerified ? 'current' : 'stale', registrationId: value.registrationId,
+        versionId: result.versionId, ...flags });
+    } catch (error) {
+      const state = { APPLICATION_NOT_REGISTERED: 'absent', APPLICATION_REGISTRATION_RETIRED: 'retired',
+        APPLICATION_REGISTRATION_INCOMPLETE: 'incomplete' }[error?.lifecycleReason];
+      if (state) return Object.freeze({ state, registrationId: value.registrationId, versionId: null, ...flags });
+      throw error;
+    }
+  }
+  /* Removes one registration and its copies; refuses while a copy is running. */
+  async deleteRegistration(input) {
+    const value = request(input, ['registrationId']);
+    try { await this.#call(['app-delete', value.registrationId], {}, true); return Object.freeze({ deleted: true, absent: false, ...flags }); }
+    catch (error) {
+      if (error?.lifecycleReason === 'APPLICATION_NOT_REGISTERED') return Object.freeze({ deleted: false, absent: true, ...flags });
+      if (error?.lifecycleReason === 'APPLICATION_IN_USE') error.inUse = true;
+      throw error;
+    }
+  }
+  /* Removes one environment's attached-application data; refuses while any
+   * attached application is running. */
+  async deleteEnvironmentData(input) {
+    const value = request(input, ['environmentId']);
+    try { await this.#call(['app-data-delete', value.environmentId], {}, true); return Object.freeze({ deleted: true, absent: false, ...flags }); }
+    catch (error) {
+      if (error?.lifecycleReason === 'APPLICATION_DATA_ABSENT') return Object.freeze({ deleted: false, absent: true, ...flags });
+      if (error?.lifecycleReason === 'APPLICATION_IN_USE') error.inUse = true;
+      throw error;
+    }
+  }
+  async storageInventory() {
+    return this.#call(['app-storage-inventory'], {}, false, { maxBytes: 131072, parse: parseStorageInventory });
+  }
   async prepareTicket(input) {
     const value = request(input, ['ticketId', 'registrationId', 'versionId', 'environmentId', 'runId']);
     if (this.#requests.has(value.ticketId)) fail('TICKET_ALREADY_ATTEMPTED');

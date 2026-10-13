@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { MacOSPFController, MacOSPFExecutor, validatePFAppBoundLease, validatePFRootHookLease, validatePFApplicationPrestageAbort, validatePFApplicationPreflightAbort, PF_APP_BOUND_LEASE_SCHEMA, PF_APP_SESSION_LEASE_MS, PF_APP_RELEASE_RETRY_MS, PF_ROOT_HOOK_LEASE_SCHEMA, PF_INSTALL_ROOT, PF_RUNTIME_ROOT, dispatchPFRequest } from '../native/macos-pf-routing/controller.mjs';
+import { pfApplicationRegistrationId } from '../native/macos-pf-routing/policy.mjs';
 import { pfRoutingAnchor } from '../native/macos-pf-routing/policy.mjs';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
@@ -56,14 +57,23 @@ function fixture(overrides = {}, extra = {}) {
       assert.deepEqual(value, executor.sealed.rootHookLease); calls.push('remove-hook');
       return { ownedRootHookRemoved: true, originalRootRestored: true, namespaceReclaimed: true, receiptRetired: true }; },
     removeGroups: async () => calls.push('remove-groups'), retireApplicationLease: async () => calls.push('retire-lease'), releaseLock: async () => calls.push('unlock'), ...overrides };
-  const registered = [];
-  const commands = { register: async input => { calls.push('register'); registered.push(input); return { ...input, applicationIdentityVerified: true }; } };
+  const registered = [], deletedRegistrations = [];
+  /* The native registry as the controller sees it: one registration per
+   * application, reused while current. Tests set its state directly. */
+  const registry = { state: 'absent', versionId: null, registerFailures: [] };
+  const commands = {
+    current: async ({ registrationId }) => { calls.push('current'); return { state: registry.state, registrationId, versionId: registry.versionId }; },
+    register: async input => { calls.push('register'); registered.push(input);
+      if (registry.registerFailures.length) throw registry.registerFailures.shift();
+      registry.state = 'current'; registry.versionId = input.versionId; return { ...input, applicationIdentityVerified: true }; },
+    deleteRegistration: async ({ registrationId }) => { calls.push('delete-registration'); deletedRegistrations.push(registrationId);
+      registry.state = 'absent'; registry.versionId = null; return { deleted: true, absent: false }; } };
   const controller = new MacOSPFController({ executor, applicationCommands: commands, inspectInstallation: async () => ({ verified: true, runtimeVerified: true }),
     authenticateProxy: async () => {}, identity: { uid: 0, euid: 0, callerUID: 501, controlledSession: true }, ...extra });
   const prepareRoute = async (change = {}) => controller.prepareRoute({ application: { id: 'notion', profileId: 'profile', executablePath: '/Applications/Notion.app' },
     workspace: { cwd: '/tmp/owned-workspace', timezone: 'Asia/Manila', locale: 'en-PH' }, route: proxy,
     managedRoute: { profileId: 'profile', proxyId: 'node', nodeType: 'anytls', corePid: managedPid, routeIdentity: randomUUID(), coreGeneration: randomUUID(), coreVersion: 'v1.19.32' }, ...change });
-  return { controller, executor, calls, prepareRoute, commands, identities, child, registered };
+  return { controller, executor, calls, prepareRoute, commands, identities, child, registered, registry, deletedRegistrations };
 }
 const input = routeId => ({ routeId, runId: randomUUID(), environmentId: randomUUID(), lifetimeSeconds: 30, activationAuthorized: true });
 test('successful stop passes only the issued lease through the real executor validator, DELETE and independent STATUS before complete cleanup', async () => {
@@ -131,6 +141,47 @@ for (const kind of ['no-root', 'no-runtime', 'no-activation', 'lo-skipped', 'not
   if (kind === 'lo-skipped') f.executor.readOnlyStatus = async () => ({ consoleUID: 501, pf: { lo0SkipVerified: false } });
   await assert.rejects(f.controller.prepareNotionApplication(request)); assert.ok(!f.calls.includes('register') && !f.calls.includes('lock'));
   await f.controller.shutdown();
+});
+test('an application keeps one registration: reused while current, a new version only when its original changed', async () => {
+  /* A fresh registration per attach filled the 32-registration registry, put
+   * every attach on a new, logged-out data directory and copied the whole
+   * application again each time. */
+  const expected = pfApplicationRegistrationId('/Applications/Notion.app');
+  const first = fixture(), route = await first.prepareRoute(); await first.controller.prepareNotionApplication(input(route.routeId));
+  assert.equal(first.executor.sealed.registrationId, expected, 'the registration is derived from the application, not random');
+  assert.equal(first.registered.length, 1); assert.equal(first.registered[0].previousVersionId, undefined);
+  const copied = first.executor.sealed.versionId;
+
+  const again = fixture(); again.registry.state = 'current'; again.registry.versionId = copied;
+  const second = await again.prepareRoute(); await again.controller.prepareNotionApplication(input(second.routeId));
+  assert.equal(again.registered.length, 0, 'an exact current version is reused, never copied again');
+  assert.equal(again.executor.sealed.registrationId, expected); assert.equal(again.executor.sealed.versionId, copied);
+
+  const updated = fixture(); updated.registry.state = 'stale'; updated.registry.versionId = copied;
+  const third = await updated.prepareRoute(); await updated.controller.prepareNotionApplication(input(third.routeId));
+  assert.equal(updated.registered.length, 1); assert.equal(updated.registered[0].previousVersionId, copied, 'a new version names the one it supersedes');
+  assert.equal(updated.executor.sealed.registrationId, expected); assert.notEqual(updated.executor.sealed.versionId, copied);
+});
+test('a full, retired or interrupted registration is removed and registered again under the same id', async () => {
+  const expected = pfApplicationRegistrationId('/Applications/Notion.app'), full = Object.assign(new Error('full'),
+    { code: 'APPLICATION_NATIVE_REFUSED', nativeFailure: { stage: 'register', reason: 'NATIVE_APP_OPERATION_REFUSED', error: 28 } });
+  for (const [state, failures] of [['stale', [full]], ['retired', []], ['incomplete', []]]) {
+    const f = fixture(); f.registry.state = state; f.registry.versionId = state === 'stale' ? randomUUID() : null; f.registry.registerFailures.push(...failures);
+    const route = await f.prepareRoute(); await f.controller.prepareNotionApplication(input(route.routeId));
+    assert.deepEqual(f.deletedRegistrations, [expected], state);
+    assert.equal(f.registered.at(-1).previousVersionId, undefined, `${state}: registered again from nothing`);
+    assert.equal(f.executor.sealed.registrationId, expected, `${state}: the id, and so the data directory, is kept`);
+    assert.ok(f.calls.indexOf('delete-registration') < f.calls.lastIndexOf('register'));
+  }
+  const other = Object.assign(new Error('refused'), { code: 'APPLICATION_NATIVE_REFUSED', nativeFailure: { stage: 'register', reason: 'NATIVE_APP_OPERATION_REFUSED', error: 13 } });
+  const refused = fixture(); refused.registry.state = 'stale'; refused.registry.versionId = randomUUID(); refused.registry.registerFailures.push(other);
+  const route = await refused.prepareRoute();
+  await assert.rejects(refused.controller.prepareNotionApplication(input(route.routeId)));
+  assert.deepEqual(refused.deletedRegistrations, [], 'only a full registration is removed; any other refusal stops');
+  const unknown = fixture(); unknown.registry.state = 'mystery';
+  const unknownRoute = await unknown.prepareRoute();
+  await assert.rejects(unknown.controller.prepareNotionApplication(input(unknownRoute.routeId)));
+  assert.equal(unknown.registered.length, 0); assert.deepEqual(unknown.deletedRegistrations, []);
 });
 test('a locally selected application outside Notion is accepted and sealed by its own bundle', async () => {
   const f = fixture(), route = await f.prepareRoute({ application: { id: 'other', profileId: 'profile', executablePath: '/Applications/Other.app/Contents/MacOS/Other' } });

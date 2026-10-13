@@ -7,7 +7,8 @@
 int envara_app_command_dispatch(int argc, char **argv,
     const struct envara_app_supervisor_provider *provider, int *exit_status) {
     if (!exit_status || argc < 2 || !argv || !argv[1]) return 0;
-    const char *commands[] = {"app-register", "app-plan", "app-retire", "app-ticket-prepare", "app-ticket-inspect"};
+    const char *commands[] = {"app-register", "app-plan", "app-retire", "app-ticket-prepare", "app-ticket-inspect",
+        "app-current", "app-delete", "app-data-delete", "app-storage-inventory"};
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) if (!strcmp(argv[1], commands[i])) {
         struct envara_app_control_context context = {0};
         context.authority = provider ? &provider->ticket : NULL;

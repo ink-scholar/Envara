@@ -1,5 +1,6 @@
 #include "app-registry.h"
 #include <CommonCrypto/CommonDigest.h>
+#include <libproc.h>
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/acl.h>
@@ -555,5 +556,218 @@ int envara_app_registry_retire(struct envara_app_registry *registry, const char 
             handle_valid(registry) || named_dir(registry->fd, "registrations", records, registry, 0700) ||
             named_dir(records, id, reg, registry, 0700)) error = errno; }
     if (reg >= 0) close(reg); if (objects >= 0) close(objects); if (records >= 0) close(records);
+    flock(registry->fd, LOCK_UN); return error ? refuse(error) : 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Storage lifecycle. Every attach used to make a new registration and a new
+ * per-environment data directory, and nothing was ever removed, so the bounded
+ * inventories filled up and attaching stopped working. A registration is now
+ * reused while it is exact; these operations remove what is no longer used.
+ * ------------------------------------------------------------------------- */
+#define REMOVE_MAX_DEPTH 64
+#define REMOVE_MAX_ENTRIES ((size_t)1000000)
+/* Removes `name` below the held directory `parent`. A directory is entered only
+ * through openat(O_NOFOLLOW|O_DIRECTORY) on its held parent, so a symlink, even
+ * one placed by the user in their own data, is unlinked as the link itself and
+ * never followed. Entries are listed in batches and removed between listings,
+ * because removing entries while one listing is in progress can skip some. */
+static int remove_entry(int parent, const char *name, unsigned depth, size_t *budget) {
+    if (!*budget) return refuse(E2BIG);
+    (*budget)--;
+    struct stat info;
+    if (fstatat(parent, name, &info, AT_SYMLINK_NOFOLLOW)) return errno == ENOENT ? 0 : -1;
+    if (!S_ISDIR(info.st_mode)) return unlinkat(parent, name, 0) && errno != ENOENT ? -1 : 0;
+    if (depth >= REMOVE_MAX_DEPTH) return refuse(ELOOP);
+    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return errno == ENOENT ? 0 : -1;
+    struct stat held;
+    if (fstat(fd, &held) || held.st_dev != info.st_dev || held.st_ino != info.st_ino) { close(fd); return refuse(ESTALE); }
+    /* Sealed copies keep read-only directories. Root needs no write bit to
+     * empty them; an unprivileged fixture owner does, on what it is removing. */
+    if (geteuid() && !(held.st_mode & S_IWUSR) && fchmod(fd, (held.st_mode & 07777) | S_IRWXU)) { int error = errno; close(fd); return refuse(error); }
+    int error = 0;
+    for (;;) {
+        char *batch[256]; size_t count = 0;
+        int scan = dup(fd); DIR *dir = scan < 0 ? NULL : fdopendir(scan);
+        if (!dir) { error = errno ? errno : EIO; if (scan >= 0) close(scan); break; }
+        rewinddir(dir); errno = 0; struct dirent *entry;
+        while (count < sizeof(batch) / sizeof(batch[0]) && (entry = readdir(dir))) {
+            if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+            if (!(batch[count] = strdup(entry->d_name))) { error = ENOMEM; break; }
+            count++;
+        }
+        if (!error && errno) error = errno;
+        closedir(dir);
+        for (size_t i = 0; i < count; i++) {
+            if (!error && remove_entry(fd, batch[i], depth + 1, budget)) error = errno ? errno : EIO;
+            free(batch[i]);
+        }
+        if (error || !count) break;
+    }
+    close(fd);
+    if (!error && unlinkat(parent, name, AT_REMOVEDIR) && errno != ENOENT) error = errno;
+    return error ? refuse(error) : 0;
+}
+/* A copy that is running, or data an attached application may hold open, is
+ * never removed: any process whose executable lies below `prefix` refuses. */
+static int no_process_below(const char *prefix) {
+    int expected = proc_listallpids(NULL, 0);
+    if (expected <= 0) return refuse(EIO);
+    size_t capacity = (size_t)expected + 256;
+    pid_t *pids = calloc(capacity, sizeof(pid_t)); if (!pids) return refuse(ENOMEM);
+    int count = proc_listallpids(pids, (int)(capacity * sizeof(pid_t)));
+    if (count < 0) { free(pids); return refuse(EIO); }
+    if ((size_t)count > capacity) count = (int)capacity;
+    size_t length = strlen(prefix); int busy = 0; char path[PROC_PIDPATHINFO_MAXSIZE];
+    for (int i = 0; i < count && !busy; i++)
+        if (pids[i] > 0 && proc_pidpath(pids[i], path, sizeof(path)) > 0 && !strncmp(path, prefix, length)) busy = 1;
+    free(pids); return busy ? refuse(EBUSY) : 0;
+}
+int envara_app_registry_current(struct envara_app_registry *registry, const char *id, char version[37], int *reusable) {
+    if (handle_valid(registry) || !uuid(id) || !version || !reusable) return refuse(EINVAL);
+    version[0] = 0; *reusable = 0;
+    if (flock(registry->fd, LOCK_SH | LOCK_NB)) return -1;
+    int records = -1, objects = -1, reg = -1, error = 0; size_t count; unsigned highest = 0; struct disk_record latest; struct stat dead;
+    if (root_inventory(registry, &records, &objects, &count)) error = errno;
+    else if ((reg = open_dir(records, id, registry->owner, 0700)) < 0) error = errno;   /* ENOENT: never registered */
+    else if (!fstatat(reg, "retired", &dead, AT_SYMLINK_NOFOLLOW)) error = EIDRM;    /* retired, or a delete was interrupted */
+    else if (version_inventory(reg, registry, id, &highest, &latest)) error = errno;   /* EINPROGRESS: an interrupted copy */
+    else if (!highest) error = ENOENT;                                                  /* registered, but no version yet */
+    else strcpy(version, latest.version_id);
+    if (reg >= 0) close(reg); if (objects >= 0) close(objects); if (records >= 0) close(records);
+    flock(registry->fd, LOCK_UN);
+    if (error) return refuse(error);
+    /* Reusable only while the existing exact checks still hold for the current
+     * original; otherwise the caller registers a new version after this one. */
+    struct envara_app_registration resolved;
+    *reusable = envara_app_registry_resolve(registry, id, version, &resolved) == 0;
+    return 0;
+}
+int envara_app_registry_delete(struct envara_app_registry *registry, const char *id) {
+    if (handle_valid(registry) || !uuid(id)) return refuse(EINVAL);
+    char prefix[PATH_MAX];
+    if (snprintf(prefix, sizeof(prefix), "%s/objects/%s/", registry->root, id) >= (int)sizeof(prefix)) return refuse(ENAMETOOLONG);
+    if (flock(registry->fd, LOCK_EX | LOCK_NB)) return -1;
+    int records = -1, objects = -1, reg = -1, error = 0; struct stat existing; size_t budget = REMOVE_MAX_ENTRIES;
+    /* Deliberately no whole-inventory check: an interrupted delete must stay
+     * finishable, and only this registration's own entries are touched. */
+    if ((records = open_dir(registry->fd, "registrations", registry->owner, 0700)) < 0 ||
+        (objects = open_dir(registry->fd, "objects", registry->owner, 0755)) < 0) { error = errno; goto done; }
+    if (no_process_below(prefix)) { error = errno; goto done; }
+    int record_present = !fstatat(records, id, &existing, AT_SYMLINK_NOFOLLOW);
+    int object_present = !fstatat(objects, id, &existing, AT_SYMLINK_NOFOLLOW);
+    if (!record_present && !object_present) { error = ENOENT; goto done; }
+    if (record_present) {
+        if ((reg = open_dir(records, id, registry->owner, 0700)) < 0) { error = errno; goto done; }
+        /* Durable intent first: an interrupted delete leaves a retired, unusable
+         * registration that the next delete finishes, never a half-valid one. */
+        if (fstatat(reg, "retired", &existing, AT_SYMLINK_NOFOLLOW)) {
+            struct disk_record descriptor, dead;
+            if (read_record(reg, "descriptor", registry, DESCRIPTOR, id, &descriptor)) { error = errno; goto done; }
+            record_init(&dead, registry, RETIRED, id); dead.original = descriptor.original;
+            if (write_record(reg, "retired", &dead) || fsync(reg)) { error = errno; goto done; }
+        }
+        close(reg); reg = -1;
+    }
+    if (object_present && remove_entry(objects, id, 0, &budget)) { error = errno; goto done; }
+    if (fsync(objects)) { error = errno; goto done; }
+    if (record_present && remove_entry(records, id, 0, &budget)) { error = errno; goto done; }
+    if (fsync(records)) error = errno;
+done:
+    if (reg >= 0) close(reg); if (objects >= 0) close(objects); if (records >= 0) close(records);
+    flock(registry->fd, LOCK_UN); return error ? refuse(error) : 0;
+}
+int envara_app_data_delete(const char *fixture_root, const char *fixture_registry_root, int fixture_only, const char *environment_id) {
+    if ((fixture_only != 0 && fixture_only != 1) || !uuid(environment_id) ||
+        (fixture_only ? getuid() == 0 || geteuid() != getuid() || !fixture_root || !fixture_registry_root :
+                        getuid() != 0 || geteuid() != 0 || fixture_root || fixture_registry_root)) return refuse(EACCES);
+    const char *root = fixture_only ? fixture_root : ENVARA_APP_DATA_ROOT;
+    char busy[PATH_MAX];
+    if (snprintf(busy, sizeof(busy), "%s/objects/", fixture_only ? fixture_registry_root : ENVARA_APP_REGISTRY_ROOT) >= (int)sizeof(busy)) return refuse(ENAMETOOLONG);
+    /* No attached application may be running while any of its data goes. */
+    if (no_process_below(busy)) return -1;
+    int fd = absolute_dir(root, !fixture_only);
+    if (fd < 0) return -1;
+    struct stat info; uid_t owner = fixture_only ? getuid() : 0; int error = 0; size_t budget = REMOVE_MAX_ENTRIES;
+    if (fstat(fd, &info) || !S_ISDIR(info.st_mode) || info.st_uid != owner || (info.st_mode & 0022)) error = EACCES;
+    else if (fstatat(fd, environment_id, &info, AT_SYMLINK_NOFOLLOW)) error = errno;
+    else if (!S_ISDIR(info.st_mode) || info.st_uid != owner) error = EACCES;
+    else if (remove_entry(fd, environment_id, 0, &budget) || fsync(fd)) error = errno;
+    close(fd); return error ? refuse(error) : 0;
+}
+
+/* Read-only size of an entry, never following a symlink; bounded like removal. */
+static int tree_bytes(int parent, const char *name, unsigned depth, size_t *budget, uint64_t *bytes) {
+    if (!*budget) return refuse(E2BIG);
+    (*budget)--;
+    struct stat info;
+    if (fstatat(parent, name, &info, AT_SYMLINK_NOFOLLOW)) return errno == ENOENT ? 0 : -1;
+    *bytes += (uint64_t)info.st_blocks * 512U;
+    if (!S_ISDIR(info.st_mode)) return 0;
+    if (depth >= REMOVE_MAX_DEPTH) return refuse(ELOOP);
+    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return errno == ENOENT || errno == EACCES ? 0 : -1;
+    int scan = dup(fd); DIR *dir = scan < 0 ? NULL : fdopendir(scan);
+    if (!dir) { int error = errno; if (scan >= 0) close(scan); close(fd); return refuse(error ? error : EIO); }
+    int error = 0; struct dirent *entry; errno = 0;
+    while (!error && (entry = readdir(dir))) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (tree_bytes(fd, entry->d_name, depth + 1, budget, bytes)) error = errno ? errno : EIO;
+    }
+    closedir(dir); close(fd); return error ? refuse(error) : 0;
+}
+static void inventory_string(FILE *out, const char *value) {
+    fputc('"', out);
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if (*p == '"' || *p == '\\') { fputc('\\', out); fputc(*p, out); }
+        else if (*p < 32 || *p == 127) fprintf(out, "\\u%04x", *p);
+        else fputc(*p, out);
+    }
+    fputc('"', out);
+}
+#define INVENTORY_MAX_ENTRIES 256
+int envara_app_storage_inventory(struct envara_app_registry *registry, const char *fixture_data_root, FILE *out) {
+    if (handle_valid(registry) || !out || (registry->fixture_only ? !fixture_data_root : fixture_data_root != NULL)) return refuse(EINVAL);
+    if (flock(registry->fd, LOCK_SH | LOCK_NB)) return -1;
+    /* Deliberately no whole-inventory check, so storage left over capacity or
+     * by an interrupted delete can still be listed and removed. */
+    int records = -1, objects = -1, data = -1, error = 0; struct names ids = {0}, envs = {0};
+    if ((records = open_dir(registry->fd, "registrations", registry->owner, 0700)) < 0 ||
+        (objects = open_dir(registry->fd, "objects", registry->owner, 0755)) < 0 ||
+        list(records, &ids, INVENTORY_MAX_ENTRIES)) { error = errno; goto done; }
+    fprintf(out, "{\"schema\":1,\"ok\":true,\"error\":0,\"ready\":false,\"protected\":false,\"activatesSystem\":false,\"registrations\":[");
+    for (size_t i = 0; i < ids.count; i++) {
+        if (!uuid(ids.items[i])) { error = EILSEQ; goto done; }
+        int reg = open_dir(records, ids.items[i], registry->owner, 0700); struct disk_record descriptor; struct stat dead;
+        int has_descriptor = reg >= 0 && !read_record(reg, "descriptor", registry, DESCRIPTOR, ids.items[i], &descriptor);
+        int retired = reg >= 0 && !fstatat(reg, "retired", &dead, AT_SYMLINK_NOFOLLOW);
+        unsigned versions = 0; struct names version_names = {0};
+        int object_reg = open_dir(objects, ids.items[i], registry->owner, 0755);
+        if (object_reg >= 0 && !list(object_reg, &version_names, ENVARA_APP_REGISTRY_MAX_VERSIONS + 8)) versions = (unsigned)version_names.count;
+        free_names(&version_names); if (object_reg >= 0) close(object_reg); if (reg >= 0) close(reg);
+        uint64_t bytes = 0; size_t budget = REMOVE_MAX_ENTRIES;
+        if (tree_bytes(objects, ids.items[i], 0, &budget, &bytes)) bytes = 0;
+        fprintf(out, "%s{\"registrationId\":\"%s\",\"identifier\":", i ? "," : "", ids.items[i]);
+        inventory_string(out, has_descriptor ? descriptor.original.identifier : "");
+        fprintf(out, ",\"bundle\":"); inventory_string(out, has_descriptor ? descriptor.original.bundle : "");
+        fprintf(out, ",\"versions\":%u,\"retired\":%s,\"bytes\":%llu}", versions, retired ? "true" : "false", (unsigned long long)bytes);
+    }
+    fprintf(out, "],\"environments\":[");
+    const char *data_root = registry->fixture_only ? fixture_data_root : ENVARA_APP_DATA_ROOT;
+    data = absolute_dir(data_root, !registry->fixture_only);
+    if (data >= 0 && !list(data, &envs, INVENTORY_MAX_ENTRIES)) {
+        size_t shown = 0;
+        for (size_t i = 0; i < envs.count; i++) {
+            if (!uuid(envs.items[i])) continue;
+            uint64_t bytes = 0; size_t budget = REMOVE_MAX_ENTRIES;
+            if (tree_bytes(data, envs.items[i], 0, &budget, &bytes)) bytes = 0;
+            fprintf(out, "%s{\"environmentId\":\"%s\",\"bytes\":%llu}", shown++ ? "," : "", envs.items[i], (unsigned long long)bytes);
+        }
+    } else if (data < 0 && errno != ENOENT) { error = errno; goto done; }
+    fprintf(out, "]}\n"); fflush(out);
+done:
+    free_names(&ids); free_names(&envs);
+    if (data >= 0) close(data); if (objects >= 0) close(objects); if (records >= 0) close(records);
     flock(registry->fd, LOCK_UN); return error ? refuse(error) : 0;
 }

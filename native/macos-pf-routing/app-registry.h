@@ -48,4 +48,27 @@ int envara_app_registry_register(struct envara_app_registry *registry, const cha
 int envara_app_registry_resolve(struct envara_app_registry *registry, const char *registration_id,
                                const char *version_id, struct envara_app_registration *out);
 int envara_app_registry_retire(struct envara_app_registry *registry, const char *registration_id);
+/* The latest committed version of a registration and whether resolve still
+ * accepts it for the current original. ENOENT: never registered or no version
+ * yet. EIDRM: retired (or a delete was interrupted). EINPROGRESS: a copy was
+ * interrupted. Read-only. */
+int envara_app_registry_current(struct envara_app_registry *registry, const char *registration_id,
+                                char version_id[37], int *reusable);
+/* Removes one registration and every one of its copies. Durably retires it
+ * first, refuses with EBUSY while any process runs from one of its copies, and
+ * never follows a symlink. ENOENT when there is nothing to remove. */
+int envara_app_registry_delete(struct envara_app_registry *registry, const char *registration_id);
+#define ENVARA_APP_DATA_ROOT "/Library/PrivilegedHelperTools/io.envara.pf-app-data"
+/* Removes one environment's attached-application data. Refuses with EBUSY while
+ * any attached application runs, and never follows a symlink, including the
+ * ones in the console user's own data. Fixture roots are accepted only for an
+ * unprivileged fixture owner. */
+int envara_app_data_delete(const char *fixture_root, const char *fixture_registry_root, int fixture_only,
+                           const char *environment_id);
+/* One read-only JSON line listing every registration (identifier, original
+ * bundle, version count, retired, bytes) and every environment data directory
+ * (bytes). Sizes never follow a symlink. A fixture registry passes its own data
+ * root; production always uses ENVARA_APP_DATA_ROOT. */
+#include <stdio.h>
+int envara_app_storage_inventory(struct envara_app_registry *registry, const char *fixture_data_root, FILE *out);
 #endif

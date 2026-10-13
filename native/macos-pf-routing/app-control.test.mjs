@@ -69,6 +69,36 @@ test('standalone app control and private tickets refuse missing authority, stale
     const register = (s, version = s.version, previous = '-') => control(s, ['app-register', s.registration, version, s.bundle, previous]);
     function issued() { const s = setup(); register(s); api(s, 'store-create'); api(s, 'prepare'); return s; }
 
+    /* Expired tickets move to an archive that still refuses their identities.
+     * Every attach used to leave a ticket and two bindings in the bounded live
+     * store, which refused all further attaches once 64 had accumulated. */
+    {
+      const shortLived = path.join(temporary, 'app-control-fixture-short');
+      const built = spawnSync('xcrun', ['clang', '-std=gnu11', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations',
+        '-DENVARA_APP_TICKET_LIFETIME_NS=UINT64_C(1500000000)', '-target', `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macos13.0`,
+        ...common, path.join(directory, 'app-control-fixture.c'), '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'Security',
+        '-lbsm', '-o', shortLived], { encoding: 'utf8', timeout: 60_000 });
+      assert.equal(built.status, 0, built.stderr);
+      const quick = (s, action, mode = 'good', expected = true, options = {}) =>
+        run(shortLived, ['api', action, s.registry, s.tickets, s.workspace, options.lease ?? s.lease, mode,
+          options.ticket ?? s.ticket, ...(action === 'prepare' ? [s.registration, s.version, s.environment, options.run ?? s.run] : []), s.registration], expected);
+      const s = setup(); register(s); quick(s, 'store-create'); quick(s, 'prepare');
+      const archive = `${s.tickets}-archive`, names = [s.ticket, `lease.${s.lease}`, `run.${s.run}`];
+      spawnSync('/bin/sleep', ['1.6']);
+      const next = { ticket: uuid(8000), run: uuid(8001), lease: uuid(8002) };
+      quick(s, 'prepare', 'good', true, next);
+      for (const name of names) {
+        assert.equal(existsSync(path.join(s.tickets, name)), false, `${name} left the live store`);
+        assert.equal(existsSync(path.join(archive, name)), true, `${name} is archived, not deleted`);
+      }
+      assert.equal(existsSync(path.join(s.tickets, next.ticket)), true, 'the live ticket stays live');
+      const before = image(s.tickets), beforeArchive = image(archive);
+      quick(s, 'prepare', 'good', false, { ticket: s.ticket, run: uuid(8100), lease: uuid(8101) });
+      quick(s, 'prepare', 'good', false, { ticket: uuid(8102), run: s.run, lease: uuid(8103) });
+      quick(s, 'prepare', 'good', false, { ticket: uuid(8104), run: uuid(8105), lease: s.lease });
+      assert.deepEqual(image(s.tickets), before, 'an archived identity is refused without writing');
+      assert.deepEqual(image(archive), beforeArchive);
+    }
     const basic = setup(); const original = image(basic.bundle);
     const registered = register(basic); assert.equal(registered.applicationIdentityVerified, true);
     assert.equal(registered.ticketIssued, false); assert.deepEqual(image(basic.bundle), original);

@@ -5,6 +5,21 @@ import { isIP } from 'node:net';
 export const PF_ROUTING_ANCHOR = 'io.envara.pf.root.v1';
 export const PF_ROUTING_NAMESPACE = 'io.envara.pf.run.';
 export const isPFRoutingRunId = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+/* A stable identity in the canonical lowercase UUID v4 shape the native side
+ * accepts, derived from fixed parts. The same environment and the same
+ * application therefore always reach the same registration and data directory,
+ * instead of a fresh random one on every attach. */
+export function stableEnvaraUUID(namespace, ...parts) {
+  if (typeof namespace !== 'string' || !/^envara\.[a-z0-9.-]+\/v[0-9]+$/.test(namespace) || !parts.length ||
+      parts.some(part => typeof part !== 'string' || !part || part.length > 4096 || part.includes('\0'))) throw new TypeError('stable identity input invalid');
+  const bytes = createHash('sha256').update([namespace, ...parts].join('\0')).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+export const pfApplicationRegistrationId = bundlePath => stableEnvaraUUID('envara.application-registration/v1', bundlePath);
+export const pfAttachEnvironmentId = profileId =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(profileId ?? '') ? profileId : stableEnvaraUUID('envara.attach-environment/v1', profileId);
 export function pfRoutingAnchor(runId) {
   if (!isPFRoutingRunId(runId)) throw fail('PF_ROUTING_INVALID_RUN');
   return `${PF_ROUTING_NAMESPACE}${runId}`;

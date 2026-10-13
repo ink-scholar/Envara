@@ -205,6 +205,69 @@ test('standalone application registrar: copy, invalidation, durable intent and p
     assert.deepEqual(image(fifo.root), fifoInventory, 'FIFO descriptor refusal must remain read-only');
     const badParent = scenario(); chmodSync(badParent.parent, 0o755);
     run(['open-create', badParent.root], false, ['EACCES']); assert.equal(existsSync(badParent.root), false);
+
+    /* Storage lifecycle. Each attach used to register a new copy and nothing
+     * was removed, so the 32-registration inventory filled up. One registration
+     * per application is now reused while exact and removed when unused. */
+    const current = (s, expected = true, errors) => run(['current', s.root, s.id], expected, errors);
+    const life = scenario(); run(['open-create', life.root]);
+    current(life, false, ['ENOENT']);
+    register(life);
+    let state = current(life); assert.equal(state.versionId, life.version); assert.equal(state.reusable, true);
+    writeFileSync(life.marker, 'updated-original');
+    state = current(life); assert.equal(state.versionId, life.version, 'a stale version is still the one to supersede');
+    assert.equal(state.reusable, false, 'a changed original is never reused');
+    const lifeV2 = uuid(4000); register(life, lifeV2, life.version);
+    state = current(life); assert.equal(state.versionId, lifeV2); assert.equal(state.reusable, true);
+    const objects = path.join(life.root, 'objects', life.id), records = path.join(life.root, 'registrations', life.id);
+    assert.ok(existsSync(objects) && existsSync(records));
+    run(['delete', life.root, life.id]);
+    assert.equal(existsSync(objects), false); assert.equal(existsSync(records), false);
+    current(life, false, ['ENOENT']);
+    run(['delete', life.root, life.id], false, ['ENOENT']);
+    register(life, uuid(4001)); assert.equal(current(life).reusable, true, 'the same registration id is usable again after a delete');
+
+    const retired = scenario(); run(['open-create', retired.root]); register(retired);
+    run(['retire', retired.root, retired.id]); current(retired, false, ['EIDRM']);
+    run(['delete', retired.root, retired.id]); current(retired, false, ['ENOENT']);
+
+    // A copy that is running must keep its files.
+    const busy = scenario(); run(['open-create', busy.root]); register(busy);
+    /* macOS refuses to run a copied system binary, so a small sleeper is
+     * compiled here and placed inside the registered copy's directory. */
+    const sleeper = path.join(busy.root, 'objects', busy.id, busy.version, 'sleeper');
+    const built = spawnSync('xcrun', ['clang', '-x', 'c', '-', '-o', sleeper], { input: '#include <unistd.h>\nint main(void){sleep(30);return 0;}\n', encoding: 'utf8', timeout: 60_000 });
+    assert.equal(built.status, 0, built.stderr);
+    const holder = spawnSync('/bin/sh', ['-c', `"${sleeper}" 30 >/dev/null 2>&1 & echo $!`], { encoding: 'utf8' });
+    const holderPid = Number(holder.stdout.trim()); assert.ok(holderPid > 1);
+    try {
+      for (let i = 0; i < 50 && spawnSync('/bin/ps', ['-p', String(holderPid)]).status !== 0; i++) spawnSync('/bin/sleep', ['0.05']);
+      run(['delete', busy.root, busy.id], false, ['EBUSY']);
+      assert.ok(existsSync(path.join(busy.root, 'objects', busy.id)), 'a refused delete removes nothing');
+      current(busy);
+    } finally { try { process.kill(holderPid, 'SIGKILL'); } catch {} }
+    for (let i = 0; i < 50 && spawnSync('/bin/ps', ['-p', String(holderPid)]).status === 0; i++) spawnSync('/bin/sleep', ['0.05']);
+    run(['delete', busy.root, busy.id]); assert.equal(existsSync(path.join(busy.root, 'objects', busy.id)), false);
+
+    // Environment data removal never follows a symlink, including ones the
+    // console user can place in their own data.
+    const data = scenario(), dataRoot = path.join(data.parent, 'data'), environment = uuid(5000), registration = uuid(5001);
+    run(['open-create', data.root]);
+    const leaf = path.join(dataRoot, environment, registration, 'UserData');
+    mkdirSync(path.join(leaf, 'Cache', 'deep'), { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(leaf, 'Cookies'), 'session'); writeFileSync(path.join(leaf, 'Cache', 'deep', 'blob'), 'cached');
+    mkdirSync(path.join(leaf, 'Locked'), { mode: 0o700 }); writeFileSync(path.join(leaf, 'Locked', 'inside'), 'x'); chmodSync(path.join(leaf, 'Locked'), 0o555);
+    const outside = path.join(data.parent, 'outside'); mkdirSync(outside, { mode: 0o700 }); writeFileSync(path.join(outside, 'keep'), 'must survive');
+    symlinkSync(outside, path.join(leaf, 'link-to-directory')); symlinkSync(path.join(outside, 'keep'), path.join(leaf, 'link-to-file'));
+    const other = uuid(5002); mkdirSync(path.join(dataRoot, other), { mode: 0o755 }); writeFileSync(path.join(dataRoot, other, 'kept'), 'other environment');
+    run(['data-delete', dataRoot, data.root, 'not-a-uuid'], false, ['EACCES']);
+    run(['data-delete', dataRoot, data.root, environment]);
+    assert.equal(existsSync(path.join(dataRoot, environment)), false);
+    assert.equal(readFileSync(path.join(outside, 'keep'), 'utf8'), 'must survive', 'a symlink is removed, never followed');
+    assert.ok(existsSync(path.join(dataRoot, other, 'kept')), 'only the named environment is removed');
+    run(['data-delete', dataRoot, data.root, environment], false, ['ENOENT']);
+    chmodSync(dataRoot, 0o775); run(['data-delete', dataRoot, data.root, other], false, ['EACCES']); chmodSync(dataRoot, 0o755);
+    assert.ok(existsSync(path.join(dataRoot, other, 'kept')), 'a group-writable data root is refused, not used');
   } finally {
     removable(temporary); rmSync(temporary, { recursive: true, force: true });
   }

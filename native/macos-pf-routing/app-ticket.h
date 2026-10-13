@@ -5,7 +5,10 @@
 #define ENVARA_APP_TICKET_ROOT "/Library/PrivilegedHelperTools/io.envara.pf-app-tickets"
 #define ENVARA_APP_TICKET_SCHEMA 1
 #define ENVARA_APP_TICKET_MAX 64
+/* Overridable only so a compiled fixture can observe expiry quickly. */
+#ifndef ENVARA_APP_TICKET_LIFETIME_NS
 #define ENVARA_APP_TICKET_LIFETIME_NS UINT64_C(60000000000)
+#endif
 
 struct envara_app_ticket_store { int fd, fixture_only; uid_t owner; char root[PATH_MAX]; };
 struct envara_app_ticket {

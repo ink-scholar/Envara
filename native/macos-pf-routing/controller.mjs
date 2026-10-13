@@ -5,7 +5,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { constants as fsConstants, createReadStream } from 'node:fs';
 import * as fs from 'node:fs/promises';
-import { createPFRoutingPolicy, createStatelessFixturePFRoutingPolicy, PF_ROUTING_NAMESPACE, isPFRoutingRunId, pfRoutingAnchor, PF_ROUTING_GATES } from './policy.mjs';
+import { createPFRoutingPolicy, createStatelessFixturePFRoutingPolicy, PF_ROUTING_NAMESPACE, isPFRoutingRunId, pfRoutingAnchor, PF_ROUTING_GATES,
+  pfApplicationRegistrationId } from './policy.mjs';
 import { verifyStatelessFixtureRuleReadback, expectedStatelessFixtureRuleSemantics } from './stateless-verifier.mjs';
 
 export const PF_HELPER_PROTOCOL = 'envara.application-routing';
@@ -1965,6 +1966,35 @@ export class MacOSPFController {
       applicationEnded: ended != null,
       ...(ended ? { endedChildReaped: entry.applicationEnded.childReaped === true, endedChildSignalled: entry.applicationEnded.childSignalled === true } : {}) };
   }
+  /* One registration per application bundle, reused while it is exact. A new
+   * registration per attach filled the bounded registry, put every attach on a
+   * fresh, logged-out data directory and copied the whole application again.
+   * A new version is copied only when the original itself changed. The data
+   * directory is keyed by the registration, so removing and registering again
+   * under the same id keeps the application's data. */
+  async applicationVersion(registrationId, bundlePath) {
+    const register = async previousVersionId => {
+      const versionId = randomUUID();
+      const registered = await this.applicationCommands.register({ registrationId, versionId, bundlePath, ...(previousVersionId ? { previousVersionId } : {}) });
+      if (registered?.applicationIdentityVerified !== true || registered.registrationId !== registrationId || registered.versionId !== versionId) throw failure('APPLICATION_APP_IDENTITY_REFUSED');
+      return versionId;
+    };
+    const current = await this.applicationCommands.current({ registrationId });
+    if (current?.registrationId !== registrationId) throw failure('APPLICATION_APP_IDENTITY_REFUSED');
+    if (current.state === 'current' && uuid(current.versionId)) return current.versionId;
+    if (current.state === 'absent') return register(null);
+    if (current.state === 'stale' && uuid(current.versionId)) {
+      try { return await register(current.versionId); }
+      catch (error) {
+        // ENOSPC: the registration holds its maximum number of versions.
+        if (error?.nativeFailure?.error !== 28) throw error;
+      }
+    } else if (!['retired', 'incomplete'].includes(current.state)) throw failure('APPLICATION_APP_IDENTITY_REFUSED');
+    /* Retired, left by an interrupted copy, or full: removed and registered
+     * again under the same id. The removal refuses while a copy is running. */
+    await this.applicationCommands.deleteRegistration({ registrationId });
+    return register(null);
+  }
   prepareNotionApplication(input = {}) {
     return this.serialized(async () => {
       this.assertOpen();
@@ -2010,9 +2040,8 @@ export class MacOSPFController {
       try {
         if (!this.applicationCommands) { const { NativeApplicationCommands } = await import('./helper-production-native.mjs');
           this.applicationCommands = new NativeApplicationCommands({ controlledSession: this.identity.controlledSession === true, inspectInstallation: this.inspectInstallation }); }
-        run.registrationId = randomUUID(); run.versionId = randomUUID(); run.ticketId = randomUUID();
-        const registered = await this.applicationCommands.register({ registrationId: run.registrationId, versionId: run.versionId, bundlePath });
-        if (registered?.applicationIdentityVerified !== true || registered.registrationId !== run.registrationId || registered.versionId !== run.versionId) throw failure('APPLICATION_APP_IDENTITY_REFUSED');
+        run.registrationId = pfApplicationRegistrationId(bundlePath); run.ticketId = randomUUID();
+        run.versionId = await this.applicationVersion(run.registrationId, bundlePath);
         run.stage = 'registry-lock'; await this.executor.acquireLock(run.runId); run.lockAcquired = true;
         run.baseline = await this.executor.snapshotUnrelatedNetwork();
         run.stage = 'root-hook'; run.rootHookMutationAttempted = true; await this.executor.persistRun(run);

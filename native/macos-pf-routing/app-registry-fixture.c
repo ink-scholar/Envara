@@ -20,7 +20,9 @@ static const char *error_name(int error) {
         case ESTALE: return "ESTALE"; case EINPROGRESS: return "EINPROGRESS";
         case EAGAIN: return "EAGAIN"; case ENOENT: return "ENOENT";
         case EIO: return "EIO"; case ENOSPC: return "ENOSPC";
-        case ENOTSUP: return "ENOTSUP"; default: return "OTHER";
+        case ENOTSUP: return "ENOTSUP"; case EIDRM: return "EIDRM";
+        case EBUSY: return "EBUSY"; case ELOOP: return "ELOOP"; case E2BIG: return "E2BIG";
+        default: return "OTHER";
     }
 }
 static void json_string(const char *value) {
@@ -84,10 +86,17 @@ static void parent_diagnostic(const char *root) {
 }
 int main(int argc, char **argv) {
     if (getuid() == 0 || geteuid() != getuid() || argc < 3) return 90;
+    if (!strcmp(argv[1], "data-delete")) {
+        /* data-delete <data root> <registry root> <environment id> */
+        if (argc != 5) return 98;
+        int result = envara_app_data_delete(argv[2], argv[3], 1, argv[4]);
+        return output(result, result == 0 ? 0 : errno, NULL);
+    }
     struct envara_app_registry registry; memset(&registry, 0, sizeof(registry)); registry.fd = -1;
     struct envara_app_registration record; memset(&record, 0, sizeof(record));
     int create = !strcmp(argv[1], "open-create");
-    if (!create && strcmp(argv[1], "open-read") && strcmp(argv[1], "register") && strcmp(argv[1], "resolve") && strcmp(argv[1], "retire")) return 91;
+    if (!create && strcmp(argv[1], "open-read") && strcmp(argv[1], "register") && strcmp(argv[1], "resolve") && strcmp(argv[1], "retire") &&
+        strcmp(argv[1], "current") && strcmp(argv[1], "delete")) return 91;
     int result = envara_app_registry_open(&registry, argv[2], 1, create);
     if (result != 0) { int error = errno; parent_diagnostic(argv[2]); return output(result, error, NULL); }
     int has_record = 0;
@@ -112,6 +121,21 @@ int main(int argc, char **argv) {
     } else if (!strcmp(argv[1], "retire")) {
         if (argc != 4) { envara_app_registry_close(&registry); return 96; }
         result = envara_app_registry_retire(&registry, argv[3]);
+    } else if (!strcmp(argv[1], "delete")) {
+        if (argc != 4) { envara_app_registry_close(&registry); return 99; }
+        result = envara_app_registry_delete(&registry, argv[3]);
+    } else if (!strcmp(argv[1], "current")) {
+        if (argc != 4) { envara_app_registry_close(&registry); return 100; }
+        char version[37]; int reusable = 0;
+        result = envara_app_registry_current(&registry, argv[3], version, &reusable);
+        int error = result == 0 ? 0 : errno;
+        envara_app_registry_close(&registry);
+        printf("{\"ok\":%s,\"errno\":%d,\"error\":", result == 0 ? "true" : "false", error);
+        json_string(error_name(error));
+        printf(",\"fixtureOnly\":true,\"ready\":false,\"protected\":false,\"activatesSystem\":false,\"versionId\":");
+        json_string(result == 0 ? version : "");
+        printf(",\"reusable\":%s}\n", result == 0 && reusable ? "true" : "false");
+        return result == 0 ? 0 : 1;
     } else if (argc != 3) { envara_app_registry_close(&registry); return 97; }
     int error = result == 0 ? 0 : errno;
     envara_app_registry_close(&registry);

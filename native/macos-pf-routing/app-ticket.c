@@ -189,6 +189,58 @@ static int read_ticket(int fd, struct envara_app_ticket_store *store, struct env
         memcmp(&lease_binding.ticket, &out->ticket, sizeof(out->ticket)) || memcmp(&run_binding.ticket, &out->ticket, sizeof(out->ticket))) return reject(ESTALE);
     return 0;
 }
+/* Expired tickets and their lease/run bindings are moved, never deleted, into
+ * a sibling archive, and a ticket, lease or run named there is still refused
+ * exactly as in the live store. Archiving frees the bounded live store without
+ * weakening the replay refusal: every attach used to leave one ticket and two
+ * bindings behind, and after 64 attaches the store refused every further one.
+ * The archive is never pruned, so no burned identity is ever forgotten. */
+static int archive_open(struct envara_app_ticket_store *store) {
+    char parent[PATH_MAX], leaf[300]; strcpy(parent, store->root); char *slash = strrchr(parent, '/');
+    if (!slash || slash == parent || !slash[1]) return reject(EINVAL);
+    if (snprintf(leaf, sizeof(leaf), "%s-archive", slash + 1) >= (int)sizeof(leaf)) return reject(ENAMETOOLONG);
+    *slash = 0;
+    int fd = absolute_dir(parent, !store->fixture_only); if (fd < 0) return -1;
+    int created = !mkdirat(fd, leaf, 0700);
+    if (!created && errno != EEXIST) { int error = errno; close(fd); return reject(error); }
+    int archive = openat(fd, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (archive < 0 || object(archive, store->owner, 1, 0700) || (created && fsync(fd))) {
+        int error = errno ? errno : EACCES; if (archive >= 0) close(archive); close(fd); return reject(error); }
+    close(fd); return archive;
+}
+static int archived(int archive, const char *name) {
+    struct stat existing; return !fstatat(archive, name, &existing, AT_SYMLINK_NOFOLLOW) || errno != ENOENT;
+}
+static int record_expired(int fd, const char *name, struct envara_app_ticket_store *store, uint64_t now, const char *boot) {
+    struct ticket_record record;
+    if (read_record(fd, name, RESERVED, store, NULL, &record)) return 0; /* Unreadable: left exactly where it is. */
+    return strcmp(record.ticket.boot_id, boot) || now >= record.ticket.expires_ns;
+}
+static void archive_expired(struct envara_app_ticket_store *store, int archive) {
+    uint64_t now; char boot[64]; if (clock_read(&now, boot)) return;
+    int scan = openat(store->fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); if (scan < 0) return;
+    DIR *dir = fdopendir(scan); if (!dir) { close(scan); return; }
+    /* Names are collected first and moved after, so a listing in progress is
+     * never mutated. Anything beyond this bound is handled by the next attach. */
+    char *names[3 * ENVARA_APP_TICKET_MAX + 8]; size_t count = 0; struct dirent *entry;
+    while (count < sizeof(names) / sizeof(names[0]) && (entry = readdir(dir))) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (!(names[count] = strdup(entry->d_name))) break;
+        count++;
+    }
+    closedir(dir);
+    for (size_t i = 0; i < count; i++) {
+        const char *name = names[i]; int expired = 0;
+        if (!strncmp(name, "lease.", 6) || !strncmp(name, "run.", 4)) expired = record_expired(store->fd, name, store, now, boot);
+        else if (uuid(name)) {
+            int child = openat(store->fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (child >= 0) { expired = !object(child, store->owner, 1, 0700) && record_expired(child, "reserved", store, now, boot); close(child); }
+        }
+        if (expired) (void)renameatx_np(store->fd, name, archive, name, RENAME_EXCL);
+        free(names[i]);
+    }
+    (void)fsync(archive); (void)fsync(store->fd);
+}
 int envara_app_ticket_prepare(struct envara_app_ticket_store *store, struct envara_app_registry *registry,
     const char *id, const char *registration, const char *version, const char *environment, const char *run,
     const struct envara_app_ticket_authority *authority, struct envara_app_ticket *out) {
@@ -196,6 +248,11 @@ int envara_app_ticket_prepare(struct envara_app_ticket_store *store, struct enva
         !uuid(id) || !uuid(registration) || !uuid(version) || !uuid(environment) || !uuid(run)) return reject(EINVAL);
     memset(out, 0, sizeof(*out)); if (!authority || !authority->inspect || !authority->verify || !authority->adopt) return reject(ENOTSUP);
     if (flock(store->fd, LOCK_EX | LOCK_NB)) return -1; int fd = -1, error = 0; size_t count; struct ticket_record record; memset(&record, 0, sizeof(record));
+    /* Without the archive a replay of an archived identity could not be
+     * refused, so no ticket is prepared when it cannot be opened. */
+    int archive = archive_open(store);
+    if (archive < 0) { error = errno ? errno : EACCES; flock(store->fd, LOCK_UN); return reject(error); }
+    archive_expired(store, archive);
     memcpy(record.magic, "EVTKT01", 8); record.size = sizeof(record); record.kind = RESERVED; record.owner = store->owner;
     struct envara_app_ticket *t = &record.ticket; t->schema = ENVARA_APP_TICKET_SCHEMA; t->fixture_only = store->fixture_only;
     strcpy(t->ticket_id, id); strcpy(t->environment_id, environment); strcpy(t->run_id, run);
@@ -209,7 +266,8 @@ int envara_app_ticket_prepare(struct envara_app_ticket_store *store, struct enva
     struct stat existing;
     if (!fstatat(store->fd, id, &existing, AT_SYMLINK_NOFOLLOW) || errno != ENOENT ||
         !fstatat(store->fd, lease_name, &existing, AT_SYMLINK_NOFOLLOW) || errno != ENOENT ||
-        !fstatat(store->fd, run_name, &existing, AT_SYMLINK_NOFOLLOW) || errno != ENOENT) { error = EALREADY; goto done; }
+        !fstatat(store->fd, run_name, &existing, AT_SYMLINK_NOFOLLOW) || errno != ENOENT ||
+        archived(archive, id) || archived(archive, lease_name) || archived(archive, run_name)) { error = EALREADY; goto done; }
     /* Independently burn the underlying native lease and run, not merely a
      * caller-selected ticket UUID. Partial indices are retained, never reused. */
     if (write_record(store->fd, lease_name, &record) || write_record(store->fd, run_name, &record) ||
@@ -221,7 +279,7 @@ int envara_app_ticket_prepare(struct envara_app_ticket_store *store, struct enva
     if (fresh(t, registry) || authority_fresh(t, authority) || write_record(fd, "ticket", &record) || directory_named(store, id, fd)) { error = errno; goto done; }
     struct ticket_record check;
     if (read_ticket(fd, store, registry, id, &check) || memcmp(&check.ticket, t, sizeof(*t))) { error = errno ? errno : ESTALE; goto done; } *out = *t;
-done: if (fd >= 0) close(fd); flock(store->fd, LOCK_UN); return error ? reject(error) : 0;
+done: if (fd >= 0) close(fd); close(archive); flock(store->fd, LOCK_UN); return error ? reject(error) : 0;
 }
 int envara_app_ticket_inspect(struct envara_app_ticket_store *store, struct envara_app_registry *registry, const char *id, struct envara_app_ticket *out) {
     if (!out || valid_store(store) || !uuid(id) || !registry || registry->fixture_only != store->fixture_only) return reject(EINVAL);

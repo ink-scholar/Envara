@@ -287,20 +287,14 @@ function publicResult(method, result) {
  */
 export function createPersistentPFNotionSessionClient({ spawnRootControlledLifecycle, acquireChannel = null,
   lifetimeMs = PF_NOTION_CHANNEL_LIFETIME_MS, channelKey = null, maximumBytes = 65536,
-  now = () => performance.now(), requestSerial = null } = {}) {
-  /* A caller supplies either its own spawn callback or a shared channel; a
-   * serializing wrapper is optional and defaults to running requests directly. */
+  now = () => performance.now() } = {}) {
+  /* A caller supplies either its own spawn callback or a shared channel. */
   if (typeof spawnRootControlledLifecycle !== 'function' && typeof acquireChannel !== 'function' ||
-      typeof now !== 'function' || requestSerial !== null && typeof requestSerial !== 'function' ||
+      typeof now !== 'function' ||
       typeof lifetimeMs !== 'number' || !(lifetimeMs > 0) ||
       channelKey !== null && typeof channelKey !== 'string' ||
       !Number.isInteger(maximumBytes) || maximumBytes < 1024 || maximumBytes > 131072) throw failed('PF_HELPER_REQUEST_INVALID');
   const bounded = Number.isFinite(lifetimeMs);
-  const evaluate = operation => {
-    const result = requestSerial ? requestSerial(operation) : operation();
-    if (!result || typeof result.then !== 'function') throw failed('PF_HELPER_REQUEST_INVALID');
-    return result;
-  };
   let child, starting, startedAt = null, pending = null, buffer = Buffer.alloc(0), closing = false, closed = false,
     uncertain = false, terminalError = null, terminal = null, closePromise, preparedRoute = null, bound = null,
     stopKind = null, freshCleanupKind = null, resumeAttempted = false, stopAttempted = false, lastClock = null,
@@ -439,17 +433,33 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
         settleExit(terminal);
       });
     } else {
+      /* The shared session reports its own failure on the run's channel. A
+       * request in flight then fails at once with that cause, instead of
+       * waiting out its whole deadline for an answer that cannot come. */
+      child.once('error', () => failChannel(failed('PF_HELPER_UNAVAILABLE')));
       child.once('close', (exitCode, exitSignal) => {
         closed = true; terminal = { exitCode: exitCode === 0 ? 0 : 1, exitSignal: null };
         /* This run's virtual process ended, but the shared root session is
-         * still serving the other attached applications. */
+         * still serving the other attached applications. A close this run did
+         * not ask for, with a request still in flight or bytes still buffered,
+         * is not a clean end. */
+        if (buffer.length || pending || !closing && terminal.exitCode !== 0) failChannel(failed('PF_HELPER_UNEXPECTED_EXIT'));
         settleExit(terminal);
       });
     }
     return child;
   };
+  /* start() runs inside a request's promise executor, so it must never throw
+   * synchronously: a throw there rejected the request while leaving it marked
+   * pending, and refused every later request on this client. The shared
+   * channel used to go through a check that required a promise, and the
+   * manager hands its channel over synchronously, so the very first attach
+   * failed with PF_HELPER_REQUEST_INVALID before anything was sent. */
   const start = () => starting ??= (shared
-    ? evaluate(() => acquireChannel({ key: channelKey, label: channelKey })).then(attach)
+    ? Promise.resolve().then(() => acquireChannel({ key: channelKey, label: channelKey })).then(process => {
+        if (!process?.stdin || !process?.stdout || typeof process.on !== 'function' || typeof process.once !== 'function') throw failed('PF_HELPER_UNAVAILABLE');
+        return attach(process);
+      })
     : Promise.resolve().then(spawnRootControlledLifecycle).then(process => {
         if (!process?.stdin || !process?.stdout || typeof process.on !== 'function' || typeof process.kill !== 'function') throw failed('PF_HELPER_UNAVAILABLE');
         return attach(process);
@@ -522,7 +532,8 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
       if (signal?.aborted) abort();
     });
   };
-  const statusOnlyEvidence = () => startedAt != null && closing && closed && stdoutEOF && !uncertain && !terminalError &&
+  /* Only a dedicated channel can prove its authorizer exited. */
+  const statusOnlyEvidence = () => !shared && startedAt != null && closing && closed && stdoutEOF && !uncertain && !terminalError &&
     !nonStatusRequestAttempted && !preparedRoute && !bound && !pending && !buffer.length && historyComplete && callHistory.length > 0 &&
     callHistory.every(method => method === 'status') && lastStatusReadOnly && lastStatusInventory &&
     lastSuccessfulStatusHistoryLength === callHistory.length && Object.values(lastStatusInventory).every(count => count === 0) && lastStatusRunId === selectedStatusRunId &&
@@ -533,6 +544,19 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
       bufferedOutputAbsent: true, noMutationRequestAttempted: true, uncertaintyLatched: false,
       cleanupComplete: false, lifecyclePassed: false, ready: false, protected: false, productionReady: false,
     } : null;
+  /* A shared channel's root session belongs to Envara and keeps serving other
+   * runs, so a run on it cannot show the authorizer exiting, and must not claim
+   * to. It can show that it only ever asked for read-only status, every answer
+   * arrived, the controller reported no runs, applications or routes, nothing
+   * is pending, buffered or uncertain, and its own channel closed normally.
+   * Such a run holds nothing, which is all its close has to establish. Without
+   * this, a run refused at its first status check (an owned runtime that is
+   * not empty, say) was reported as needing cleanup it never caused. */
+  const statusOnlyDetached = () => shared && startedAt != null && closing && closed && !uncertain && !terminalError &&
+    !nonStatusRequestAttempted && !preparedRoute && !bound && !pending && !buffer.length && historyComplete && callHistory.length > 0 &&
+    callHistory.every(method => method === 'status') && lastStatusReadOnly && lastStatusInventory &&
+    lastSuccessfulStatusHistoryLength === callHistory.length && Object.values(lastStatusInventory).every(count => count === 0) &&
+    lastStatusRunId === selectedStatusRunId && terminal?.exitCode === 0 && terminal?.exitSignal == null;
   call.close = ({ timeoutMs = 10000 } = {}) => {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 20000) return Promise.reject(failed('PF_HELPER_REQUEST_INVALID'));
     return closePromise ??= (async () => {
@@ -556,6 +580,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
       if (!closed) { uncertain = true; try { child?.kill?.()?.catch?.(() => {}); } catch {} }
       const evidence = statusOnlyEvidence();
       if (evidence) return { closed: true, started: true, cleanupUncertain: false, statusOnlyEvidence: evidence };
+      if (statusOnlyDetached()) return { closed: true, started: true, cleanupUncertain: false, statusOnlyDetached: true };
       /* A shared channel reports its own virtual-process close code; 0 means the
        * run ended cleanly, 1 that the root session itself is gone. */
       const expectedExit = shared ? [0, 1] : [0];
@@ -568,7 +593,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     'SIGTTIN', 'SIGTTOU', 'SIGCONT', 'SIGCHLD', 'SIGWINCH', 'SIGURG', 'SIGIO', 'SIGSYS']);
   call.snapshot = () => ({ started: startedAt != null, closed, closing, pending: pending != null,
     runId: bound?.runId ?? null, environmentId: bound?.environmentId ?? null,
-    cleanupUncertain: uncertain || startedAt != null && !statusOnlyEvidence() && (!bound || !freshCleanupKind), cleanupKind: freshCleanupKind,
+    cleanupUncertain: uncertain || startedAt != null && !statusOnlyEvidence() && !statusOnlyDetached() && (!bound || !freshCleanupKind), cleanupKind: freshCleanupKind,
     diagnostics: { selectedStatusRunId, lastStatusRunId, lastStatusInventory: lastStatusInventory ? { ...lastStatusInventory } : null,
       lastStatusReadOnly, terminalExitCode: Number.isInteger(terminal?.exitCode) && terminal.exitCode >= 0 && terminal.exitCode <= 255 ? terminal.exitCode : null,
       terminalExitSignal: terminal?.exitSignal == null ? null : signals.has(terminal.exitSignal) ? terminal.exitSignal : 'unknown',

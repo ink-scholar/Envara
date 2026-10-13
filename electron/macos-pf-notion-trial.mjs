@@ -195,15 +195,19 @@ export class MacOSPFNotionTrial {
     /* An attached application runs until it is stopped, it exits, or Envara
      * quits. A bounded trial may pass a finite watch window in milliseconds;
      * the default keeps watching for as long as the run lasts. */
-    watchMs = Infinity, onEvent = () => {}, persistDiagnostics = async () => {} } = {}) {
-    if (![verifyCandidate, verifyNotion, createClient, onEvent, persistDiagnostics].every(value => typeof value === 'function') ||
+    watchMs = Infinity, onEvent = () => {}, persistDiagnostics = async () => {},
+    /* Only the verified fixed carrier is ever spawned. Tests replace this to
+     * run the real shared channel against an inert root helper. */
+    spawnCarrier = authorizer => spawn(authorizer, ['--request-controlled-experiment'],
+      { shell: false, cwd: '/', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, stdio: ['pipe', 'pipe', 'pipe'] }) } = {}) {
+    if (![verifyCandidate, verifyNotion, createClient, onEvent, persistDiagnostics, spawnCarrier].every(value => typeof value === 'function') ||
         !(watchMs === Infinity || Number.isInteger(watchMs) && watchMs >= 0 && watchMs <= 45000)) throw error('PF_NOTION_TRIAL_REQUEST_INVALID');
     this.verifyCandidate = verifyCandidate; this.verifyNotion = verifyNotion; this.createClient = createClient;
     this.watchMs = watchMs; this.onEvent = onEvent; this.persistDiagnostics = persistDiagnostics;
     this.observationSeconds = Number.isFinite(watchMs) && watchMs > 0 ? watchMs / 1000 : null;
     this.state = null; this.pending = null; this.stopObservation = null; this.closed = false;
     this.mux = null; this.activeTarget = null; this.runTargets = new Map();
-    this.authorizerPath = authorizerPath;
+    this.authorizerPath = authorizerPath; this.spawnCarrier = spawnCarrier;
   }
   stateFlags() { return { active: false, phase: 'idle', staged: false, resumed: false, cleanupComplete: false, cleanupUncertain: false,
     lifecyclePassed: false, errorCode: null, events: [], ...fixedFlags, initialFailure: null, cleanupFailure: null,
@@ -215,12 +219,16 @@ export class MacOSPFNotionTrial {
    * spawned inside the mux, so nothing runs and no dialog appears until the
    * first attach actually acquires a run channel. */
   ensureMux() {
+    /* A shared session that has ended (its carrier exited, or it refused
+     * authorization) can carry nothing more. Reusing it made every later attach
+     * in the same launch fail; a new one is opened, which honestly needs a new
+     * authorization. */
+    if (this.mux?.snapshot().ended === true) this.mux = null;
     return this.mux ??= createPFAuthorizedChannelMux({ spawnRootControlledLifecycle: () => this.spawnSharedCarrier() });
   }
   /* Only the verified fixed carrier is ever spawned, and only here. */
   spawnSharedCarrier() {
-    return spawn(this.authorizerPath, ['--request-controlled-experiment'],
-      { shell: false, cwd: '/', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, stdio: ['pipe', 'pipe', 'pipe'] });
+    return this.spawnCarrier(this.authorizerPath);
   }
   acquireRunChannel(key) {
     const target = this.ensureMux().acquire({ key });
@@ -353,7 +361,7 @@ export class MacOSPFNotionTrial {
     return task;
   }
   async execute(request) {
-    let call, prepared = false, stoppedKind = null, snapshotKind = null, closeConfirmed = false, statusOnlyClosed = false;
+    let call, prepared = false, stoppedKind = null, snapshotKind = null, closeConfirmed = false, statusOnlyClosed = false, statusOnlyDetached = false;
     const runId = randomUUID(), environmentId = canonicalUUID(request.application.profileId) ? request.application.profileId : randomUUID();
     this.state.runId = runId; this.state.environmentId = environmentId;
     const advance = (phase, failure) => { this.state.phase = phase; this.emit(phase, failure); };
@@ -413,7 +421,10 @@ export class MacOSPFNotionTrial {
       }
       if (call) {
         try { const closed = await call.close({ timeoutMs: 15000 }); closeConfirmed = closed.closed === true && closed.cleanupUncertain === false;
-          statusOnlyClosed = !prepared && closeConfirmed && validatePFNotionStatusOnlyCloseEvidence(closed.statusOnlyEvidence, runId); }
+          statusOnlyClosed = !prepared && closeConfirmed && validatePFNotionStatusOnlyCloseEvidence(closed.statusOnlyEvidence, runId);
+          /* On the shared session the run detaches instead of the session
+           * closing; the client establishes that it held nothing. */
+          statusOnlyDetached = !prepared && closeConfirmed && closed.statusOnlyDetached === true; }
         catch (failure) { this.emit('stopping', failure); }
         /* This run's virtual channel ends here; the shared authorized session
          * stays open so the next attach asks for no password. */
@@ -431,8 +442,9 @@ export class MacOSPFNotionTrial {
       }
       this.state.cleanupComplete = prepared && stoppedKind != null && stoppedKind === snapshotKind && closeConfirmed;
       this.state.statusOnlySessionClosed = statusOnlyClosed;
+      this.state.statusOnlyRunDetached = statusOnlyDetached;
       this.state.cleanupUncertain = call != null && (!closeConfirmed || prepared && !this.state.cleanupComplete ||
-        this.state.errorCode === 'PF_OWNED_RUNTIME_NOT_EMPTY' && !statusOnlyClosed);
+        this.state.errorCode === 'PF_OWNED_RUNTIME_NOT_EMPTY' && !statusOnlyClosed && !statusOnlyDetached);
       this.state.lifecyclePassed = this.state.resumed && this.state.cleanupComplete && !this.state.errorCode;
       this.state.active = false;
       advance(this.state.cleanupUncertain ? 'cleanup-required' : this.state.cleanupComplete ? 'cleaned' : 'failed');

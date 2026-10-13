@@ -24,7 +24,7 @@ export function createPFAuthorizedChannelMux({ spawnRootControlledLifecycle, max
   if (typeof spawnRootControlledLifecycle !== 'function' || !Number.isInteger(maximumBytes) || maximumBytes < 1024 || maximumBytes > TERMINAL_BYTES)
     throw failed('mux-request-invalid');
   const targets = new Map(), owners = new Map(), pending = new Map();
-  let child = null, starting = null, buffer = Buffer.alloc(0), spawned = false, disposed = false, terminal = null;
+  let child = null, starting = null, buffer = Buffer.alloc(0), spawned = false, disposed = false, terminal = null, sessionFailed = false;
 
   const start = () => starting ??= Promise.resolve().then(spawnRootControlledLifecycle).then(process => {
     if (!process?.stdin || !process?.stdout || typeof process.on !== 'function' || typeof process.kill !== 'function')
@@ -64,17 +64,29 @@ export function createPFAuthorizedChannelMux({ spawnRootControlledLifecycle, max
     if (buffer.length > maximumBytes * 2) return fail('mux-response-too-large');
     let newline;
     while ((newline = buffer.indexOf(10)) >= 0) {
-      const line = buffer.subarray(0, newline); buffer = buffer.subarray(newline + 1);
+      /* Each run's client frames its own input by newline, exactly as it does
+       * for a dedicated carrier, so the frame is delivered with its newline. */
+      const frame = buffer.subarray(0, newline + 1), line = frame.subarray(0, newline); buffer = buffer.subarray(newline + 1);
       if (!line.length || line.length > maximumBytes) return fail('mux-response-invalid');
       let id = null;
       try { id = JSON.parse(line.toString('utf8'))?.id ?? null; } catch { return fail('mux-response-invalid'); }
+      /* The carrier itself writes the only frames without an id: an
+       * authorization refusal, or the root wrapper's cleanup-unconfirmed
+       * terminal frame. Both describe the whole session, so every attached run
+       * receives them and applies its own fixed checks. Dropping them lost the
+       * refusal reason and the cleanup uncertainty. The session is over. */
+      if (id === null) {
+        sessionFailed = true;
+        for (const target of [...targets.values()]) target.emit('data', frame);
+        continue;
+      }
       // A frame whose id belongs to no live request is still delivered to its
       // owning run, so that run's own late-response evidence is preserved.
       const owner = typeof id === 'string' ? owners.get(id) : null;
       const record = typeof id === 'string' ? pending.get(id) : null;
       if (record) pending.delete(id);
-      if (!owner) { if (id === null) return fail('mux-unaddressed-response'); continue; }
-      owner.emit('data', line);
+      if (!owner) continue;
+      owner.emit('data', frame);
     }
     if (buffer.length > maximumBytes) fail('mux-response-too-large');
   };
@@ -87,6 +99,7 @@ export function createPFAuthorizedChannelMux({ spawnRootControlledLifecycle, max
 
   function acquire({ key } = {}) {
     if (disposed) throw failed('mux-disposed');
+    if (terminal || sessionFailed) throw failed('mux-session-ended');
     if (key && targets.has(key)) throw failed('mux-key-in-use');
     const handlers = new Set();
     const target = {
@@ -112,32 +125,41 @@ export function createPFAuthorizedChannelMux({ spawnRootControlledLifecycle, max
     // the first request is what starts that carrier, and a caller must never
     // lose a request just because the authorization dialog is still on screen.
     const backlog = [];
-    const forward = input => {
-      if (disposed || terminal || ended || !child) return false;
-      try { return child.stdin.write(input); } catch { return false; }
+    /* A write callback means "the stream is done with these bytes": the run's
+     * client scrubs its request buffer in it, and a request can carry the
+     * proxy password. So the callback goes to the real stream, which calls it
+     * once it has taken the bytes. Calling it here first zeroed every request
+     * still in flight, and the root helper received NUL bytes and never
+     * answered. A false return from write is backpressure, not a failure. */
+    const forward = (input, callback) => {
+      if (disposed || terminal || sessionFailed || ended || !child) return false;
+      try { child.stdin.write(input, callback); return true; } catch { return false; }
     };
+    const scrub = () => { for (const held of backlog.splice(0)) held.fill(0); };
     const flush = () => {
       while (backlog.length) {
-        const input = backlog.shift();
-        if (!forward(input)) { backlog.unshift(input); return false; }
+        const held = backlog.shift();
+        if (!forward(held, () => held.fill(0))) { held.fill(0); scrub(); return false; }
       }
       return true;
     };
     target.stdin = {
       write: (input, callback) => {
-        if (disposed || terminal || ended) { callback?.(); return false; }
+        if (disposed || terminal || sessionFailed || ended) { callback?.(); return false; }
         const id = parseId(input);
         if (id) {
           if (pending.has(id)) { callback?.(); throw failed('mux-duplicate-request'); }
           pending.set(id, { id, emit: target.emit }); owners.set(id, target);
         }
-        if (child) { const sent = forward(input); callback?.(); return sent; }
-        // The first request is what opens the shared authorized session; this is
-        // the only place the carrier is ever spawned.
-        backlog.push(input);
-        void start().then(() => { if (!flush()) fail('mux-input-failed'); }).catch(() => fail('mux-process-unavailable'));
+        if (child) { if (forward(input, callback)) return true; callback?.(); return false; }
+        /* The first request is what opens the shared authorized session; this
+         * is the only place the carrier is ever spawned. Until it is ready the
+         * request is held as a private copy, so the caller may scrub its own
+         * buffer now, and the copy is scrubbed once the carrier takes it. */
+        backlog.push(Buffer.from(input));
+        void start().then(() => { if (!flush()) fail('mux-input-failed'); }).catch(() => { scrub(); fail('mux-process-unavailable'); });
         callback?.();
-        return false;
+        return true;
       },
       end,
       on: () => {}, once: () => {}, removeListener: () => {},
@@ -160,12 +182,16 @@ export function createPFAuthorizedChannelMux({ spawnRootControlledLifecycle, max
     pending.clear(); owners.clear();
     for (const target of [...targets.values()]) target.emit('close', null, null);
     targets.clear();
-    try { await start().catch(() => {}); } catch { /* never spawned */ }
+    /* Quitting must never be what opens the session: a channel that was
+     * acquired but never sent a request has no carrier, and starting one here
+     * put an administrator password dialog in front of the user on quit. */
+    if (starting) await starting.catch(() => {});
     try { child?.stdin?.end?.(); } catch { /* already closed */ }
   };
   return Object.freeze({
     acquire, release, dispose, start,
-    snapshot: () => ({ spawned, connected: child != null, disposed, terminal: terminal ? { ...terminal } : null,
+    snapshot: () => ({ spawned, connected: child != null, disposed, ended: disposed || terminal != null || sessionFailed,
+      terminal: terminal ? { ...terminal } : null,
       targets: targets.size, pending: pending.size, bufferedBytes: buffer.length }),
     child: () => child,
   });

@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { localeForInterfaceLanguage } from "../shared/interface-languages.mjs";
 import { savedNetworkPresentation } from "./network-flow-state.mjs";
 import { notionTrialControls, notionTrialLogLine, notionTrialFailureLine, notionTrialErrorHint, attachedApplicationStatus, safeNotionTrial } from "./notion-trial-state.mjs";
-import { Stack, GlobeHemisphereWest, FolderOpen, Plus, Play, Stop, Trash, Desktop, ShieldCheck, WarningCircle, ArrowRight, PencilSimple, Browsers, TerminalWindow, Clock, Info } from "@phosphor-icons/react";
+import { Stack, GlobeHemisphereWest, FolderOpen, Plus, Play, Stop, Trash, Desktop, ShieldCheck, WarningCircle, ArrowRight, PencilSimple, Browsers, TerminalWindow, Clock, Info, Eraser, ArrowSquareOut } from "@phosphor-icons/react";
 import { ApplicationIcon } from "./ApplicationIcon.jsx";
 const live = new Set(["starting", "running", "stopping"]);
 function WorkspaceEmpty({
@@ -139,6 +139,8 @@ export function ApplicationsWorkspace({
   onStop,
   onRunNotionTrial,
   onStopNotionTrial,
+  onShowApplicationWindow,
+  onClearApplicationData,
   onExportNotionDiagnostics,
   onCheckStorage,
   onReclaimStorage,
@@ -195,7 +197,9 @@ export function ApplicationsWorkspace({
         const issue = inEnvironment && !rowLive && Boolean(controlled.trial?.errorCode || diagnostics?.initialFailure || diagnostics?.cleanupFailure);
         return <div className={`application-row${issue ? " has-issue" : ""}`} key={application.id}>
           <div className="application-main">
-            <ApplicationIcon path={application.path} />
+            {inEnvironment && rowStatus === "running" && typeof onShowApplicationWindow === "function"
+              ? <button type="button" className="application-icon-button" onClick={() => onShowApplicationWindow(application)} title={t("打开窗口")} aria-label={t("打开窗口")}><ApplicationIcon path={application.path} /></button>
+              : <ApplicationIcon path={application.path} />}
             <div className="application-copy"><strong title={application.path}>{application.name}</strong><span>{owner ? [owner.name, ownerNetwork?.name || t("本机网络")].join(" · ") : t("环境不可用")}</span>
               {application.lastError && <p className="application-error"><WarningCircle size={14} />{t(typeof application.lastError === "string" ? application.lastError : application.lastError.message)}</p>}
               {capabilityError && <p className="notion-trial-error" role="status">{t("错误码")} · <code>{capabilityError}</code></p>}
@@ -207,7 +211,7 @@ export function ApplicationsWorkspace({
               stopping: "停止中",
               error: "异常"
             }[rowStatus] || rowStatus)}</span>
-            <div className="application-actions"><button className={`button ${rowLive ? "" : "primary"}`} disabled={inEnvironment ? (rowLive ? !controlled.canStop : !owner || !controlled.canRun) : busy || (active ? application.status !== "running" : !ready || !owner)} onClick={() => inEnvironment ? (rowLive ? onStopNotionTrial(application) : onRunNotionTrial(application)) : active ? onStop(application) : onStart(application)}>{rowLive ? <Stop size={15} /> : <Play size={15} />}{t(rowLive ? "停止" : "启动")}</button><button className="icon-button" disabled={active || busy || controlled.trial?.cleanupUncertain === true} onClick={() => onDelete(application)} aria-label={t("移除软件")} title={t("移除软件")}><Trash size={17} /></button></div>
+            <div className="application-actions">{inEnvironment && rowStatus === "running" && typeof onShowApplicationWindow === "function" && <button className="icon-button" disabled={pending[`showApplicationWindow:${application.id}`]} onClick={() => onShowApplicationWindow(application)} aria-label={t("打开窗口")} title={t("打开窗口")}><ArrowSquareOut size={17} /></button>}<button className={`button ${rowLive ? "" : "primary"}`} disabled={inEnvironment ? (rowLive ? !controlled.canStop : !owner || !controlled.canRun) : busy || (active ? application.status !== "running" : !ready || !owner)} onClick={() => inEnvironment ? (rowLive ? onStopNotionTrial(application) : onRunNotionTrial(application)) : active ? onStop(application) : onStart(application)}>{rowLive ? <Stop size={15} /> : <Play size={15} />}{t(rowLive ? "停止" : "启动")}</button>{inEnvironment && typeof onClearApplicationData === "function" && <button className="icon-button" disabled={rowLive || busy || controlled.trial?.cleanupUncertain === true} onClick={() => onClearApplicationData(application)} aria-label={t("清除登录数据")} title={t("清除登录数据")}><Eraser size={17} /></button>}<button className="icon-button" disabled={active || busy || controlled.trial?.cleanupUncertain === true} onClick={() => onDelete(application)} aria-label={t("移除软件")} title={t("移除软件")}><Trash size={17} /></button></div>
           </div>
           {issue && <div className="application-issue" role="status">
             <div className="application-issue-head"><WarningCircle size={15} /><strong>{t(controlled.trial?.phase === "cleanup-required" ? "清理未确认" : historicalDiagnostics ? "上次附加" : "上次启动未完成")}</strong>{controlled.trial?.errorCode && <code>{controlled.trial.errorCode}</code>}</div>
@@ -222,7 +226,7 @@ export function ApplicationsWorkspace({
         </div>;
       })}</div> : <WorkspaceEmpty icon={Desktop} title={profile ? "添加软件到这个境舱" : "先创建网络环境"} action={desktop ? "添加软件" : undefined} onAction={onPick} t={t} />}
     {startable && rows.length > 0 && <ul className="application-notes">{["附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。",
-      "关闭窗口不会退出软件，点程序坞图标即可重新打开窗口；点停止会退出软件。", "再次启动会沿用这个境舱的登录数据。",
+      "关闭窗口不会退出软件，点「打开窗口」或程序坞图标即可重新打开；点停止会退出软件。", "再次启动会沿用这个境舱的登录数据，只有手动清除或删除境舱时才会删除。",
       "首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。"].map(text => <li key={text}><Info size={14} /><span>{t(text)}</span></li>)}</ul>}
     {desktop && routing?.backend === "pf-utun" && typeof onCheckStorage === "function" &&
       <ApplicationStorage onCheck={onCheckStorage} onReclaim={onReclaimStorage} formatBytes={formatBytes} pending={pending} t={t} />}

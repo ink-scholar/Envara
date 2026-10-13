@@ -2,8 +2,10 @@ import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage } from 'e
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { readFile, writeFile, mkdir, readdir, lstat, rm } from 'node:fs/promises';
-import { pfAttachEnvironmentId } from '../native/macos-pf-routing/policy.mjs';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { pfAttachEnvironmentId, pfApplicationRegistrationId } from '../native/macos-pf-routing/policy.mjs';
+import { eraseAttachedApplicationData } from './application-data.mjs';
+import { showManagedApplicationWindow } from './application-window.mjs';
 import { EnvaraService } from './service.mjs';
 import { BrowserRuntime } from './runtime.mjs';
 import { SidecarManager } from './sidecar-manager.mjs';
@@ -145,7 +147,7 @@ async function publish() {
 }
 const allowedMethods = new Set(['snapshot','createProfile','updateProfile','cloneProfile','deleteProfile','clearProfile','startProfile','stopProfile','focusProfile','saveProxy','deleteProxy','checkProxy','saveSettings','installEngine','importProfiles','cancelImport','exportProfiles','openDataDirectory','openDocumentation','previewLegacyMigration','migrateLegacy','saveGroup','deleteGroup','clearGroupProxy','bulkProfiles','exportAutomationConfig','openTerminalWindow', ...TERMINAL_METHODS]);
 const applicationMethods = new Set(['saveApplication', 'startApplication', 'stopApplication', 'deleteApplication', 'getApplicationRoutingStatus', 'setupApplicationRouting']);
-for (const method of [...applicationMethods, 'pickApplication', 'listLocalApplications', 'applicationIcon', 'previewProxyNetwork', 'checkEnvironmentNetwork', 'openNetworkLocationMap']) allowedMethods.add(method);
+for (const method of [...applicationMethods, 'pickApplication', 'listLocalApplications', 'applicationIcon', 'showApplicationWindow', 'clearApplicationData', 'previewProxyNetwork', 'checkEnvironmentNetwork', 'openNetworkLocationMap']) allowedMethods.add(method);
 for (const method of ['runNotionTrial', 'stopNotionTrial', 'notionTrialSnapshot', 'exportNotionDiagnostics', 'applicationStorage', 'reclaimApplicationStorage']) allowedMethods.add(method);
 
 async function protectApplicationMutation(method, args, operation) {
@@ -188,19 +190,6 @@ async function applicationStorageCandidates() {
  * cannot be swapped for a link, so no administrator step is needed. What
  * remains is the empty root-owned skeleton, removed by the storage cleanup.
  * Removal never follows a link. */
-async function eraseAttachedApplicationData(profileId) {
-  if (process.platform !== 'darwin' || typeof profileId !== 'string' || !profileId) return;
-  const root = path.join('/Library/PrivilegedHelperTools/io.envara.pf-app-data', pfAttachEnvironmentId(profileId));
-  let registrations; try { registrations = await readdir(root); } catch { return; }
-  for (const registration of registrations) {
-    const leaf = path.join(root, registration, 'UserData');
-    let info; try { info = await lstat(leaf); } catch { continue; }
-    if (!info.isDirectory() || info.uid !== process.getuid()) continue;
-    for (const entry of await readdir(leaf).catch(() => []))
-      await rm(path.join(leaf, entry), { recursive: true, force: true }).catch(() => {});
-  }
-}
-
 async function handleCall(method, args = {}, caller = window) {
   if (quitting) throw Object.assign(new Error('应用正在退出。'), { code: 'APP_CLOSING' });
   if (!allowedMethods.has(method)) throw new Error('不支持的操作');
@@ -256,6 +245,25 @@ async function handleCall(method, args = {}, caller = window) {
   }
   if (method === 'listLocalApplications') return localApplications.list(args);
   if (method === 'applicationIcon') return applicationIcon(args);
+  if (method === 'clearApplicationData') {
+    /* Sign-in data is removed only on request (removing an application keeps
+     * it), and never while this application is starting, running or awaiting
+     * cleanup. Another application's attachment uses its own data folder. */
+    if (!applications || typeof args.id !== 'string') throw Object.assign(new Error('未找到此附加软件。'), { code: 'APPLICATION_NOT_FOUND' });
+    const item = (await applications.snapshot()).applications.find(entry => entry.id === args.id);
+    if (!item?.path || !item.profileId) throw Object.assign(new Error('未找到此附加软件。'), { code: 'APPLICATION_NOT_FOUND' });
+    const trial = applications.routing?.controlledNotionTrialSnapshot?.() ?? null;
+    if (notionTrialReserved || ['starting', 'running', 'stopping'].includes(item.status) ||
+      trial?.applicationId === item.id && (trial.active === true || trial.cleanupUncertain === true)) throw Object.assign(new Error('请先停止此软件。'), { code: 'APPLICATION_RUNNING' });
+    const erased = await eraseAttachedApplicationData(item.profileId, { registrationId: pfApplicationRegistrationId(item.path) });
+    return { cleared: true, erased: erased.length };
+  }
+  if (method === 'showApplicationWindow') {
+    if (process.platform !== 'darwin' || !applications || typeof args.id !== 'string') throw Object.assign(new Error('软件没有在境舱中运行。'), { code: 'APPLICATION_WINDOW_UNAVAILABLE' });
+    const item = (await applications.snapshot()).applications.find(entry => entry.id === args.id);
+    if (!item?.path) throw Object.assign(new Error('未找到此附加软件。'), { code: 'APPLICATION_NOT_FOUND' });
+    return showManagedApplicationWindow({ registrationId: pfApplicationRegistrationId(item.path) });
+  }
   if (method === 'openNetworkLocationMap') {
     const location = parseGoogleMapsLocation(args.url);
     if (!location) throw new Error('请先选择网络位置。');
@@ -364,12 +372,12 @@ async function handleCall(method, args = {}, caller = window) {
   const result = await protectApplicationMutation(method, args, () => terminalController ? terminalController.protectMutation(method, args, () => service.call(method, args)) : service.call(method, args));
   if (applications && method === 'deleteProfile') {
     for (const item of (await applications.snapshot()).applications.filter(item => item.profileId === args.id)) await applications.deleteApplication({ id: item.id });
-    await eraseAttachedApplicationData(args.id);
+    await eraseAttachedApplicationData(args.id).catch(() => {});
   }
   if (applications && method === 'bulkProfiles' && args.action === 'delete') {
     const deleted = new Set((result?.actionResult?.results ?? result?.results ?? []).filter(item => item.ok).map(item => item.id));
     for (const item of (await applications.snapshot()).applications.filter(item => deleted.has(item.profileId))) await applications.deleteApplication({ id: item.id });
-    for (const id of deleted) await eraseAttachedApplicationData(id);
+    for (const id of deleted) await eraseAttachedApplicationData(id).catch(() => {});
   }
   return result;
 }

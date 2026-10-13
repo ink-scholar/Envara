@@ -66,13 +66,27 @@ export const networkFlowEnglish = {
     'An attached application keeps running until you stop it, it exits, or you quit Envara. The fingerprint browser and terminals are not counted.',
   '首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。':
     'The first attach asks for administrator authorization once; this Envara run will not ask again.',
-  '关闭窗口不会退出软件，点程序坞图标即可重新打开窗口；点停止会退出软件。':
-    'Closing its window does not quit the application; click its Dock icon to open the window again. Stop quits it.',
-  '再次启动会沿用这个境舱的登录数据。': 'Launching it again keeps this environment’s sign-in data.',
+  '关闭窗口不会退出软件，点「打开窗口」或程序坞图标即可重新打开；点停止会退出软件。':
+    'Closing its window does not quit the application; use Open window or its Dock icon to open it again. Stop quits it.',
+  '再次启动会沿用这个境舱的登录数据，只有手动清除或删除境舱时才会删除。':
+    'Launching it again keeps this environment’s sign-in data; it is deleted only when you clear it or delete the environment.',
   '接管尚未完成全部验收': 'Routing is not fully verified yet',
   '软件可以在境舱网络中启动；DNS、子进程等接管项仍在验证。':
     'Applications can start inside the environment’s network; DNS, child processes and other routing checks are still being verified.',
   '上次启动未完成': 'The last start did not complete',
+  '打开窗口': 'Open window',
+  '清除登录数据': 'Clear sign-in data',
+  '清除「{value1}」在这个境舱的登录数据？': 'Clear {value1}’s sign-in data in this environment?',
+  '下次启动需要重新登录；电脑上的软件本身不受影响。':
+    'You will need to sign in again next time; the application installed on your Mac is not affected.',
+  '登录数据已清除': 'Sign-in data cleared',
+  '软件没有在境舱中运行。': 'The application is not running in the environment.',
+  'macOS 未允许境舱控制这个软件。请在“系统设置 › 隐私与安全性 › 自动化”中允许，或点程序坞里的图标。':
+    'macOS has not allowed Envara to control this application. Allow it in System Settings › Privacy & Security › Automation, or click its Dock icon.',
+  '只移除绑定，登录数据会保留；要清除，请先点「清除登录数据」。':
+    'Only the binding is removed and its sign-in data is kept; to delete that data, use Clear sign-in data first.',
+  '请先停止此软件。': 'Stop this application first.',
+  '登录数据没有全部清除，请退出这个软件后重试。': 'Not all sign-in data was cleared. Quit this application and try again.',
   '更新网络组件': 'Update network component',
   '更新中…': 'Updating…',
   '已安装的网络组件早于当前应用版本，需要更新后才能附加软件。': 'The installed network component predates this app version. Update it before attaching software.',

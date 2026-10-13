@@ -572,6 +572,9 @@ body:has(.terminal-window-shell) { min-width: 640px; }
 .application-main { display: flex; align-items: center; gap: 14px; }
 .application-icon { display: flex; flex: none; align-items: center; justify-content: center; background: #2e3340; color: #8eabc9; border: 1px solid #3d4554; border-radius: 10px; }
 .application-icon.has-image, .choice-icon.has-image { background: none; border: 0; }
+.application-icon-button { display: flex; flex: none; padding: 0; border: 0; background: none; border-radius: 10px; cursor: pointer; }
+.application-icon-button:hover { filter: brightness(1.08); }
+.application-icon-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .application-icon img, .choice-icon img { display: block; filter: drop-shadow(0 1px 2px #00000059); }
 .application-copy { display: flex; flex: 1; flex-direction: column; gap: 4px; min-width: 0; }
 .application-copy > strong { font-size: 14px; font-weight: 600; color: #e3e3ea; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

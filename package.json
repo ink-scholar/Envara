@@ -96,7 +96,10 @@
         "zip"
       ],
       "identity": null,
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "Envara asks an attached application that is already running in its environment to open its window again. 用于让已在境舱中运行的附加软件重新打开窗口。"
+      }
     },
     "win": {
       "target": [

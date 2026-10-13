@@ -1432,11 +1432,21 @@ function WorkspaceApp() {
         title: t("移除「{value1}」？", {
           value1: application.name
         }),
-        description: t("只移除境舱绑定，软件与本地文件会保留。"),
+        description: t("只移除绑定，登录数据会保留；要清除，请先点「清除登录数据」。"),
         method: "deleteApplication",
         id: application.id,
         button: t("移除软件"),
         success: t("软件已移除")
+      })} onShowApplicationWindow={application => perform("showApplicationWindow", { id: application.id })} onClearApplicationData={application => setModal({
+        type: "confirm",
+        title: t("清除「{value1}」在这个境舱的登录数据？", {
+          value1: application.name
+        }),
+        description: t("下次启动需要重新登录；电脑上的软件本身不受影响。"),
+        method: "clearApplicationData",
+        id: application.id,
+        button: t("清除登录数据"),
+        success: t("登录数据已清除")
       })} onSetup={() => perform("setupApplicationRouting")} onInstall={() => perform("setupApplicationRouting", { activate: true })} pending={pending} t={t} desktop={api.isDesktop} />}
       {page === "proxies" && <div className="page-content"><div className="section-note"><ShieldCheck size={18} /><span>{api.isDesktop ? t("创建时确认位置与时区，浏览器、终端和附加软件共同使用。") : t("真实出口识别需要境舱桌面应用；预览中可管理示例代理配置。")}</span></div>{proxies.length ? <div className="proxy-table"><div className="proxy-grid table-head"><span>{t("网络出口")}</span><span>{t("服务器")}</span><span>{t("实际出口")}</span><span>{t("操作")}</span></div>{proxies.map(proxy => <div className="proxy-grid proxy-row" key={proxy.id}><div className="proxy-name"><div className="proxy-icon"><GlobeHemisphereWest size={20} /></div><div><strong>{proxy.name}</strong><small>{profiles.filter(profile => profile.proxyId === proxy.id).length}{t("个环境使用")}{snapshot.groups?.some(group => group.proxyId === proxy.id) && t(" · {value1} 个分组绑定", {
                     value1: snapshot.groups.filter(group => group.proxyId === proxy.id).length

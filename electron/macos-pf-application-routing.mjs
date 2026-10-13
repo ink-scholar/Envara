@@ -349,6 +349,11 @@ export class MacOSPFApplicationRouting {
   stopControlledNotionTrial({ applicationId } = {}) {
     this.assertOpen(); return this.notionTrial.stop(applicationId);
   }
+  /* What attached applications keep on disk, and its removal. */
+  applicationStorage() { this.assertOpen(); return this.notionTrial.applicationStorage(); }
+  reclaimApplicationStorage({ registrationIds, environmentIds } = {}) {
+    this.assertOpen(); return this.notionTrial.reclaimApplicationStorage({ registrationIds, environmentIds });
+  }
   async controlledNotionTrial({ application, context, activationAuthorized } = {}) {
     this.assertOpen();
     /* Any locally added application whose bundle this process can inspect and

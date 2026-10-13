@@ -571,6 +571,14 @@ body:has(.terminal-window-shell) { min-width: 640px; }
 .notion-trial-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 .notion-trial-actions .button { min-height: 29px; padding: 6px 9px; font-size: 11px; }
 .notion-trial-scope { margin: 9px 0 7px; color: #c8ae79; font-size: 11px; line-height: 1.5; }
+.application-storage { margin-top: 18px; padding: 14px 16px; border: 1px solid #41414b; border-radius: 8px; }
+.application-storage-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.application-storage-head strong { font-size: 13px; }
+.application-storage-list { list-style: none; margin: 10px 0; padding: 0; display: grid; gap: 6px; }
+.application-storage-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; font-size: 12px; color: #c9c9d6; }
+.application-storage-list li span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.storage-in-use { color: #8fbf9a; } .storage-unused { color: #c8ae79; }
+.confirm-items { margin: 12px 0 0 36px; padding: 0; font-size: 12px; color: #aeaec0; line-height: 1.7; max-height: 220px; overflow: auto; }
 .notion-trial-status { display: flex; gap: 5px 13px; flex-wrap: wrap; font-size: 11px; color: #a9a9b8; }
 .notion-trial-status code { overflow-wrap: anywhere; font-size: 10px; }
 .notion-trial-error { color: #dc9da5; }

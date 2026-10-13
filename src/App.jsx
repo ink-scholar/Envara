@@ -1050,10 +1050,12 @@ function WorkspaceApp() {
     }
   };
   const confirmAction = async () => {
-    const response = await perform(modal.method, {
-      id: modal.id
-    }, modal.success);
-    if (response.ok) closeModal();
+    const current = modal;
+    const response = await perform(current.method, {
+      id: current.id,
+      ...(current.args ?? {})
+    }, current.success);
+    if (response.ok) { closeModal(); current.onDone?.(response.result); }
   };
   const confirmDelete = profile => setModal({
     type: "confirm",
@@ -1413,7 +1415,18 @@ function WorkspaceApp() {
         id: application.id
       })} onStop={application => perform("stopApplication", {
         id: application.id
-      }, t("软件已停止"))} onRunNotionTrial={async application => { const result = await perform("runNotionTrial", { id: application.id }); if (!result.ok) await refresh().catch(() => {}); }} onStopNotionTrial={async application => { const result = await perform("stopNotionTrial", { id: application.id }); if (!result.ok) await refresh().catch(() => {}); }} onExportNotionDiagnostics={application => perform("exportNotionDiagnostics", { id: application.id })} onDelete={application => setModal({
+      }, t("软件已停止"))} onRunNotionTrial={async application => { const result = await perform("runNotionTrial", { id: application.id }); if (!result.ok) await refresh().catch(() => {}); }} onStopNotionTrial={async application => { const result = await perform("stopNotionTrial", { id: application.id }); if (!result.ok) await refresh().catch(() => {}); }} onExportNotionDiagnostics={application => perform("exportNotionDiagnostics", { id: application.id })} onCheckStorage={() => perform("applicationStorage", {})} formatBytes={bytes} onReclaimStorage={(items, total, recheck) => setModal({
+        type: "confirm",
+        title: t("删除未使用的数据？"),
+        description: t("以下数据都没有在使用，共 {value1}，删除后无法恢复。之后再附加对应的软件时需要重新登录。", { value1: total }),
+        items: items.map(item => `${item.label} · ${bytes(item.bytes)}`),
+        method: "reclaimApplicationStorage",
+        id: "",
+        args: { ids: items.map(item => item.id) },
+        button: t("删除"),
+        success: t("已删除未使用的数据"),
+        onDone: () => recheck()
+      })} onDelete={application => setModal({
         type: "confirm",
         title: t("移除「{value1}」？", {
           value1: application.name
@@ -1479,6 +1492,6 @@ function WorkspaceApp() {
     })} onAddProxy={() => {
       closeModal();
       setPage("proxies");
-    }} onClose={closeModal} saving={pending[`importProfiles:${modal.session.importId}`]} />}{modal?.type === "migration" && migration && <MigrationForm migration={migration} onMigrate={migrate} onClose={closeModal} saving={pending["migrateLegacy:"]} />}{modal?.type === "moveGroup" && <GroupForm groups={groups} count={checkedIds.length} onSave={group => runBulk("group", group)} onClose={closeModal} saving={bulkRunning} />}{modal?.type === "confirm" && <Modal title={modal.title} onClose={closeModal} className="confirm-modal"><div className="modal-body"><div className="confirm-warning"><WarningCircle size={23} /><p>{modal.description}</p></div></div><div className="modal-footer"><Button onClick={closeModal}>{t("取消")}</Button><Button className="danger" onClick={confirmAction} disabled={pending[`${modal.method}:${modal.id}`]}>{pending[`${modal.method}:${modal.id}`] ? t("处理中…") : modal.button}</Button></div></Modal>}{toast && <div className={`toast toast-${toast.type}`} role="status">{toast.type === "error" ? <WarningCircle size={19} /> : toast.type === "success" ? <CheckCircle size={19} /> : <Browsers size={19} />}<span>{t(toast.message)}</span><IconButton icon={X} label={t("关闭通知")} onClick={() => setToast(null)} /></div>}
+    }} onClose={closeModal} saving={pending[`importProfiles:${modal.session.importId}`]} />}{modal?.type === "migration" && migration && <MigrationForm migration={migration} onMigrate={migrate} onClose={closeModal} saving={pending["migrateLegacy:"]} />}{modal?.type === "moveGroup" && <GroupForm groups={groups} count={checkedIds.length} onSave={group => runBulk("group", group)} onClose={closeModal} saving={bulkRunning} />}{modal?.type === "confirm" && <Modal title={modal.title} onClose={closeModal} className="confirm-modal"><div className="modal-body"><div className="confirm-warning"><WarningCircle size={23} /><p>{modal.description}</p></div>{modal.items?.length > 0 && <ul className="confirm-items">{modal.items.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>}</div><div className="modal-footer"><Button onClick={closeModal}>{t("取消")}</Button><Button className="danger" onClick={confirmAction} disabled={pending[`${modal.method}:${modal.id}`]}>{pending[`${modal.method}:${modal.id}`] ? t("处理中…") : modal.button}</Button></div></Modal>}{toast && <div className={`toast toast-${toast.type}`} role="status">{toast.type === "error" ? <WarningCircle size={19} /> : toast.type === "success" ? <CheckCircle size={19} /> : <Browsers size={19} />}<span>{t(toast.message)}</span><IconButton icon={X} label={t("关闭通知")} onClick={() => setToast(null)} /></div>}
   </div>;
 }

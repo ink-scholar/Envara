@@ -99,6 +99,33 @@ export function ContextDetail({
     <div className="danger-actions"><button disabled={editingDisabled} onClick={onDelete}>{t("删除环境…")}</button></div>
   </>;
 }
+/* What attached applications keep on disk: one sealed copy per application and
+ * one sign-in data directory per environment. Only items main reports as no
+ * longer in use can be offered for deletion, and only after confirmation. */
+function ApplicationStorage({ onCheck, onReclaim, formatBytes, pending, t }) {
+  const [storage, setStorage] = useState(null);
+  const check = async () => { const response = await onCheck(); if (response?.ok) setStorage(response.result); };
+  const items = storage ? [
+    ...storage.registrations.map(item => ({ ...item, label: `${t("软件副本")} · ${item.name || item.bundle}` })),
+    ...storage.environments.map(item => ({ ...item, label: `${t("登录数据")} · ${item.environment || t("已删除的境舱")}` }))] : [];
+  const unused = items.filter(item => !item.inUse);
+  const unusedBytes = unused.reduce((sum, item) => sum + item.bytes, 0);
+  return <section className="application-storage">
+    <div className="application-storage-head"><strong>{t("附加软件占用的空间")}</strong>
+      <button className="button" onClick={check} disabled={pending["applicationStorage:"]}>{t(pending["applicationStorage:"] ? "检查中…" : "检查")}</button></div>
+    <p className="notion-trial-scope">{t("每个附加的软件保留一份副本，每个境舱保留一份它的登录数据。删除境舱时，它的登录数据会一并清空。")}</p>
+    {!storage && <p className="notion-trial-scope">{t("检查时可能会请求一次管理员授权。")}</p>}
+    {storage && <>
+      {items.length ? <ul className="application-storage-list">{items.map(item => <li key={item.id}><span>{item.label}</span>
+        <span>{formatBytes(item.bytes)}</span><span className={item.inUse ? "storage-in-use" : "storage-unused"}>{t(item.inUse ? "使用中" : "未使用")}</span></li>)}</ul>
+        : <p className="notion-trial-scope">{t("没有未使用的数据。")}</p>}
+      {storage.attachedApplicationActive && <p className="notion-trial-scope">{t("有附加的软件正在运行，停止后才能删除。")}</p>}
+      {unused.length > 0 && <button className="button danger" disabled={storage.attachedApplicationActive || pending["reclaimApplicationStorage:"]}
+        onClick={() => onReclaim(unused, formatBytes(unusedBytes), check)}>{t("删除未使用的数据")} · {formatBytes(unusedBytes)}</button>}
+      {items.length > 0 && !unused.length && <p className="notion-trial-scope">{t("没有未使用的数据。")}</p>}
+    </>}
+  </section>;
+}
 export function ApplicationsWorkspace({
   profiles,
   proxies,
@@ -112,6 +139,9 @@ export function ApplicationsWorkspace({
   onRunNotionTrial,
   onStopNotionTrial,
   onExportNotionDiagnostics,
+  onCheckStorage,
+  onReclaimStorage,
+  formatBytes,
   onDelete,
   onSetup,
   onInstall,
@@ -179,6 +209,8 @@ export function ApplicationsWorkspace({
         <div className="application-actions"><button className={`button ${active ? "" : "primary"}`} disabled={busy || (active ? application.status !== "running" : !ready || !owner)} onClick={() => active ? onStop(application) : onStart(application)}>{active ? <Stop size={15} /> : <Play size={15} />}{t(active ? "停止" : "启动")}</button><button className="icon-button" disabled={active || busy || controlled.trial?.cleanupUncertain === true} onClick={() => onDelete(application)} aria-label={t("移除软件")}><Trash size={17} /></button></div>
       </div>;
       })}</div> : <WorkspaceEmpty icon={Desktop} title={profile ? "添加软件到这个境舱" : "先创建网络环境"} action={desktop ? "添加软件" : undefined} onAction={onPick} t={t} />}
+    {desktop && routing?.backend === "pf-utun" && typeof onCheckStorage === "function" &&
+      <ApplicationStorage onCheck={onCheckStorage} onReclaim={onReclaimStorage} formatBytes={formatBytes} pending={pending} t={t} />}
   </div>;
 }
 export function MonitorWorkspace({

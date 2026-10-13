@@ -2,7 +2,8 @@ import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage } from 'e
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, lstat, rm } from 'node:fs/promises';
+import { pfAttachEnvironmentId } from '../native/macos-pf-routing/policy.mjs';
 import { EnvaraService } from './service.mjs';
 import { BrowserRuntime } from './runtime.mjs';
 import { SidecarManager } from './sidecar-manager.mjs';
@@ -140,7 +141,7 @@ async function publish() {
 const allowedMethods = new Set(['snapshot','createProfile','updateProfile','cloneProfile','deleteProfile','clearProfile','startProfile','stopProfile','focusProfile','saveProxy','deleteProxy','checkProxy','saveSettings','installEngine','importProfiles','cancelImport','exportProfiles','openDataDirectory','openDocumentation','previewLegacyMigration','migrateLegacy','saveGroup','deleteGroup','clearGroupProxy','bulkProfiles','exportAutomationConfig','openTerminalWindow', ...TERMINAL_METHODS]);
 const applicationMethods = new Set(['saveApplication', 'startApplication', 'stopApplication', 'deleteApplication', 'getApplicationRoutingStatus', 'setupApplicationRouting']);
 for (const method of [...applicationMethods, 'pickApplication', 'listLocalApplications', 'previewProxyNetwork', 'checkEnvironmentNetwork', 'openNetworkLocationMap']) allowedMethods.add(method);
-for (const method of ['runNotionTrial', 'stopNotionTrial', 'notionTrialSnapshot', 'exportNotionDiagnostics']) allowedMethods.add(method);
+for (const method of ['runNotionTrial', 'stopNotionTrial', 'notionTrialSnapshot', 'exportNotionDiagnostics', 'applicationStorage', 'reclaimApplicationStorage']) allowedMethods.add(method);
 
 async function protectApplicationMutation(method, args, operation) {
   if (!applications) return operation();
@@ -161,10 +162,53 @@ async function protectApplicationMutation(method, args, operation) {
   });
 }
 
+/* What attached applications keep on disk. Main alone decides what is still in
+ * use: a copy whose original belongs to a currently attached application, and
+ * data belonging to an environment that still exists. The renderer can only
+ * confirm items from this list for removal, never name any other storage. */
+async function applicationStorageCandidates() {
+  if (typeof applications?.routing?.applicationStorage !== 'function')
+    throw Object.assign(new Error('此平台没有附加软件存储。'), { code: 'APPLICATION_ROUTING_UNAVAILABLE' });
+  const [inventory, attached, workspace] = await Promise.all([applications.routing.applicationStorage(), applications.snapshot(), service.snapshot()]);
+  const attachedBundles = new Set(attached.applications.map(item => item.path).filter(value => typeof value === 'string'));
+  const environments = new Map(workspace.profiles.map(profile => [pfAttachEnvironmentId(profile.id), profile.name]));
+  return { attachedApplicationActive: inventory.attachedApplicationActive === true,
+    registrations: inventory.registrations.map(item => ({ id: item.registrationId, bundle: item.bundle, versions: item.versions, bytes: item.bytes,
+      name: path.basename(item.bundle || '', '.app') || item.identifier || null, inUse: attachedBundles.has(item.bundle) })),
+    environments: inventory.environments.map(item => ({ id: item.environmentId, bytes: item.bytes,
+      environment: environments.get(item.environmentId) ?? null, inUse: environments.has(item.environmentId) })) };
+}
+/* A deleted environment's attached-application data is emptied at once: the
+ * data directory is owned by the console user and its root-owned ancestors
+ * cannot be swapped for a link, so no administrator step is needed. What
+ * remains is the empty root-owned skeleton, removed by the storage cleanup.
+ * Removal never follows a link. */
+async function eraseAttachedApplicationData(profileId) {
+  if (process.platform !== 'darwin' || typeof profileId !== 'string' || !profileId) return;
+  const root = path.join('/Library/PrivilegedHelperTools/io.envara.pf-app-data', pfAttachEnvironmentId(profileId));
+  let registrations; try { registrations = await readdir(root); } catch { return; }
+  for (const registration of registrations) {
+    const leaf = path.join(root, registration, 'UserData');
+    let info; try { info = await lstat(leaf); } catch { continue; }
+    if (!info.isDirectory() || info.uid !== process.getuid()) continue;
+    for (const entry of await readdir(leaf).catch(() => []))
+      await rm(path.join(leaf, entry), { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function handleCall(method, args = {}, caller = window) {
   if (quitting) throw Object.assign(new Error('应用正在退出。'), { code: 'APP_CLOSING' });
   if (!allowedMethods.has(method)) throw new Error('不支持的操作');
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('操作参数无效。');
+  if (method === 'applicationStorage') return applicationStorageCandidates();
+  if (method === 'reclaimApplicationStorage') {
+    const confirmed = new Set(Array.isArray(args.ids) ? args.ids.filter(id => typeof id === 'string') : []);
+    const current = await applicationStorageCandidates();
+    const registrationIds = current.registrations.filter(item => !item.inUse && confirmed.has(item.id)).map(item => item.id);
+    const environmentIds = current.environments.filter(item => !item.inUse && confirmed.has(item.id)).map(item => item.id);
+    if (!registrationIds.length && !environmentIds.length) return { registrations: [], environments: [] };
+    return applications.routing.reclaimApplicationStorage({ registrationIds, environmentIds });
+  }
   if (['runNotionTrial', 'stopNotionTrial', 'notionTrialSnapshot', 'exportNotionDiagnostics'].includes(method)) {
     const application = findAttachmentApplication(args);
     if (method === 'notionTrialSnapshot') return { applicationId: application.id,
@@ -311,10 +355,12 @@ async function handleCall(method, args = {}, caller = window) {
   const result = await protectApplicationMutation(method, args, () => terminalController ? terminalController.protectMutation(method, args, () => service.call(method, args)) : service.call(method, args));
   if (applications && method === 'deleteProfile') {
     for (const item of (await applications.snapshot()).applications.filter(item => item.profileId === args.id)) await applications.deleteApplication({ id: item.id });
+    await eraseAttachedApplicationData(args.id);
   }
   if (applications && method === 'bulkProfiles' && args.action === 'delete') {
     const deleted = new Set((result?.actionResult?.results ?? result?.results ?? []).filter(item => item.ok).map(item => item.id));
     for (const item of (await applications.snapshot()).applications.filter(item => deleted.has(item.profileId))) await applications.deleteApplication({ id: item.id });
+    for (const id of deleted) await eraseAttachedApplicationData(id);
   }
   return result;
 }

@@ -569,5 +569,20 @@
   "上次附加": "Anexado anteriormente",
   "导出诊断": "Exportar diagnóstico",
   "附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。": "Um aplicativo anexado continua em execução até você pará-lo, o aplicativo encerrar ou você sair do Envara. O navegador de impressão digital e os terminais não contam.",
-  "首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。": "O primeiro anexo pede uma autorização de administrador; esta execução do Envara não vai perguntar de novo."
+  "首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。": "O primeiro anexo pede uma autorização de administrador; esta execução do Envara não vai perguntar de novo.",
+  "软件副本": "Cópia do aplicativo",
+  "登录数据": "Dados de login",
+  "已删除的境舱": "Ambiente excluído",
+  "附加软件占用的空间": "Espaço usado pelos aplicativos anexados",
+  "检查": "Verificar",
+  "每个附加的软件保留一份副本，每个境舱保留一份它的登录数据。删除境舱时，它的登录数据会一并清空。": "Cada aplicativo anexado mantém uma cópia, e cada ambiente mantém seus próprios dados de login. Excluir um ambiente também apaga seus dados de login.",
+  "检查时可能会请求一次管理员授权。": "A verificação pode pedir a autorização de administrador uma vez.",
+  "使用中": "Em uso",
+  "未使用": "Não usado",
+  "没有未使用的数据。": "Não há dados sem uso.",
+  "有附加的软件正在运行，停止后才能删除。": "Há um aplicativo anexado em execução; pare-o antes de excluir.",
+  "删除未使用的数据": "Excluir dados sem uso",
+  "删除未使用的数据？": "Excluir os dados sem uso?",
+  "以下数据都没有在使用，共 {value1}，删除后无法恢复。之后再附加对应的软件时需要重新登录。": "Nenhum destes dados está em uso ({value1} no total). A exclusão não pode ser desfeita, e você precisará entrar novamente na próxima vez que anexar o aplicativo correspondente.",
+  "已删除未使用的数据": "Dados sem uso excluídos"
 }

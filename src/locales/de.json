@@ -569,5 +569,20 @@
   "上次附加": "Zuvor angehängt",
   "导出诊断": "Diagnose exportieren",
   "附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。": "Eine angehängte Anwendung läuft weiter, bis Sie sie beenden, die Anwendung sich schließt oder Sie Envara beenden. Fingerprint-Browser und Terminals zählen nicht mit.",
-  "首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。": "Beim ersten Anhängen wird einmalig eine Administrator-Autorisierung abgefragt. In diesem Envara-Lauf wird sie nicht erneut verlangt."
+  "首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。": "Beim ersten Anhängen wird einmalig eine Administrator-Autorisierung abgefragt. In diesem Envara-Lauf wird sie nicht erneut verlangt.",
+  "软件副本": "Programmkopie",
+  "登录数据": "Anmeldedaten",
+  "已删除的境舱": "Gelöschte Umgebung",
+  "附加软件占用的空间": "Von angehängten Programmen belegter Speicher",
+  "检查": "Prüfen",
+  "每个附加的软件保留一份副本，每个境舱保留一份它的登录数据。删除境舱时，它的登录数据会一并清空。": "Jedes angehängte Programm behält eine Kopie, und jede Umgebung behält ihre eigenen Anmeldedaten. Beim Löschen einer Umgebung werden auch ihre Anmeldedaten gelöscht.",
+  "检查时可能会请求一次管理员授权。": "Beim Prüfen kann einmal eine Administratorberechtigung angefordert werden.",
+  "使用中": "In Verwendung",
+  "未使用": "Nicht verwendet",
+  "没有未使用的数据。": "Keine ungenutzten Daten.",
+  "有附加的软件正在运行，停止后才能删除。": "Ein angehängtes Programm läuft noch; beenden Sie es vor dem Löschen.",
+  "删除未使用的数据": "Ungenutzte Daten löschen",
+  "删除未使用的数据？": "Ungenutzte Daten löschen?",
+  "以下数据都没有在使用，共 {value1}，删除后无法恢复。之后再附加对应的软件时需要重新登录。": "Keine dieser Daten wird verwendet (insgesamt {value1}). Das Löschen kann nicht rückgängig gemacht werden, und beim nächsten Anhängen des zugehörigen Programms müssen Sie sich erneut anmelden.",
+  "已删除未使用的数据": "Ungenutzte Daten gelöscht"
 }

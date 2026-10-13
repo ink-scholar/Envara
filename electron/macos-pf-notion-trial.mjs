@@ -5,7 +5,7 @@ import { createReadStream } from 'node:fs';
 import { lstat, realpath } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
 import { verifyPFInstallation, PF_INSTALL_ROOT, PF_APP_SESSION_LEASE_SECONDS } from '../native/macos-pf-routing/controller.mjs';
-import { pfRoutingAnchor } from '../native/macos-pf-routing/policy.mjs';
+import { pfRoutingAnchor, pfAttachEnvironmentId } from '../native/macos-pf-routing/policy.mjs';
 import { createPFAuthorizedChannelMux } from './macos-pf-channel-mux.mjs';
 import { createPersistentPFNotionSessionClient, validatePFNotionSessionRequest,
   PF_NOTION_RESUME_TIMEOUT_MS, PF_SESSION_CHANNEL_LIFETIME_MS, validatePFNotionCallTimingDiagnostic,
@@ -143,7 +143,7 @@ export async function verifyNotionTrialSignature(application) {
  * run; candidate verification of the carrier itself stays fixed. Nothing here
  * upgrades a signature check into a routing or protection claim.
  */
-export async function verifyNotionTrialCandidate({ authorizerPath, applicationPath } = {}) {
+export async function verifyNotionTrialCandidate({ authorizerPath, applicationPath, carrierOnly = false } = {}) {
   if (process.platform !== 'darwin') throw error('PF_NOTION_TRIAL_PLATFORM_REQUIRED');
   if (typeof authorizerPath !== 'string' || !path.isAbsolute(authorizerPath) || !authorizerPath.endsWith(`.app${suffix}`) || /[\0\r\n]/.test(authorizerPath))
     throw error('PF_NOTION_TRIAL_NOT_ENABLED');
@@ -160,6 +160,8 @@ export async function verifyNotionTrialCandidate({ authorizerPath, applicationPa
   // The bound application is signature-checked here too. The native fixed
   // registry additionally re-inspects and seals the exact signed bundle, so a
   // caller cannot substitute a different or modified application at this layer.
+  // Storage maintenance binds no application: every check above still applies.
+  if (carrierOnly === true) return true;
   const bundle = applicationPath ?? '/Applications/Notion.app';
   if (!trialBundlePath(bundle)) throw error('PF_NOTION_TRIAL_REQUEST_INVALID');
   await verifyNotionTrialSignature(bundle);
@@ -181,7 +183,7 @@ const cleanKind = (value, runId, environmentId) => value?.environmentId !== envi
     validatePFNotionPreflightCleanupReceipt(value, runId) ? 'preflight' : null;
 
 export class MacOSPFNotionTrial {
-  constructor({ authorizerPath, verifyCandidate = ({ applicationPath } = {}) => verifyNotionTrialCandidate({ authorizerPath, applicationPath }),
+  constructor({ authorizerPath, verifyCandidate = ({ applicationPath, carrierOnly } = {}) => verifyNotionTrialCandidate({ authorizerPath, applicationPath, carrierOnly }),
     verifyNotion = bundle => verifyNotionTrialSignature(bundle ?? '/Applications/Notion.app'),
     createClient = ({ runId } = {}) => {
       /* One authorized root session per Envara launch: the carrier is spawned
@@ -249,6 +251,28 @@ export class MacOSPFNotionTrial {
     const mux = this.mux;
     this.mux = null;
     if (mux) await mux.dispose();
+  }
+  /* What attached applications keep on disk, and its removal, served on a
+   * channel of its own in the shared session: never while an application is
+   * attached, and only after the same carrier checks as an attach. */
+  async storage(method, params) {
+    if (this.closed) throw error('PF_NOTION_TRIAL_STOPPED');
+    if (this.pending) throw error('PF_NOTION_TRIAL_BUSY');
+    if (this.state?.cleanupUncertain) throw error('PF_OWNED_RUNTIME_NOT_EMPTY');
+    await this.verifyCandidate({ carrierOnly: true });
+    if (this.pending) throw error('PF_NOTION_TRIAL_BUSY');
+    const key = randomUUID(), target = this.ensureMux().acquire({ key });
+    const call = createPersistentPFNotionSessionClient({ spawnRootControlledLifecycle: null, acquireChannel: () => target,
+      lifetimeMs: PF_SESSION_CHANNEL_LIFETIME_MS, channelKey: key });
+    try { return await call(method, params, { timeoutMs: 60000 }); }
+    finally {
+      try { await call.close({ timeoutMs: 5000 }); } catch { /* reported by the call above */ }
+      try { target.end(); } catch { /* already ended */ }
+    }
+  }
+  applicationStorage() { return this.storage('applicationStorage', {}); }
+  reclaimApplicationStorage({ registrationIds, environmentIds } = {}) {
+    return this.storage('reclaimApplicationStorage', { registrationIds, environmentIds });
   }
   snapshot(applicationId) {
     if (!this.state || applicationId && this.state.applicationId !== applicationId) return { applicationId: applicationId ?? null, ...this.stateFlags() };
@@ -364,7 +388,10 @@ export class MacOSPFNotionTrial {
   }
   async execute(request) {
     let call, prepared = false, stoppedKind = null, snapshotKind = null, closeConfirmed = false, statusOnlyClosed = false, statusOnlyDetached = false;
-    const runId = randomUUID(), environmentId = canonicalUUID(request.application.profileId) ? request.application.profileId : randomUUID();
+    /* The environment's identity is derived from its own id, so the same
+     * environment always reaches the same data. A non-UUID id used to be
+     * replaced by a random one on every attach. */
+    const runId = randomUUID(), environmentId = pfAttachEnvironmentId(request.application.profileId);
     this.state.runId = runId; this.state.environmentId = environmentId;
     const advance = (phase, failure) => { this.state.phase = phase; this.emit(phase, failure); };
     const checkStop = () => { if (this.state.stopRequested) throw error('PF_NOTION_TRIAL_STOPPED'); };

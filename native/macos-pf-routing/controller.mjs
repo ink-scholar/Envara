@@ -1966,6 +1966,49 @@ export class MacOSPFController {
       applicationEnded: ended != null,
       ...(ended ? { endedChildReaped: entry.applicationEnded.childReaped === true, endedChildSignalled: entry.applicationEnded.childSignalled === true } : {}) };
   }
+  async ensureApplicationCommands() {
+    if (this.applicationCommands) return this.applicationCommands;
+    const { NativeApplicationCommands } = await import('./helper-production-native.mjs');
+    this.applicationCommands = new NativeApplicationCommands({ controlledSession: this.identity.controlledSession === true, inspectInstallation: this.inspectInstallation });
+    return this.applicationCommands;
+  }
+  /* What attached applications keep on disk: one sealed copy per application
+   * and one data directory per environment. Read-only. */
+  applicationStorage(input = {}) {
+    return this.serialized(async () => {
+      this.assertOpen();
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) throw failure('APPLICATION_ROUTING_PROTOCOL_ERROR');
+      if (!(await this.state()).authorized) throw failure('APPLICATION_ROUTING_AUTHORIZATION_REQUIRED');
+      const inventory = await (await this.ensureApplicationCommands()).storageInventory();
+      return { ...appFlags(), readOnly: true, registrations: inventory.registrations.map(item => ({ ...item })),
+        environments: inventory.environments.map(item => ({ ...item })),
+        attachedApplicationActive: [...this.appRuns.values()].some(run => !appCleanPhase(run.phase)) };
+    });
+  }
+  /* Removes exactly the named copies and data directories, never while an
+   * application is attached. Each is reported on its own: removed, already
+   * gone, in use, or refused. */
+  reclaimApplicationStorage(input = {}) {
+    return this.serialized(async () => {
+      this.assertOpen();
+      const lists = [input?.registrationIds, input?.environmentIds];
+      if (!input || typeof input !== 'object' || Object.keys(input).sort().join('|') !== 'environmentIds|registrationIds' ||
+          !lists.every(list => Array.isArray(list) && list.length <= 256 && list.every(uuid) && new Set(list).size === list.length)) throw failure('APPLICATION_ROUTING_PROTOCOL_ERROR');
+      if ([...this.appRuns.values()].some(run => !appCleanPhase(run.phase) || run.cleanupUncertain)) throw failure('APPLICATION_ROUTING_NOT_READY');
+      if (!(await this.state()).authorized) throw failure('APPLICATION_ROUTING_AUTHORIZATION_REQUIRED');
+      const commands = await this.ensureApplicationCommands();
+      const outcome = async remove => {
+        try { const result = await remove(); return result.deleted ? 'deleted' : result.absent ? 'absent' : 'failed'; }
+        catch (error) { return error?.inUse === true ? 'in-use' : 'failed'; }
+      };
+      const registrations = [], environments = [];
+      for (const registrationId of input.registrationIds)
+        registrations.push({ registrationId, outcome: await outcome(() => commands.deleteRegistration({ registrationId })) });
+      for (const environmentId of input.environmentIds)
+        environments.push({ environmentId, outcome: await outcome(() => commands.deleteEnvironmentData({ environmentId })) });
+      return { ...appFlags(), registrations, environments };
+    });
+  }
   /* One registration per application bundle, reused while it is exact. A new
    * registration per attach filled the bounded registry, put every attach on a
    * fresh, logged-out data directory and copied the whole application again.
@@ -2038,8 +2081,7 @@ export class MacOSPFController {
       run.managedIdentity = { pid: selected.managedRoute.corePid, ...managedIdentity };
       this.usedRunIds.add(run.runId); this.appRuns.set(run.runId, run);
       try {
-        if (!this.applicationCommands) { const { NativeApplicationCommands } = await import('./helper-production-native.mjs');
-          this.applicationCommands = new NativeApplicationCommands({ controlledSession: this.identity.controlledSession === true, inspectInstallation: this.inspectInstallation }); }
+        await this.ensureApplicationCommands();
         run.registrationId = pfApplicationRegistrationId(bundlePath); run.ticketId = randomUUID();
         run.versionId = await this.applicationVersion(run.registrationId, bundlePath);
         run.stage = 'registry-lock'; await this.executor.acquireLock(run.runId); run.lockAcquired = true;
@@ -2627,7 +2669,8 @@ export class MacOSPFController {
 export async function dispatchPFRequest(controller, request) {
   const methods = new Set(['status', 'setup', 'plan', 'acceptancePlan', 'prepareRoute', 'launch', 'start', 'stop', 'revoke',
     'prepareOwnedFixtures', 'startAcceptance', 'runOwnedFixtureCase', 'cleanupOwnedFixtures', 'acceptanceSnapshot',
-    'prepareNotionApplication', 'resumeNotionApplication', 'stopNotionApplication', 'applicationSnapshot', 'shutdown']);
+    'prepareNotionApplication', 'resumeNotionApplication', 'stopNotionApplication', 'applicationSnapshot', 'shutdown',
+    'applicationStorage', 'reclaimApplicationStorage']);
   if (!request || request.protocol !== PF_HELPER_PROTOCOL || request.version !== PF_HELPER_VERSION || !validId(request.id) ||
       !methods.has(request.method) || (request.params != null && (typeof request.params !== 'object' || Array.isArray(request.params)))) throw failure('APPLICATION_ROUTING_PROTOCOL_ERROR');
   return controller[request.method](request.params ?? {});

@@ -569,5 +569,20 @@
   "上次附加": "Joint précédemment",
   "导出诊断": "Exporter le diagnostic",
   "附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。": "Une application jointe continue de fonctionner jusqu’à ce que vous l’arrêtiez, qu’elle se ferme ou que vous quittiez Envara. Le navigateur à empreinte et les terminaux ne comptent pas.",
-  "首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。": "Le premier ajout demande une autorisation administrateur ; cette session d’Envara ne la redemandera plus."
+  "首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。": "Le premier ajout demande une autorisation administrateur ; cette session d’Envara ne la redemandera plus.",
+  "软件副本": "Copie du logiciel",
+  "登录数据": "Données de connexion",
+  "已删除的境舱": "Environnement supprimé",
+  "附加软件占用的空间": "Espace utilisé par les logiciels joints",
+  "检查": "Vérifier",
+  "每个附加的软件保留一份副本，每个境舱保留一份它的登录数据。删除境舱时，它的登录数据会一并清空。": "Chaque logiciel joint conserve une copie, et chaque environnement conserve ses propres données de connexion. Supprimer un environnement efface aussi ses données de connexion.",
+  "检查时可能会请求一次管理员授权。": "La vérification peut demander une fois l’autorisation d’administrateur.",
+  "使用中": "Utilisé",
+  "未使用": "Inutilisé",
+  "没有未使用的数据。": "Aucune donnée inutilisée.",
+  "有附加的软件正在运行，停止后才能删除。": "Un logiciel joint est en cours d’exécution ; arrêtez-le avant de supprimer.",
+  "删除未使用的数据": "Supprimer les données inutilisées",
+  "删除未使用的数据？": "Supprimer les données inutilisées ?",
+  "以下数据都没有在使用，共 {value1}，删除后无法恢复。之后再附加对应的软件时需要重新登录。": "Aucune de ces données n’est utilisée ({value1} au total). La suppression est définitive, et vous devrez vous reconnecter la prochaine fois que vous joindrez le logiciel correspondant.",
+  "已删除未使用的数据": "Données inutilisées supprimées"
 }

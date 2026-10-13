@@ -36,7 +36,12 @@ const boundApplicationPath = value => {
   return index > 0 && segments[index].length >= 5;
 };
 export function validatePFNotionSessionRequest(method, params) {
-  if (method === 'status') {
+  if (method === 'applicationStorage') {
+    if (!exact(params, [], [])) throw failed('PF_HELPER_REQUEST_INVALID');
+  } else if (method === 'reclaimApplicationStorage') {
+    if (!exact(params, ['registrationIds', 'environmentIds'], []) || ![params.registrationIds, params.environmentIds].every(list =>
+        Array.isArray(list) && list.length <= 256 && list.every(canonicalUUID) && new Set(list).size === list.length)) throw failed('PF_HELPER_REQUEST_INVALID');
+  } else if (method === 'status') {
     if (!exact(params, [], ['runId']) || Object.hasOwn(params, 'runId') && !canonicalUUID(params.runId)) throw failed('PF_HELPER_REQUEST_INVALID');
   } else if (method === 'prepareRoute') {
     /* Any locally added application may be bound. The executable must be a
@@ -136,7 +141,26 @@ export function validatePFNotionPreflightCleanupReceipt(result, requestedRunId) 
     truths.every(key => evidence[key] === true) && observationsReported(evidence) && falsehoods.every(key => evidence[key] === false);
 }
 
-const methods = new Set(['status', 'prepareRoute', ...notionMethods]);
+/* What attached applications keep on disk, and its removal. Never part of a
+ * run; served on a channel of their own. */
+const storageMethods = new Set(['applicationStorage', 'reclaimApplicationStorage']);
+const methods = new Set(['status', 'prepareRoute', ...notionMethods, ...storageMethods]);
+const storageOutcomes = new Set(['deleted', 'absent', 'in-use', 'failed']);
+const safeCount = value => Number.isSafeInteger(value) && value >= 0;
+const storageFlags = value => value.ready === false && value.protected === false && value.productionReady === false;
+function validStorageResult(method, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !storageFlags(value) ||
+      !Array.isArray(value.registrations) || !Array.isArray(value.environments) ||
+      value.registrations.length > 256 || value.environments.length > 256) return false;
+  if (method === 'applicationStorage')
+    return value.readOnly === true && typeof value.attachedApplicationActive === 'boolean' &&
+      value.registrations.every(item => item && canonicalUUID(item.registrationId) && typeof item.identifier === 'string' && item.identifier.length <= 255 &&
+        typeof item.bundle === 'string' && item.bundle.length <= 4095 && !/[\0\r\n]/.test(item.bundle) &&
+        Number.isSafeInteger(item.versions) && item.versions >= 0 && item.versions <= 64 && typeof item.retired === 'boolean' && safeCount(item.bytes)) &&
+      value.environments.every(item => item && canonicalUUID(item.environmentId) && safeCount(item.bytes));
+  return value.registrations.every(item => item && canonicalUUID(item.registrationId) && storageOutcomes.has(item.outcome)) &&
+    value.environments.every(item => item && canonicalUUID(item.environmentId) && storageOutcomes.has(item.outcome));
+}
 const cleanupMethods = new Set(['status', 'stopNotionApplication', 'applicationSnapshot']);
 const timingSchema = 'envara.macos-pf-notion-call-timing/v1';
 const timingSource = 'verified-authorizer-session-client';
@@ -252,6 +276,14 @@ function publicResult(method, result) {
   }
   if (method === 'prepareRoute') return { routeId: result.routeId, profileId: result.profileId ?? null,
     ready: false, failClosed: false, guardArmed: false, managedRouteVerified: false };
+  /* Rebuilt field by field from what validStorageResult admitted. */
+  if (method === 'applicationStorage') return { ready: false, protected: false, productionReady: false, readOnly: true,
+    attachedApplicationActive: result.attachedApplicationActive,
+    registrations: result.registrations.map(({ registrationId, identifier, bundle, versions, retired, bytes }) => ({ registrationId, identifier, bundle, versions, retired, bytes })),
+    environments: result.environments.map(({ environmentId, bytes }) => ({ environmentId, bytes })) };
+  if (method === 'reclaimApplicationStorage') return { ready: false, protected: false, productionReady: false,
+    registrations: result.registrations.map(({ registrationId, outcome }) => ({ registrationId, outcome })),
+    environments: result.environments.map(({ environmentId, outcome }) => ({ environmentId, outcome })) };
   const keys = ['runId', 'environmentId', 'routeId', 'profile', 'phase', 'staged', 'resumed', 'prestageAborted',
     'preflightAborted', 'cleanupUncertain', 'cleanupComplete',
     /* The guardian already stopped the exact child: the run has ended even
@@ -300,7 +332,8 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     stopKind = null, freshCleanupKind = null, resumeAttempted = false, stopAttempted = false, lastClock = null,
     selectedStatusRunId = null, lastStatusRunId = null, lastStatusInventory = null, lastStatusReadOnly = false,
     stdoutEOF = false, nonStatusRequestAttempted = false, historyComplete = true, lastSuccessfulStatusHistoryLength = 0,
-    lastLatePrepare = null, lastApplicationSnapshot = null, observationPolls = 0, observationPollFailures = 0;
+    lastLatePrepare = null, lastApplicationSnapshot = null, observationPolls = 0, observationPollFailures = 0,
+    authorizationRefusedBeforeExecution = false;
   const callHistory = [], callTimings = [];
   const retired = new Map(); let settleExit;
   const exit = new Promise(resolve => { settleExit = resolve; });
@@ -333,6 +366,8 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
         !bound || item.runId !== bound.runId || item.environmentId !== bound.environmentId)) uncertain = true;
       if (Array.isArray(result.applications) && result.applications.some(item =>
         !bound || item.runId !== bound.runId || !cleanupKind(item, bound.runId, bound.environmentId))) freshCleanupKind = null;
+    } else if (storageMethods.has(request.method)) {
+      if (!validStorageResult(request.method, result)) throw failed('PF_HELPER_RESPONSE_INVALID');
     } else if (request.method === 'prepareRoute') {
       if (!safeId(result.routeId) || result.ready !== false || result.failClosed !== false || result.guardArmed !== false ||
           result.managedRouteVerified !== false || result.profileId !== request.profileId) throw failed('PF_HELPER_RESPONSE_INVALID');
@@ -370,6 +405,14 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
                 !['AuthorizationCreate', 'AuthorizationCopyRights', 'AuthorizationCopyPrivilegedReference', 'AuthorizationExecuteWithPrivileges'].includes(response.nativeAuthorization.stage) ||
                 !Number.isInteger(response.nativeAuthorization.status) || response.nativeAuthorization.status < -2147483648 ||
                 response.nativeAuthorization.status > 2147483647)) throw failed('PF_HELPER_RESPONSE_INVALID');
+          /* Refused at AuthorizationCreate or AuthorizationCopyRights (the
+           * dialog was cancelled, or rights were not granted): the carrier never
+           * reached AuthorizationExecuteWithPrivileges, so no privileged process
+           * ran and this run holds nothing. Every later stage, and a refusal
+           * without a recorded stage, stays uncertain. */
+          if (response.error.code === 'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED' && !Object.hasOwn(response, 'terminal') &&
+              ['AuthorizationCreate', 'AuthorizationCopyRights'].includes(response.nativeAuthorization?.stage) && !nonStatusRequestAttempted)
+            authorizationRefusedBeforeExecution = true;
           return failChannel(failed(safeNativeCode(response.error)));
         }
         if (!exact(response, ['protocol', 'version', 'id'], ['ok', 'result', 'error'])) throw failed('PF_HELPER_RESPONSE_INVALID');
@@ -586,6 +629,9 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
       else child?.stdin?.end?.();      // Ends only this run's virtual channel.
       await boundedWait(exit);
       if (!closed) { uncertain = true; try { child?.kill?.()?.catch?.(() => {}); } catch {} }
+      if (authorizationRefusedBeforeExecution && !nonStatusRequestAttempted && !preparedRoute && !bound &&
+          callHistory.every(method => method === 'status'))
+        return { closed, started: true, cleanupUncertain: false, authorizationRefusedBeforeExecution: true };
       const evidence = statusOnlyEvidence();
       if (evidence) return { closed: true, started: true, cleanupUncertain: false, statusOnlyEvidence: evidence };
       if (statusOnlyDetached()) return { closed: true, started: true, cleanupUncertain: false, statusOnlyDetached: true };

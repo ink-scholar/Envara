@@ -12,6 +12,8 @@ const require = createRequire(import.meta.url);
 const MAX_SESSIONS = 8;
 const MAX_WRITE_BYTES = 64 * 1024;
 const MAX_REPLAY_BYTES = 256 * 1024;
+// How long output that could begin a secret is held before it is shown anyway.
+const SECRET_TAIL_FLUSH_MS = 40;
 const MAX_QUEUE_BYTES = 256 * 1024;
 const OUTPUT_CHUNK_BYTES = 32 * 1024;
 const codeError = (message, code = 'TERMINAL_VALIDATION_ERROR') => Object.assign(new Error(message), { code });
@@ -104,7 +106,10 @@ function loopbackRoutePort(bridge, endpoint) {
 
 export class TerminalService {
   constructor({ dataDir, onEvent = () => {}, resolveContext, ptyFactory = defaultPtyFactory, processControl = { capture: captureTerminalProcess, close: closeTerminalProcess }, additionalExecutablePaths = [],
-    networkFence = process.platform === 'darwin' ? new TerminalNetworkFence() : null }) {
+    networkFence = process.platform === 'darwin' ? new TerminalNetworkFence() : null,
+    /* Links a fenced terminal asks to open come back through this channel and
+     * are opened by the app, never by the host's default browser. */
+    linkChannel = null }) {
     if (!path.isAbsolute(dataDir ?? '') || typeof resolveContext !== 'function') throw codeError('终端数据目录或环境解析器无效。');
     this.dataDir = path.resolve(dataDir);
     this.onEvent = onEvent;
@@ -115,6 +120,8 @@ export class TerminalService {
     this.networkFence = networkFence;
     if (!Array.isArray(additionalExecutablePaths) || additionalExecutablePaths.some(value => typeof value !== 'string' || !path.isAbsolute(value) || /[\0\r\n]/.test(value))) throw codeError('可信程序搜索目录无效。');
     this.additionalExecutablePaths = [...additionalExecutablePaths];
+    if (linkChannel != null && (typeof linkChannel.environment !== 'function' || typeof linkChannel.executableDirectory !== 'function')) throw codeError('终端链接通道无效。');
+    this.linkChannel = linkChannel;
     this.hostHome = os.homedir();
     this.settings = new Map();
     this.contexts = new Map();
@@ -138,13 +145,14 @@ export class TerminalService {
       for (const item of document.profiles) {
         validId(item.id);
         if (typeof item.cwd !== 'string' || !path.isAbsolute(item.cwd) || item.cwd.includes('\0')) throw codeError('终端工作目录无效。');
-        this.settings.set(item.id, { cwd: item.cwd });
+        this.settings.set(item.id, { cwd: item.cwd, ...(typeof item.browserProfileId === 'string' && /^[A-Za-z0-9_-]{1,96}$/.test(item.browserProfileId) ? { browserProfileId: item.browserProfileId } : {}) });
       }
       await chmod(this.settingsFile, 0o600);
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
   async saveSettings() {
-    await ownedFile(this.settingsFile, JSON.stringify({ schema: 'envara.terminal', version: 1, profiles: [...this.settings].map(([id, item]) => ({ id, cwd: item.cwd })) }, null, 2), true);
+    await ownedFile(this.settingsFile, JSON.stringify({ schema: 'envara.terminal', version: 1,
+      profiles: [...this.settings].map(([id, item]) => ({ id, cwd: item.cwd, ...(item.browserProfileId ? { browserProfileId: item.browserProfileId } : {}) })) }, null, 2), true);
   }
   mutateSettings(operation) {
     const task = this.settingsQueue.then(operation);
@@ -170,26 +178,55 @@ export class TerminalService {
     const ids = id ? [id] : [...new Set([...this.settings.keys(), ...this.contexts.keys(), ...this.sessions.values()].map(value => typeof value === 'string' ? value : value.profileId))];
     return { profiles: ids.map(profileId => {
       const context = this.contexts.get(profileId);
-      return { profileId, name: context?.name ?? null, cwd: this.settings.get(profileId)?.cwd ?? null, timezone: context?.timezone ?? null, timezoneSource: context?.timezoneSource ?? 'unknown', network: context?.network ?? unknownNetwork(),
+      return { profileId, name: context?.name ?? null, cwd: this.settings.get(profileId)?.cwd ?? null, browserProfileId: this.settings.get(profileId)?.browserProfileId ?? null, timezone: context?.timezone ?? null, timezoneSource: context?.timezoneSource ?? 'unknown', network: context?.network ?? unknownNetwork(),
         configDir: context?.configDir ?? null, claudeConfigDir: context?.claudeConfigDir ?? null,
         sessions: [...this.sessions.values()].filter(session => session.profileId === profileId).map(session => this.metadata(session)) };
     }) };
+  }
+  /* The browser this environment's links use. It is read when a link arrives,
+   * so changing it applies to the next link without a restart. */
+  linkBrowser(id) { validId(id); return this.settings.get(id)?.browserProfileId ?? null; }
+  async setLinkBrowser({ id, browserProfileId }) {
+    return this.serialized(id, async () => {
+      if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
+      validId(id);
+      if (browserProfileId != null && browserProfileId !== '' && (typeof browserProfileId !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(browserProfileId))) throw codeError('浏览器标识无效。', 'VALIDATION_ERROR');
+      const previous = this.settings.get(id);
+      const next = { ...(previous ?? {}), ...(browserProfileId ? { browserProfileId } : {}) };
+      if (!browserProfileId) delete next.browserProfileId;
+      this.settings.set(id, next);
+      try { await this.saveSettings(); } catch (error) { if (previous) this.settings.set(id, previous); else this.settings.delete(id); throw error; }
+      return this.snapshot({ id });
+    });
+  }
+  /* Which environment a live process belongs to, from its process ancestry. */
+  sessionForProcess(chain = []) {
+    const pids = new Set(chain.map(Number).filter(Number.isSafeInteger));
+    for (const session of this.sessions.values())
+      if (['running', 'starting'].includes(session.status) && pids.has(Number(session.identity?.pid ?? session.pty?.pid))) return { profileId: session.profileId, sessionId: session.sessionId };
+    return null;
   }
   async setDirectory({ id, path: selectedPath }) {
     return this.serialized(id, async () => {
       if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
       if (this.active(id)) throw codeError('请先关闭此环境的终端，再切换工作目录。', 'TERMINAL_RUNNING');
-      if (typeof selectedPath !== 'string' || !path.isAbsolute(selectedPath) || selectedPath.includes('\0') || selectedPath.length > 8192) throw codeError('请选择有效的绝对工作目录。');
-      const cwd = await realpath(selectedPath);
-      if (!(await stat(cwd)).isDirectory()) throw codeError('终端工作目录必须是文件夹。');
-      await access(cwd, constants.R_OK | constants.X_OK);
-      await this.mutateSettings(async () => {
-        const previous = this.settings.get(id);
-        this.settings.set(id, { cwd });
-        try { await this.saveSettings(); } catch (error) { if (previous) this.settings.set(id, previous); else this.settings.delete(id); throw error; }
-      });
+      await this.rememberDirectory(id, selectedPath);
       return this.snapshot({ id });
     });
+  }
+  /* The directory new terminals of this environment start in. Sessions that
+   * already run keep their own; only the next new one uses this. */
+  async rememberDirectory(id, selectedPath) {
+    if (typeof selectedPath !== 'string' || !path.isAbsolute(selectedPath) || selectedPath.includes('\0') || selectedPath.length > 8192) throw codeError('请选择有效的绝对工作目录。');
+    const cwd = await realpath(selectedPath);
+    if (!(await stat(cwd)).isDirectory()) throw codeError('终端工作目录必须是文件夹。');
+    await access(cwd, constants.R_OK | constants.X_OK);
+    await this.mutateSettings(async () => {
+      const previous = this.settings.get(id);
+      this.settings.set(id, { ...(previous ?? {}), cwd });
+      try { await this.saveSettings(); } catch (error) { if (previous) this.settings.set(id, previous); else this.settings.delete(id); throw error; }
+    });
+    return cwd;
   }
   async directories(id) {
     const root = await privateDirectory(this.profilesDir, validId(id));
@@ -208,7 +245,7 @@ export class TerminalService {
     for (const [file, source] of [[history, ''], [path.join(home, '.gitconfig'), '# Envara environment-local Git configuration\n'], [path.join(home, '.npmrc'), ''], [path.join(home, '.zshenv'), zshEnv], [path.join(home, '.zshrc'), zshRC], [path.join(home, '.bashrc'), bashRC]]) await ownedFile(file, source);
     return { root, home, config, cache, data, state, claude, temp, history };
   }
-  childEnvironment(directories, timezone, proxyEndpoint, privacy = { mode: 'standard' }) {
+  childEnvironment(directories, timezone, proxyEndpoint, privacy = { mode: 'standard' }, linkShim = null) {
     // Build from scratch: host API keys, SSH agent and author variables are
     // deliberately absent. HOME/TZ here belong only to the new child process.
     const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
@@ -216,7 +253,7 @@ export class TerminalService {
       ? [path.join(systemRoot, 'System32'), systemRoot, path.join(systemRoot, 'System32/WindowsPowerShell/v1.0'), path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'nodejs'), path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git/cmd'), path.join(this.hostHome, 'AppData/Roaming/npm'), path.join(this.hostHome, 'AppData/Local/Microsoft/WindowsApps')]
       : ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin', path.join(this.hostHome, '.local/bin')];
     const environment = {
-      PATH: [...new Set([...this.additionalExecutablePaths, ...systemPaths])].join(path.delimiter),
+      PATH: [...new Set([...(linkShim ? [linkShim.directory] : []), ...this.additionalExecutablePaths, ...systemPaths])].join(path.delimiter),
       HOME: directories.home, USERPROFILE: directories.home,
       XDG_CONFIG_HOME: directories.config, XDG_CACHE_HOME: directories.cache, XDG_DATA_HOME: directories.data, XDG_STATE_HOME: directories.state,
       CLAUDE_CONFIG_DIR: directories.claude, HISTFILE: directories.history, HISTSIZE: '1000', SAVEHIST: '1000',
@@ -236,6 +273,11 @@ export class TerminalService {
     // Node's built-in fetch/http ignore proxy variables unless this is set.
     if (proxyEndpoint) environment.NODE_USE_ENV_PROXY = '1';
     // Supported tool opt-outs apply only to this owned shell and its children.
+    if (linkShim) {
+      environment.BROWSER = path.join(linkShim.directory, 'browser');
+      // The open shim reports links over this channel; without these it can only refuse.
+      for (const key of ['ENVARA_LINK_SOCKET', 'ENVARA_LINK_TOKEN']) if (typeof linkShim[key] === 'string' && linkShim[key] && !/[\0\r\n]/.test(linkShim[key])) environment[key] = linkShim[key];
+    }
     if (privacy?.mode !== 'off') Object.assign(environment, { DO_NOT_TRACK: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' });
     if (privacy?.mode === 'strict') environment.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
     return environment;
@@ -245,12 +287,14 @@ export class TerminalService {
     if (process.platform === 'darwin') return { executable: '/bin/zsh', args: ['-d', '-i'], environment: { ...environment, SHELL: '/bin/zsh', PS1: 'envara %~ %# ' } };
     return { executable: '/bin/bash', args: ['--noprofile', '--rcfile', path.join(environment.HOME, '.bashrc'), '-i'], environment: { ...environment, SHELL: '/bin/bash', PS1: 'envara \\w \\$ ' } };
   }
-  async create({ id, columns, rows }) {
+  async create({ id, columns, rows, fresh = false, directory = null }) {
     return this.serialized(id, async () => {
       if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
-      const existing = this.active(id);
-      if (existing) return this.metadata(existing);
-      const cwd = this.settings.get(id)?.cwd;
+      if (!fresh) {
+        const existing = this.active(id);
+        if (existing) return this.metadata(existing);
+      }
+      const cwd = directory != null ? await this.rememberDirectory(id, directory) : this.settings.get(id)?.cwd;
       if (!cwd) throw codeError('请先选择终端工作目录。', 'TERMINAL_DIRECTORY_REQUIRED');
       return this.startSession({ id, cwd, columns, rows });
     });
@@ -307,16 +351,30 @@ export class TerminalService {
         const parsed = new URL(endpoint);
         session.secrets = [...new Set([endpoint, proxy && proxyURL(proxy), proxy?.password, proxy?.password && encodeURIComponent(proxy.password), parsed.password && decodeURIComponent(parsed.password), parsed.username && Buffer.from(`${decodeURIComponent(parsed.username)}:${decodeURIComponent(parsed.password)}`).toString('base64')].filter(value => typeof value === 'string' && value.length >= 4))].sort((a, b) => b.length - a.length);
       }
-      session.timezone = timezone; session.network = { ...publicNetwork(proxy), ...(session.launchContext.networkEgress?.ok ? { egress: session.launchContext.networkEgress } : {}) };
+      session.timezone = timezone; session.network = { ...publicNetwork(proxy), ...(typeof context.proxyName === 'string' && context.proxyName ? { routeName: context.proxyName.slice(0, 100) } : {}), ...(session.launchContext.networkEgress?.ok ? { egress: session.launchContext.networkEgress } : {}) };
       this.contexts.set(id, { name: session.launchContext.name, timezone, timezoneSource: session.launchContext.timezoneSource, network: session.network, configDir: directories.config, claudeConfigDir: directories.claude });
       if (source) this.requireDuplicable(source);
-      let shell = this.shell(this.childEnvironment(directories, timezone, endpoint, session.launchContext.privacy));
+      /* The environment's links leave through its own designated browser; the
+       * shim reports them over the app's channel instead of the host opener. */
+      let linkShim = null;
+      if (this.linkChannel) {
+        try { linkShim = { directory: await this.linkChannel.executableDirectory(id), ...this.linkChannel.environment(id) }; }
+        catch (error) { this.assertStarting(session); throw codeError(`终端链接通道不可用，未启动终端：${error.message}`, 'TERMINAL_LINK_CHANNEL_UNAVAILABLE'); }
+      }
+      if (linkShim?.ENVARA_LINK_TOKEN) session.secrets = [...new Set([...session.secrets, linkShim.ENVARA_LINK_TOKEN])];
+      this.assertStarting(session);
+      let shell = this.shell(this.childEnvironment(directories, timezone, endpoint, session.launchContext.privacy, linkShim));
       // A loopback route (this session's bridge or the managed core listener)
       // is the environment's only network path for this whole process tree.
       // Fence it or refuse to start; never run it unfenced.
       session.networkFence = false;
       const routePort = loopbackRoutePort(session.bridge, endpoint);
-      if (routePort && this.networkFence) { shell = await this.networkFence.wrap(shell, { routePort }); session.networkFence = true; }
+      if (routePort && this.networkFence) {
+        shell = await this.networkFence.wrap(shell, { routePort }); session.networkFence = true;
+        session.network = { ...session.network, fenced: true, description: '已加网络围栏：终端里的程序只能经这条线路出网，不支持代理的程序会连不上，不会直连。' };
+        const known = this.contexts.get(id);
+        if (known) this.contexts.set(id, { ...known, network: session.network });
+      }
       this.assertStarting(session);
       const spawned = this.ptyFactory(shell.executable, shell.args, { name: 'xterm-256color', cols: session.columns, rows: session.rows, cwd, env: shell.environment, encoding: 'utf8', handleFlowControl: false });
       const pty = typeof spawned?.then === 'function' ? await spawned : spawned;
@@ -373,7 +431,20 @@ export class TerminalService {
   }
   receive(session, data) {
     if (session.finished || typeof data !== 'string') return;
-    const value = this.redact(session, data);
+    clearTimeout(session.secretTimer); session.secretTimer = null;
+    this.deliver(session, this.redact(session, data));
+    /* Output that splits a secret arrives in one burst, so a tail that could
+     * start a secret waits only briefly. Without this, the echo of a typed
+     * character that happens to begin a secret stays hidden until the next key. */
+    if (session.secretTail) session.secretTimer = setTimeout(() => {
+      session.secretTimer = null;
+      if (session.finished || !session.secretTail) return;
+      const held = session.secretTail; session.secretTail = '';
+      this.deliver(session, held);
+    }, SECRET_TAIL_FLUSH_MS);
+  }
+  deliver(session, value) {
+    if (!value) return;
     session.replay = tail(session.replay + value, MAX_REPLAY_BYTES);
     const buffer = Buffer.from(tail(value, MAX_QUEUE_BYTES));
     for (let start = 0; start < buffer.length;) {
@@ -454,6 +525,7 @@ export class TerminalService {
     session.status = 'closing';
     session.finishing = Promise.resolve().then(async () => {
       if (session.finished) return;
+      clearTimeout(session.secretTimer); session.secretTimer = null;
       const pending = this.redact(session, '', true);
       if (pending) { session.replay = tail(session.replay + pending, MAX_REPLAY_BYTES); this.emit(session, 'data', { data: pending }); }
       if (Number.isInteger(event.exitCode)) session.exitCode = event.exitCode;

@@ -1,11 +1,16 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage } from 'electron';
+import { execFile, execFile as execFileCallback } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, lstat, rm, cp, rename } from 'node:fs/promises';
+import { promisify } from 'node:util';
 import { pfAttachEnvironmentId, pfApplicationRegistrationId } from '../native/macos-pf-routing/policy.mjs';
-import { eraseAttachedApplicationData } from './application-data.mjs';
+import { eraseAttachedApplicationData, eraseEnvironmentData, attachedApplicationDataInventory } from './application-data.mjs';
+import { signInDataRows, SignInDataNames, runningSignInDataId } from './sign-in-data.mjs';
 import { showManagedApplicationWindow } from './application-window.mjs';
+import { TerminalLinkChannel, LinkSocketServer, TERMINAL_LINK_SOCKET } from './terminal-link-channel.mjs';
+import { LinkRouter } from './link-router.mjs';
 import { EnvaraService } from './service.mjs';
 import { BrowserRuntime } from './runtime.mjs';
 import { SidecarManager } from './sidecar-manager.mjs';
@@ -124,11 +129,29 @@ function assertNotionTrialContextIdle({ allowReservation = false } = {}) {
   if ((!allowReservation && notionTrialReserved) || state?.active === true || state?.cleanupUncertain === true) throw Object.assign(new Error('请先停止附加软件并确认清理，再修改环境。'), { code: 'PF_OWNED_RUNTIME_NOT_EMPTY' });
 }
 
+/** Hands a link to the host's default browser, which is outside every
+ *  environment. Only the reported fallback path uses this. */
+async function shellOpen(url, bundleId = null) {
+  if (process.platform !== 'darwin') return;
+  const args = bundleId && /^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$/.test(bundleId) ? ['-b', bundleId, url] : [url];
+  await new Promise((resolve, reject) => execFile('/usr/bin/open', args, { timeout: 15000 }, error => error ? reject(error) : resolve()));
+}
+/* The host's own browser for a link that leaves the environment. While Envara's
+ * link router is the default browser, asking the system would hand the link
+ * straight back to the router, so it goes to the browser that was the default
+ * before (Safari when that is unknown). */
+async function openOutsideEnvironment(url) {
+  const status = process.platform === 'darwin' ? await linkRouterStatus().catch(() => null) : null;
+  if (status?.enabled) return shellOpen(url, status.previous && status.previous !== LINK_ROUTER_BUNDLE_ID ? status.previous : 'com.apple.Safari');
+  return shellOpen(url);
+}
 async function shutdownOwnedServices() {
   // Preserve the managed route if native cleanup remains uncertain.
   try { await applications?.shutdown(); }
   finally { await notionDiagnostics?.pending.catch(() => {}); }
   await terminal?.shutdown().catch(() => {});
+  await linkChannel?.close().catch(() => {});
+  await routerChannel?.close().catch(() => {});
   try {
     if (service) await service.shutdown();
     else await sidecar?.shutdown();
@@ -145,9 +168,10 @@ async function publish() {
   } catch (error) { console.error('Unable to refresh workspace:', error.message); }
   finally { publishing = false; if (needsPublish) { needsPublish = false; void publish(); } }
 }
+const execFileAsync = promisify(execFileCallback);
 const allowedMethods = new Set(['snapshot','createProfile','updateProfile','cloneProfile','deleteProfile','clearProfile','startProfile','stopProfile','focusProfile','saveProxy','deleteProxy','checkProxy','saveSettings','installEngine','importProfiles','cancelImport','exportProfiles','openDataDirectory','openDocumentation','previewLegacyMigration','migrateLegacy','saveGroup','deleteGroup','clearGroupProxy','bulkProfiles','exportAutomationConfig','openTerminalWindow', ...TERMINAL_METHODS]);
-const applicationMethods = new Set(['saveApplication', 'startApplication', 'stopApplication', 'deleteApplication', 'getApplicationRoutingStatus', 'setupApplicationRouting']);
-for (const method of [...applicationMethods, 'pickApplication', 'listLocalApplications', 'applicationIcon', 'showApplicationWindow', 'clearApplicationData', 'previewProxyNetwork', 'checkEnvironmentNetwork', 'openNetworkLocationMap']) allowedMethods.add(method);
+const applicationMethods = new Set(['saveApplication', 'startApplication', 'stopApplication', 'deleteApplication', 'getApplicationRoutingStatus', 'setupApplicationRouting', 'setApplicationLinkBrowser']);
+for (const method of [...applicationMethods, 'pickApplication', 'listLocalApplications', 'applicationIcon', 'showApplicationWindow', 'clearApplicationData', 'signInData', 'deleteSignInData', 'linkRouterStatus', 'setLinkRouter', 'previewProxyNetwork', 'checkEnvironmentNetwork', 'openNetworkLocationMap']) allowedMethods.add(method);
 for (const method of ['runNotionTrial', 'stopNotionTrial', 'notionTrialSnapshot', 'exportNotionDiagnostics', 'applicationStorage', 'reclaimApplicationStorage']) allowedMethods.add(method);
 
 async function protectApplicationMutation(method, args, operation) {
@@ -190,6 +214,117 @@ async function applicationStorageCandidates() {
  * cannot be swapped for a link, so no administrator step is needed. What
  * remains is the empty root-owned skeleton, removed by the storage cleanup.
  * Removal never follows a link. */
+/* The dockless router that makes macOS hand every web link to Envara first. It
+ * is the only way an attached application's own links — Notion's Google sign-in,
+ * for example — can leave through that environment. Enabling it changes the
+ * system's default browser, so only macOS's own confirmation, accepted by the
+ * user, may make that change, and it is reversible from here. */
+const LINK_ROUTER_BUNDLE_ID = 'io.envara.link-router';
+/* The router asks over a unix socket, whose path macOS limits to 104 bytes, so
+ * it lives under the shared temporary directory with the user's id. */
+const LINK_ROUTER_SOCKET_PATH = `/private/tmp/io.envara.link-router.${process.getuid?.() ?? 0}.sock`;
+function linkRouterResources() {
+  const base = app.isPackaged ? process.resourcesPath : path.join(root, 'build');
+  return path.join(base, 'app-routing', 'macos-link-router');
+}
+function linkRouterInstalled() {
+  return path.join(app.getPath('userData'), 'link-router', 'EnvaraLinkRouter.app');
+}
+async function linkRouterRun(arguments_) {
+  const { stdout } = await execFileAsync(linkRouterInstalled() + '/Contents/MacOS/EnvaraLinkRouter', arguments_, { timeout: 120000, maxBuffer: 1024 * 1024 });
+  return stdout.trim();
+}
+/* The copy in the application's own data directory, refreshed only when the
+ * shipped build differs. Keeping it outside the versioned app folder means
+ * removing an old build never breaks the system's link handling. */
+async function ensureLinkRouterInstalled() {
+  if (process.platform !== 'darwin') throw Object.assign(new Error('链接路由需要 macOS。'), { code: 'LINK_ROUTER_UNAVAILABLE' });
+  const source = linkRouterResources(), target = linkRouterInstalled();
+  const info = await lstat(source).catch(() => null);
+  if (!info?.isDirectory()) throw Object.assign(new Error('此版本没有内置链接路由。'), { code: 'LINK_ROUTER_UNAVAILABLE' });
+  const marker = path.join(app.getPath('userData'), 'link-router', 'installed.json');
+  let installed = null;
+  try { installed = JSON.parse(await readFile(marker, 'utf8')); } catch {}
+  const [sourceBinary, targetBinary] = await Promise.all([lstat(path.join(source, 'Contents', 'MacOS', 'EnvaraLinkRouter')),
+    lstat(path.join(target, 'Contents', 'MacOS', 'EnvaraLinkRouter')).catch(() => null)]);
+  const fresh = targetBinary && installed?.bundleIdentifier === LINK_ROUTER_BUNDLE_ID && installed?.size === sourceBinary.size && installed?.mtimeMs === sourceBinary.mtimeMs;
+  if (!fresh) {
+    await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+    const stage = `${target}.stage-${randomUUID()}`;
+    await rm(stage, { recursive: true, force: true });
+    await cp(source, stage, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
+    await rename(stage, target);
+    await writeFile(marker, `${JSON.stringify({ bundleIdentifier: LINK_ROUTER_BUNDLE_ID, size: sourceBinary.size, mtimeMs: sourceBinary.mtimeMs }, null, 2)}\n`, { mode: 0o600 });
+    // LaunchServices must know this copy for the system to offer it as a handler.
+    await execFileAsync('/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', ['-f', target], { timeout: 30000 }).catch(() => {});
+  }
+  return target;
+}
+/* Whether links from environments open in their browsers. On by default; off
+ * means every link uses this Mac's own browser. A refusal in macOS's dialog is
+ * remembered so the request is not repeated at every launch. */
+let linkPreferences = { openInEnvironment: true, declinedAt: null };
+const linkPreferencesFile = () => path.join(app.getPath('userData'), 'link-preferences.json');
+async function loadLinkPreferences() {
+  try {
+    const saved = JSON.parse(await readFile(linkPreferencesFile(), 'utf8'));
+    linkPreferences = { openInEnvironment: saved?.openInEnvironment !== false, declinedAt: typeof saved?.declinedAt === 'string' ? saved.declinedAt : null };
+  } catch { linkPreferences = { openInEnvironment: true, declinedAt: null }; }
+}
+async function saveLinkPreferences(next) {
+  linkPreferences = next;
+  await writeFile(linkPreferencesFile(), `${JSON.stringify(linkPreferences, null, 2)}\n`, { mode: 0o600 });
+}
+async function linkRouterStatus() {
+  const preference = { preference: linkPreferences.openInEnvironment, declined: Boolean(linkPreferences.declinedAt) };
+  if (process.platform !== 'darwin') return { available: false, enabled: false, handler: null, previous: null, ...preference };
+  try {
+    await ensureLinkRouterInstalled();
+    const status = JSON.parse(await linkRouterRun(['--status']) || '{}');
+    return { available: true, enabled: status.enabled === true, handler: typeof status.handler === 'string' ? status.handler : null,
+      previous: typeof status.previous === 'string' && status.previous ? status.previous : null, ...preference };
+  } catch (error) { return { available: false, enabled: false, handler: null, previous: null, ...preference, errorCode: error.code ?? 'LINK_ROUTER_UNAVAILABLE' }; }
+}
+/* Asks macOS to let Envara's link router handle web links. Only the system's
+ * own confirmation dialog can make that change, and the user decides there. */
+async function requestLinkRouter() {
+  await ensureLinkRouterInstalled();
+  try {
+    const output = await linkRouterRun(['--enable']);
+    await saveLinkPreferences({ ...linkPreferences, declinedAt: null });
+    return { granted: true, output };
+  } catch (error) {
+    await saveLinkPreferences({ ...linkPreferences, declinedAt: new Date().toISOString() }).catch(() => {});
+    return { granted: false, output: String(error?.stdout || error?.message || '').trim().slice(0, 200) };
+  }
+}
+/* On by default: the first launch asks once, after the window is up. */
+async function offerLinkRouting() {
+  if (process.platform !== 'darwin' || !linkPreferences.openInEnvironment || linkPreferences.declinedAt) return;
+  const status = await linkRouterStatus();
+  if (status.available && !status.enabled) await requestLinkRouter();
+}
+
+/* Sign-in data on disk, one row per environment and application. The user's
+ * own folders are read directly, so listing it needs no administrator step. */
+let signInNames = null;
+let linkChannel = null;
+let routerChannel = null;
+let linkRouter = null;
+async function signInDataSnapshot() {
+  if (process.platform !== 'darwin' || !applications || !service) return { items: [], totalBytes: 0 };
+  const [attached, workspace, inventory] = await Promise.all([applications.snapshot(), service.snapshot(), attachedApplicationDataInventory()]);
+  const names = signInNames ? await signInNames.remember(attached.applications).catch(() => signInNames.read()) : {};
+  const trial = applications.routing?.controlledNotionTrialSnapshot?.() ?? null, running = new Set();
+  if (trial?.active === true || trial?.cleanupUncertain === true) {
+    const id = runningSignInDataId(attached.applications.find(item => item.id === trial.applicationId));
+    if (id) running.add(id);
+  }
+  for (const item of attached.applications) if (['starting', 'running', 'stopping'].includes(item.status)) { const id = runningSignInDataId(item); if (id) running.add(id); }
+  const items = signInDataRows({ applications: attached.applications, profiles: workspace.profiles, names, inventory, running });
+  return { items, totalBytes: items.reduce((sum, item) => sum + item.bytes, 0) };
+}
 async function handleCall(method, args = {}, caller = window) {
   if (quitting) throw Object.assign(new Error('应用正在退出。'), { code: 'APP_CLOSING' });
   if (!allowedMethods.has(method)) throw new Error('不支持的操作');
@@ -256,6 +391,27 @@ async function handleCall(method, args = {}, caller = window) {
     if (notionTrialReserved || ['starting', 'running', 'stopping'].includes(item.status) ||
       trial?.applicationId === item.id && (trial.active === true || trial.cleanupUncertain === true)) throw Object.assign(new Error('请先停止此软件。'), { code: 'APPLICATION_RUNNING' });
     const erased = await eraseAttachedApplicationData(item.profileId, { registrationId: pfApplicationRegistrationId(item.path) });
+    return { cleared: true, erased: erased.length };
+  }
+  if (method === 'linkRouterStatus') return linkRouterStatus();
+  if (method === 'setLinkRouter') {
+    if (typeof args.enabled !== 'boolean') throw Object.assign(new Error('链接设置参数无效。'), { code: 'LINK_ROUTER_REQUEST_INVALID' });
+    await saveLinkPreferences({ ...linkPreferences, openInEnvironment: args.enabled });
+    /* On asks macOS (its own dialog decides). Off sends every link to this Mac's
+     * browser and gives the system default back to the browser it was before. */
+    if (args.enabled) { const outcome = await requestLinkRouter(); return { ...(await linkRouterStatus()), granted: outcome.granted }; }
+    const status = await linkRouterStatus();
+    if (status.enabled) await linkRouterRun(['--disable']);
+    return linkRouterStatus();
+  }
+  if (method === 'signInData') return signInDataSnapshot();
+  if (method === 'deleteSignInData') {
+    if (typeof args.id !== 'string' || args.id.length > 80) throw Object.assign(new Error('未找到这份登录数据。'), { code: 'SIGN_IN_DATA_NOT_FOUND' });
+    // Only a row main itself reports can be removed, and never while it is in use.
+    const item = (await signInDataSnapshot()).items.find(entry => entry.id === args.id);
+    if (!item) throw Object.assign(new Error('未找到这份登录数据。'), { code: 'SIGN_IN_DATA_NOT_FOUND' });
+    if (notionTrialReserved || item.running) throw Object.assign(new Error('请先停止此软件。'), { code: 'APPLICATION_RUNNING' });
+    const erased = await eraseEnvironmentData(item.environmentId, { registrationId: item.registrationId });
     return { cleared: true, erased: erased.length };
   }
   if (method === 'showApplicationWindow') {
@@ -484,6 +640,7 @@ app.on('before-quit', event => {
 if (ownsLock) void app.whenReady().then(async () => {
   const dataDir = app.getPath('userData');
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
+  signInNames = new SignInDataNames({ dataDir });
   if (isSmoke || process.env.ENVARA_BACKEND === 'legacy') {
     const runtime = new BrowserRuntime({ cacheDir: isSmoke && process.env.ENVARA_SMOKE_ENGINE_DIR ? process.env.ENVARA_SMOKE_ENGINE_DIR : path.join(dataDir, 'engines'), onChange: publish });
     service = new EnvaraService(dataDir, runtime, { platform: process.platform, appVersion: app.getVersion() }, publish);
@@ -503,8 +660,20 @@ if (ownsLock) void app.whenReady().then(async () => {
       cancelInstall: () => sidecar.cancelInstall(),
       assertLegacyStopped: () => sidecar.assertLegacyStopped(), shutdown: () => sidecar.shutdown(),
     });
+    /* Two doors into the same decision: the environment's own open shim for
+     * terminals, and the system-wide link router for everything macOS hands to
+     * a browser, including links an attached application raises itself. */
+    const reportLink = (request, source) => linkRouter.openFromProfile({ profileId: request.profileId, url: request.url, source });
+    linkChannel = new TerminalLinkChannel({ root: dataDir, onLink: request => reportLink(request, '终端'),
+      log: message => console.info(`Envara link channel: ${message}`) });
+    await linkChannel.listen().catch(error => { console.error(`Envara link channel unavailable: ${error.message}`); linkChannel = null; });
+    routerChannel = new LinkSocketServer({ root: dataDir, socketPath: LINK_ROUTER_SOCKET_PATH,
+      onLink: request => linkRouter.openFromProcess(request),
+      log: message => console.info(`Envara link router: ${message}`) });
+    await routerChannel.listen().catch(error => { console.error(`Envara link router unavailable: ${error.message}`); routerChannel = null; });
     terminal = new TerminalService({
       dataDir,
+      linkChannel,
       additionalExecutablePaths: [path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'backend', 'playwright-driver')],
       resolveContext: id => service.resolveWorkspaceContext(id),
       onEvent: event => {
@@ -512,6 +681,12 @@ if (ownsLock) void app.whenReady().then(async () => {
         if (event.type === 'exit' && !views.size) void quitWhenIdle().catch(() => app.quit());
       },
     });
+    await loadLinkPreferences();
+    linkRouter = new LinkRouter({ service, applications, terminal,
+      enabled: () => linkPreferences.openInEnvironment,
+      registrationRoot: '/Library/PrivilegedHelperTools/io.envara.pf-apps',
+      openDefault: async url => { await openOutsideEnvironment(url); },
+      notify: event => { for (const { window: view, kind } of views.values()) if (!view.isDestroyed() && kind === 'workspace') view.webContents.send('envara:link-event', event); } });
     terminalController = new TerminalController({ terminal, service, pickDirectory: async ({ currentPath }, context) => {
       if (isWorkspaceSmoke) {
         const ownedCwd = process.env.ENVARA_WORKSPACE_SMOKE_CWD;
@@ -561,7 +736,7 @@ if (ownsLock) void app.whenReady().then(async () => {
       if (source.kind === 'terminal' && !TERMINAL_METHODS.has(request.method) && !['snapshot', 'openTerminalWindow'].includes(request.method)) throw new Error('此窗口仅支持终端操作。');
       if (source.kind === 'terminal') {
         if (request.method === 'terminalSnapshot') request.args = { ...request.args, id: source.profileId };
-        if (['chooseWorkspaceDirectory', 'openTerminal', 'openTerminalWindow'].includes(request.method) && request.args?.id !== source.profileId) throw new Error('此窗口仅操作当前环境。');
+        if (['chooseWorkspaceDirectory', 'pickTerminalDirectory', 'setTerminalLinkBrowser', 'openTerminal', 'openTerminalWindow'].includes(request.method) && request.args?.id !== source.profileId) throw new Error('此窗口仅操作当前环境。');
         if (['duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal'].includes(request.method)) {
           const current = await terminal.snapshot({ id: source.profileId });
           if (!current.profiles?.some(profile => profile.sessions?.some(session => session.sessionId === request.args?.sessionId))) throw new Error('该会话不属于此终端窗口。');
@@ -578,6 +753,7 @@ if (ownsLock) void app.whenReady().then(async () => {
   ]));
   if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(path.join(root, 'build/icon.png')));
   await createWindow();
+  if (!isSmoke && !isWorkspaceSmoke) setTimeout(() => { void offerLinkRouting().catch(error => console.error(`Envara link routing: ${error.message}`)); }, 1500).unref?.();
   const refreshTimer = setInterval(() => { void publish(); }, 4000);
   refreshTimer.unref();
 }).catch(async error => {

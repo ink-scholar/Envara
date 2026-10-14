@@ -396,6 +396,10 @@ test('a SOCKS bridge route starts only inside the network fence and Node uses th
   await f.service.setDirectory({ id: 'profile_a', path: f.cwd });
   const session = await f.service.create({ id: 'profile_a' });
   assert.equal(session.networkFence, true);
+  // What the terminal says about its network is what the fence enforces.
+  assert.equal(session.network.fenced, true);
+  assert.match(session.network.description, /不会直连/);
+  assert.doesNotMatch(session.network.description, /本机地址直连/);
   assert.equal(launches.length, 1);
   const shell = f.service.shell({});
   assert.equal(launches[0].executable, '/usr/bin/sandbox-exec');
@@ -454,4 +458,61 @@ test('the managed core listener is fenced as the only route; a remote HTTP upstr
   assert.equal((await remote.service.create({ id: 'profile_a' })).networkFence, false);
   assert.equal(remoteLaunches[0].executable, remote.service.shell({}).executable);
   assert.equal(wraps.length, 1);
+});
+
+test('a fresh terminal is a new process in its own folder; the folder becomes the next default and keeps the link browser', async t => {
+  const f = await fixture(t, { networkFence: null });
+  const { realpath } = await import('node:fs/promises');
+  await f.service.setDirectory({ id: 'profile_a', path: f.cwd });
+  await f.service.setLinkBrowser({ id: 'profile_a', browserProfileId: 'system' });
+  const first = await f.service.create({ id: 'profile_a' });
+  const other = path.join(f.root, 'another'); await mkdir(other);
+  // Another terminal while the first runs: a separate process, in the picked folder.
+  const second = await f.service.create({ id: 'profile_a', fresh: true, directory: other });
+  assert.notEqual(second.sessionId, first.sessionId);
+  assert.equal(f.fakes.length, 2, 'two shells, not one shared');
+  assert.equal(second.cwd, await realpath(other));
+  assert.equal(first.cwd, await realpath(f.cwd), 'the running one keeps its folder');
+  // Not fresh still means "show me the running one".
+  assert.equal((await f.service.create({ id: 'profile_a' })).sessionId, first.sessionId);
+  const saved = JSON.parse(await readFile(path.join(f.root, 'data/terminal/workspace.json')));
+  assert.deepEqual(saved.profiles[0], { id: 'profile_a', cwd: await realpath(other), browserProfileId: 'system' });
+  assert.equal(f.service.linkBrowser('profile_a'), 'system');
+  // A folder that is not one is refused before anything starts.
+  await assert.rejects(f.service.create({ id: 'profile_a', fresh: true, directory: 'relative/path' }));
+  assert.equal(f.fakes.length, 2);
+});
+
+test('a typed character that could begin a secret is shown promptly, while a secret split within one burst stays hidden', async t => {
+  const f = await fixture(t, { resolveContext: async id => ({ id, timezone: 'UTC', proxy: { protocol: 'http', host: '127.0.0.1', port: 8080, username: 'u', password: 'cp4ss-word' } }) });
+  await f.service.setDirectory({ id: 'profile_a', path: f.cwd }); await f.service.create({ id: 'profile_a' });
+  const shown = () => f.events.filter(event => event.type === 'data').map(event => event.data).join('');
+  // The echo of "curl cip.cc": the last "c" begins the password, so it used to wait for the next key.
+  for (const key of 'curl cip.cc') f.fakes[0].output(key);
+  await delay(120);
+  assert.ok(shown().endsWith('curl cip.cc'), `the whole line is on screen: ${JSON.stringify(shown())}`);
+  // The password arriving in pieces within one burst is still masked as a whole.
+  f.fakes[0].output('pw='); f.fakes[0].output('cp4'); f.fakes[0].output('ss-'); f.fakes[0].output('word\n');
+  await delay(120);
+  assert.ok(shown().endsWith('pw=[redacted]\n'), JSON.stringify(shown().slice(-40)));
+  assert.equal(shown().includes('cp4ss-word'), false);
+});
+
+test('a terminal receives its link channel, and the channel token is masked like a credential', async t => {
+  const linkChannel = {
+    executableDirectory: async () => path.join(os.tmpdir(), 'envara-link-bin-test'),
+    environment: () => ({ ENVARA_LINK_SOCKET: '/private/tmp/envara-link-test.sock', ENVARA_LINK_TOKEN: 'a1b2c3d4'.repeat(8) }),
+  };
+  const f = await fixture(t, { linkChannel });
+  await f.service.setDirectory({ id: 'profile_a', path: f.cwd }); await f.service.create({ id: 'profile_a' });
+  const env = f.fakes[0].options.env;
+  assert.equal(env.ENVARA_LINK_SOCKET, '/private/tmp/envara-link-test.sock');
+  assert.equal(env.ENVARA_LINK_TOKEN, 'a1b2c3d4'.repeat(8), 'without these the open shim can only refuse');
+  assert.ok(env.PATH.startsWith(path.join(os.tmpdir(), 'envara-link-bin-test')), 'the shim comes first on PATH');
+  assert.equal(env.BROWSER, path.join(os.tmpdir(), 'envara-link-bin-test', 'browser'));
+  f.fakes[0].output(`ENVARA_LINK_TOKEN=${'a1b2c3d4'.repeat(8)}\n`);
+  await delay(80);
+  const shown = f.events.filter(event => event.type === 'data').map(event => event.data).join('');
+  assert.equal(shown.includes('a1b2c3d4'.repeat(8)), false);
+  assert.match(shown, /ENVARA_LINK_TOKEN=\[redacted\]/);
 });

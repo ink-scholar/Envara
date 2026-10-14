@@ -8,10 +8,11 @@ export function storedApplication(value) {
   if (!value || !validId(value.id) || !validId(value.profileId) || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 128 ||
       ![value.path, value.executablePath].every(item => typeof item === 'string' && path.isAbsolute(item) && item.length <= 8192 && !/[\0\r\n]/.test(item)) ||
       typeof value.identity !== 'string' || !/^[A-Za-z0-9:._-]{1,512}$/.test(value.identity) ||
-      !Array.isArray(value.args) || value.args.length > 128 || value.args.some(arg => typeof arg !== 'string' || arg.length > 8192 || /[\0\r\n]/.test(arg))) throw fail();
+      !Array.isArray(value.args) || value.args.length > 128 || value.args.some(arg => typeof arg !== 'string' || arg.length > 8192 || /[\0\r\n]/.test(arg)) ||
+      value.browserProfileId != null && !validId(value.browserProfileId)) throw fail();
   // Explicit allowlist: routing credentials and runtime sessions are never persisted.
   return { id: value.id, profileId: value.profileId, name: value.name.trim(), path: value.path, executablePath: value.executablePath,
-    identity: value.identity, args: [...value.args] };
+    identity: value.identity, args: [...value.args], ...(value.browserProfileId ? { browserProfileId: value.browserProfileId } : {}) };
 }
 export class ApplicationStore {
   constructor(dataDir) {

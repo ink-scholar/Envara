@@ -1,10 +1,11 @@
+import { randomUUID } from 'node:crypto';
 const fail = (message, code = 'TERMINAL_ACTION_FAILED') => Object.assign(new Error(message), { code });
 const identifier = (value) => {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(value)) throw fail('无效的环境标识。', 'VALIDATION_ERROR');
   return value;
 };
 
-export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'chooseWorkspaceDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal']);
+export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser']);
 const PROFILE_CONFIGURATION = new Set(['updateProfile', 'deleteProfile']);
 const PROXY_CONFIGURATION = new Set(['saveProxy', 'deleteProxy']);
 const GROUP_CONFIGURATION = new Set(['saveGroup', 'deleteGroup', 'clearGroupProxy']);
@@ -15,6 +16,9 @@ export class TerminalController {
     this.terminal = terminal;
     this.service = service;
     this.pickDirectory = pickDirectory;
+    /* Folders picked in the native dialog for one new terminal. The renderer
+     * holds only a token, so a directory always comes from the user's pick. */
+    this.pickedDirectories = new Map();
     this.queue = Promise.resolve();
   }
 
@@ -46,6 +50,32 @@ export class TerminalController {
     return { canceled: false, ...(await this.terminal.snapshot({ id })) };
   }
 
+  /* A folder for the next new terminal only: picked, not yet applied. Unlike
+   * changing the environment's directory, this is allowed while terminals run,
+   * because they keep their own. */
+  async pickNewDirectory(id, context = {}) {
+    await this.profile(id);
+    const state = await this.terminal.snapshot({ id });
+    const current = state.profiles?.find((row) => row.profileId === id);
+    const choice = await this.pickDirectory({ id, currentPath: current?.cwd ?? undefined }, context);
+    if (choice.canceled || !choice.path) return { canceled: true };
+    await this.profile(id);
+    const now = Date.now();
+    for (const [token, item] of this.pickedDirectories) if (item.expiresAt <= now) this.pickedDirectories.delete(token);
+    const token = randomUUID();
+    this.pickedDirectories.set(token, { id, path: choice.path, expiresAt: now + 30 * 60 * 1000 });
+    return { canceled: false, path: choice.path, token };
+  }
+  takeDirectory(token) {
+    if (token == null) return null;
+    const item = typeof token === 'string' ? this.pickedDirectories.get(token) : null;
+    this.pickedDirectories.delete(token);
+    // The user picked this folder for a new terminal; which environment the
+    // terminal then runs in may still change before it opens.
+    if (!item || item.expiresAt <= Date.now()) throw fail('所选文件夹已失效，请重新选择。', 'TERMINAL_DIRECTORY_EXPIRED');
+    return item.path;
+  }
+
   async dispatch(method, args = {}, context = {}) {
     if (!TERMINAL_METHODS.has(method)) throw fail('不支持的终端操作。');
     if (!args || typeof args !== 'object' || Array.isArray(args)) throw fail('终端参数格式无效。', 'VALIDATION_ERROR');
@@ -66,17 +96,31 @@ export class TerminalController {
       }
       identifier(args.id);
       if (method === 'chooseWorkspaceDirectory') return this.selectDirectory(args.id, context);
+      if (method === 'pickTerminalDirectory') return this.pickNewDirectory(args.id, context);
+      /* Which browser this environment's links open in. Allowed while it runs:
+       * a link resolves the setting when it is opened. */
+      if (method === 'setTerminalLinkBrowser') return this.setLinkBrowser(args);
       await this.profile(args.id);
-      const state = await this.terminal.snapshot({ id: args.id });
-      const current = state.profiles?.find((row) => row.profileId === args.id);
-      if (!current?.cwd) {
-        const choice = await this.selectDirectory(args.id, context);
-        if (choice.canceled) return choice;
+      // Only the fields a caller may set; a directory comes from a picked token.
+      const directory = this.takeDirectory(args.directoryToken ?? null);
+      const request = { id: args.id, columns: args.columns, rows: args.rows, fresh: args.fresh === true, directory };
+      if (!directory) {
+        const state = await this.terminal.snapshot({ id: args.id });
+        const current = state.profiles?.find((row) => row.profileId === args.id);
+        if (!current?.cwd) {
+          const choice = await this.selectDirectory(args.id, context);
+          if (choice.canceled) return choice;
+        }
       }
-      return this.terminal.create(args);
+      return this.terminal.create(request);
     });
   }
 
+  async setLinkBrowser(args) {
+    identifier(args.id);
+    await this.profile(args.id);
+    return this.terminal.setLinkBrowser({ id: args.id, browserProfileId: args.browserProfileId ?? null });
+  }
   async protectMutation(method, args, operation) {
     const changesProfiles = method === 'bulkProfiles' && ['move', 'delete'].includes(args.action);
     if (!PROFILE_CONFIGURATION.has(method) && !PROXY_CONFIGURATION.has(method) && !GROUP_CONFIGURATION.has(method) && !changesProfiles) return operation();

@@ -1,8 +1,9 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { SYSTEM_BROWSER, linkBrowserChoice } from "./link-browser.mjs";
 import { localeForInterfaceLanguage } from "../shared/interface-languages.mjs";
 import { savedNetworkPresentation } from "./network-flow-state.mjs";
 import { notionTrialControls, notionTrialLogLine, notionTrialFailureLine, notionTrialErrorHint, attachedApplicationStatus, safeNotionTrial } from "./notion-trial-state.mjs";
-import { Stack, GlobeHemisphereWest, FolderOpen, Plus, Play, Stop, Trash, Desktop, ShieldCheck, WarningCircle, ArrowRight, PencilSimple, Browsers, TerminalWindow, Clock, Info, Eraser, ArrowSquareOut } from "@phosphor-icons/react";
+import { Stack, GlobeHemisphereWest, FolderOpen, Plus, Play, Stop, Trash, Desktop, ShieldCheck, WarningCircle, ArrowRight, PencilSimple, Browsers, TerminalWindow, Clock, Info, ArrowSquareOut, CaretRight } from "@phosphor-icons/react";
 import { ApplicationIcon } from "./ApplicationIcon.jsx";
 const live = new Set(["starting", "running", "stopping"]);
 function WorkspaceEmpty({
@@ -50,10 +51,10 @@ export function EnvironmentOverview({
         <input className="row-checkbox" type="checkbox" checked={checkedIds.includes(profile.id)} aria-label={t("选择 {name}", {
           name: profile.name
         })} onClick={event => event.stopPropagation()} onChange={() => onToggleChecked(profile.id)} />
-        <button className="profile-open cell-stack" onClick={() => onSelect(profile.id)} aria-pressed={selectedId === profile.id}><strong>{profile.name}</strong><small>{profile.group || t("未分组")}</small></button>
-        <span className="cell-stack"><span>{proxy?.name || t("本机网络")}</span><small>{network?.ip || t("出口待识别")}</small></span>
+        <button className="profile-open cell-stack" onClick={() => onSelect(profile.id)} aria-pressed={selectedId === profile.id}><strong>{profile.name}</strong>{profile.group ? <small>{profile.group}</small> : null}</button>
+        <span className="cell-stack"><span>{proxy?.name || t("本机网络")}</span><small>{network?.ip || t("待检测")}</small></span>
         <span className="cell-stack"><span>{location || t("启动时自动匹配")}</span><small>{presentation.timezone || network?.timezone || t("自动时区")}{presentation.savedOnly ? ` · ${t("已保存配置")}` : ""}</small></span>
-        <span className="cell-stack workspace-directory-cell" title={profile.workspace?.cwd || profile.cwd || ""}><span>{profile.workspace?.cwd || profile.cwd || t("尚未选择")}</span><small>{t("配置与历史独立")}</small></span>
+        <span className="cell-stack workspace-directory-cell" title={profile.workspace?.cwd || profile.cwd || ""}><span>{profile.workspace?.cwd || profile.cwd || t("选择目录")}</span><small>{profile.workspace?.cwd || profile.cwd ? t("配置与历史独立") : ""}</small></span>
         <button className="icon-button" aria-label={t("编辑环境")} onClick={event => {
           event.stopPropagation();
           onEdit(profile);
@@ -80,7 +81,7 @@ export function ContextDetail({
   const presentation = savedNetworkPresentation(profile, proxy);
   const network = presentation.failed ? null : profile.network?.ok ? profile.network : proxy?.network?.ok ? proxy.network : null;
   return <>
-    <div className="detail-heading"><h2>{profile.name}</h2><p>{profile.group || t("未分组")}</p></div>
+    <div className="detail-heading"><h2>{profile.name}</h2><p>{profile.group || proxy?.name || t("本机网络")}</p></div>
     <div className="context-network-card"><div className="context-card-icon"><GlobeHemisphereWest size={23} /></div><strong>{proxy?.name || t("本机网络")}</strong><span>{network?.ip || t("出口待识别")}</span>{network && <small>{[network.country || network.countryCode, network.city].filter(Boolean).join(" · ")}</small>}</div>
     <dl className="detail-properties compact-context-properties">
       <div><dt>{t("时区")}</dt><dd>{presentation.timezone || network?.timezone || t("启动时自动匹配")}{presentation.savedOnly && <small>{t("已保存配置")}</small>}</dd></div>
@@ -92,7 +93,7 @@ export function ContextDetail({
             off: "停用"
           }[profile.privacy?.mode || "standard"])}</dd></div>
     </dl>
-    <div className="context-directory"><span>{t("工作目录")}</span><strong title={workspace?.cwd || profile.workspace?.cwd || ""}>{workspace?.cwd || profile.workspace?.cwd || t("尚未选择")}</strong><button className="button" disabled={directoryDisabled} onClick={onDirectory}><FolderOpen size={15} />{t(workspace?.cwd ? "更换目录" : "选择目录")}</button></div>
+    <div className="context-directory"><span>{t("工作目录")}</span><strong className={workspace?.cwd || profile.workspace?.cwd ? "" : "is-empty"} title={workspace?.cwd || profile.workspace?.cwd || ""}>{workspace?.cwd || profile.workspace?.cwd || t("未选择")}</strong><button className="button" disabled={directoryDisabled} onClick={onDirectory}><FolderOpen size={15} />{t(workspace?.cwd ? "更换目录" : "选择目录")}</button></div>
     <div className="context-launches">
       {[["browsers", "浏览器"], ["terminals", "终端"], ["applications", "附加软件"]].map(([page, label]) => <button key={page} onClick={() => onNavigate(page)}><span>{t(label)}</span><ArrowRight size={16} /></button>)}
     </div>
@@ -100,32 +101,29 @@ export function ContextDetail({
     <div className="danger-actions"><button disabled={editingDisabled} onClick={onDelete}>{t("删除环境…")}</button></div>
   </>;
 }
-/* What attached applications keep on disk: one sealed copy per application and
- * one sign-in data directory per environment. Only items main reports as no
- * longer in use can be offered for deletion, and only after confirmation. */
-function ApplicationStorage({ onCheck, onReclaim, formatBytes, pending, t }) {
-  const [storage, setStorage] = useState(null);
-  const check = async () => { const response = await onCheck(); if (response?.ok) setStorage(response.result); };
-  const items = storage ? [
-    ...storage.registrations.map(item => ({ ...item, label: `${t("软件副本")} · ${item.name || item.bundle}` })),
-    ...storage.environments.map(item => ({ ...item, label: `${t("登录数据")} · ${item.environment || t("已删除的境舱")}` }))] : [];
-  const unused = items.filter(item => !item.inUse);
-  const unusedBytes = unused.reduce((sum, item) => sum + item.bytes, 0);
-  return <section className="application-storage">
-    <div className="application-storage-head"><strong>{t("附加软件占用的空间")}</strong>
-      <button className="button" onClick={check} disabled={pending["applicationStorage:"]}>{t(pending["applicationStorage:"] ? "检查中…" : "检查")}</button></div>
-    <p className="notion-trial-scope">{t("每个附加的软件保留一份副本，每个境舱保留一份它的登录数据。删除境舱时，它的登录数据会一并清空。")}</p>
-    {!storage && <p className="notion-trial-scope">{t("检查时可能会请求一次管理员授权。")}</p>}
-    {storage && <>
-      {items.length ? <ul className="application-storage-list">{items.map(item => <li key={item.id}><span>{item.label}</span>
-        <span>{formatBytes(item.bytes)}</span><span className={item.inUse ? "storage-in-use" : "storage-unused"}>{t(item.inUse ? "使用中" : "未使用")}</span></li>)}</ul>
-        : <p className="notion-trial-scope">{t("没有未使用的数据。")}</p>}
-      {storage.attachedApplicationActive && <p className="notion-trial-scope">{t("有附加的软件正在运行，停止后才能删除。")}</p>}
-      {unused.length > 0 && <button className="button danger" disabled={storage.attachedApplicationActive || pending["reclaimApplicationStorage:"]}
-        onClick={() => onReclaim(unused, formatBytes(unusedBytes), check)}>{t("删除未使用的数据")} · {formatBytes(unusedBytes)}</button>}
-      {items.length > 0 && !unused.length && <p className="notion-trial-scope">{t("没有未使用的数据。")}</p>}
-    </>}
-  </section>;
+/* Sign-in data on disk, one row per environment and application. A row of a
+ * running application cannot be deleted; everything else can, on its own. */
+function SignInData({ items, totalBytes, pending, onReload, onDelete, formatBytes, t }) {
+  const loaded = Array.isArray(items);
+  const row = item => {
+    const name = item.application?.name || t("已移除的软件");
+    return <div className={`sign-in-row${item.running ? " is-running" : ""}`} key={item.id}>
+      {item.application?.path ? <ApplicationIcon path={item.application.path} size={34} /> : <span className="application-icon"><Desktop size={19} /></span>}
+      <div className="sign-in-copy"><strong title={item.application?.path || ""}>{name}</strong>
+        <span>{item.environment?.name || t("已删除的境舱")}</span></div>
+      <span className="sign-in-size">{item.bytes > 0 ? formatBytes(item.bytes) : t("没有登录数据")}</span>
+      {item.running ? <span className="sign-in-lock">{t("停止后可删除")}</span>
+        : <button className="icon-button" disabled={pending["deleteSignInData:" + item.id]} onClick={() => onDelete(item)} aria-label={t("删除")} title={t("删除")}><Trash size={16} /></button>}
+    </div>;
+  };
+  return <div className="sign-in-data">
+    <div className="sign-in-head"><span>{t("这里保存每个软件的登录状态，停止或移除软件都不会删除。")}</span>
+      {loaded && <span className="sign-in-total">{t("共 {value1}", { value1: formatBytes(totalBytes) })}</span>}
+      <button className="button" onClick={onReload} disabled={pending["signInData:"]}>{t(pending["signInData:"] ? "检查中…" : "刷新")}</button></div>
+    {!loaded ? <div className="table-loading">{t("正在读取…")}</div>
+      : items.length ? <div className="sign-in-list">{items.map(row)}</div>
+        : <WorkspaceEmpty icon={Desktop} title="没有登录数据" t={t} />}
+  </div>;
 }
 export function ApplicationsWorkspace({
   profiles,
@@ -140,19 +138,28 @@ export function ApplicationsWorkspace({
   onRunNotionTrial,
   onStopNotionTrial,
   onShowApplicationWindow,
-  onClearApplicationData,
   onExportNotionDiagnostics,
-  onCheckStorage,
-  onReclaimStorage,
+  onCheckSignInData,
+  onDeleteSignInData,
+  onChooseLinkBrowser,
+  linkCandidates,
   formatBytes,
   onDelete,
-  onSetup,
   onInstall,
   pending,
   t,
   desktop
 }) {
   const [tab, setTab] = useState("environment");
+  const [data, setData] = useState(null);
+  /* Sign-in data is only read when its tab is opened, and re-read after a
+   * delete; the page never polls the disk on its own. */
+  useEffect(() => {
+    if (tab !== "signInData" || typeof onCheckSignInData !== "function") return;
+    let current = true;
+    onCheckSignInData().then(result => { if (current && result?.ok) setData(result.result); });
+    return () => { current = false; };
+  }, [tab]);
   const profile = profiles.find(item => item.id === selectedId);
   const selectedProxy = proxies.find(item => item.id === profile?.proxyId);
   const rows = tab === "all" ? applications : applications.filter(item => item.profileId === selectedId);
@@ -166,19 +173,20 @@ export function ApplicationsWorkspace({
   /* The in-environment start works while full routing acceptance is still
    * pending, so the readiness strip says exactly that instead of "cannot start". */
   const startable = desktop && routing?.controlledNotionTrialAvailable === true;
-  const routingChecks = { tcp: "TCP 转发", udp: "UDP 转发或阻断", dns: "DNS 出口", childProcesses: "子进程接管", failClosed: "断线阻断", ...(routing?.backend === "pf-utun" ? { guard: "守护进程保护", unrelatedApps: "其他软件网络", nativeAcceptance: "实机验证" } : {}) };
   return <div className="applications-workspace">
     <div className="application-context-strip">
       <label><span>{t("境舱")}</span><select value={selectedId || ""} onChange={event => onSelect(event.target.value)} aria-label={t("选择境舱")} disabled={!profiles.length}><option value="" disabled>{t("选择境舱")}</option>{profiles.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
       <div className="application-network"><GlobeHemisphereWest size={17} /><span>{selectedProxy?.name || t("本机网络")}</span></div>
       <button className="button primary" onClick={onPick} disabled={!desktop || pending["attachApplication:"]}><Plus size={16} />{t("添加软件")}</button>
     </div>
-    {!ready && <div className={`routing-readiness${startable ? " quiet" : ""}`} role="status"><ShieldCheck size={19} /><div><strong>{t(!desktop ? "本地软件需要桌面应用" : startable ? "接管尚未完成全部验收" : routing?.status === "prepared" ? "网络组件已准备" : routing?.status === "authorization-required" ? "需要系统授权" : "网络接管尚未就绪")}</strong><span>{t(startable ? "软件可以在境舱网络中启动；DNS、子进程等接管项仍在验证。" : routing?.message || "完成系统网络组件安装后，才能启动附加软件。")}</span>{desktop && routing?.component && <details className="routing-checks"><summary>{t("查看验证进度")}</summary><div><span>{routing.component.name}{routing.component.version ? ` · ${routing.component.version}` : ""}</span>{Object.entries(routingChecks).map(([key, label]) => <span key={key}>{t(label)}<small>{t((routing.verification?.checks?.[key] ?? routing.systemChecks?.[key]) === true ? "已验证" : "待验证")}</small></span>)}</div></details>}</div>{desktop && <button className="button" onClick={onSetup} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "检查中…" : "检查系统组件")}</button>}</div>}
-    {canInstall && <div className="detail-actions"><button className="button" onClick={onInstall} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "安装中…" : "安装网络组件")}</button></div>}
-    {canUpgrade && <div className="detail-actions"><button className="button primary" onClick={onInstall} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "更新中…" : "更新网络组件")}</button><span className="routing-upgrade-note">{t("已安装的网络组件早于当前应用版本，需要更新后才能附加软件。")}</span></div>}
-    {ready && <div className="routing-ready"><ShieldCheck size={16} /><span>{t("网络接管已就绪")}</span></div>}
-    <div className="workspace-segments"><button className={tab === "environment" ? "selected" : ""} onClick={() => setTab("environment")}>{t("当前境舱")}</button><button className={tab === "all" ? "selected" : ""} onClick={() => setTab("all")}>{t("全部软件")}<span>{applications.length}</span></button></div>
-    {rows.length ? <div className="application-list">{rows.map(application => {
+    {/* While software can start there is nothing to say here. Only a state that
+       * stops it from starting is shown, with the action that resolves it. */}
+    {!ready && !startable && <div className="routing-readiness" role="status"><ShieldCheck size={17} /><strong>{t(!desktop ? "本地软件需要桌面应用" : routing?.status === "prepared" ? "网络组件已准备" : routing?.status === "authorization-required" ? "需要系统授权" : "网络接管尚未就绪")}</strong><span>{t(routing?.message || "完成系统网络组件安装后，才能启动附加软件。")}</span>{canUpgrade && <button className="button primary" title={t("已安装的网络组件早于当前应用版本，需要更新后才能附加软件。")} onClick={onInstall} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "更新中…" : "更新网络组件")}</button>}{canInstall && <button className="button" onClick={onInstall} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "安装中…" : "安装网络组件")}</button>}</div>}
+    <div className="workspace-segments"><button className={tab === "environment" ? "selected" : ""} onClick={() => setTab("environment")}>{t("当前境舱")}</button><button className={tab === "all" ? "selected" : ""} onClick={() => setTab("all")}>{t("全部软件")}<span>{applications.length}</span></button>{desktop && typeof onCheckSignInData === "function" && <button className={tab === "signInData" ? "selected" : ""} onClick={() => setTab("signInData")}>{t("登录数据")}</button>}</div>
+    {tab === "signInData" ? <SignInData items={data?.items} totalBytes={data?.totalBytes ?? 0} pending={pending} formatBytes={formatBytes} t={t}
+      onReload={async () => { const result = await onCheckSignInData(); if (result?.ok) setData(result.result); }}
+      onDelete={item => onDeleteSignInData(item, async () => { const result = await onCheckSignInData(); if (result?.ok) setData(result.result); })} />
+      : rows.length ? <div className="application-list">{rows.map(application => {
         const owner = profiles.find(item => item.id === application.profileId);
         const ownerNetwork = proxies.find(item => item.id === owner?.proxyId);
         const active = live.has(application.status);
@@ -201,6 +209,7 @@ export function ApplicationsWorkspace({
               ? <button type="button" className="application-icon-button" onClick={() => onShowApplicationWindow(application)} title={t("打开窗口")} aria-label={t("打开窗口")}><ApplicationIcon path={application.path} /></button>
               : <ApplicationIcon path={application.path} />}
             <div className="application-copy"><strong title={application.path}>{application.name}</strong><span>{owner ? [owner.name, ownerNetwork?.name || t("本机网络")].join(" · ") : t("环境不可用")}</span>
+              {inEnvironment && <button type="button" className="link-browser-chip" onClick={() => onChooseLinkBrowser(application)} title={t("此软件的链接")} disabled={pending[`setApplicationLinkBrowser:${application.id}`]}><Browsers size={13} /><strong>{(() => { const candidates = linkCandidates(application), value = linkBrowserChoice(candidates, application.browserProfileId); return value === SYSTEM_BROWSER ? t("系统默认浏览器") : candidates.find(item => item.id === value)?.name || t("系统默认浏览器"); })()}</strong><CaretRight size={11} /></button>}
               {application.lastError && <p className="application-error"><WarningCircle size={14} />{t(typeof application.lastError === "string" ? application.lastError : application.lastError.message)}</p>}
               {capabilityError && <p className="notion-trial-error" role="status">{t("错误码")} · <code>{capabilityError}</code></p>}
             </div>
@@ -211,7 +220,7 @@ export function ApplicationsWorkspace({
               stopping: "停止中",
               error: "异常"
             }[rowStatus] || rowStatus)}</span>
-            <div className="application-actions">{inEnvironment && rowStatus === "running" && typeof onShowApplicationWindow === "function" && <button className="icon-button" disabled={pending[`showApplicationWindow:${application.id}`]} onClick={() => onShowApplicationWindow(application)} aria-label={t("打开窗口")} title={t("打开窗口")}><ArrowSquareOut size={17} /></button>}<button className={`button ${rowLive ? "" : "primary"}`} disabled={inEnvironment ? (rowLive ? !controlled.canStop : !owner || !controlled.canRun) : busy || (active ? application.status !== "running" : !ready || !owner)} onClick={() => inEnvironment ? (rowLive ? onStopNotionTrial(application) : onRunNotionTrial(application)) : active ? onStop(application) : onStart(application)}>{rowLive ? <Stop size={15} /> : <Play size={15} />}{t(rowLive ? "停止" : "启动")}</button>{inEnvironment && typeof onClearApplicationData === "function" && <button className="icon-button" disabled={rowLive || busy || controlled.trial?.cleanupUncertain === true} onClick={() => onClearApplicationData(application)} aria-label={t("清除登录数据")} title={t("清除登录数据")}><Eraser size={17} /></button>}<button className="icon-button" disabled={active || busy || controlled.trial?.cleanupUncertain === true} onClick={() => onDelete(application)} aria-label={t("移除软件")} title={t("移除软件")}><Trash size={17} /></button></div>
+            <div className="application-actions">{inEnvironment && rowStatus === "running" && typeof onShowApplicationWindow === "function" && <button className="icon-button" disabled={pending[`showApplicationWindow:${application.id}`]} onClick={() => onShowApplicationWindow(application)} aria-label={t("打开窗口")} title={t("打开窗口")}><ArrowSquareOut size={17} /></button>}<button className={`button ${rowLive ? "" : "primary"}`} disabled={inEnvironment ? (rowLive ? !controlled.canStop : !owner || !controlled.canRun) : busy || (active ? application.status !== "running" : !ready || !owner)} onClick={() => inEnvironment ? (rowLive ? onStopNotionTrial(application) : onRunNotionTrial(application)) : active ? onStop(application) : onStart(application)}>{rowLive ? <Stop size={15} /> : <Play size={15} />}{t(rowLive ? "停止" : "启动")}</button><button className="icon-button" disabled={active || busy || controlled.trial?.cleanupUncertain === true} onClick={() => onDelete(application)} aria-label={t("移除软件")} title={t("移除软件")}><Trash size={17} /></button></div>
           </div>
           {issue && <div className="application-issue" role="status">
             <div className="application-issue-head"><WarningCircle size={15} /><strong>{t(controlled.trial?.phase === "cleanup-required" ? "清理未确认" : historicalDiagnostics ? "上次附加" : "上次启动未完成")}</strong>{controlled.trial?.errorCode && <code>{controlled.trial.errorCode}</code>}</div>
@@ -225,11 +234,12 @@ export function ApplicationsWorkspace({
           </div>}
         </div>;
       })}</div> : <WorkspaceEmpty icon={Desktop} title={profile ? "添加软件到这个境舱" : "先创建网络环境"} action={desktop ? "添加软件" : undefined} onAction={onPick} t={t} />}
-    {startable && rows.length > 0 && <ul className="application-notes">{["附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。",
-      "关闭窗口不会退出软件，点「打开窗口」或程序坞图标即可重新打开；点停止会退出软件。", "再次启动会沿用这个境舱的登录数据，只有手动清除或删除境舱时才会删除。",
-      "首次附加会请求一次管理员授权，本次打开境舱期间不会再询问。"].map(text => <li key={text}><Info size={14} /><span>{t(text)}</span></li>)}</ul>}
-    {desktop && routing?.backend === "pf-utun" && typeof onCheckStorage === "function" &&
-      <ApplicationStorage onCheck={onCheckStorage} onReclaim={onReclaimStorage} formatBytes={formatBytes} pending={pending} t={t} />}
+    {tab !== "signInData" && startable && rows.length > 0 && <details className="application-notes">
+      <summary><Info size={14} /><span>{t("运行方式与登录数据")}</span></summary>
+      <ul>{["附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。",
+        "关闭窗口不会退出软件，点「打开窗口」或程序坞图标即可重新打开。",
+        "再次启动会沿用这个境舱的登录数据；它保存在「登录数据」里，停止和移除软件都不会删除。"].map(text => <li key={text}><span>{t(text)}</span></li>)}</ul>
+    </details>}
   </div>;
 }
 export function MonitorWorkspace({
@@ -289,7 +299,7 @@ export function MonitorWorkspace({
         label,
         icon: Icon,
         rows
-      }) => <div key={id}><span><Icon size={19} />{t(label)}</span><strong>{rows.length}<small>{t("运行中")}</small></strong></div>)}</div>
+      }) => <div key={id}><span><Icon size={17} />{t(label)}</span><strong>{rows.length}</strong><small>{t("运行中")}</small></div>)}</div>
     <div className="section-heading"><h2>{t("正在运行")}</h2></div>
     <div className="monitor-runtime-list">{categories.flatMap(({
         id,
@@ -301,11 +311,11 @@ export function MonitorWorkspace({
             stopping: "停止中",
             closing: "关闭中"
           }[row.status] || row.status)}</span><button className="button" onClick={() => onNavigate(id)}>{t("查看")}</button></div>))}{!browsers.length && !terminals.length && !apps.length && <div className="empty-activity">{t("当前没有运行中的会话")}</div>}</div>
-    <div className="section-heading activity-heading"><h2>{t("运行记录")}</h2></div>
-    <div className="activity-list">{events.length ? [...events].sort((a, b) => new Date(b.time) - new Date(a.time)).slice(0, 80).map(event => <div className="activity-row" key={event.id}><span className={`activity-dot ${event.type === "error" ? "failure" : ""}`} /><span className="activity-message">{t(event.message)}</span><time>{new Date(event.time).toLocaleTimeString(localeForInterfaceLanguage(language), {
+    {events.length > 0 && <div className="section-heading activity-heading"><h2>{t("运行记录")}</h2></div>}
+    <div className={`activity-list${events.length ? "" : " is-empty"}`}>{events.length ? [...events].sort((a, b) => new Date(b.time) - new Date(a.time)).slice(0, 80).map(event => <div className="activity-row" key={event.id}><span className={`activity-dot ${event.type === "error" ? "failure" : ""}`} /><span className="activity-message">{t(event.message)}</span><time>{new Date(event.time).toLocaleTimeString(localeForInterfaceLanguage(language), {
             hour: "2-digit",
             minute: "2-digit",
             second: "2-digit"
-          })}</time></div>) : <div className="empty-activity"><Clock size={20} />{t("暂无运行记录")}</div>}</div>
+          })}</time></div>) : <div className="empty-activity"><Clock size={17} />{t("暂无运行记录")}</div>}</div>
   </div>;
 }

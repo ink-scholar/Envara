@@ -14,7 +14,7 @@
     "start": "npm run native:prepare && npm run proxy:prepare && electron .",
     "test": "node --test tests/*.test.mjs",
     "test:smoke": "node scripts/native-smoke.mjs",
-    "dist:mac": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run routing:build:mac && npm run routing:build:mac:local && npm run routing:build:mac:acceptance && npm run routing:build:mac:pf && npm run build && electron-builder --mac",
+    "dist:mac": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run routing:build:mac && npm run routing:build:mac:local && npm run routing:build:mac:acceptance && npm run routing:build:mac:pf && npm run routing:build:mac:link-router && npm run build && electron-builder --mac",
     "dist:win": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run routing:build:win && npm run build && electron-builder --win --x64",
     "dist:win:cross": "node scripts/prepare-windows-desktop.mjs --build",
     "dist:linux": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run build && electron-builder --linux --x64",
@@ -38,7 +38,8 @@
     "routing:test:win": "node scripts/test-windows-app-routing.mjs",
     "test:workspace": "node scripts/workspace-smoke.mjs",
     "test:privacy:sidecar": "node scripts/privacy-sidecar-smoke.mjs",
-    "test:package:resources": "node scripts/verify-package-resources.mjs"
+    "test:package:resources": "node scripts/verify-package-resources.mjs",
+    "routing:build:mac:link-router": "node scripts/build-macos-link-router.mjs"
   },
   "dependencies": {
     "cloakbrowser": "0.5.12",
@@ -154,7 +155,8 @@
           "**/*",
           "!**/.swift-build/**",
           "!macos-pf-*/**",
-          "!macos-pf-*"
+          "!macos-pf-*",
+          "!macos-link-router.json"
         ]
       },
       {

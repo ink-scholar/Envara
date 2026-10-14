@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { Stack, GlobeHemisphereWest, ChartLine, Gear, Plus, MagnifyingGlass, DownloadSimple, UploadSimple, Play, Stop, Copy, PencilSimple, Trash, ArrowsClockwise, FolderOpen, ArrowSquareOut, X, CheckCircle, WarningCircle, Browsers, CaretRight, Cpu, HardDrives, Clock, Eye, EyeSlash, ArrowRight, ShieldCheck, TerminalWindow, Desktop, Translate } from "@phosphor-icons/react";
 import { api } from "./client.js";
 import { TerminalDock } from "./TerminalPane.jsx";
@@ -8,6 +8,7 @@ import { locationFormState, verifiedLocationPreview, locationConfirmation, proxy
 import { googleMapsLocationURL, normalizeNetworkLocation } from "../shared/network-location.mjs";
 import { safeNotionTrial, notionTrialLocksConfiguration } from "./notion-trial-state.mjs";
 import { useI18n } from "./i18n.jsx";
+import { SYSTEM_BROWSER, linkBrowsersFor as linkBrowsersOf, linkBrowserChoice } from "./link-browser.mjs";
 import { LanguageWelcome } from "./LanguageWelcome.jsx";
 import { languageOptions, localeForInterfaceLanguage } from "../shared/interface-languages.mjs";
 import { BrowserWorkspace } from "./BrowserWorkspace.jsx";
@@ -647,7 +648,20 @@ function ProxyForm({
       <label className="location-confirmation"><input type="checkbox" checked={location.confirmed} onChange={event => { setLocation(previous => ({ ...previous, confirmed: event.target.checked })); setCheckError(""); }} /><span>{t("我确认这个网络环境的位置与时区")}</span></label>
     </>}{checkError && <p className="field-error network-flow-error" role="alert">{t(checkError)}</p>}</div><div className="modal-footer"><Button type="button" onClick={step === "location" ? () => setStep("connection") : onClose} disabled={saving}>{t(step === "location" ? "上一步" : "取消")}</Button><Button type="submit" className="primary" disabled={saving || checking || step === "location" && (!verified || !location.confirmed)}>{saving ? t("保存中…") : checking ? t("检测中…") : !api.isDesktop ? t("保存网络出口") : step === "connection" ? t("检测并继续") : t("保存网络环境")}</Button></div></form></Modal>;
 }
-function AttachApplicationForm({ profiles, proxies, groups, applications, selectedId, onSave, onClose, onAddNetwork, saving }) {
+/* Where links from an environment open: its own browser first, the other
+ * browsers of its network next, and the system browser last, which is said to
+ * leave the environment. */
+function LinkBrowserChoices({ candidates, chosen, onChoose, disabled = false }) {
+  const { t } = useI18n();
+  return <div className="network-choice-list">{[...candidates, null].map((item, index) => {
+    const value = item ? item.id : SYSTEM_BROWSER, selected = chosen === value;
+    return <button type="button" key={value || "own"} disabled={disabled} className={`network-choice ${selected ? "selected" : ""}`} aria-pressed={selected} onClick={() => onChoose(value)}>
+      {item ? <Browsers size={20} /> : <GlobeHemisphereWest size={20} />}
+      <span><strong>{item ? item.name : t("系统默认浏览器")}</strong><small>{item ? `${index === 0 ? `${t("本境舱")} · ` : ""}${t(item.status === "running" ? "运行中" : "已停止")}` : t("不使用境舱浏览器；链接会交给系统默认浏览器，不经过境舱网络。")}</small></span>
+      {selected && <CheckCircle size={19} />}</button>;
+  })}</div>;
+}
+function AttachApplicationForm({ profiles, proxies, groups, applications, selectedId, isActive = () => false, onSave, onClose, onAddNetwork, saving }) {
   const { t } = useI18n();
   const choices = networkApplicationChoices(proxies, groups, profiles);
   const preferred = choices.find(choice => choice.profileIds.includes(selectedId));
@@ -659,7 +673,13 @@ function AttachApplicationForm({ profiles, proxies, groups, applications, select
   const [error, setError] = useState("");
   const [picked, setPicked] = useState(null);
   const [retry, setRetry] = useState(0);
+  const [browserId, setBrowserId] = useState("");
   const choice = choices.find(item => item.id === choiceId);
+  /* The software runs in the environment the save will choose (or create); its
+   * own browser is the default, then the group's other browsers. */
+  const owner = choice ? chooseApplicationProfile(choice, profiles, selectedId, isActive) : null;
+  const ownBrowser = owner ?? (choice ? { id: "", name: `${picked?.name || t("选择软件")} · ${choice.name}`, status: "stopped" } : null);
+  const browsers = owner ? linkBrowsersOf(profiles, owner) : ownBrowser ? [ownBrowser] : [];
   useEffect(() => {
     if (step !== "application") return;
     let current = true;
@@ -686,9 +706,14 @@ function AttachApplicationForm({ profiles, proxies, groups, applications, select
       }
     } catch (value) { setError(value.message || t("操作未完成，请重试。")); }
   };
-  return <Modal title={t(step === "network" ? "选择网络分组" : "选择本地软件")} onClose={onClose} className="attach-application-modal">
-    <div className="network-flow-steps"><span className={step === "network" ? "current" : "complete"}><span>1</span>{t("网络分组")}</span><CaretRight size={14} /><span className={step === "application" ? "current" : ""}><span>2</span>{t("选择软件")}</span></div>
-    <div className="modal-body">{step === "network" ? choices.length ? <div className="network-choice-list">{choices.map(item => <button type="button" key={item.id} className={`network-choice ${choiceId === item.id ? "selected" : ""}`} aria-pressed={choiceId === item.id} onClick={() => setChoiceId(item.id)}><GlobeHemisphereWest size={21} /><span><strong>{item.name}</strong><small>{item.group ? item.proxy.name : protocolLabel(item.proxy.protocol)} · {item.proxy.location?.confirmed ? item.proxy.location.label || item.proxy.location.timezone : t("位置尚未确认")}</small></span>{choiceId === item.id && <CheckCircle size={19} />}</button>)}</div> : <div className="application-picker-empty"><GlobeHemisphereWest size={30} /><strong>{t("先创建网络环境")}</strong><Button type="button" onClick={onAddNetwork} icon={Plus}>{t("创建网络环境")}</Button></div> : <>
+  const steps = ["network", "application", "browser"];
+  const stepIndex = steps.indexOf(step);
+  return <Modal title={t(step === "network" ? "选择网络分组" : step === "application" ? "选择本地软件" : "链接使用的浏览器")} onClose={onClose} className="attach-application-modal">
+    <div className="network-flow-steps">{steps.map((name, index) => <React.Fragment key={name}>{index > 0 && <CaretRight size={14} />}<span className={step === name ? "current" : index < stepIndex ? "complete" : ""}><span>{index + 1}</span>{t(name === "network" ? "网络分组" : name === "application" ? "选择软件" : "浏览器")}</span></React.Fragment>)}</div>
+    <div className="modal-body">{step === "browser" ? <>
+      <p className="field-hint">{t("选定后，终端命令和软件发起的登录链接都在这个浏览器中打开。")}</p>
+      <LinkBrowserChoices candidates={browsers} chosen={browserId || ownBrowser?.id || ""} onChoose={value => setBrowserId(value === ownBrowser?.id ? "" : value)} />
+    </> : step === "network" ? choices.length ? <div className="network-choice-list">{choices.map(item => <button type="button" key={item.id} className={`network-choice ${choiceId === item.id ? "selected" : ""}`} aria-pressed={choiceId === item.id} onClick={() => setChoiceId(item.id)}><GlobeHemisphereWest size={21} /><span><strong>{item.name}</strong><small>{item.group ? item.proxy.name : protocolLabel(item.proxy.protocol)} · {item.proxy.location?.confirmed ? item.proxy.location.label || item.proxy.location.timezone : t("位置尚未确认")}</small></span>{choiceId === item.id && <CheckCircle size={19} />}</button>)}</div> : <div className="application-picker-empty"><GlobeHemisphereWest size={30} /><strong>{t("先创建网络环境")}</strong><Button type="button" onClick={onAddNetwork} icon={Plus}>{t("创建网络环境")}</Button></div> : <>
       <div className="selected-network-context"><GlobeHemisphereWest size={18} /><strong>{choice?.name}</strong><span>{choice?.proxy.location?.timezone || choice?.proxy.network?.timezone || t("自动时区")}</span></div>
       <div className="search-input application-picker-search"><MagnifyingGlass size={17} /><input value={query} onChange={event => setQuery(event.target.value)} maxLength={256} placeholder={t("搜索本地软件")} aria-label={t("搜索本地软件")} /></div>
       <div className="local-application-list" aria-live="polite">{loading ? <div className="application-picker-empty"><ArrowsClockwise className="spin" size={23} /><span>{t("正在读取本地软件…")}</span></div> : error ? <div className="application-picker-empty"><WarningCircle size={24} /><span>{t(error)}</span><Button type="button" onClick={() => setRetry(value => value + 1)}>{t("重新读取")}</Button></div> : catalog?.applications.length ? catalog.applications.map(application => {
@@ -699,12 +724,13 @@ function AttachApplicationForm({ profiles, proxies, groups, applications, select
       <div className="application-picker-file"><Button type="button" icon={FolderOpen} onClick={chooseFromFile} disabled={saving}>{t("从文件选择…")}</Button>{picked && <span className="application-picked"><ApplicationIcon path={picked.path} size={22} className="choice-icon" /><strong title={picked.path}>{picked.name || picked.path.split(/[\\/]/).pop()}</strong></span>}</div>
       <p className="field-hint">{t("使用已确认的网络环境；定位支持取决于软件。")}</p>
     </>}{step === "network" && error && <p className="field-error" role="alert">{t(error)}</p>}</div>
-    <div className="modal-footer"><Button type="button" disabled={saving} onClick={step === "network" ? onClose : () => { setStep("network"); setError(""); }}>{t(step === "network" ? "取消" : "上一步")}</Button><Button className="primary" disabled={saving || !choice || step === "application" && (!picked || isApplicationAlreadyAttached(picked, applications))} onClick={async () => {
+    <div className="modal-footer"><Button type="button" disabled={saving} onClick={step === "network" ? onClose : () => { setStep(steps[stepIndex - 1]); setError(""); }}>{t(step === "network" ? "取消" : "上一步")}</Button><Button className="primary" disabled={saving || !choice || step === "application" && (!picked || isApplicationAlreadyAttached(picked, applications))} onClick={async () => {
       if (!choice) { setError(t("网络分组已改变，请重新选择。")); return; }
-      if (step === "network") { setStep("application"); return; }
-      const result = await onSave(choice, picked);
+      setError("");
+      if (step !== steps.at(-1)) { setStep(steps[stepIndex + 1]); return; }
+      const result = await onSave(choice, picked, browserId || null);
       if (!result?.ok) setError(result?.message || t("操作未完成，请重试。"));
-    }}>{saving ? t("保存中…") : step === "network" ? t("选择软件") : t("添加软件")}</Button></div>
+    }}>{saving ? t("保存中…") : step === steps.at(-1) ? t("添加软件") : t(step === "network" ? "选择软件" : "下一步")}</Button></div>
   </Modal>;
 }
 function BrowserDetail({
@@ -829,6 +855,12 @@ function WorkspaceApp() {
       if (!acceptSnapshot(value)) refresh().catch(() => {});
     });
   }, [refresh, acceptSnapshot]);
+  /* Where each link from an environment went: its browser, the host browser,
+   * or nowhere because the browser refused. */
+  useEffect(() => typeof api.onLinkEvent === "function" ? api.onLinkEvent(event => {
+    if (!event?.message) return;
+    setToast({ type: event.type === "error" ? "error" : event.type === "link" ? "success" : "info", message: event.message });
+  }) : undefined, []);
   useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(() => setToast(null), 6000);
@@ -1270,9 +1302,32 @@ function WorkspaceApp() {
     ...profile,
     workspace: terminalProfiles.find(item => item.profileId === profile.id)
   }));
+  /* The browsers an environment's links may use: the same network group and the
+   * same node as the environment itself. */
+  const [linkRouter, setLinkRouter] = useState(null);
+  useEffect(() => {
+    if (!api.isDesktop || page !== "settings") return;
+    api.call("linkRouterStatus").then(value => setLinkRouter(value)).catch(() => setLinkRouter(null));
+  }, [page, snapshot.settings]);
+  const linkBrowsersFor = profile => linkBrowsersOf(profiles, profile);
+  const linkBrowserName = (candidates, chosenId) => { const value = linkBrowserChoice(candidates, chosenId); return value === SYSTEM_BROWSER ? t("系统默认浏览器") : candidates.find(item => item.id === value)?.name || t("系统默认浏览器"); };
+  const terminalLinkBrowsers = linkBrowsersFor(selected);
+  /* Save where an environment's terminal links open, then have the dock read
+   * the stored value back so every view names the same browser. */
+  const [terminalRefresh, setTerminalRefresh] = useState(0);
+  const saveTerminalLinkBrowser = async (profile, value) => {
+    const result = await perform("setTerminalLinkBrowser", { id: profile.id, browserProfileId: value === profile.id ? null : value }, t("链接浏览器已保存"));
+    if (!result.ok) return;
+    const updates = result.result?.profiles ?? [];
+    setTerminalProfiles(current => [...current.filter(item => !updates.some(update => update.profileId === item.profileId)), ...updates.map(update => ({ ...(current.find(item => item.profileId === update.profileId) ?? {}), ...update }))]);
+    setTerminalRefresh(value => value + 1);
+    closeModal();
+  };
   const terminalContextProfiles = profiles.map(profile => {
     const proxy = proxies.find(item => item.id === profile.proxyId);
-    return proxy?.location?.confirmed && proxy.location.timezone ? { ...profile, savedNetworkTimezone: proxy.location.timezone, savedNetworkLocation: proxy.location } : profile;
+    const measured = profile.network?.ok ? profile.network : proxy?.network?.ok ? proxy.network : null;
+    const network = { networkName: proxy?.name || null, networkEgress: measured ? { ip: measured.ip, country: measured.country, countryCode: measured.countryCode, city: measured.city, timezone: measured.timezone } : null };
+    return proxy?.location?.confirmed && proxy.location.timezone ? { ...profile, ...network, savedNetworkTimezone: proxy.location.timezone, savedNetworkLocation: proxy.location } : { ...profile, ...network };
   });
   const withDetail = ["profiles", "browsers", "applications"].includes(page);
   const navigate = target => {
@@ -1308,7 +1363,7 @@ function WorkspaceApp() {
   };
   const pickApplication = () => { if (api.isDesktop) setModal({ type: "attachApplication" }); };
   const activeInEnvironment = profile => ["running", "starting"].includes(profile?.status) || terminalActive(profile?.id) || applications.some(item => item.profileId === profile?.id && (["running", "starting", "stopping"].includes(item.status) || notionTrialLocksConfiguration(item, pending)));
-  const saveAttachedApplication = async (choice, application) => {
+  const saveAttachedApplication = async (choice, application, browserProfileId = null) => {
     const key = "attachApplication:";
     if (pendingRef.current.has(key)) return { ok: false, message: t("此操作正在进行中。") };
     pendingRef.current.add(key);
@@ -1331,7 +1386,8 @@ function WorkspaceApp() {
         if (!owner) return { ok: false, message: t("未能确认新境舱，请在环境页检查。") };
         created = owner;
       }
-      const result = await perform("saveApplication", { application: { profileId: owner.id, path: application.path, name: application.name } }, t("软件已添加"));
+      const linkBrowser = browserProfileId && browserProfileId !== owner.id ? browserProfileId : null;
+      const result = await perform("saveApplication", { application: { profileId: owner.id, path: application.path, name: application.name, ...(linkBrowser ? { browserProfileId: linkBrowser } : {}) } }, t("软件已添加"));
       if (result.ok) { setSelectedId(owner.id); setModal(null); return result; }
       if (created) {
         // Remove only the fresh, unused environment we created, after reading
@@ -1372,7 +1428,7 @@ function WorkspaceApp() {
           label,
           icon: Icon
         }) => <button key={id} className={`nav-item ${page === id ? "active" : ""}`} onClick={() => navigate(id)}><Icon size={20} weight={page === id ? "fill" : "regular"} /><span>{t(label)}</span>{id === "profiles" && <span className="nav-count">{profiles.length}</span>}</button>)}</nav>
-      <div className="sidebar-bottom"><button className={`nav-item settings-navigation ${page === "settings" ? "active" : ""}`} onClick={() => navigate("settings")}><Gear size={20} weight={page === "settings" ? "fill" : "regular"} /><span>{t("设置")}</span></button><div className="storage-summary"><span>{t("环境数据")}</span><span>{bytes(totalBytes)}</span></div><div className="owner"><div className="owner-avatar">{t("境")}</div><div><strong>{t("本地工作区")}</strong><span>{t("设备所有者")}</span></div><span className="local-dot" /></div></div>
+      <div className="sidebar-bottom"><button className={`nav-item settings-navigation ${page === "settings" ? "active" : ""}`} onClick={() => navigate("settings")}><Gear size={20} weight={page === "settings" ? "fill" : "regular"} /><span>{t("设置")}</span></button><div className="owner" title={t("本地工作区 · 设备所有者")}><div className="owner-avatar">{t("境")}</div><div><strong>{t("本地工作区")}</strong><span>{totalBytes > 0 ? `${t("环境数据")} ${bytes(totalBytes)}` : t("设备所有者")}</span></div><span className="local-dot" /></div></div>
     </aside>
     <main className="main-panel">
       <header className="page-header"><div className="page-heading"><div className="heading-line"><h1 tabIndex={-1}>{t(page === "settings" ? "设置" : navItems.find(item => item.id === page)?.label)}</h1>{!api.isDesktop && <span className="preview-badge">{t("界面预览")}</span>}</div><p>{t(subtitle)}</p></div>
@@ -1411,43 +1467,33 @@ function WorkspaceApp() {
       })} onEdit={editSelected} onCreate={() => setModal({
         type: "createProfile"
       })} onInstall={installRuntime} busyProfile={busyProfile} editingDisabled={id => terminalActive(id) || applications.some(item => item.profileId === id && (["running", "starting", "stopping"].includes(item.status) || notionTrialLocksConfiguration(item, pending)))} pending={pending} t={t} />}
-      {page === "terminals" && <div className="terminal-page-context"><TerminalWindow size={18} /><span>{selectedProxy?.location?.confirmed ? `${selectedProxy.name} · ${selectedProxy.location.label || ""} · ${selectedProxy.location.timezone}` : t("选择境舱和工作目录，打开终端即可使用本地工具。")}</span></div>}
+      {page === "terminals" && <div className="terminal-page-context"><TerminalWindow size={18} /><span>{selectedProxy?.location?.confirmed ? `${selectedProxy.name} · ${selectedProxy.location.label || ""} · ${selectedProxy.location.timezone}` : t("选择境舱和工作目录，打开终端即可使用本地工具。")}</span>
+        {selected && <button type="button" className="link-browser-chip" onClick={() => setModal({ type: "terminalLinkBrowser" })} title={t("链接使用的浏览器")}><Browsers size={13} />{t("链接使用的浏览器")}<strong>{linkBrowserName(terminalLinkBrowsers, selectedWorkspace?.browserProfileId)}</strong><CaretRight size={11} /></button>}
+      </div>}
       {page === "applications" && <ApplicationsWorkspace profiles={profiles} proxies={proxies} applications={applications} routing={snapshot.applicationRouting} selectedId={selectedId} onSelect={setSelectedId} onPick={pickApplication} onStart={application => perform("startApplication", {
         id: application.id
       })} onStop={application => perform("stopApplication", {
         id: application.id
-      }, t("软件已停止"))} onRunNotionTrial={async application => { const result = await perform("runNotionTrial", { id: application.id }); if (!result.ok) await refresh().catch(() => {}); }} onStopNotionTrial={async application => { const result = await perform("stopNotionTrial", { id: application.id }); if (!result.ok) await refresh().catch(() => {}); }} onExportNotionDiagnostics={application => perform("exportNotionDiagnostics", { id: application.id })} onCheckStorage={() => perform("applicationStorage", {})} formatBytes={bytes} onReclaimStorage={(items, total, recheck) => setModal({
+      }, t("软件已停止"))} onRunNotionTrial={async application => { const result = await perform("runNotionTrial", { id: application.id }); if (!result.ok) await refresh().catch(() => {}); }} onStopNotionTrial={async application => { const result = await perform("stopNotionTrial", { id: application.id }); if (!result.ok) await refresh().catch(() => {}); }} onExportNotionDiagnostics={application => perform("exportNotionDiagnostics", { id: application.id })} onChooseLinkBrowser={application => setModal({ type: "linkBrowser", application })} linkCandidates={application => linkBrowsersFor(profiles.find(item => item.id === application.profileId))} onCheckSignInData={() => perform("signInData", {})} onDeleteSignInData={(item, after) => setModal({
         type: "confirm",
-        title: t("删除未使用的数据？"),
-        description: t("以下数据都没有在使用，共 {value1}，删除后无法恢复。之后再附加对应的软件时需要重新登录。", { value1: total }),
-        items: items.map(item => `${item.label} · ${bytes(item.bytes)}`),
-        method: "reclaimApplicationStorage",
-        id: "",
-        args: { ids: items.map(item => item.id) },
+        title: t("删除「{value1}」的登录数据？", { value1: item.application?.name || t("已移除的软件") }),
+        description: t("下次启动这个软件需要重新登录；软件本身和它的环境都不受影响。"),
+        method: "deleteSignInData",
+        id: item.id,
         button: t("删除"),
-        success: t("已删除未使用的数据"),
-        onDone: () => recheck()
-      })} onDelete={application => setModal({
+        success: t("登录数据已删除"),
+        onDone: () => after()
+      })} formatBytes={bytes} onDelete={application => setModal({
         type: "confirm",
         title: t("移除「{value1}」？", {
           value1: application.name
         }),
-        description: t("只移除绑定，登录数据会保留；要清除，请先点「清除登录数据」。"),
+        description: t("只移除绑定，登录数据会保留；要删除，请到「登录数据」里删除。"),
         method: "deleteApplication",
         id: application.id,
         button: t("移除软件"),
         success: t("软件已移除")
-      })} onShowApplicationWindow={application => perform("showApplicationWindow", { id: application.id })} onClearApplicationData={application => setModal({
-        type: "confirm",
-        title: t("清除「{value1}」在这个境舱的登录数据？", {
-          value1: application.name
-        }),
-        description: t("下次启动需要重新登录；电脑上的软件本身不受影响。"),
-        method: "clearApplicationData",
-        id: application.id,
-        button: t("清除登录数据"),
-        success: t("登录数据已清除")
-      })} onSetup={() => perform("setupApplicationRouting")} onInstall={() => perform("setupApplicationRouting", { activate: true })} pending={pending} t={t} desktop={api.isDesktop} />}
+      })} onShowApplicationWindow={application => perform("showApplicationWindow", { id: application.id })} onInstall={() => perform("setupApplicationRouting", { activate: true })} pending={pending} t={t} desktop={api.isDesktop} />}
       {page === "proxies" && <div className="page-content"><div className="section-note"><ShieldCheck size={18} /><span>{api.isDesktop ? t("创建时确认位置与时区，浏览器、终端和附加软件共同使用。") : t("真实出口识别需要境舱桌面应用；预览中可管理示例代理配置。")}</span></div>{proxies.length ? <div className="proxy-table"><div className="proxy-grid table-head"><span>{t("网络出口")}</span><span>{t("服务器")}</span><span>{t("实际出口")}</span><span>{t("操作")}</span></div>{proxies.map(proxy => <div className="proxy-grid proxy-row" key={proxy.id}><div className="proxy-name"><div className="proxy-icon"><GlobeHemisphereWest size={20} /></div><div><strong>{proxy.name}</strong><small>{profiles.filter(profile => profile.proxyId === proxy.id).length}{t("个环境使用")}{snapshot.groups?.some(group => group.proxyId === proxy.id) && t(" · {value1} 个分组绑定", {
                     value1: snapshot.groups.filter(group => group.proxyId === proxy.id).length
                   })}</small></div></div><div className="proxy-server"><span className="server-address">{proxy.host}:{proxy.port}</span><span className="protocol-tag">{protocolLabel(proxy.protocol)}</span></div><NetworkResult compact network={proxyTests[proxy.id]?.checking ? null : proxyTests[proxy.id] || proxy.network} checking={proxyTests[proxy.id]?.checking} /><div className="row-actions"><Button onClick={() => checkProxy(proxy)} disabled={!api.isDesktop || proxyTests[proxy.id]?.checking} title={api.isDesktop ? t("识别实际网络出口") : t("出口识别需要桌面应用")}>{t("识别")}</Button><IconButton icon={PencilSimple} label={t("编辑网络出口")} onClick={() => setModal({
@@ -1477,6 +1523,9 @@ function WorkspaceApp() {
               }
             })} /></div><div className="settings-row"><div><strong>{t("本地数据")}</strong><span className="path-label">{t(system.dataDir)}</span></div><Button icon={FolderOpen} disabled={!api.isDesktop} onClick={() => perform("openDataDirectory")}>{t("打开目录")}</Button></div></div>
         {api.isDesktop && snapshot.legacyMigration?.available && <div className="settings-card settings-rows migration-settings"><div className="settings-row"><div><strong>{t("旧版本工作区")}</strong></div><Button onClick={previewMigration} disabled={pending["previewLegacyMigration:"]}>{t("迁移旧环境")}</Button></div></div>}
+        {api.isDesktop && linkRouter && <><div className="section-heading"><h2>{t("打开链接")}</h2></div><div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("链接由境舱浏览器打开")}</strong><span>{t("终端和附加软件的链接用境舱里的浏览器打开；关闭后改用本机浏览器，不经过境舱网络。")}</span></div>
+          <label className="proxy-check-option settings-switch"><input type="checkbox" checked={linkRouter.preference !== false} disabled={pending["setLinkRouter:"]} onChange={async event => { const result = await perform("setLinkRouter", { enabled: event.target.checked }); if (result.ok && result.result) setLinkRouter(result.result); }} /><span>{t(linkRouter.preference !== false ? "已开启" : "已关闭")}</span></label></div>
+          {linkRouter.preference !== false && linkRouter.available && !linkRouter.enabled && <div className="settings-row"><div><strong>{t("等待 macOS 允许")}</strong><span>{t("附加软件自己打开的链接（例如登录）要 macOS 允许后才能交给境舱浏览器；终端里的链接不受影响。")}</span></div><Button onClick={async () => { const result = await perform("setLinkRouter", { enabled: true }); if (result.ok && result.result) setLinkRouter(result.result); }} disabled={pending["setLinkRouter:"]}>{t("允许")}</Button></div>}</div></>}
         <div className="section-heading"><h2>{t("关于")}</h2></div><div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("Envara 境舱")}</strong><span>{t("开源的本地独立工作空间")}</span></div><span className="version-label">{system.appVersion || "—"}</span></div><div className="settings-row"><div><strong>{t("浏览器内核许可")}</strong></div><Button onClick={() => perform("openDocumentation", {
               target: "runtime-license"
             })}>{t("查看许可")}</Button></div><div className="settings-row"><div><strong>GitHub</strong></div><Button icon={ArrowSquareOut} onClick={() => perform("openDocumentation", {
@@ -1491,18 +1540,28 @@ function WorkspaceApp() {
       }, t("会话已停止"))} onEdit={() => editSelected(selected)} onClear={() => confirmClear(selected)} editingDisabled={activeInEnvironment(selected)} t={t} /> : <ContextDetail profile={selected} proxy={selectedProxy} workspace={selectedWorkspace} onEdit={() => editSelected(selected)} onDirectory={chooseDirectory} directoryDisabled={!api.isDesktop || !selected || activeInEnvironment(selected) || !!pending[`chooseWorkspaceDirectory:${selected?.id}`]} onNavigate={navigate} onClone={() => cloneProfile(selected)} onExport={() => perform("exportProfiles", {
         id: selected.id
       }, t("环境配置已导出"))} onDelete={() => confirmDelete(selected)} editingDisabled={activeInEnvironment(selected)} t={t} />}</aside>}
-    <TerminalDock profiles={terminalContextProfiles} visible={terminalVisible} onHide={() => {
+    <TerminalDock profiles={terminalContextProfiles} selectedProfileId={selectedId} visible={terminalVisible} onHide={() => {
       setTerminalVisible(false);
       setTerminalExpanded(false);
       if (page === "terminals") setPage("profiles");
-    }} expanded={terminalExpanded} onToggleExpanded={() => setTerminalExpanded(value => !value)} onHeightChange={resizeTerminalDock} minHeight={320} maxHeight={terminalMaxHeight} openRequest={terminalRequest} onError={terminalError} onProfilesChange={setTerminalProfiles} />
-    {modal?.type === "attachApplication" && <AttachApplicationForm profiles={profiles} proxies={proxies} groups={snapshot.groups} applications={applications} selectedId={selectedId} onSave={saveAttachedApplication} onClose={closeModal} onAddNetwork={() => { setPage("proxies"); setModal({ type: "createProxy" }); }} saving={pending["attachApplication:"]} />}
+    }} expanded={terminalExpanded} onToggleExpanded={() => setTerminalExpanded(value => !value)} onHeightChange={resizeTerminalDock} minHeight={320} maxHeight={terminalMaxHeight} openRequest={terminalRequest} refreshKey={terminalRefresh} onError={terminalError} onProfilesChange={setTerminalProfiles} />
+    {modal?.type === "attachApplication" && <AttachApplicationForm profiles={profiles} proxies={proxies} groups={snapshot.groups} applications={applications} selectedId={selectedId} isActive={activeInEnvironment} onSave={saveAttachedApplication} onClose={closeModal} onAddNetwork={() => { setPage("proxies"); setModal({ type: "createProxy" }); }} saving={pending["attachApplication:"]} />}
     {(modal?.type === "createProfile" || modal?.type === "editProfile") && <ProfileForm profile={modal.profile} proxies={proxies} systemPlatform={system.platform} engines={engines} defaultEngine={snapshot.settings?.defaultEngine} groups={groups} groupDescriptors={snapshot.groups} onSave={saveProfile} onClose={closeModal} saving={pending[`updateProfile:${modal.profile?.id}`] || pending["createProfile:"]} />}{(modal?.type === "createProxy" || modal?.type === "editProxy") && <ProxyForm proxy={modal.proxy} proxyCore={system.proxyCore} onSave={saveProxy} onClose={closeModal} saving={pending["saveProxy:"]} />}{modal?.type === "importMapping" && <ImportMappingForm session={modal.session} proxies={proxies} onImport={proxyMap => importProfiles({
       importId: modal.session.importId,
       proxyMap
     })} onAddProxy={() => {
       closeModal();
       setPage("proxies");
-    }} onClose={closeModal} saving={pending[`importProfiles:${modal.session.importId}`]} />}{modal?.type === "migration" && migration && <MigrationForm migration={migration} onMigrate={migrate} onClose={closeModal} saving={pending["migrateLegacy:"]} />}{modal?.type === "moveGroup" && <GroupForm groups={groups} count={checkedIds.length} onSave={group => runBulk("group", group)} onClose={closeModal} saving={bulkRunning} />}{modal?.type === "confirm" && <Modal title={modal.title} onClose={closeModal} className="confirm-modal"><div className="modal-body"><div className="confirm-warning"><WarningCircle size={23} /><p>{modal.description}</p></div>{modal.items?.length > 0 && <ul className="confirm-items">{modal.items.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>}</div><div className="modal-footer"><Button onClick={closeModal}>{t("取消")}</Button><Button className="danger" onClick={confirmAction} disabled={pending[`${modal.method}:${modal.id}`]}>{pending[`${modal.method}:${modal.id}`] ? t("处理中…") : modal.button}</Button></div></Modal>}{toast && <div className={`toast toast-${toast.type}`} role="status">{toast.type === "error" ? <WarningCircle size={19} /> : toast.type === "success" ? <CheckCircle size={19} /> : <Browsers size={19} />}<span>{t(toast.message)}</span><IconButton icon={X} label={t("关闭通知")} onClick={() => setToast(null)} /></div>}
+    }} onClose={closeModal} saving={pending[`importProfiles:${modal.session.importId}`]} />}{modal?.type === "migration" && migration && <MigrationForm migration={migration} onMigrate={migrate} onClose={closeModal} saving={pending["migrateLegacy:"]} />}{modal?.type === "moveGroup" && <GroupForm groups={groups} count={checkedIds.length} onSave={group => runBulk("group", group)} onClose={closeModal} saving={bulkRunning} />}{modal?.type === "terminalLinkBrowser" && selected && <Modal title={t("选择此环境的浏览器")} onClose={closeModal} className="attach-application-modal"><div className="modal-body">
+      <p className="field-hint">{t("环境中的软件和终端打开链接时使用它。")}</p>
+      <LinkBrowserChoices candidates={terminalLinkBrowsers} chosen={linkBrowserChoice(terminalLinkBrowsers, selectedWorkspace?.browserProfileId)} disabled={!!pending[`setTerminalLinkBrowser:${selected?.id}`]} onChoose={value => void saveTerminalLinkBrowser(selected, value)} />
+    </div></Modal>}{modal?.type === "linkBrowser" && <Modal title={t("链接使用的浏览器")} onClose={closeModal} className="attach-application-modal"><div className="modal-body">
+      <p className="field-hint">{t("选定后，终端命令和软件发起的登录链接都在这个浏览器中打开。")}</p>
+      {(() => {
+        const candidates = linkBrowsersFor(profiles.find(row => row.id === modal.application.profileId));
+        return <LinkBrowserChoices candidates={candidates} chosen={linkBrowserChoice(candidates, modal.application.browserProfileId)} disabled={!!pending[`setApplicationLinkBrowser:${modal.application.id}`]}
+          onChoose={async value => { const result = await perform("setApplicationLinkBrowser", { id: modal.application.id, browserProfileId: value === modal.application.profileId ? null : value }, t("链接浏览器已保存")); if (result.ok) closeModal(); }} />;
+      })()}
+    </div></Modal>}{modal?.type === "confirm" && <Modal title={modal.title} onClose={closeModal} className="confirm-modal"><div className="modal-body"><div className="confirm-warning"><WarningCircle size={23} /><p>{modal.description}</p></div>{modal.items?.length > 0 && <ul className="confirm-items">{modal.items.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>}</div><div className="modal-footer"><Button onClick={closeModal}>{t("取消")}</Button><Button className="danger" onClick={confirmAction} disabled={pending[`${modal.method}:${modal.id}`]}>{pending[`${modal.method}:${modal.id}`] ? t("处理中…") : modal.button}</Button></div></Modal>}{toast && <div className={`toast toast-${toast.type}`} role="status">{toast.type === "error" ? <WarningCircle size={19} /> : toast.type === "success" ? <CheckCircle size={19} /> : <Browsers size={19} />}<span>{t(toast.message)}</span><IconButton icon={X} label={t("关闭通知")} onClick={() => setToast(null)} /></div>}
   </div>;
 }

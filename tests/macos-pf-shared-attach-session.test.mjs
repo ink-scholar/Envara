@@ -105,9 +105,11 @@ function attachFixture(options = {}) {
   let canCreate = options.canCreate ?? true;
   const carrier = carrierFactory({ ...options, canCreate: () => canCreate });
   // No createClient: this is the default the packaged app uses.
+  const pruned = [];
   const trial = new MacOSPFNotionTrial({ authorizerPath: '/fixture/EnvaraPFInstall', verifyCandidate: async () => true,
-    verifyNotion: async () => true, watchMs: 0, spawnCarrier: carrier.spawnCarrier });
-  return { trial, carrier, setCanCreate: value => { canCreate = value; },
+    verifyNotion: async () => true, watchMs: 0, spawnCarrier: carrier.spawnCarrier,
+    pruneApplicationData: async value => { pruned.push(value); return 1024; } });
+  return { trial, carrier, pruned, setCanCreate: value => { canCreate = value; },
     attach: () => trial.run({ request: request(), applicationId: 'notion_bound', activationAuthorized: true }) };
 }
 
@@ -140,8 +142,9 @@ test('the default shared channel runs two attachments in one launch over one car
   assert.equal(second.phase, 'cleaned'); assert.equal(second.lifecyclePassed, true); assert.notEqual(first.runId, second.runId);
   assert.equal(f.carrier.sessions.length, 1, 'the administrator password is asked once per launch');
   const session = f.carrier.sessions[0];
-  assert.deepEqual(session.root.calls, ['status', 'prepareRoute', 'prepare', 'resume', 'stop', 'snapshot',
-    'status', 'prepareRoute', 'prepare', 'resume', 'stop', 'snapshot']);
+  await f.trial.housekeeping;
+  assert.deepEqual(session.root.calls, ['status', 'prepareRoute', 'prepare', 'resume', 'stop', 'snapshot', 'reclaim',
+    'status', 'prepareRoute', 'prepare', 'resume', 'stop', 'snapshot', 'reclaim']);
   assert.equal(session.exited, false, 'ending a run leaves the shared root session open');
   await f.trial.shutdownAll(); await until(() => session.exited);
   assert.equal(session.root.shutdowns(), 1); assert.equal(f.carrier.sessions.length, 1, 'quitting opens no new session');
@@ -299,4 +302,42 @@ test('storage is listed and removed on a channel of its own, never while an appl
   await assert.rejects(f.trial.applicationStorage(), { code: 'PF_NOTION_TRIAL_BUSY' });
   await attaching;
   await f.trial.shutdownAll();
+});
+
+test('a confirmed stop removes that run\'s copy and caches on the open session; sign-in data and the session stay', async () => {
+  const f = attachFixture();
+  const done = await f.attach();
+  assert.equal(done.phase, 'cleaned');
+  const outcome = await f.trial.housekeeping;
+  const session = f.carrier.sessions[0], registrationId = '4bf0f214-bcaa-4cea-af6f-b7e29800b4c5';
+  assert.deepEqual(session.root.reclaimed, [{ registrationIds: [registrationId], environmentIds: [] }], 'only the copy, never the data');
+  assert.equal(outcome.copy, 'deleted'); assert.equal(outcome.cacheBytesFreed, 1024);
+  assert.equal(f.pruned.length, 1); assert.equal(f.pruned[0].registrationId, registrationId);
+  assert.equal(f.carrier.sessions.length, 1); assert.equal(session.exited, false, 'cleanup opens no session and closes none');
+  await f.trial.shutdownAll();
+});
+
+test('quitting right after a stop waits for its housekeeping before the session closes', async () => {
+  const f = attachFixture();
+  const run = f.attach();
+  await run;
+  await f.trial.shutdownAll();
+  const session = f.carrier.sessions[0];
+  assert.ok(session.root.calls.indexOf('reclaim') > session.root.calls.indexOf('snapshot'));
+  assert.equal(f.pruned.length, 1);
+  await until(() => session.exited); assert.equal(session.root.shutdowns(), 1);
+});
+
+test('a run without confirmed cleanup, and a session that ended, get no housekeeping and no new session', async () => {
+  const refused = attachFixture({ refusePrepare: () => true });
+  const result = await refused.attach();
+  assert.notEqual(result.phase, 'cleaned');
+  assert.equal(refused.trial.housekeeping, null);
+  assert.ok(!refused.carrier.sessions[0].root.calls.includes('reclaim'));
+  await refused.trial.shutdownAll();
+  const ended = attachFixture();
+  await ended.attach(); await ended.trial.housekeeping; await ended.trial.disposeShared();
+  const outcome = await ended.trial.scheduleHousekeeping(request());
+  assert.equal(outcome.copy, 'failed', 'an ended session is not reopened for cleanup');
+  assert.equal(ended.carrier.sessions.length, 1, 'no administrator prompt for housekeeping');
 });

@@ -214,3 +214,26 @@ test('configuration symlinks are never followed or replaced', async t => {
   await writeFile(target, 'protected'); await symlink(target, filename);
   await assert.rejects(add(f), { code: 'APPLICATION_STORAGE_UNAVAILABLE' }); assert.equal(await readFile(target, 'utf8'), 'protected');
 });
+
+test('the designated link browser is stored on the binding, changed without a restart, and cleared explicitly', async t => {
+  const f = await fixture(t), item = await add(f, 'profile_a', { browserProfileId: 'profile_ph2' });
+  assert.equal(item.browserProfileId, 'profile_ph2');
+  // A save with an empty choice clears it; a save that does not mention it keeps it.
+  assert.equal((await f.service.saveApplication({ application: { ...item, name: 'Renamed' } })).applications.at(-1).browserProfileId, 'profile_ph2');
+  assert.equal((await f.service.setApplicationLinkBrowser({ id: item.id, browserProfileId: null })).applications.at(-1).browserProfileId, undefined);
+  // It can be changed while the application runs: links read it when they open.
+  const changed = await f.service.setApplicationLinkBrowser({ id: item.id, browserProfileId: 'profile_ph3' });
+  assert.equal(changed.applications.at(-1).browserProfileId, 'profile_ph3');
+  assert.equal((await f.service.setApplicationLinkBrowser({ id: item.id, browserProfileId: 'profile_ph3' })).applications.at(-1).browserProfileId, 'profile_ph3');
+  for (const value of ['../etc', 'a b', 7, 'x'.repeat(97)])
+    await assert.rejects(() => f.service.setApplicationLinkBrowser({ id: item.id, browserProfileId: value }), { code: 'APPLICATION_VALIDATION_ERROR' }, String(value));
+  // An empty choice means the system default browser, exactly like no choice.
+  assert.equal((await f.service.setApplicationLinkBrowser({ id: item.id, browserProfileId: '' })).applications.at(-1).browserProfileId, undefined);
+  await assert.rejects(() => f.service.setApplicationLinkBrowser({ id: 'app_missing', browserProfileId: 'profile_ph2' }), { code: 'APPLICATION_NOT_FOUND' });
+  await f.service.setApplicationLinkBrowser({ id: item.id, browserProfileId: 'profile_ph3' });
+  // It survives a restart, and an unreadable value is never trusted.
+  const reloaded = new ApplicationService({ dataDir: path.join(f.root, 'data'), resolveContext: async () => null, routing: new TestRouting(), pollIntervalMs: 0 });
+  t.after(() => reloaded.shutdown());
+  await reloaded.ready;
+  assert.equal((await reloaded.snapshot()).applications[0].browserProfileId, 'profile_ph3');
+});

@@ -16,6 +16,13 @@ contextBridge.exposeInMainWorld('envara', Object.freeze({
     ipcRenderer.on('envara:snapshot', handler);
     return () => ipcRenderer.removeListener('envara:snapshot', handler);
   },
+  /* Where a link from an environment went, so the page can say so. */
+  onLinkEvent: (listener) => {
+    if (typeof listener !== 'function') throw new TypeError('链接监听器必须是函数。');
+    const handler = (_event, message) => listener(message);
+    ipcRenderer.on('envara:link-event', handler);
+    return () => ipcRenderer.removeListener('envara:link-event', handler);
+  },
   onTerminalEvent: (listener) => {
     if (typeof listener !== 'function') throw new TypeError('终端监听器必须是函数。');
     const handler = (_event, message) => listener(message);

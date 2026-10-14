@@ -60,3 +60,18 @@
 .terminal-view-notice { flex-shrink: 0; color: #9191a0; white-space: nowrap; }
 .terminal-dock button:focus-visible { outline: 2px solid #58a9ff; outline-offset: -2px; }
 @media (max-width: 1150px) { .terminal-timezone { max-width: 220px; } .terminal-context-bar { gap: 7px; padding-left: 12px; padding-right: 12px; } .terminal-environment-tab { max-width: 190px; } }
+/* Links an environment opens use its designated browser; this states which. */
+.terminal-page-context .link-browser-chip { margin-left: auto; }
+.terminal-link-note { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; color: #85858f; font-size: 11.5px; }
+/* New terminal: which environment, and where inside it. */
+.terminal-new-session { position: absolute; right: 14px; bottom: 16px; z-index: 6; width: min(360px, calc(100% - 28px)); display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px; border: 1px solid var(--edge, #33333b); border-radius: 10px; background: #24242a; box-shadow: 0 18px 48px #00000059; }
+.terminal-new-session-head { display: flex; align-items: center; gap: 8px; }
+.terminal-new-session-head strong { flex: 1; font-size: 12.5px; font-weight: 550; color: #dcdce6; }
+.terminal-new-session > label { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; font-size: 11.5px; color: #8b8b98; }
+.terminal-new-session > label > select { width: 100%; min-width: 0; min-height: 30px; padding: 5px 8px; border: 1px solid #41414b; border-radius: 6px; background: #26262c; color: #e8e8eb; font-size: 12px; }
+.terminal-new-session-directory { min-width: 0; display: flex; align-items: center; gap: 7px; padding: 7px 9px; border: 1px solid #34343d; border-radius: 6px; background: #212127; color: #a6a6b3; font-size: 11.5px; }
+.terminal-new-session-directory > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-new-session-error { color: #dc9da5; font-size: 11.5px; line-height: 1.5; }
+.terminal-new-session-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.terminal-new-session > label > .terminal-new-session-egress { color: #7f8b9c; font-size: 11px; font-variant-numeric: tabular-nums; }
+.terminal-new-session-field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; font-size: 11.5px; color: #8b8b98; }

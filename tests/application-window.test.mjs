@@ -47,22 +47,22 @@ test('the window is reopened by process id only, and a missing instance or macOS
 
 test('sign-in data is cleared for one application or a whole environment, only inside user-owned UserData', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'envara-app-data-')); t.after(() => rm(root, { recursive: true, force: true }));
-  const environment = path.join(root, pfAttachEnvironmentId('prof_a7d00a31b3e2'));
+  const environment = path.join(root, pfAttachEnvironmentId('prof_fixture_owner'));
   for (const id of [registration, other]) {
     await mkdir(path.join(environment, id, 'UserData', 'Local Storage'), { recursive: true });
     await writeFile(path.join(environment, id, 'UserData', 'Cookies'), 'session');
   }
   const uid = process.getuid();
-  assert.deepEqual(await eraseAttachedApplicationData('prof_a7d00a31b3e2', { registrationId: registration, root, uid, platform: 'darwin' }), [registration]);
+  assert.deepEqual(await eraseAttachedApplicationData('prof_fixture_owner', { registrationId: registration, root, uid, platform: 'darwin' }), [registration]);
   assert.deepEqual(await readdir(path.join(environment, registration, 'UserData')), []);
   assert.deepEqual((await readdir(path.join(environment, other, 'UserData'))).sort(), ['Cookies', 'Local Storage'], 'another application keeps its data');
-  assert.deepEqual(await eraseAttachedApplicationData('prof_a7d00a31b3e2', { root, uid: uid + 1, platform: 'darwin' }), [], 'data owned by someone else is never touched');
-  assert.deepEqual((await eraseAttachedApplicationData('prof_a7d00a31b3e2', { root, uid, platform: 'darwin' })).sort(), [other, registration].sort());
+  assert.deepEqual(await eraseAttachedApplicationData('prof_fixture_owner', { root, uid: uid + 1, platform: 'darwin' }), [], 'data owned by someone else is never touched');
+  assert.deepEqual((await eraseAttachedApplicationData('prof_fixture_owner', { root, uid, platform: 'darwin' })).sort(), [other, registration].sort());
   assert.deepEqual(await readdir(path.join(environment, other, 'UserData')), []);
   assert.deepEqual(await eraseAttachedApplicationData('prof_missing', { root, uid, platform: 'darwin' }), []);
   // An entry that cannot be removed is reported instead of a cleared result.
   await writeFile(path.join(environment, registration, 'UserData', 'Cookies'), 'session');
   const stuck = { readdir, lstat, rm: async () => {} };
-  await assert.rejects(eraseAttachedApplicationData('prof_a7d00a31b3e2', { registrationId: registration, root, uid, platform: 'darwin', fs: stuck }),
+  await assert.rejects(eraseAttachedApplicationData('prof_fixture_owner', { registrationId: registration, root, uid, platform: 'darwin', fs: stuck }),
     error => error.code === 'APPLICATION_DATA_NOT_CLEARED' && error.incomplete.includes(registration));
 });

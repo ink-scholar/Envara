@@ -5,7 +5,8 @@ import { createReadStream } from 'node:fs';
 import { lstat, realpath } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
 import { verifyPFInstallation, PF_INSTALL_ROOT, PF_APP_SESSION_LEASE_SECONDS } from '../native/macos-pf-routing/controller.mjs';
-import { pfRoutingAnchor, pfAttachEnvironmentId } from '../native/macos-pf-routing/policy.mjs';
+import { pfRoutingAnchor, pfAttachEnvironmentId, pfApplicationRegistrationId } from '../native/macos-pf-routing/policy.mjs';
+import { pruneAttachedApplicationCache } from './application-data.mjs';
 import { createPFAuthorizedChannelMux } from './macos-pf-channel-mux.mjs';
 import { createPersistentPFNotionSessionClient, validatePFNotionSessionRequest,
   PF_NOTION_RESUME_TIMEOUT_MS, PF_SESSION_CHANNEL_LIFETIME_MS, validatePFNotionCallTimingDiagnostic,
@@ -200,11 +201,14 @@ export class MacOSPFNotionTrial {
      * quits. A bounded trial may pass a finite watch window in milliseconds;
      * the default keeps watching for as long as the run lasts. */
     watchMs = Infinity, onEvent = () => {}, persistDiagnostics = async () => {},
+    /* After a run's cleanup is confirmed, its regenerable caches go; sign-in
+     * state stays. Tests replace this with a recorder. */
+    pruneApplicationData = ({ environmentId, registrationId }) => pruneAttachedApplicationCache({ environmentId, registrationId }),
     /* Only the verified fixed carrier is ever spawned. Tests replace this to
      * run the real shared channel against an inert root helper. */
     spawnCarrier = authorizer => spawn(authorizer, ['--request-controlled-experiment'],
       { shell: false, cwd: '/', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, stdio: ['pipe', 'pipe', 'pipe'] }) } = {}) {
-    if (![verifyCandidate, verifyNotion, createClient, onEvent, persistDiagnostics, spawnCarrier].every(value => typeof value === 'function') ||
+    if (![verifyCandidate, verifyNotion, createClient, onEvent, persistDiagnostics, spawnCarrier, pruneApplicationData].every(value => typeof value === 'function') ||
         !(watchMs === Infinity || Number.isInteger(watchMs) && watchMs >= 0 && watchMs <= 45000)) throw error('PF_NOTION_TRIAL_REQUEST_INVALID');
     this.verifyCandidate = verifyCandidate; this.verifyNotion = verifyNotion; this.createClient = createClient;
     this.watchMs = watchMs; this.onEvent = onEvent; this.persistDiagnostics = persistDiagnostics;
@@ -212,6 +216,7 @@ export class MacOSPFNotionTrial {
     this.state = null; this.pending = null; this.stopObservation = null; this.closed = false;
     this.mux = null; this.activeTarget = null; this.runTargets = new Map();
     this.authorizerPath = authorizerPath; this.spawnCarrier = spawnCarrier;
+    this.pruneApplicationData = pruneApplicationData; this.housekeeping = null; this.lastHousekeeping = null;
   }
   stateFlags() { return { active: false, phase: 'idle', staged: false, resumed: false, cleanupComplete: false, cleanupUncertain: false,
     lifecyclePassed: false, errorCode: null, events: [], ...fixedFlags, initialFailure: null, cleanupFailure: null,
@@ -255,12 +260,17 @@ export class MacOSPFNotionTrial {
   /* What attached applications keep on disk, and its removal, served on a
    * channel of its own in the shared session: never while an application is
    * attached, and only after the same carrier checks as an attach. */
-  async storage(method, params) {
-    if (this.closed) throw error('PF_NOTION_TRIAL_STOPPED');
-    if (this.pending) throw error('PF_NOTION_TRIAL_BUSY');
+  async storage(method, params, { housekeeping = false } = {}) {
+    /* Housekeeping runs between runs on the session that is still open: a
+     * later start waits for it, and quitting waits for it before the session
+     * closes. Everything else keeps the ordinary checks. */
+    if (this.closed && !housekeeping) throw error('PF_NOTION_TRIAL_STOPPED');
+    if (this.pending && !housekeeping) throw error('PF_NOTION_TRIAL_BUSY');
     if (this.state?.cleanupUncertain) throw error('PF_OWNED_RUNTIME_NOT_EMPTY');
+    // Housekeeping never opens a session: no administrator prompt for cleanup.
+    if (housekeeping && (!this.mux || this.mux.snapshot().ended === true)) throw error('PF_NOTION_TRIAL_STOPPED');
     await this.verifyCandidate({ carrierOnly: true });
-    if (this.pending) throw error('PF_NOTION_TRIAL_BUSY');
+    if (this.pending && !housekeeping) throw error('PF_NOTION_TRIAL_BUSY');
     const key = randomUUID(), target = this.ensureMux().acquire({ key });
     const call = createPersistentPFNotionSessionClient({ spawnRootControlledLifecycle: null, acquireChannel: () => target,
       lifetimeMs: PF_SESSION_CHANNEL_LIFETIME_MS, channelKey: key });
@@ -269,6 +279,30 @@ export class MacOSPFNotionTrial {
       try { await call.close({ timeoutMs: 5000 }); } catch { /* reported by the call above */ }
       try { target.end(); } catch { /* already ended */ }
     }
+  }
+  /* A stopped application keeps only its sign-in data: the sealed copy made
+   * for its run is removed on the same open session (the next start copies the
+   * original again), and its caches are emptied. Only a confirmed cleanup
+   * starts this, so nothing of the application is still running. */
+  scheduleHousekeeping(request) {
+    let registrationId, environmentId;
+    try { registrationId = pfApplicationRegistrationId(applicationBundleFor(request.application.executablePath));
+      environmentId = pfAttachEnvironmentId(request.application.profileId); } catch { return null; }
+    const previous = this.housekeeping ?? Promise.resolve();
+    const work = previous.catch(() => {}).then(async () => {
+      const outcome = { applicationId: request.application.id, copy: null, cacheBytesFreed: null };
+      try {
+        const result = await this.storage('reclaimApplicationStorage', { registrationIds: [registrationId], environmentIds: [] }, { housekeeping: true });
+        outcome.copy = result?.registrations?.find(item => item.registrationId === registrationId)?.outcome ?? 'failed';
+      } catch { outcome.copy = 'failed'; }
+      try { outcome.cacheBytesFreed = await this.pruneApplicationData({ environmentId, registrationId }); } catch { outcome.cacheBytesFreed = null; }
+      this.lastHousekeeping = outcome;
+      try { this.onEvent({ housekeeping: { ...outcome } })?.catch?.(() => {}); } catch { /* observers never affect cleanup */ }
+      return outcome;
+    });
+    this.housekeeping = work;
+    work.finally(() => { if (this.housekeeping === work) this.housekeeping = null; }).catch(() => {});
+    return work;
   }
   applicationStorage() { return this.storage('applicationStorage', {}); }
   reclaimApplicationStorage({ registrationIds, environmentIds } = {}) {
@@ -367,6 +401,7 @@ export class MacOSPFNotionTrial {
     const pending = this.pending;
     if (pending) { this.state.stopRequested = true; this.stopObservation?.(); }
     try { await pending; } catch { /* the run records its own first failure */ }
+    try { await this.housekeeping; } catch { /* housekeeping reports its own outcome */ }
     try { await this.closeRunChannel(); } catch { /* a failed end is reported by the run */ }
     try { await this.disposeShared(); } catch { /* dispose never spawns and never throws */ }
     onProgress({ closed: true, cleanupUncertain: this.state?.cleanupUncertain === true });
@@ -382,8 +417,12 @@ export class MacOSPFNotionTrial {
       initialFailure: null, cleanupFailure: null, events: [], ...fixedFlags,
       maximumLifetimeSeconds: PF_APP_SESSION_LEASE_SECONDS,
       observationSeconds: this.observationSeconds };
-    const task = this.execute(request); this.pending = task;
+    /* A start right after a stop waits for that stop's housekeeping, so the
+     * removal of the old copy never races the registration of the new one. */
+    const before = this.housekeeping;
+    const task = (before ? before.catch(() => {}).then(() => this.execute(request)) : this.execute(request)); this.pending = task;
     task.finally(() => { if (this.pending === task) this.pending = null; }).catch(() => {});
+    task.then(snapshot => { if (snapshot?.cleanupComplete === true && snapshot.cleanupUncertain !== true) this.scheduleHousekeeping(request); }).catch(() => {});
     return task;
   }
   async execute(request) {

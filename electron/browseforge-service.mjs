@@ -10,6 +10,14 @@ import { localeForCountry } from './workspace-context.mjs';
 import { isInterfaceLanguage } from '../shared/interface-languages.mjs';
 import { assertNetworkLocationMatchesEgress, confirmNetworkLocation, networkLocationGeolocation, normalizeNetworkLocation, recommendNetworkLocation } from '../shared/network-location.mjs';
 
+/** A link an environment's browser will load: web only, never credentials. */
+function linkURL(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 4096 || /[\0\r\n]/.test(value)) throw error('链接无效。', 'LINK_INVALID');
+  let url;
+  try { url = new URL(value); } catch { throw error('链接无效。', 'LINK_INVALID'); }
+  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw error('链接仅支持不含凭据的网页地址。', 'LINK_INVALID');
+  return url.href;
+}
 const PROFILE_KEYS = new Set(['name', 'group', 'notes', 'engine', 'platform', 'seed', 'locale', 'timezone', 'width', 'height', 'startUrl', 'proxyId', 'tags', 'fingerprint', 'privacy']);
 const now = () => new Date().toISOString();
 const unwrap = (response) => response?.data;
@@ -351,6 +359,31 @@ export class BrowseForgeService {
   }
   async deleteProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); await this.assertStopped(remote, profileId); await this.checkedDirectory(profile); await this.request('DELETE', `/api/profiles/${encoded(profileId)}`); await this.store.transaction((next) => { next.profiles = next.profiles.filter((item) => item.id !== profileId); event(next, 'profile', `删除环境「${profile.name}」`, profileId); }); this.lastErrors.delete(profileId); this.workspaceContexts.delete(profileId); this.resetPreview(profileId); }
   async clearProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); await this.assertStopped(remote, profileId); const directory = await this.checkedDirectory(profile); await rm(path.join(directory, 'browser-data'), { recursive: true, force: true }); await rm(path.join(directory, 'cookies-backup.json'), { force: true }); await mkdir(path.join(directory, 'browser-data'), { recursive: true, mode: 0o700 }); await this.store.transaction((next) => event(next, 'profile', `清理环境「${profile.name}」的完整浏览资料，保留下载文件`, profileId)); this.lastErrors.delete(profileId); this.resetPreview(profileId); }
+  /* Opens a link in this environment's browser: a new tab when the session is
+   * already running, otherwise a start that loads it. A session that cannot
+   * take a new tab is never used as a silent navigation of the page the user
+   * is on; the caller decides what a refusal means. */
+  async openProfileLink({ id: profileId, url }) {
+    const target = linkURL(url);
+    const [remote, workspace] = await Promise.all([this.remote(), this.store.read()]);
+    const profile = this.find(remote, profileId);
+    const session = remote.sessions.find(item => item.profile_id === profileId);
+    if (!session || (await this.health(session)).alive !== true) {
+      await this.startProfile({ id: profileId });
+      const started = (await this.remote()).sessions.find(item => item.profile_id === profileId);
+      if (!started) throw error('浏览器没有启动。', 'LINK_BROWSER_UNAVAILABLE');
+      await this.request('POST', `/api/sessions/${encoded(started.session_id)}/navigate`, { url: target, wait_until: 'domcontentloaded' });
+      return { profileId, profile: profile.name, opened: 'loaded', url: target };
+    }
+    /* A tab, not a navigation: the environment's browser keeps whatever the user
+     * had open. A blocked popup reports itself and is not reported as opened. */
+    const script = `(() => { const opened = window.open(${JSON.stringify(target)}, '_blank'); const handle = opened && opened !== window ? opened : null; if (handle) { try { handle.opener = null; } catch {} } return handle ? 'tab' : 'blocked'; })()`;
+    let opened = null;
+    try { const result = await this.request('POST', `/api/sessions/${encoded(session.session_id)}/eval`, { script }, { timeoutMs: 15000 });
+      opened = result?.data === 'tab' ? 'tab' : result?.data === 'blocked' ? 'blocked' : null; } catch { opened = null; }
+    if (opened !== 'tab') { try { await this.focusProfile({ id: profileId }); } catch {} }
+    return { profileId, profile: profile.name, opened: opened ?? 'unknown', url: target };
+  }
   async startProfile({ id: profileId }) {
     const reservation = await this.serialize(async () => {
       if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
@@ -593,7 +626,7 @@ export class BrowseForgeService {
     this.workspaceContexts.set(profileId, { signature, managedProxyId: managed ? effective.proxy.id : null, timezone: resolvedTimezone, timezoneSource, timezoneOrigin, locale, geolocation, selectedLocation, locationSource: selectedLocation?.source ?? network.locationSource ?? null, privacy, network, networkLastError });
     this.changed();
     return { id: profileId, profileId, name: profile.name, timezone: resolvedTimezone, timezoneSource, timezoneOrigin, locale, geolocation, selectedLocation, locationSource: selectedLocation?.source ?? network.locationSource ?? null, privacy, network, networkLastError,
-      proxy: wire, proxyEndpoint: applicationRoute, applicationRoute, managedRoute, proxyId: effective.proxy?.id ?? null, managedProxy: managed, proxySource: effective.source, proxyMode: effective.mode };
+      proxy: wire, proxyEndpoint: applicationRoute, applicationRoute, managedRoute, proxyId: effective.proxy?.id ?? null, proxyName: typeof effective.proxy?.name === 'string' ? effective.proxy.name.slice(0, 100) : null, managedProxy: managed, proxySource: effective.source, proxyMode: effective.mode };
   }
   async stoppedGroup(name) { const remote = await this.remote(); for (const profile of remote.profiles.filter((item) => item.group === name)) await this.assertStopped(remote, profile.id); }
   async applyGroupProxy(name, proxy, proxyMode = 'default') {

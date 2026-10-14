@@ -102,3 +102,29 @@ test('bulk deletion cleans only successful profile removals', async () => {
   await controller.protectMutation('bulkProfiles', { action: 'delete', ids: ['prof_a', 'prof_missing'] }, async () => ({ results: [{ id: 'prof_a', ok: true }, { id: 'prof_missing', ok: false }] }));
   assert.deepEqual(calls, [['removeOwnedConfiguration', 'prof_a']]);
 });
+
+test('a new terminal can use its own picked folder while another terminal runs, and only a picked one', async () => {
+  const created = [];
+  const f = fixture(async () => ({ canceled: false, path: '/picked/for/this/terminal' }));
+  f.state.profiles[0].cwd = '/saved/default';
+  f.state.profiles[0].sessions = [{ sessionId: 'session_a', profileId: 'prof_a', status: 'running' }];
+  f.terminal.create = async args => { created.push(args); return { sessionId: `session_${created.length + 1}`, profileId: args.id, status: 'running' }; };
+  // Picking is allowed while a terminal runs: that terminal keeps its folder.
+  const picked = await f.controller.dispatch('pickTerminalDirectory', { id: 'prof_a' });
+  assert.equal(picked.canceled, false); assert.equal(picked.path, '/picked/for/this/terminal'); assert.match(picked.token, /^[0-9a-f-]{36}$/);
+  await f.controller.dispatch('openTerminal', { id: 'prof_a', columns: 100, rows: 30, fresh: true, directoryToken: picked.token });
+  assert.deepEqual(created.at(-1), { id: 'prof_a', columns: 100, rows: 30, fresh: true, directory: '/picked/for/this/terminal' });
+  // The token is spent, bound to its environment, and a path from the caller is ignored.
+  await assert.rejects(f.controller.dispatch('openTerminal', { id: 'prof_a', fresh: true, directoryToken: picked.token }), { code: 'TERMINAL_DIRECTORY_EXPIRED' });
+  await f.controller.dispatch('openTerminal', { id: 'prof_a', fresh: true, directory: '/etc' });
+  assert.equal(created.at(-1).directory, null, 'a directory never comes from the renderer');
+  assert.equal(created.at(-1).fresh, true);
+  // The folder was picked by the user for a new terminal; choosing another
+  // browser (and so another environment) before opening keeps it.
+  f.profiles.push({ id: 'prof_b', name: '另一个', group: '工作', proxyId: 'proxy_a' });
+  f.state.profiles.push({ profileId: 'prof_b', cwd: '/b', sessions: [] });
+  const other = await f.controller.dispatch('pickTerminalDirectory', { id: 'prof_a' });
+  await f.controller.dispatch('openTerminal', { id: 'prof_b', fresh: true, directoryToken: other.token });
+  assert.deepEqual([created.at(-1).id, created.at(-1).directory], ['prof_b', '/picked/for/this/terminal']);
+  await assert.rejects(f.controller.dispatch('openTerminal', { id: 'prof_a', fresh: true, directoryToken: 'not-a-token' }), { code: 'TERMINAL_DIRECTORY_EXPIRED' });
+});

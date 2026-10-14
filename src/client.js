@@ -44,6 +44,7 @@ function download(data, filename) {
 const preview = {
   isDesktop: false,
   onTerminalEvent() { return () => {}; },
+  onLinkEvent() { return () => {}; },
   subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
   async call(method, args = {}) {
     const p = state.profiles.find(item => item.id === args.id);

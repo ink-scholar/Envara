@@ -48,6 +48,7 @@ function checkedRoute(value) {
   if (udpPolicy === 'proxy' && value.udp !== true) throw fail('APPLICATION_UNSUPPORTED_NODE', '此节点尚未确认数据报支持。');
   return { protocol, host, port: value.port, username: value.username, password: value.password, udp: value.udp === true, udpPolicy };
 }
+const browserProfileIdChoice = value => value == null || value === '' ? null : validId(value);
 const environmentKeys = new Set(['PATH', 'HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'CLAUDE_CONFIG_DIR', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'SystemRoot', 'WINDIR', 'HOMEDRIVE', 'HOMEPATH', 'NPM_CONFIG_USERCONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'DO_NOT_TRACK', 'DISABLE_TELEMETRY', 'DISABLE_ERROR_REPORTING', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC']);
 function ownedEnvironment(context, application, routeId) {
   const env = {};
@@ -146,9 +147,27 @@ export class ApplicationService {
       const local = await this.inspectApplication(application.path, { platform: this.platform });
       const conflict = [...this.applications.values()].find(item => item.id !== id && item.identity === local.identity);
       if (conflict) throw fail('APPLICATION_ALREADY_BOUND', '此软件已经附加到一个境舱，请先移除原绑定。');
-      const selected = { id, profileId, ...local, name: safeName(application.name ?? local.name), args: checkedArgs(application.args) };
+      const browserProfileId = application.browserProfileId == null ? previous?.browserProfileId ?? null : browserProfileIdChoice(application.browserProfileId);
+      const selected = { id, profileId, ...local, name: safeName(application.name ?? local.name), args: checkedArgs(application.args),
+        ...(browserProfileId ? { browserProfileId } : {}) };
       const values = [...this.applications.values()].filter(item => item.id !== id); values.push(selected);
       await this.store.write(values); this.applications.set(id, selected); this.sessions.delete(id); this.notify(selected, 'saved');
+      return this.snapshot();
+    });
+  }
+  /* The browser this application's links open in, inside the same network
+   * group. Changing it needs no restart and never touches the running process:
+   * links resolve it when they are opened, not when the application starts. */
+  async setApplicationLinkBrowser({ id, browserProfileId } = {}) {
+    return this.serialized(async () => {
+      if (this.closed) throw fail('APP_CLOSING', '应用正在退出。');
+      const application = this.applications.get(validId(id));
+      if (!application) throw fail('APPLICATION_NOT_FOUND', '未找到此附加软件。');
+      const selected = browserProfileIdChoice(browserProfileId);
+      const next = { ...application, ...(selected ? { browserProfileId: selected } : {}) };
+      if (!selected) delete next.browserProfileId;
+      const values = [...this.applications.values()].filter(item => item.id !== application.id); values.push(next);
+      await this.store.write(values); this.applications.set(application.id, next); this.notify(next, 'saved');
       return this.snapshot();
     });
   }

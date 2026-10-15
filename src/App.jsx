@@ -6,6 +6,7 @@ import { TerminalWindowApp } from "./TerminalWindowApp.jsx";
 import { initialProxyForm, proxyConfig, proxyFormError } from "./proxy-form-state.mjs";
 import { locationFormState, verifiedLocationPreview, locationConfirmation, proxyRouteFields, networkApplicationChoices, chooseApplicationProfile, isApplicationAlreadyAttached, createdProfileFromSnapshot, savedNetworkPresentation } from "./network-flow-state.mjs";
 import { googleMapsLocationURL, normalizeNetworkLocation } from "../shared/network-location.mjs";
+import { browseForgeRegionFor, preferredEngine } from "../shared/engine-choice.mjs";
 import { safeNotionTrial, notionTrialLocksConfiguration } from "./notion-trial-state.mjs";
 import { useI18n } from "./i18n.jsx";
 import { SYSTEM_BROWSER, linkBrowsersFor as linkBrowsersOf, linkBrowserChoice } from "./link-browser.mjs";
@@ -38,7 +39,6 @@ const runtimeCatalog = snapshot => [...(snapshot.engines?.length ? snapshot.engi
   capabilities: {},
   ...snapshot.engine
 }])].sort((a, b) => (["cloakbrowser", "camoufox", "browseforge-chromium"].indexOf(a.id) < 0 ? 99 : ["cloakbrowser", "camoufox", "browseforge-chromium"].indexOf(a.id)) - (["cloakbrowser", "camoufox", "browseforge-chromium"].indexOf(b.id) < 0 ? 99 : ["cloakbrowser", "camoufox", "browseforge-chromium"].indexOf(b.id)));
-const preferredEngine = (engines, configured) => engines.find(item => item.id === configured && item.supported !== false && item.installed)?.id || engines.find(item => item.supported !== false && item.installed && !item.experimental)?.id || engines.find(item => item.supported !== false && !item.experimental)?.id || engines.find(item => item.supported !== false)?.id || engines[0]?.id || "cloakbrowser";
 const allows = (runtime, key) => {
   const capability = {
     seed: "supports_seed_fingerprint",
@@ -351,8 +351,8 @@ function ProfileForm({
       }
     }
     const selectedProxy = groupEnforced ? groupProxy : proxies.find(item => item.id === form.proxyId) || groupProxy;
-    if (form.engine === "browseforge-chromium" && selectedProxy && !selectedProxy.region) {
-      fail("proxyId", t("此内核的代理需要地域标签，请先编辑网络出口，例如 us-ny。"));
+    if (form.engine === "browseforge-chromium" && selectedProxy && !browseForgeRegionFor(selectedProxy)) {
+      fail("proxyId", t("BrowseForge Chromium 只支持美国纽约、加州、得州和加拿大安大略、不列颠哥伦比亚的网络；这个网络请用 CloakBrowser。"));
       return;
     }
     onSave({
@@ -399,7 +399,7 @@ function ProfileForm({
               className: "span-two"
             })}
           {field("group", t("分组"), <><input maxLength={60} list="profile-groups" value={form.group} onChange={change("group")} placeholder={t("未分组")} /><datalist id="profile-groups">{groups.map(group => <option key={group} value={group} />)}</datalist></>)}
-          <Field label={t("隐私防护")}><select value={form.privacy?.mode || "standard"} onChange={event => setForm(value => ({
+          <Field label={t("隐私防护")} hint={t({ standard: "拦截已知的第三方追踪：内置规则加 EasyPrivacy 名单，不影响登录和网站功能。", strict: "在标准之上，再拦截标签管理器、错误上报和广告网络；个别网站可能缺少功能。", off: "不拦截追踪请求。" }[form.privacy?.mode || "standard"])}><select value={form.privacy?.mode || "standard"} onChange={event => setForm(value => ({
                 ...value,
                 privacy: {
                   mode: event.target.value
@@ -770,7 +770,7 @@ function BrowserDetail({
             standard: "标准",
             strict: "严格",
             off: "停用"
-          }[profile.privacy?.mode || "standard"])}<small>{t(profile.privacy?.mode === "off" ? "防护已关闭" : "已知追踪请求拦截")}</small></dd></div>
+          }[profile.privacy?.mode || "standard"])}<small>{profile.privacy?.mode === "off" ? t("防护已关闭") : profile.privacyProtection?.enabled ? t("本次已拦截 {count} 个追踪请求", { count: profile.privacyProtection.blockedRequests ?? 0 }) : t("内置规则与 EasyPrivacy 名单")}</small></dd></div>
       {profile.network?.ok && <div><dt>{t("实际出口")}</dt><dd>{profile.network.ip}<small>{networkPlace(profile.network)}</small></dd></div>}
       <div><dt>{t("资源占用")}</dt><dd>{profile.cpuPercent == null ? "—" : `${Number(profile.cpuPercent).toFixed(0)}% CPU`} · {bytes(profile.memoryBytes)}</dd></div>
       <div><dt>{t("浏览数据")}</dt><dd>{bytes(profile.dataBytes)}</dd></div>

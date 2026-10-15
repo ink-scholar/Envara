@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
+import net from 'node:net';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -117,4 +118,30 @@ test('a flat socket path is used as-is, replaced if stale, and stays private', a
   for (const place of ['/etc', '/Applications'])
     await assert.rejects(() => new LinkSocketServer({ root, socketPath: path.join(place, 'io.envara.test.sock'), onLink: async () => ({}) }).listen(),
       error => error.code === 'LINK_CHANNEL_UNAVAILABLE', `${place} is not a temporary directory`);
+});
+
+/* The exact request native/macos-link-router/main.swift sends: no token, a url
+ * and the sender's pid. Refusing it sent every attached application's link
+ * (Notion's Google sign-in) to the host browser. */
+const helperRequest = (socketPath, body) => new Promise((resolve, reject) => {
+  const socket = net.connect(socketPath, () => {
+    socket.end(`POST /link HTTP/1.1\r\nhost: localhost\r\ncontent-length: ${Buffer.byteLength(body)}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n${body}`);
+  });
+  let data = ''; socket.on('data', chunk => { data += chunk; }); socket.on('end', () => resolve(data.split('\r\n')[0])); socket.on('error', reject);
+});
+
+test('the system link helper is heard without a token, and only with a url and its sender', async t => {
+  const seen = [];
+  const root = await mkdtemp(path.join(os.tmpdir(), 'envara-router-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const socketPath = `/private/tmp/io.envara.link-router.${process.getuid()}.helper-test-${process.pid}.sock`;
+  const router = new LinkSocketServer({ root, socketPath, sender: 'owner', onLink: async request => { seen.push(request); return { opened: 'environment', browser: 'Notion 的境舱' }; } });
+  await router.listen(); t.after(() => router.close());
+  assert.equal((await stat(socketPath)).mode & 0o777, 0o600, 'only this user can reach it');
+  assert.equal(await helperRequest(socketPath, JSON.stringify({ url: 'https://accounts.google.com/o/oauth2/auth', senderPid: 4242 })), 'HTTP/1.1 200 OK');
+  assert.deepEqual(seen, [{ url: 'https://accounts.google.com/o/oauth2/auth', pid: 4242 }]);
+  for (const body of [JSON.stringify({ url: 'https://example.com' }), JSON.stringify({ url: 'https://example.com', senderPid: 'x' }), JSON.stringify({ url: 'https://example.com', senderPid: 1, profileId: 'prof_x' }), '[]', 'not json'])
+    assert.equal(await helperRequest(socketPath, body), 'HTTP/1.1 400 Bad Request', body);
+  // A terminal's channel still needs its token, even for the same body.
+  const terminal = await channel(t);
+  assert.equal(await helperRequest(terminal.socketPath, JSON.stringify({ url: 'https://example.com', senderPid: 4242 })), 'HTTP/1.1 403 Forbidden');
 });

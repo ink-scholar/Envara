@@ -77,7 +77,12 @@ exec "$(dirname "$0")/open" "$@"
 }
 
 export class LinkSocketServer {
-  constructor({ root, onLink, log = () => {}, socketDirectory = null, socketPath = null, socketOwner = process.getuid?.() ?? null }) {
+  /* Two kinds of caller. A terminal's shim presents its environment's token and
+   * sends a lone url. The system link helper has no token: it is trusted by the
+   * socket itself (this user's alone, 0600) and says which process sent the link. */
+  constructor({ root, onLink, log = () => {}, socketDirectory = null, socketPath = null, socketOwner = process.getuid?.() ?? null, sender = 'token' }) {
+    if (!['token', 'owner'].includes(sender)) throw fail('终端链接通道无效。');
+    this.sender = sender;
     if (typeof root !== 'string' || !path.isAbsolute(root) || typeof onLink !== 'function') throw fail('终端链接通道无效。');
     for (const value of [socketDirectory, socketPath])
       if (value != null && (typeof value !== 'string' || !path.isAbsolute(value))) throw fail('终端链接通道无效。');
@@ -144,14 +149,24 @@ export class LinkSocketServer {
         const split = request.indexOf('\r\n\r\n');
         if (split < 0 || !request.startsWith('POST /link ')) return await reply('404 Not Found', '{"error":"not-found"}');
         const header = request.slice(0, split), body = request.slice(split + 4);
-        const presented = /^authorization:[ \t]*bearer[ \t]+(\S+)[ \t]*$/im.exec(header)?.[1] ?? '';
-        // A token that is well formed but unknown is refused the same way as a missing one.
-        const found = LINK_TOKEN.test(presented) ? this.tokens.get(presented) : null;
-        if (!found) return await reply('403 Forbidden', '{"error":"not-authorized"}');
         let payload;
-        try { payload = JSON.parse(body); } catch { return await reply('400 Bad Request', '{"error":"invalid-body"}'); }
-        if (!payload || typeof payload.url !== 'string' || Object.keys(payload).length !== 1) return await reply('400 Bad Request', '{"error":"invalid-body"}');
-        const result = await this.onLink({ profileId: found.profileId, url: payload.url });
+        try { payload = JSON.parse(body); } catch { payload = null; }
+        let link;
+        if (this.sender === 'owner') {
+          // The link helper: a url and the pid that sent it, nothing else.
+          const fields = payload && typeof payload === 'object' && !Array.isArray(payload) ? Object.keys(payload) : null;
+          if (!fields || typeof payload.url !== 'string' || !Number.isSafeInteger(payload.senderPid) || payload.senderPid < 0 || fields.some(key => !['url', 'senderPid'].includes(key)))
+            return await reply('400 Bad Request', '{"error":"invalid-body"}');
+          link = { url: payload.url, pid: payload.senderPid };
+        } else {
+          const presented = /^authorization:[ \t]*bearer[ \t]+(\S+)[ \t]*$/im.exec(header)?.[1] ?? '';
+          // A token that is well formed but unknown is refused the same way as a missing one.
+          const found = LINK_TOKEN.test(presented) ? this.tokens.get(presented) : null;
+          if (!found) return await reply('403 Forbidden', '{"error":"not-authorized"}');
+          if (!payload || typeof payload.url !== 'string' || Object.keys(payload).length !== 1) return await reply('400 Bad Request', '{"error":"invalid-body"}');
+          link = { profileId: found.profileId, url: payload.url };
+        }
+        const result = await this.onLink(link);
         return await reply('200 OK', JSON.stringify({ opened: result?.opened ?? 'unknown', browser: result?.browser ?? null }));
       } catch (error) {
         this.log(`link request failed: ${error?.message ?? 'unknown'}`);

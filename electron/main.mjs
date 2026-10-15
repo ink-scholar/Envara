@@ -667,7 +667,7 @@ if (ownsLock) void app.whenReady().then(async () => {
     linkChannel = new TerminalLinkChannel({ root: dataDir, onLink: request => reportLink(request, '终端'),
       log: message => console.info(`Envara link channel: ${message}`) });
     await linkChannel.listen().catch(error => { console.error(`Envara link channel unavailable: ${error.message}`); linkChannel = null; });
-    routerChannel = new LinkSocketServer({ root: dataDir, socketPath: LINK_ROUTER_SOCKET_PATH,
+    routerChannel = new LinkSocketServer({ root: dataDir, socketPath: LINK_ROUTER_SOCKET_PATH, sender: 'owner',
       onLink: request => linkRouter.openFromProcess(request),
       log: message => console.info(`Envara link router: ${message}`) });
     await routerChannel.listen().catch(error => { console.error(`Envara link router unavailable: ${error.message}`); routerChannel = null; });
@@ -682,7 +682,9 @@ if (ownsLock) void app.whenReady().then(async () => {
       },
     });
     await loadLinkPreferences();
-    linkRouter = new LinkRouter({ service, applications, terminal,
+    /* The application service starts after the router; it is read when a link
+     * arrives, never captured here as the empty value it has at this point. */
+    linkRouter = new LinkRouter({ service, terminal, applications: { snapshot: async () => applications ? applications.snapshot() : { applications: [] } },
       enabled: () => linkPreferences.openInEnvironment,
       registrationRoot: '/Library/PrivilegedHelperTools/io.envara.pf-apps',
       openDefault: async url => { await openOutsideEnvironment(url); },

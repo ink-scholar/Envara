@@ -147,3 +147,12 @@ test('with links set to this Mac’s browser in Settings, every link goes there 
   assert.deepEqual(opened, ['https://example.com/'], 'even a saved environment browser is not used while the setting is off');
   assert.match(notify.seen.at(-1).message, /不经过境舱网络/);
 });
+
+test('the desktop wiring reads the application service when a link arrives, not before it exists', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const main = await readFile(new URL('../electron/main.mjs', import.meta.url), 'utf8');
+  const construction = main.indexOf('linkRouter = new LinkRouter('), created = main.indexOf('applications = new ApplicationService(');
+  assert.ok(construction > 0 && created > construction, 'the router is built first');
+  assert.match(main.slice(construction, construction + 400), /applications: \{ snapshot: async \(\) => applications \? applications\.snapshot\(\)/);
+  assert.doesNotMatch(main.slice(construction, construction + 200), /LinkRouter\(\{ service, applications,/);
+});

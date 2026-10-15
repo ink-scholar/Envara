@@ -1,0 +1,78 @@
+{
+  "schema": "envara.tracker-list",
+  "version": 1,
+  "list": "EasyPrivacy",
+  "source": "https://github.com/easylist/easylist",
+  "commit": "93c1d90410ad8611bdcc80f44db520991b2a701f",
+  "files": [
+    {
+      "upstream": "easyprivacy/easyprivacy_trackingservers.txt",
+      "name": "easyprivacy_trackingservers.txt",
+      "bytes": 1267,
+      "sha256": "df240b596ceb5833287704cfe455d047ffd2a09804ac82782e077e17c1b55fec"
+    },
+    {
+      "upstream": "easyprivacy/easyprivacy_trackingservers_general.txt",
+      "name": "easyprivacy_trackingservers_general.txt",
+      "bytes": 9485,
+      "sha256": "636234e02e76ac6f63905dc4a54a289619d2b911337d87e5215b7a2f8546f797"
+    },
+    {
+      "upstream": "easyprivacy/easyprivacy_trackingservers_thirdparty.txt",
+      "name": "easyprivacy_trackingservers_thirdparty.txt",
+      "bytes": 74915,
+      "sha256": "527aedaa5ac19c781f10dfc18949b37f3708d29d8f9da1c7e8d08338f0d4e1ca"
+    },
+    {
+      "upstream": "easyprivacy/easyprivacy_trackingservers_international.txt",
+      "name": "easyprivacy_trackingservers_international.txt",
+      "bytes": 26705,
+      "sha256": "9c67cc2d4ae438526b2fdfa1a07b21d286273684647cc381f2d0441eb19c5d42"
+    },
+    {
+      "upstream": "easyprivacy/easyprivacy_trackingservers_admiral.txt",
+      "name": "easyprivacy_trackingservers_admiral.txt",
+      "bytes": 52549,
+      "sha256": "d3682b26951c55963548136b895c9be9950375815979201381f8359c34d96355"
+    },
+    {
+      "upstream": "easyprivacy/easyprivacy_trackingservers_mining.txt",
+      "name": "easyprivacy_trackingservers_mining.txt",
+      "bytes": 4167,
+      "sha256": "02cfebfc3b402172cc4cbb0cb8a9ecb06423b770b451207afa6b8580d21e1cef"
+    },
+    {
+      "upstream": "easyprivacy/easyprivacy_trackingservers_notifications.txt",
+      "name": "easyprivacy_trackingservers_notifications.txt",
+      "bytes": 2397,
+      "sha256": "250d26c4fd73bd105fc8b0717be519bfd181358977de206935dbc58bfe4a66f6"
+    },
+    {
+      "upstream": "easyprivacy/easyprivacy_thirdparty.txt",
+      "name": "easyprivacy_thirdparty.txt",
+      "bytes": 98788,
+      "sha256": "38db35e4821b7d4fdec7d83b2ca5d43902c88e99d62475dc118ea103a92ae970"
+    },
+    {
+      "upstream": "easyprivacy/easyprivacy_thirdparty_international.txt",
+      "name": "easyprivacy_thirdparty_international.txt",
+      "bytes": 31923,
+      "sha256": "dedd7400aabd625cf446232e6b75f562195201402bae1dbdf3a88bdf8d9a30c2"
+    },
+    {
+      "upstream": "easyprivacy/easyprivacy_allowlist.txt",
+      "name": "easyprivacy_allowlist.txt",
+      "bytes": 51922,
+      "sha256": "128b168ca3849b075f1d2b4e1a06016ad3a3b2424bc06f045eeb2a0cc392e314"
+    },
+    {
+      "upstream": "easyprivacy/easyprivacy_allowlist_international.txt",
+      "name": "easyprivacy_allowlist_international.txt",
+      "bytes": 20637,
+      "sha256": "c7bd824da6c48718d75737a917d6154cb87afdcd235bef4d880191b9bd3e0f8a"
+    }
+  ],
+  "licence": "Unless otherwise noted, the contents of the EasyList repository (https://github.com/easylist) is dual licensed under the GNU General Public License version 3 of the License, or (at your option) any later version, and Creative Commons Attribution-ShareAlike 3.0 Unported, or (at your option) any later version. You may use and/or modify the files as permitted by either licence; if required, \"The EasyList authors (https://easylist.to/)\" should be attributed as the source of the material.",
+  "licenceSource": "https://easylist.to/pages/licence.html",
+  "attribution": "The EasyList authors (https://easylist.to/)"
+}

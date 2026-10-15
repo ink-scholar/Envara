@@ -8,6 +8,7 @@ import { ProxyNetworkProbe, proxyFingerprint } from './proxy-network.mjs';
 import { normalizePrivacy } from './privacy-policy.mjs';
 import { localeForCountry } from './workspace-context.mjs';
 import { isInterfaceLanguage } from '../shared/interface-languages.mjs';
+import { browseForgeRegionFor } from '../shared/engine-choice.mjs';
 import { assertNetworkLocationMatchesEgress, confirmNetworkLocation, networkLocationGeolocation, normalizeNetworkLocation, recommendNetworkLocation } from '../shared/network-location.mjs';
 
 /** A link an environment's browser will load: web only, never credentials. */
@@ -76,7 +77,7 @@ function proxyConfig(input) {
   }
   return config;
 }
-const upstreamProxy = (proxy) => proxy ? { type: proxy.protocol, host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password, ...(proxy.region ? { region: proxy.region } : {}) } : null;
+const upstreamProxy = (proxy) => { if (!proxy) return null; const region = browseForgeRegionFor(proxy); return { type: proxy.protocol, host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password, ...(region ? { region } : {}) }; };
 const sameProxy = (a, b) => JSON.stringify(proxyConfig(a)) === JSON.stringify(proxyConfig(b));
 const rawProxyFingerprint = (proxy) => proxy?.protocol === 'anytls' ? createHash('sha256').update(JSON.stringify(proxyConfig(proxy))).digest('hex') : proxyFingerprint(proxy);
 function event(workspace, type, message, profileId) { workspace.events.unshift({ id: randomUUID(), time: now(), type, message, ...(profileId ? { profileId } : {}) }); workspace.events.length = Math.min(200, workspace.events.length); }
@@ -296,7 +297,7 @@ export class BrowseForgeService {
     let proxy = existing?.proxy ?? null;
     if (Object.hasOwn(input, 'proxyId')) { if (input.proxyId === null || input.proxyId === '') proxy = null; else { const selected = this.proxies(workspace, remote).find((item) => item.id === input.proxyId); if (!selected) throw error('指定代理不存在，不能自动切换为直接连接。', 'PROXY_NOT_FOUND'); proxy = selected.protocol === 'anytls' ? null : upstreamProxy(selected); } payload.proxy = proxy; }
     const effective = this.effectiveProxy({ ...existing, ...payload, proxy }, remote.groups, workspace, Object.hasOwn(input, 'proxyId') ? input.proxyId : undefined);
-    if (descriptor.id === 'browseforge-chromium' && effective.proxy && !effective.proxy.region) throw error('BrowseForge Chromium 使用代理时，需要填写地域标签，例如 us-ny。', 'INVALID_PROXY_REGION');
+    if (descriptor.id === 'browseforge-chromium' && effective.proxy && !browseForgeRegionFor(effective.proxy)) throw error('BrowseForge Chromium 只支持美国纽约、加州、得州和加拿大安大略、不列颠哥伦比亚的网络；这个网络请用 CloakBrowser。', 'INVALID_PROXY_REGION');
     payload.managed_proxy_required = effective.proxy?.protocol === 'anytls';
     return payload;
   }
@@ -454,7 +455,7 @@ export class BrowseForgeService {
     const groups = existing ? this.groups(workspace, remote.groups).filter((group) => group.proxy && (group.proxy.id ? group.proxy.id === existing.id : sameProxy(group.proxy, existing))) : [];
     const affected = remote.profiles.filter((profile) => users.includes(profile) || groups.some((group) => group.name === profile.group));
     for (const profile of affected) await this.assertStopped(remote, profile.id);
-    for (const profile of affected) if (profile.runtime_id === 'browseforge-chromium' && !config.region) throw error('该内核代理必须包含地域标签。', 'INVALID_PROXY_REGION');
+    for (const profile of affected) if (profile.runtime_id === 'browseforge-chromium' && !browseForgeRegionFor(config)) throw error('BrowseForge Chromium 只支持美国纽约、加州、得州和加拿大安大略、不列颠哥伦比亚的网络；这个网络请用 CloakBrowser。', 'INVALID_PROXY_REGION');
     if (groups.length && config.protocol === 'https') throw error('BrowseForge 分组代理仅支持 HTTP、SOCKS5 或托管 AnyTLS。', 'UNSUPPORTED_GROUP_PROXY');
     const staged = structuredClone(workspace);
     staged.proxies = staged.proxies.filter((item) => item.id !== savedId);
@@ -517,7 +518,7 @@ export class BrowseForgeService {
     }
     const wire = proxyConfig(candidate);
     if (wire.protocol !== 'http' || wire.host !== '127.0.0.1' || !wire.username || !wire.password) throw error('内置 AnyTLS 网络入口无效，已阻止直接连接。', 'INVALID_PROXY_CORE');
-    wire.region = proxy.region ?? '';
+    wire.region = browseForgeRegionFor(proxy) ?? '';
     if (this.closed) { await this.options.proxyCore.release?.(proxy.id); throw error('应用正在退出。', 'APP_CLOSING'); }
     this.proxyWires.set(proxy.id, wire);
     return { wire, managed: true };
@@ -641,7 +642,7 @@ export class BrowseForgeService {
     if (!proxy) throw error('请选择分组代理。');
     if (proxy.protocol === 'https') throw error('BrowseForge 的分组代理仅支持 HTTP、SOCKS5 或托管 AnyTLS，请使用环境专属 HTTPS 代理。', 'UNSUPPORTED_GROUP_PROXY');
     const members = remote.profiles.filter((item) => item.group === name);
-    for (const profile of members) { await this.assertStopped(remote, profile.id); if (profile.runtime_id === 'browseforge-chromium' && !proxy.region) throw error('该内核代理必须包含地域标签。', 'INVALID_PROXY_REGION'); }
+    for (const profile of members) { await this.assertStopped(remote, profile.id); if (profile.runtime_id === 'browseforge-chromium' && !browseForgeRegionFor(proxy)) throw error('BrowseForge Chromium 只支持美国纽约、加州、得州和加拿大安大略、不列颠哥伦比亚的网络；这个网络请用 CloakBrowser。', 'INVALID_PROXY_REGION'); }
     const staged = { ...workspace, groups: [...(workspace.groups ?? []).filter((item) => item.name !== name), { name, proxyId, proxyMode }] };
     const markers = new Map(members.map((profile) => [profile.id, this.effectiveProxy(profile, remote.groups, staged).proxy?.protocol === 'anytls']));
     const previous = remote.groups.find((item) => item.name === name), applied = [];

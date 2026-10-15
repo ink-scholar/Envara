@@ -96,6 +96,12 @@ export async function buildSidecar({ rootDir = ROOT, outputDir = path.join(rootD
     const licenses = await copyModuleLicenses(buildEnv.GOMODCACHE, licenseDir);
     await copyLicense(path.join(sourceDir, 'LICENSE'), path.join(licenseDir, 'BrowseForge-LICENSE'));
     licenses.push('BrowseForge-LICENSE');
+    // The bundled EasyPrivacy list is embedded unmodified; its licence and
+    // attribution travel with the binary.
+    const trackerListDir = path.join(sourceDir, 'internal', 'browser', 'trackerlists', 'easyprivacy');
+    const trackerList = JSON.parse(await readFile(path.join(trackerListDir, 'provenance.json'), 'utf8'));
+    await copyLicense(path.join(trackerListDir, 'NOTICE.md'), path.join(licenseDir, 'EasyPrivacy-NOTICE.md'));
+    licenses.push('EasyPrivacy-NOTICE.md');
     const goRoot = (await execFile(goExecutable, ['env', 'GOROOT'], { cwd: sourceDir, env: buildEnv })).stdout.trim();
     await copyLicense(path.join(goRoot, 'LICENSE'), path.join(licenseDir, 'Go-LICENSE'));
     licenses.push('Go-LICENSE');
@@ -105,6 +111,7 @@ export async function buildSidecar({ rootDir = ROOT, outputDir = path.join(rootD
       goVersion: GO_VERSION, goos: target.goos, goarch: target.goarch, cgo: false,
       buildFlags: ['-trimpath', '-buildvcs=false', '-mod=readonly', '-s', '-w', '-buildid='],
       sourceTreeSha256,
+      trackerList: { name: trackerList.list, source: trackerList.source, commit: trackerList.commit, files: trackerList.files.length },
       binarySha256: createHash('sha256').update(await readFile(temporary)).digest('hex'),
       licenses: licenses.sort(),
     };

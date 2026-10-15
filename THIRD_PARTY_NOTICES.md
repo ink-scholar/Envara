@@ -12,6 +12,7 @@ Envara's original application code is licensed under the MIT License. Third-part
 | @vitejs/plugin-react | MIT | 2019–present Yuxi (Evan) You and Vite contributors · [source](https://github.com/vitejs/vite-plugin-react) |
 | Phosphor Icons | MIT | 2020 Phosphor Icons · [source](https://github.com/phosphor-icons/react) |
 | BrowseForge vendored backend | MIT | 2026 BrowseForge contributors · [preserved license](third_party/browseforge/LICENSE) |
+| EasyPrivacy tracker list (unmodified, commit `93c1d90`) | GPLv3+ or CC BY-SA 3.0+ (dual) | The EasyList authors (https://easylist.to/) · [notice and licence](third_party/browseforge/internal/browser/trackerlists/easyprivacy/NOTICE.md) · [pinned files and hashes](third_party/browseforge/internal/browser/trackerlists/easyprivacy/provenance.json) |
 | Mihomo v1.19.32 proxy core | GPLv3 | Upstream authors and contributors · [preserved license](third_party/proxy-core/LICENSE) · [fixed source record](third_party/proxy-core/SOURCE.md) |
 | WinDivert 2.2.2-A x64 DLL / original signed driver | LGPLv3 / GPLv2 upstream choice | Basil and contributors · [retained full license](native/windows-app-routing/capture/vendor/WinDivert-LICENSE) · [pinned preparation](scripts/prepare-windivert.mjs) |
 | ProxyBridge TCP NAT technique | MIT | 2025 Anof-cyber/InterceptSuite · [retained license](native/windows-app-routing/capture/LICENSE) · [fixed source attribution](native/windows-app-routing/capture/PROVENANCE.md) |

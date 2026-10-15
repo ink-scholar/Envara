@@ -89,7 +89,11 @@ func (s *PrivacyState) Snapshot() map[string]any {
 	if s.Mode == "off" {
 		serviceWorkers = "allow"
 	}
-	return map[string]any{"mode": s.Mode, "blockedRequests": s.BlockedRequests.Load(), "geolocation": geo, "geolocationPolicy": geoPolicy, "trackerScope": "third-party-http", "enabled": s.Mode != "off", "serviceWorkers": serviceWorkers}
+	snapshot := map[string]any{"mode": s.Mode, "blockedRequests": s.BlockedRequests.Load(), "geolocation": geo, "geolocationPolicy": geoPolicy, "trackerScope": "third-party-http", "enabled": s.Mode != "off", "serviceWorkers": serviceWorkers}
+	if label := trackerListLabel(); label != "" && s.Mode != "off" {
+		snapshot["trackerList"] = label
+	}
+	return snapshot
 }
 
 func checkedPrivacyURL(raw string) *url.URL {
@@ -103,6 +107,49 @@ func matchingHost(host, domain string) bool {
 	return host == domain || strings.HasSuffix(host, "."+domain)
 }
 func shouldBlockTracker(raw, firstParty, mode string) bool {
+	return blockTrackerRequest(raw, firstParty, mode, kindDefault)
+}
+
+// builtinTrackerDomain is the tier entry a host belongs to, if any.
+func builtinTrackerDomain(host, mode string) string {
+	for _, domain := range standardTrackerDomains {
+		if matchingHost(host, domain) {
+			return domain
+		}
+	}
+	if mode == "strict" {
+		for _, domain := range strictTrackerDomains {
+			if matchingHost(host, domain) {
+				return domain
+			}
+		}
+	}
+	return ""
+}
+
+// builtinTrackerExempt keeps a service's own first-party analytics and sibling
+// APIs working on its own site.
+func builtinTrackerExempt(host, firstHost, trackerDomain string) bool {
+	if firstHost == "" {
+		return false
+	}
+	if matchingHost(host, firstHost) || matchingHost(firstHost, host) {
+		return true
+	}
+	for _, root := range trackerServiceRoots[trackerDomain] {
+		if matchingHost(firstHost, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// blockTrackerRequest decides one request. Envara's own tiers decide first; a
+// host they name is blocked or deliberately allowed. Otherwise the bundled
+// EasyPrivacy rules apply to third-party requests, except that standard never
+// blocks what the strict tier holds back as able to break sites, and a page
+// the user navigates to is never blocked.
+func blockTrackerRequest(raw, firstParty, mode string, kind uint16) bool {
 	if mode == "off" {
 		return false
 	}
@@ -111,37 +158,40 @@ func shouldBlockTracker(raw, firstParty, mode string) bool {
 		return false
 	}
 	host := strings.TrimSuffix(strings.ToLower(target.Hostname()), ".")
-	trackerDomain := ""
-	for _, domain := range standardTrackerDomains {
-		if matchingHost(host, domain) {
-			trackerDomain = domain
-			break
-		}
+	firstHost := ""
+	if first := checkedPrivacyURL(firstParty); first != nil {
+		firstHost = strings.TrimSuffix(strings.ToLower(first.Hostname()), ".")
 	}
-	if trackerDomain == "" && mode == "strict" {
+	if domain := builtinTrackerDomain(host, mode); domain != "" {
+		return !builtinTrackerExempt(host, firstHost, domain)
+	}
+	if mode != "strict" {
 		for _, domain := range strictTrackerDomains {
 			if matchingHost(host, domain) {
-				trackerDomain = domain
-				break
-			}
-		}
-	}
-	if trackerDomain == "" {
-		return false
-	}
-	if first := checkedPrivacyURL(firstParty); first != nil {
-		firstHost := strings.TrimSuffix(strings.ToLower(first.Hostname()), ".")
-		if matchingHost(host, firstHost) || matchingHost(firstHost, host) {
-			return false
-		}
-		for _, root := range trackerServiceRoots[trackerDomain] {
-			if matchingHost(firstHost, root) {
 				return false
 			}
 		}
 	}
-	return true
+	if kind == kindDocument || sameSite(host, firstHost) {
+		return false
+	}
+	return loadedEasyPrivacy().blocks(host, urlTail(target), kind, firstHost)
 }
+
+// requestKind is the filter-list kind of a Playwright request.
+func requestKind(request playwright.Request) (kind uint16) {
+	defer func() {
+		if recover() != nil {
+			kind = kindOther
+		}
+	}()
+	subframe := false
+	if frame := request.Frame(); frame != nil && frame.ParentFrame() != nil {
+		subframe = true
+	}
+	return requestKindFor(request.ResourceType(), subframe)
+}
+
 func requestFirstParty(request playwright.Request) (firstParty string) {
 	// Requests without a frame (for example a browser-owned request) have no
 	// first-party exception. Do not derive the hostname from URL query strings.
@@ -292,7 +342,7 @@ func installBrowserPrivacy(ctx playwright.BrowserContext, p *profile.Profile, ch
 	if mode != "off" {
 		if err := ctx.Route("**/*", func(route playwright.Route) {
 			request := route.Request()
-			if shouldBlockTracker(request.URL(), requestFirstParty(request), mode) {
+			if blockTrackerRequest(request.URL(), requestFirstParty(request), mode, requestKind(request)) {
 				if route.Abort("blockedbyclient") == nil {
 					state.BlockedRequests.Add(1)
 				}

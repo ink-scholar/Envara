@@ -10,6 +10,8 @@ import { localeForCountry } from './workspace-context.mjs';
 import { isInterfaceLanguage } from '../shared/interface-languages.mjs';
 import { browseForgeRegionFor } from '../shared/engine-choice.mjs';
 import { assertNetworkLocationMatchesEgress, confirmNetworkLocation, networkLocationGeolocation, normalizeNetworkLocation, recommendNetworkLocation } from '../shared/network-location.mjs';
+import { browserContextSignature } from './terminal-browser-broker.mjs';
+import { PROVIDER_DEFAULT_DEVICE_PROFILE_ID, defaultBrowserDeviceProfileId, deviceProfileFingerprint, getBrowserDeviceProfile, supportsBrowserDeviceProfiles, validateBrowserDeviceProfileInput } from '../shared/browser-device-profile.mjs';
 
 /** A link an environment's browser will load: web only, never credentials. */
 function linkURL(value) {
@@ -19,7 +21,29 @@ function linkURL(value) {
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw error('链接仅支持不含凭据的网页地址。', 'LINK_INVALID');
   return url.href;
 }
-const PROFILE_KEYS = new Set(['name', 'group', 'notes', 'engine', 'platform', 'seed', 'locale', 'timezone', 'width', 'height', 'startUrl', 'proxyId', 'tags', 'fingerprint', 'privacy']);
+const PROFILE_KEYS = new Set(['name', 'group', 'notes', 'engine', 'platform', 'seed', 'locale', 'timezone', 'width', 'height', 'startUrl', 'proxyId', 'tags', 'fingerprint', 'privacy', 'deviceProfileId']);
+const BOUND_BROWSER_ARGUMENTS = Object.freeze({ form_fill: ['fields'], press_key: ['key'], select_option: ['selector', 'values', 'timeout'], check: ['selector', 'checked', 'timeout'], list_tabs: [], new_tab: ['url'], switch_tab: ['index'], close_tab: ['index'] });
+function browserProfileSignature(profile) {
+  const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+  return createHash('sha256').update(JSON.stringify(canonical(Object.fromEntries(['runtime_id', 'fingerprint_seed', 'identity', 'fingerprint', 'launch_overrides', 'group', 'proxy', 'managed_proxy_required'].map(key => [key, profile?.[key] ?? null]))))).digest('hex');
+}
+function boundBrowserArguments(name, args) {
+  const keys = Object.hasOwn(BOUND_BROWSER_ARGUMENTS, name) ? BOUND_BROWSER_ARGUMENTS[name] : null;
+  const invalid = () => { throw error('浏览器操作参数无效。', 'CLAUDE_BROWSER_INVALID_ARGUMENT'); };
+  if (!keys) throw error('此浏览器操作不属于当前终端。', 'CLAUDE_BROWSER_UNKNOWN_TOOL');
+  if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => key !== 'profile_id' && !keys.includes(key))) invalid();
+  const input = Object.fromEntries(keys.filter(key => Object.hasOwn(args, key)).map(key => [key, args[key]]));
+  const string = (value, max = 10000, empty = false) => typeof value === 'string' && (empty || value.length > 0) && value.length <= max && !value.includes('\0');
+  if (name === 'form_fill' && (!Array.isArray(input.fields) || !input.fields.length || input.fields.length > 100 || input.fields.some(field => !field || typeof field !== 'object' || Array.isArray(field) || Object.keys(field).some(key => !['selector', 'text', 'clear'].includes(key)) || !string(field.selector) || !string(field.text, 64000, true) || field.clear != null && typeof field.clear !== 'boolean'))) invalid();
+  if (name === 'press_key' && !string(input.key, 200)) invalid();
+  if (['select_option', 'check'].includes(name) && !string(input.selector)) invalid();
+  if (name === 'select_option' && (!Array.isArray(input.values) || !input.values.length || input.values.length > 100 || input.values.some(value => !string(value, 10000, true)))) invalid();
+  if (name === 'check' && typeof input.checked !== 'boolean') invalid();
+  if (input.timeout != null && (!Number.isSafeInteger(input.timeout) || input.timeout < 0 || input.timeout > 45000)) invalid();
+  if (['switch_tab', 'close_tab'].includes(name) && (!Number.isSafeInteger(input.index) || input.index < 0 || input.index > 10000)) invalid();
+  if (name === 'new_tab' && input.url != null) input.url = linkURL(input.url);
+  return structuredClone(input);
+}
 const now = () => new Date().toISOString();
 const unwrap = (response) => response?.data;
 const array = (response) => Array.isArray(unwrap(response)) ? unwrap(response) : [];
@@ -116,6 +140,7 @@ export class BrowseForgeService {
     this.options = options;
     this.networkProbe = options.networkProbe ?? new ProxyNetworkProbe();
     this.workspaceContexts = new Map();
+    this.browserLaunchReceipts = new Map();
     this.proxyWires = new Map();
     this.managedProxyRevisions = new Map();
     this.locationPreviews = new Map();
@@ -252,7 +277,7 @@ export class BrowseForgeService {
       else this.resetPreview(profile.id);
       let bytes = null;
       try { bytes = await dataSize(path.join(await this.checkedDirectory(profile), 'browser-data')); } catch {}
-      return { id: profile.id, name: profile.name, group: profile.group ?? '', tags: profile.tags ?? [], notes: metadata.notes ?? '', engine: profile.runtime_id, platform: launchOverrides.target_os || profile.identity?.target_os || null, seed: profile.fingerprint_seed || null, locale, timezone, localeMode: configured(locale) ? 'fixed' : 'auto', timezoneMode: configured(timezone) ? 'fixed' : 'auto', launchOverrides, resolvedTimezone: currentContext ? currentContext.timezone ?? null : networkTimezone ?? fixedTimezone, timezoneSource: currentContext ? currentContext.timezoneSource ?? null : networkTimezone ? 'proxy-egress' : configured(timezone) ? 'manual' : null, timezoneOrigin: currentContext?.timezoneOrigin ?? (networkTimezone ? 'network-environment' : null), network: currentContext?.network ?? null, networkLastError: currentContext?.networkLastError ?? null, width: fingerprint['screen.width'] ?? null, height: fingerprint['screen.height'] ?? null, fingerprint, privacy: normalizePrivacy(metadata.privacy), privacyProtection: session?.privacy ?? null, geolocation: currentContext?.geolocation ?? null, selectedLocation: currentContext?.selectedLocation ?? selectedNetworkLocation, locationSource: currentContext?.locationSource ?? effective.proxy?.location?.source ?? null, resolvedLocale: currentContext?.locale ?? null, startUrl: metadata.startUrl ?? 'about:blank', proxyId, profileProxyId: ownProxy ? proxies.find((proxy) => proxy.id === ownProxy.id)?.id ?? proxies.find((proxy) => sameProxy(proxy, ownProxy))?.id ?? null : null, proxySource: effective.source, proxyMode: effective.mode, createdAt: metadata.createdAt ?? profile.created_at, updatedAt: metadata.updatedAt ?? profile.created_at, lastLaunchedAt: metadata.lastLaunchedAt ?? null, status, lastError: health?.alive === null ? health.error : this.lastErrors.get(profile.id) ?? null, dataBytes: bytes, cpuPercent: metric(measurement.cpuPercent), memoryBytes: metric(measurement.memoryBytes), observed: health?.observed ?? null, ...(this.previews.has(profile.id) && status === 'running' ? { screenshot: this.previews.get(profile.id), screenshotCapturedAt: this.previewCapturedAt.get(profile.id) } : {}) };
+      return { id: profile.id, name: profile.name, group: profile.group ?? '', tags: profile.tags ?? [], notes: metadata.notes ?? '', engine: profile.runtime_id, deviceProfileId: metadata.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID, platform: launchOverrides.target_os || profile.identity?.target_os || null, seed: profile.fingerprint_seed || null, locale, timezone, localeMode: configured(locale) ? 'fixed' : 'auto', timezoneMode: configured(timezone) ? 'fixed' : 'auto', launchOverrides, resolvedTimezone: currentContext ? currentContext.timezone ?? null : networkTimezone ?? fixedTimezone, timezoneSource: currentContext ? currentContext.timezoneSource ?? null : networkTimezone ? 'proxy-egress' : configured(timezone) ? 'manual' : null, timezoneOrigin: currentContext?.timezoneOrigin ?? (networkTimezone ? 'network-environment' : null), network: currentContext?.network ?? null, networkLastError: currentContext?.networkLastError ?? null, width: fingerprint['screen.width'] ?? null, height: fingerprint['screen.height'] ?? null, fingerprint, privacy: normalizePrivacy(metadata.privacy), privacyProtection: session?.privacy ?? null, geolocation: currentContext?.geolocation ?? null, selectedLocation: currentContext?.selectedLocation ?? selectedNetworkLocation, locationSource: currentContext?.locationSource ?? effective.proxy?.location?.source ?? null, resolvedLocale: currentContext?.locale ?? null, startUrl: metadata.startUrl ?? 'about:blank', proxyId, profileProxyId: ownProxy ? proxies.find((proxy) => proxy.id === ownProxy.id)?.id ?? proxies.find((proxy) => sameProxy(proxy, ownProxy))?.id ?? null : null, proxySource: effective.source, proxyMode: effective.mode, createdAt: metadata.createdAt ?? profile.created_at, updatedAt: metadata.updatedAt ?? profile.created_at, lastLaunchedAt: metadata.lastLaunchedAt ?? null, status, lastError: health?.alive === null ? health.error : this.lastErrors.get(profile.id) ?? null, dataBytes: bytes, cpuPercent: metric(measurement.cpuPercent), memoryBytes: metric(measurement.memoryBytes), observed: health?.observed ?? null, ...(this.previews.has(profile.id) && status === 'running' ? { screenshot: this.previews.get(profile.id), screenshotCapturedAt: this.previewCapturedAt.get(profile.id) } : {}) };
     }));
     let legacyMigration;
     try { const migration = await this.previewLegacyMigration(); legacyMigration = { available: migration.detected && migration.profiles.some((profile) => !profile.migrated), count: migration.profiles.filter((profile) => !profile.migrated).length, migrated: migration.profiles.filter((profile) => profile.migrated).length, ...migration }; }
@@ -267,6 +292,23 @@ export class BrowseForgeService {
     const session = remote.sessions.find((item) => item.profile_id === profileId);
     if (session) { if ((await this.health(session)).alive !== false) throw error('请先停止环境。', 'PROFILE_RUNNING'); await this.request('DELETE', `/api/sessions/${encoded(session.session_id)}`); }
   }
+  deviceProfileInput(input, descriptor, { existing, preserve = false } = {}) {
+    object(input, '环境配置');
+    if (Object.hasOwn(input, 'deviceProfileId')) {
+      getBrowserDeviceProfile(input.deviceProfileId);
+      return { ...input };
+    }
+    // An unlabelled old profile or imported configuration keeps exactly its
+    // existing fields. New drafts use the host/explicit platform only when no
+    // custom device fields would be overwritten by that default.
+    let deviceProfileId = existing?.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID;
+    if (!existing && !preserve && supportsBrowserDeviceProfiles(descriptor)) {
+      const candidate = getBrowserDeviceProfile(defaultBrowserDeviceProfileId(input.platform ?? this.system.platform));
+      if (candidate && candidate.id === defaultBrowserDeviceProfileId(this.system.platform) && input.fingerprint == null
+        && ['width', 'height'].every(key => input[key] == null || input[key] === candidate[key])) deviceProfileId = candidate.id;
+    }
+    return { ...input, deviceProfileId };
+  }
   normalize(input, descriptor, workspace, remote, existing = null) {
     object(input, '环境配置');
     if (Object.hasOwn(input, 'privacy')) normalizePrivacy(input.privacy);
@@ -274,13 +316,22 @@ export class BrowseForgeService {
     const name = text(input.name ?? existing?.name, '环境名称');
     const group = text(input.group ?? existing?.group ?? '', '分组', 100, true);
     if (!descriptor || !descriptor.platform_supported) throw error('当前平台不支持所选浏览器内核。', 'UNSUPPORTED_ENGINE');
+    const deviceProfile = validateBrowserDeviceProfileInput(input, descriptor, this.system.platform);
     const payload = { name, group, runtime_id: descriptor.id };
     const launchOverrides = { ...(existing?.launch_overrides ?? {}) };
     if (input.tags != null) { if (!Array.isArray(input.tags) || input.tags.length > 30) throw error('标签格式无效。'); payload.tags = input.tags.map((tag) => text(tag, '标签', 60)); }
-    const platform = input.platform ?? existing?.identity?.target_os;
+    const platform = deviceProfile?.platform ?? input.platform ?? existing?.identity?.target_os;
     if (platform != null) { if (!['macos', 'windows', 'linux'].includes(platform)) throw error('指纹平台无效。'); payload.identity = { ...(existing?.identity ?? {}), target_os: platform }; launchOverrides.target_os = platform; }
     const fingerprint = { ...(existing?.fingerprint ?? {}) };
     if (input.fingerprint != null) Object.assign(fingerprint, fingerprintConfig(input.fingerprint));
+    if (deviceProfile) {
+      Object.assign(fingerprint, deviceProfileFingerprint(deviceProfile.id));
+      // Available desktop area belongs to the native window manager. An old
+      // custom value can exceed the new fixed screen size and is not a setting
+      // this catalog promises to control.
+      delete fingerprint['screen.availWidth'];
+      delete fingerprint['screen.availHeight'];
+    }
     if (input.locale === '') {
       launchOverrides.locale = '';
       for (const key of ['navigator.language', 'navigator.languages', 'locale:language', 'locale:region']) delete fingerprint[key];
@@ -304,7 +355,7 @@ export class BrowseForgeService {
   metadata(input, profileId, existing = {}) {
     const startUrl = input.startUrl ?? existing.startUrl ?? 'about:blank';
     if (startUrl !== 'about:blank') { let url; try { url = new URL(startUrl); } catch { throw error('启动网址无效。'); } if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw error('启动网址仅支持不含凭据的 HTTP 或 HTTPS。'); }
-    return { ...existing, id: profileId, ...(Object.hasOwn(input, 'proxyId') ? { proxyId: input.proxyId || null } : {}), privacy: normalizePrivacy(input.privacy ?? existing.privacy), notes: text(input.notes ?? existing.notes ?? '', '备注', 4000, true), startUrl, updatedAt: now() };
+    return { ...existing, id: profileId, deviceProfileId: input.deviceProfileId ?? existing.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID, ...(Object.hasOwn(input, 'proxyId') ? { proxyId: input.proxyId || null } : {}), privacy: normalizePrivacy(input.privacy ?? existing.privacy), notes: text(input.notes ?? existing.notes ?? '', '备注', 4000, true), startUrl, updatedAt: now() };
   }
   async call(method, args = {}) {
     await this.ready;
@@ -327,6 +378,7 @@ export class BrowseForgeService {
     const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
     if (remote.profiles.length >= 500) throw error('最多支持 500 个环境。');
     const descriptor = remote.descriptors.find((item) => item.id === (profile?.engine ?? remote.defaultEngine));
+    profile = this.deviceProfileInput(profile, descriptor);
     const metadata = this.metadata(profile, null);
     const payload = this.normalize(profile, descriptor, workspace, remote);
     const created = unwrap(await this.request('POST', '/api/profiles', payload));
@@ -340,7 +392,9 @@ export class BrowseForgeService {
     await this.assertStopped(remote, profileId);
     const engineId = profile?.engine ?? existing.runtime_id;
     if (engineId !== existing.runtime_id) throw error('已有资料不能直接切换内核，请创建新环境。', 'ENGINE_CHANGE_REQUIRES_NEW_PROFILE');
-    const metadata = this.metadata(profile, profileId, workspace.profiles.find((item) => item.id === profileId));
+    const oldMetadata = workspace.profiles.find((item) => item.id === profileId) ?? {};
+    profile = this.deviceProfileInput(profile, remote.descriptors.find(item => item.id === engineId), { existing: oldMetadata, preserve: true });
+    const metadata = this.metadata(profile, profileId, oldMetadata);
     const payload = this.normalize(profile, remote.descriptors.find((item) => item.id === engineId), workspace, remote, existing);
     await this.request('PUT', `/api/profiles/${encoded(profileId)}`, payload);
     await this.store.transaction((next) => { next.profiles = next.profiles.filter((item) => item.id !== profileId); next.profiles.push(metadata); event(next, 'profile', `更新环境「${payload.name}」`, profileId); });
@@ -352,9 +406,14 @@ export class BrowseForgeService {
     const descriptor = remote.descriptors.find((item) => item.id === original.runtime_id);
     if (!descriptor?.platform_supported) throw error('当前平台不支持原环境的内核。');
     const payload = { name: `${original.name.slice(0, 90)} 副本`, runtime_id: original.runtime_id, group: original.group ?? '', tags: original.tags ?? [], proxy: original.proxy ?? null, identity: original.identity, launch_overrides: original.launch_overrides, managed_proxy_required: this.effectiveProxy(original, remote.groups, workspace).proxy?.protocol === 'anytls' };
+    const old = workspace.profiles.find(item => item.id === profileId) ?? {};
+    const deviceProfile = validateBrowserDeviceProfileInput({ deviceProfileId: old.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID }, descriptor, this.system.platform);
+    // Carry the selected immutable hardware specification, never an old
+    // profile's generated canvas/audio noise or browser data, into a clone.
+    if (deviceProfile) payload.fingerprint = deviceProfileFingerprint(deviceProfile.id);
     if (descriptor.capabilities?.supports_seed_fingerprint) { payload.fingerprint_seed = randomInt(1, 4294967295); while (payload.fingerprint_seed === original.fingerprint_seed) payload.fingerprint_seed = randomInt(1, 4294967295); }
     const created = unwrap(await this.request('POST', '/api/profiles', payload));
-    try { await this.store.transaction((next) => { const old = workspace.profiles.find((item) => item.id === profileId); next.profiles.push(this.metadata(old ?? {}, created.id)); event(next, 'profile', `克隆环境「${original.name}」`, created.id); }); }
+    try { await this.store.transaction((next) => { next.profiles.push(this.metadata(old, created.id)); event(next, 'profile', `克隆环境「${original.name}」`, created.id); }); }
     catch (value) { await this.request('DELETE', `/api/profiles/${encoded(created.id)}`).catch(() => {}); throw value; }
     return { createdId: created.id };
   }
@@ -390,6 +449,11 @@ export class BrowseForgeService {
       if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
       if (this.installingEngine) throw error('内核正在安装，请稍后启动。', 'ENGINE_INSTALL_BUSY');
       const remote = await this.remote(); const profile = this.find(remote, profileId); const previous = remote.sessions.find((item) => item.profile_id === profileId);
+      const metadata = (await this.store.read()).profiles.find(item => item.id === profileId) ?? {};
+      const deviceProfileId = metadata.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID;
+      validateBrowserDeviceProfileInput({ deviceProfileId, platform: profile.launch_overrides?.target_os ?? profile.identity?.target_os,
+        fingerprint: Object.fromEntries(Object.keys(deviceProfileFingerprint(deviceProfileId)).map(key => [key, profile.fingerprint?.[key]])) },
+      profile.runtime_id, this.system.platform);
       if (previous && (await this.health(previous)).alive === true) return { profile, focus: true };
       const engine = (await this.engines(remote.descriptors)).find((item) => item.id === profile.runtime_id);
       if (!engine?.installed || !engine.enabled) throw error('请先安装并启用该环境的浏览器内核。', 'ENGINE_NOT_INSTALLED');
@@ -402,6 +466,18 @@ export class BrowseForgeService {
     try {
       const context = await this.resolveWorkspaceContext(profileId, { remote: reservation.remote, force: true });
       const session = unwrap(await this.request('POST', '/api/sessions', { profile_id: profileId, launch_overrides: { timezone: context.timezone, ...(context.locale ? { locale: context.locale } : {}), privacy: context.privacy, geolocation: context.geolocation, ...(context.managedProxy ? { proxy: upstreamProxy(context.proxy) } : {}) } }, { timeoutMs: 180000 }));
+      // Only a launch issued here can establish the route receipt. Existing
+      // sessions discovered from REST are never retroactively called verified.
+      this.browserLaunchReceipts.delete(profileId);
+      try {
+        // LaunchSession may reuse a healthy backend browser even when its active
+        // page failed our health check. That is not proof of a fresh launch.
+        if (reservation.remote.sessions.some(item => item.profile_id === profileId)) throw error('浏览器启动来源尚未确认。', 'CLAUDE_BROWSER_ROUTE_UNVERIFIED');
+        const endpoint = await this.boundBrowserEndpoint(session);
+        this.browserLaunchReceipts.set(profileId, { sessionId: session.session_id, runtimeId: session.runtime_id, endpoint,
+          profileSignature: browserProfileSignature({ ...profile, ...(context.managedProxy ? { managed_proxy_required: true } : {}) }),
+          signature: browserContextSignature(context), context: structuredClone({ proxyId: context.proxyId, timezone: context.timezone, locale: context.locale, geolocation: context.geolocation, network: context.network }) });
+      } catch { /* Normal browser launch remains usable; bound automation refuses. */ }
       const metadata = (await this.store.read()).profiles.find((item) => item.id === profileId);
       if (metadata?.startUrl && metadata.startUrl !== 'about:blank') { try { await this.request('POST', `/api/sessions/${encoded(session.session_id)}/navigate`, { url: metadata.startUrl, wait_until: 'domcontentloaded' }); } catch (value) { this.lastErrors.set(profileId, `页面未加载完成：${value.message}`); } }
       await this.store.transaction((next) => { const metadata = next.profiles.find((item) => item.id === profileId); if (metadata) metadata.lastLaunchedAt = now(); event(next, 'browser', `启动环境「${profile.name}」`, profileId); });
@@ -409,7 +485,60 @@ export class BrowseForgeService {
     } catch (value) { this.lastErrors.set(profileId, value.message); await this.store.transaction((next) => event(next, 'error', `环境「${profile.name}」启动失败：${value.message}`, profileId)); throw value; }
     finally { this.starting.delete(profileId); this.changed(); }
   }
-  async stopProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); const session = remote.sessions.find((item) => item.profile_id === profileId); if (session) await this.request('DELETE', `/api/sessions/${encoded(session.session_id)}`); this.resetPreview(profileId); this.lastErrors.delete(profileId); await this.store.transaction((next) => event(next, 'browser', `停止环境「${profile.name}」`, profileId)); }
+  async stopProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); const session = remote.sessions.find((item) => item.profile_id === profileId); if (session) await this.request('DELETE', `/api/sessions/${encoded(session.session_id)}`); this.browserLaunchReceipts.delete(profileId); this.resetPreview(profileId); this.lastErrors.delete(profileId); await this.store.transaction((next) => event(next, 'browser', `停止环境「${profile.name}」`, profileId)); }
+  async boundBrowserEndpoint(session) {
+    const endpoints = array(await this.request('GET', '/api/playwright/endpoint'));
+    const endpoint = endpoints.find(item => item.profile_id === session.profile_id && item.session_id === session.session_id && item.runtime_id === session.runtime_id)?.endpoint;
+    if (typeof endpoint !== 'string' || !endpoint) throw error('当前浏览器缺少启动凭据，请在境舱中停止后重新启动。', 'CLAUDE_BROWSER_ROUTE_UNVERIFIED');
+    return createHash('sha256').update(endpoint).digest('hex');
+  }
+  async assertBoundBrowserReceipt(profileId, context, remote) {
+    const session = remote.sessions.find(item => item.profile_id === profileId);
+    const receipt = this.browserLaunchReceipts.get(profileId);
+    if (!session || !receipt || receipt.sessionId !== session.session_id || receipt.runtimeId !== session.runtime_id
+      || receipt.profileSignature !== browserProfileSignature(remote.profiles.find(item => item.id === profileId))
+      || receipt.signature !== browserContextSignature(context) || receipt.endpoint !== await this.boundBrowserEndpoint(session)) {
+      throw error('当前浏览器的网络启动凭据不匹配，请在境舱中停止后重新启动。', 'CLAUDE_BROWSER_ROUTE_UNVERIFIED');
+    }
+    if ((await this.health(session)).alive !== true) throw error('当前浏览器没有响应，未改用其他浏览器。', 'CLAUDE_BROWSER_UNAVAILABLE');
+    return { session_id: session.session_id, profile_id: profileId };
+  }
+  /** Main-process only. Not part of call()/IPC and never returns Bind endpoints. */
+  async ensureBoundBrowser({ profileId, expectedContext }) {
+    await this.ready;
+    identifier(profileId);
+    if (expectedContext?.id !== profileId || !expectedContext.proxy || !expectedContext.proxyId || expectedContext.network?.ok !== true) throw error('请先确认此浏览器所属的境舱网络。', 'CLAUDE_BROWSER_NETWORK_REQUIRED');
+    return this.profileSerialize(profileId, async () => {
+      if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
+      let remote = await this.remote();
+      let context = await this.resolveWorkspaceContext(profileId, { remote });
+      const expectedSignature = browserContextSignature(expectedContext);
+      if (context.network?.ok !== true || browserContextSignature(context) !== expectedSignature) throw error('浏览器的境舱网络已改变，请重新创建 Claude Code 会话。', 'CLAUDE_BROWSER_BINDING_CHANGED');
+      if (!remote.sessions.some(item => item.profile_id === profileId)) {
+        // startProfile uses the global reservation queue, not profileSerialize.
+        await this.startProfile({ id: profileId });
+        remote = await this.remote();
+        context = await this.resolveWorkspaceContext(profileId, { remote });
+        if (context.network?.ok !== true || browserContextSignature(context) !== expectedSignature) throw error('浏览器启动期间境舱网络已改变，请重新创建 Claude Code 会话。', 'CLAUDE_BROWSER_BINDING_CHANGED');
+      }
+      return this.assertBoundBrowserReceipt(profileId, context, remote);
+    });
+  }
+  /** The broker may call only page operations; another profile is never accepted. */
+  async callBoundBrowserTool(profileId, name, args = {}) {
+    await this.ready;
+    identifier(profileId);
+    const input = boundBrowserArguments(name, args);
+    return this.profileSerialize(profileId, async () => {
+      if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
+      const remote = await this.remote();
+      const context = await this.resolveWorkspaceContext(profileId, { remote });
+      if (context.network?.ok !== true || !context.proxy || !context.proxyId) throw error('当前境舱网络不可用，未执行浏览器操作。', 'CLAUDE_BROWSER_NETWORK_REQUIRED');
+      await this.assertBoundBrowserReceipt(profileId, context, remote);
+      if (typeof this.client.callMcpTool !== 'function') throw error('浏览器操作通道不可用。', 'CLAUDE_BROWSER_UNAVAILABLE');
+      return this.client.callMcpTool(name, { ...input, profile_id: profileId });
+    });
+  }
   async focusProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); const session = remote.sessions.find((item) => item.profile_id === profileId); if (!session || (await this.health(session)).alive !== true) throw error('环境尚未运行。', 'PROFILE_NOT_RUNNING'); const workspace = await this.store.read(); if (this.effectiveProxy(profile, remote.groups, workspace).proxy?.protocol === 'anytls' || profile.managed_proxy_required) await this.resolveWorkspaceContext(profileId, { remote, force: true }); if (this.options.focusSession) await this.options.focusSession(session); else await this.request('POST', `/api/sessions/${encoded(session.session_id)}/focus`); await this.capture(profileId, session.session_id); }
   resetPreview(profileId) { this.previews.delete(profileId); this.previewAttempts.delete(profileId); this.previewCapturedAt.delete(profileId); this.previewInFlight.delete(profileId); }
   async capture(profileId, sessionId, { force = true } = {}) {
@@ -740,6 +869,7 @@ export class BrowseForgeService {
     const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
     const candidates = rows.map((row) => {
       const config = Object.fromEntries(Object.entries(object(row, '导入环境')).filter(([key]) => PROFILE_KEYS.has(key)));
+      if (!Object.hasOwn(config, 'deviceProfileId')) config.deviceProfileId = PROVIDER_DEFAULT_DEVICE_PROFILE_ID;
       if (row.proxyId) { const mapped = proxyMap[row.proxyId]; if (!mapped) throw error(`环境「${row.name}」的代理尚未映射，导入已取消。`, 'PROXY_MAPPING_REQUIRED'); config.proxyId = mapped; }
       else if (Object.hasOwn(row, 'proxy') && row.proxy) throw error('原始代理配置需要先建立明确映射。', 'PROXY_MAPPING_REQUIRED');
       if (Object.keys(row).some((key) => !PROFILE_KEYS.has(key) && !['id', 'createdAt', 'updatedAt', 'lastLaunchedAt'].includes(key))) throw error('导入配置包含不支持的字段。');
@@ -769,7 +899,7 @@ export class BrowseForgeService {
     const remote = await this.remote(); const descriptor = remote.descriptors.find((item) => item.id === 'cloakbrowser');
     const importedProxies = legacy.proxies.map((proxy) => ({ ...proxyConfig(proxy), name: text(proxy.name, '旧代理名称'), id: randomUUID(), legacyId: proxy.id }));
     const stagedWorkspace = { ...existing, proxies: [...existing.proxies, ...importedProxies] };
-    const candidates = selected.map((profile) => { if (!/^[0-9a-f-]{36}$/i.test(profile.id)) throw error('旧环境 ID 无效，迁移取消。'); const proxyId = profile.proxyId ? importedProxies.find((proxy) => proxy.legacyId === profile.proxyId)?.id : null; if (profile.proxyId && !proxyId) throw error('旧代理绑定缺失，不能改为直接连接。', 'PROXY_MAPPING_REQUIRED'); const config = Object.fromEntries([...PROFILE_KEYS].filter((key) => Object.hasOwn(profile, key)).map((key) => [key, profile[key]])); config.proxyId = proxyId; return { old: profile, payload: this.normalize(config, descriptor, stagedWorkspace, remote), metadata: this.metadata(config, null) }; });
+    const candidates = selected.map((profile) => { if (!/^[0-9a-f-]{36}$/i.test(profile.id)) throw error('旧环境 ID 无效，迁移取消。'); const proxyId = profile.proxyId ? importedProxies.find((proxy) => proxy.legacyId === profile.proxyId)?.id : null; if (profile.proxyId && !proxyId) throw error('旧代理绑定缺失，不能改为直接连接。', 'PROXY_MAPPING_REQUIRED'); const config = Object.fromEntries([...PROFILE_KEYS].filter((key) => Object.hasOwn(profile, key)).map((key) => [key, profile[key]])); config.proxyId = proxyId; config.deviceProfileId ??= PROVIDER_DEFAULT_DEVICE_PROFILE_ID; return { old: profile, payload: this.normalize(config, descriptor, stagedWorkspace, remote), metadata: this.metadata(config, null) }; });
     const backupDir = path.join(this.dataDir, 'migration-backups', `${Date.now()}-${randomUUID()}`);
     await mkdir(backupDir, { recursive: true, mode: 0o700 });
     await cp(path.join(this.dataDir, 'workspace.json'), path.join(backupDir, 'workspace.json'), { errorOnExist: true, force: false });

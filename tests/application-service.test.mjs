@@ -88,6 +88,8 @@ test('missing installation, authorization, each network capability or actual ver
 
 test('genuine owned child uses the shared context and literal args; no secrets appear in metadata or child environment', async t => {
   const f = await fixture(t), args = ['$(touch do-not-create)', '; echo do-not-execute', '--literal=value'];
+  f.context.locale = 'ms-MY';
+  Object.assign(f.context.environment, { LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' });
   const item = await add(f, 'profile_a', { args });
   const result = await f.service.startApplication({ id: item.id }), live = result.applications[0];
   assert.equal(live.status, 'running'); assert.ok(live.pid > 0); assert.equal(live.timezone, 'Asia/Manila'); assert.equal(live.geolocation.latitude, 14.6);
@@ -98,6 +100,7 @@ test('genuine owned child uses the shared context and literal args; no secrets a
   const launch = f.routing.calls.find(([method]) => method === 'launch')[1];
   assert.deepEqual(launch.args, args); assert.equal(launch.cwd, f.cwd); assert.equal(launch.env.TZ, f.context.timezone);
   assert.equal(launch.env.HOME, f.context.environment.HOME); assert.equal(launch.env.CLAUDE_CONFIG_DIR, f.context.environment.CLAUDE_CONFIG_DIR);
+  assert.equal(launch.env.LANG, 'en_US.UTF-8'); assert.equal(launch.env.LC_ALL, 'en_US.UTF-8');
   assert.equal(launch.env.HTTP_PROXY, undefined); assert.equal(launch.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(JSON.stringify(result).includes('runtime-secret'), false); assert.equal(JSON.stringify(result).includes('runtime-user'), false);
   assert.equal((await f.service.startApplication({ id: item.id })).applications[0].pid, live.pid, 'Repeated start never creates a second instance');

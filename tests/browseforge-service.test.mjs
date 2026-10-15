@@ -152,7 +152,7 @@ test('supported missing providers allow drafts while start requires a real insta
 
 test('switching fixed locale and timezone to auto clears overrides and old fingerprint defaults', async (t) => {
   const { service, client } = await fixture(t);
-  const profile = (await service.call('createProfile', { profile: { name: '自动网络匹配', engine: 'cloakbrowser', seed: 12345, locale: 'zh-CN', timezone: 'Asia/Shanghai' } })).profiles[0];
+  const profile = (await service.call('createProfile', { profile: { name: '自动网络匹配', engine: 'cloakbrowser', deviceProfileId: 'provider-default', seed: 12345, locale: 'zh-CN', timezone: 'Asia/Shanghai' } })).profiles[0];
   assert.equal(profile.localeMode, 'fixed');
   assert.equal(profile.timezoneMode, 'fixed');
   const auto = await service.call('updateProfile', { id: profile.id, profile: { locale: '', timezone: '' } });
@@ -354,7 +354,7 @@ test('long launch only locks its own profile; other stop and metadata actions co
 
 test('clone bypasses upstream duplicate to regenerate seed without copying structured fingerprint or data', async (t) => {
   const { service, client } = await fixture(t);
-  const original = await create(service);
+  const original = await create(service, { deviceProfileId: 'provider-default' });
   const snapshot = await service.call('cloneProfile', { id: original.id });
   const clone = snapshot.profiles.at(-1);
   const body = client.requests.filter((request) => request.method === 'POST' && request.route === '/api/profiles').at(-1).body;

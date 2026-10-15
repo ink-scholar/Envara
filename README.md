@@ -5,7 +5,7 @@
 <p align="center"><strong>多个环境，一个工作台。</strong><br />A local workspace for browsers, terminals and network contexts.</p>
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原创代码许可证：MIT" /></a>
-  <a href="docs/verification.md"><img src="https://img.shields.io/badge/0.5.0-local_candidate-475569" alt="0.5.0 本地候选版" /></a>
+  <a href="docs/verification.md"><img src="https://img.shields.io/badge/0.5.3-local_candidate-475569" alt="0.5.3 本地候选版" /></a>
   <a href="docs/readme/en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 种 README 语言" /></a>
 </p>
 <p align="center">
@@ -33,6 +33,8 @@ Envara 将 BrowseForge 的浏览器环境能力带进本地桌面工作台。按
 
 浏览器和终端共用境舱的网络与时区上下文。每个境舱有独立工具配置和历史；复制终端会创建新的进程，不重放正在执行的命令。内置 AnyTLS 使用应用管理的核心，无需另外配置 Clash。
 
+本地 0.5.7 候选版提供 [Claude Code 专用会话](docs/claude-code-sessions.md)：先打开命令行，由用户运行 `claude` 并自行添加参数；每个境舱维护独立原生安装，首次可选择从本机程序初始化，或通过所选境舱网络下载独立安装（默认），可选择独立登录档案，手动更新后下次调用采用新版。沿用境舱配置与登录信息，通过 MCP / Playwright 操作创建会话时选定的浏览器，并提供[浏览器设备档案与独立语言设置](docs/browser-device-profiles.md)。账号配置检查、官方隐私选项与网络故障处理的取舍见 [参考项目分析](docs/claude-reference-analysis.md)。
+
 ## 用自己的语言开始
 
 候选界面支持 **简体中文、繁體中文、English、日本語、한국어、Español、Français、Deutsch、Português (Brasil)**。首次打开提供语言选择，之后可以在设置中修改。
@@ -45,7 +47,7 @@ Envara 将 BrowseForge 的浏览器环境能力带进本地桌面工作台。按
 
 ## 安装与当前状态
 
-**0.5.0 为开发候选版，当前没有公开正式下载。** 最新源码进展已获授权上传；安装发行版仍为草稿，自动发行保持禁用。Notion 启动与清理尚未验收，见 [当前诊断交接](docs/notion-launch-handoff-20261010.md)。
+**0.5.7 为本地开发候选版，当前没有公开正式下载。** 本轮 Claude Code 会话与设备档案功能尚未发布到 GitHub，自动发行保持禁用。历史 Notion 诊断见 [诊断交接](docs/notion-launch-handoff-20261010.md)，该历史记录不代表本轮功能的验收状态。
 
 GitHub 自动编译、打包工作流已移除；上传源码不会触发构建，需要时在本地手动构建。
 

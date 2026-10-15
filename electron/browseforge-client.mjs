@@ -78,6 +78,7 @@ export class BrowseForgeClient {
   #token;
   #fetch;
   #timeout;
+  #rpcSequence = 0;
 
   constructor({ baseUrl = 'http://127.0.0.1:19280', token = '', fetchImpl = globalThis.fetch, timeoutMs = 15000 } = {}) {
     if (typeof baseUrl !== 'function') baseURL(baseUrl);
@@ -91,7 +92,20 @@ export class BrowseForgeClient {
   }
 
   /** Returns raw JSON envelopes, text, or a Node Buffer. Mutations are never retried. */
-  async request(method, path, body, { responseType = 'json', timeoutMs = this.#timeout, signal } = {}) {
+  request(method, path, body, options) { return this.#request(method, path, body, options); }
+
+  /** Main-process-only MCP transport. Callers must constrain the tool and profile. */
+  async callMcpTool(name, args, options = {}) {
+    if (typeof name !== 'string' || !/^[a-z_]{1,64}$/.test(name) || !args || typeof args !== 'object' || Array.isArray(args)) throw new TypeError('Invalid BrowseForge MCP tool call.');
+    const id = `envara-${++this.#rpcSequence}`;
+    const response = await this.#request('POST', '/mcp', { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }, { timeoutMs: 45000, ...options }, true);
+    if (response?.jsonrpc !== '2.0' || response.id !== id) throw new BrowseForgeApiError('BrowseForge returned an invalid MCP response.', { code: 'INVALID_RESPONSE' });
+    if (response.error) throw new BrowseForgeApiError('The selected browser action failed.', { code: 'MCP_TOOL_FAILED' });
+    if (!response.result || !Array.isArray(response.result.content)) throw new BrowseForgeApiError('BrowseForge returned an invalid MCP tool result.', { code: 'INVALID_RESPONSE' });
+    return response.result;
+  }
+
+  async #request(method, path, body, { responseType = 'json', timeoutMs = this.#timeout, signal } = {}, mcp = false) {
     if (typeof method !== 'string' || !['GET', 'POST', 'PUT', 'DELETE'].includes(method.toUpperCase())) {
       throw new TypeError('Unsupported BrowseForge HTTP method.');
     }
@@ -99,7 +113,7 @@ export class BrowseForgeClient {
     if (!['json', 'text', 'arraybuffer'].includes(responseType)) throw new TypeError('Unsupported responseType.');
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('timeoutMs must be positive.');
     const base = baseURL(typeof this.#baseUrl === 'function' ? await this.#baseUrl() : this.#baseUrl);
-    const url = apiURL(base, path);
+    const url = mcp ? new URL('/mcp', base) : apiURL(base, path);
     const token = typeof this.#token === 'function' ? await this.#token() : this.#token;
     if (typeof token !== 'string' || /[\r\n]/.test(token)) throw new TypeError('Invalid BrowseForge authentication token.');
     const secrets = [...new Set([token, ...bodySecrets(body)].filter(Boolean))];

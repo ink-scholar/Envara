@@ -61,6 +61,8 @@ export class TerminalStreamStore {
       if (typeof event.status === 'string') entry.meta.status = event.status;
       if (typeof event.error === 'string') entry.meta.error = event.error;
       if (typeof event.message === 'string') entry.meta.message = event.message;
+      if (event.claudeInstall && typeof event.claudeInstall === 'object') entry.meta.claudeInstall = { ...event.claudeInstall };
+      else if (event.claudeInstall === null) entry.meta.claudeInstall = null;
     }
   }
   drain(entry, writes) {

@@ -7,6 +7,8 @@ import { initialProxyForm, proxyConfig, proxyFormError } from "./proxy-form-stat
 import { locationFormState, verifiedLocationPreview, locationConfirmation, proxyRouteFields, networkApplicationChoices, chooseApplicationProfile, isApplicationAlreadyAttached, createdProfileFromSnapshot, savedNetworkPresentation } from "./network-flow-state.mjs";
 import { googleMapsLocationURL, normalizeNetworkLocation } from "../shared/network-location.mjs";
 import { browseForgeRegionFor, preferredEngine } from "../shared/engine-choice.mjs";
+import { BROWSER_DEVICE_PROFILES, PROVIDER_DEFAULT_DEVICE_PROFILE_ID, defaultBrowserDeviceProfileId, getBrowserDeviceProfile, supportsBrowserDeviceProfiles } from "../shared/browser-device-profile.mjs";
+import { initialBrowserDeviceFields, selectBrowserDeviceProfile, changeBrowserDeviceEngine } from "./browser-device-form.mjs";
 import { safeNotionTrial, notionTrialLocksConfiguration } from "./notion-trial-state.mjs";
 import { useI18n } from "./i18n.jsx";
 import { SYSTEM_BROWSER, linkBrowsersFor as linkBrowsersOf, linkBrowserChoice } from "./link-browser.mjs";
@@ -25,7 +27,7 @@ const initialSnapshot = {
   events: [],
   system: {}
 };
-const profileFields = ["name", "group", "notes", "engine", "platform", "seed", "locale", "timezone", "width", "height", "startUrl", "proxyId", "privacy"];
+const profileFields = ["name", "group", "notes", "engine", "platform", "seed", "locale", "timezone", "width", "height", "startUrl", "proxyId", "privacy", "deviceProfileId"];
 const profileConfig = profile => ({
   ...Object.fromEntries(profileFields.filter(key => profile[key] != null || key === "proxyId").map(key => [key, profile[key]])),
   proxyId: Object.hasOwn(profile, "profileProxyId") ? profile.profileProxyId : profile.proxyId
@@ -243,7 +245,8 @@ function ProfileForm({
     } : {}),
     ...(profile && Object.hasOwn(profile, "profileProxyId") ? {
       proxyId: profile.profileProxyId || ""
-    } : {})
+    } : {}),
+    ...initialBrowserDeviceFields(profile, systemPlatform, profile?.engine || preferredEngine(engines, defaultEngine))
   }));
   const [errors, setErrors] = useState({});
   const [fixedModes, setFixedModes] = useState({
@@ -257,13 +260,16 @@ function ProfileForm({
       timezone: profile?.timezone || "Asia/Shanghai"
     });
   const runtime = engines.find(item => item.id === form.engine);
+  const deviceProfilesSupported = supportsBrowserDeviceProfiles(form.engine);
+  const selectedDevice = getBrowserDeviceProfile(form.deviceProfileId);
+  const deviceChoices = BROWSER_DEVICE_PROFILES.filter(device => device.id === defaultBrowserDeviceProfileId(systemPlatform));
   const groupDescriptor = groupDescriptors?.find(item => typeof item === "object" && item.name === form.group);
   const groupProxy = proxies.find(item => item.id === groupDescriptor?.proxyId);
   const groupEnforced = groupDescriptor?.proxy_mode === "enforced" && !!groupProxy;
   const effectiveProxy = groupEnforced ? groupProxy : proxies.find(item => item.id === form.proxyId) || groupProxy;
   const confirmedNetworkTimezone = effectiveProxy?.location?.confirmed ? effectiveProxy.location.timezone : null;
   const change = key => event => {
-    setForm(value => ({
+    setForm(value => key === "engine" ? changeBrowserDeviceEngine(value, event.target.value) : ({
       ...value,
       [key]: event.target.value
     }));
@@ -271,6 +277,10 @@ function ProfileForm({
       ...value,
       [key]: ""
     }));
+  };
+  const changeDeviceProfile = event => {
+    setForm(value => selectBrowserDeviceProfile(value, event.target.value));
+    setErrors(value => ({ ...value, deviceProfileId: "", platform: "", width: "", height: "" }));
   };
   const changeMode = key => event => {
     setFixedModes(value => ({
@@ -304,7 +314,7 @@ function ProfileForm({
     setErrors({
       [key]: message
     });
-    if (["seed", "width", "height", "platform", "locale", "timezone", "engine"].includes(key)) setAdvanced(true);
+    if (["seed", "width", "height", "platform", "locale", "timezone", "engine", "deviceProfileId"].includes(key)) setAdvanced(true);
     requestAnimationFrame(() => formRef.current?.elements.namedItem(key)?.focus());
   };
   const submit = event => {
@@ -360,6 +370,7 @@ function ProfileForm({
       group: form.group.trim(),
       notes: form.notes,
       engine: form.engine,
+      deviceProfileId: form.deviceProfileId,
       platform: form.platform,
       ...(allows(runtime, "seed") ? {
         seed: Number(form.seed)
@@ -398,6 +409,12 @@ function ProfileForm({
           {field("engine", t("浏览器内核"), <select value={form.engine} onChange={change("engine")} disabled={!!profile} {...invalid("engine")}>{engines.map(item => <option key={item.id} value={item.id} disabled={item.supported === false}>{item.displayName || item.id}{item.supported === false ? t(" · 不可用") : ""}</option>)}{!runtime && <option value={form.engine}>{form.engine}</option>}</select>, {
               className: "span-two"
             })}
+          <div className="browser-device-settings span-two">
+            {field("deviceProfileId", t("设备档案"), <select value={form.deviceProfileId} onChange={changeDeviceProfile} disabled={!deviceProfilesSupported} {...invalid("deviceProfileId")}><option value={PROVIDER_DEFAULT_DEVICE_PROFILE_ID}>{t("自定义（保留当前配置）")}</option>{deviceChoices.map(device => <option key={device.id} value={device.id} disabled={!deviceProfilesSupported}>{t(device.label)}</option>)}</select>, {
+              hint: t(deviceProfilesSupported ? "选择档案会填写平台与屏幕；切换网络不改变设备。" : "当前内核暂不支持固定设备档案。")
+            })}
+            {selectedDevice && <dl className="browser-device-summary" aria-label={t("设备档案")}><div><dt>{t("平台")}</dt><dd>{platforms[selectedDevice.platform]}</dd></div><div><dt>{t("屏幕")}</dt><dd>{selectedDevice.width} × {selectedDevice.height}</dd></div><div><dt>{t("逻辑处理器")}</dt><dd>{selectedDevice.hardwareConcurrency}</dd></div><div><dt>{t("浏览器内存")}</dt><dd>{selectedDevice.deviceMemory} GB</dd></div></dl>}
+          </div>
           {field("group", t("分组"), <><input maxLength={60} list="profile-groups" value={form.group} onChange={change("group")} placeholder={t("未分组")} /><datalist id="profile-groups">{groups.map(group => <option key={group} value={group} />)}</datalist></>)}
           <Field label={t("隐私防护")} hint={t({ standard: "拦截已知的第三方追踪：内置规则加 EasyPrivacy 名单，不影响登录和网站功能。", strict: "在标准之上，再拦截标签管理器、错误上报和广告网络；个别网站可能缺少功能。", off: "不拦截追踪请求。" }[form.privacy?.mode || "standard"])}><select value={form.privacy?.mode || "standard"} onChange={event => setForm(value => ({
                 ...value,
@@ -405,15 +422,15 @@ function ProfileForm({
                   mode: event.target.value
                 }
               }))}><option value="standard">{t("标准")}</option><option value="strict">{t("严格")}</option><option value="off">{t("停用")}</option></select></Field>
-          {field("locale", t("语言"), <><select aria-label={t("语言模式")} value={fixedModes.locale ? "fixed" : "auto"} onChange={changeMode("locale")}><option value="auto">{t("跟随网络出口")}</option><option value="fixed">{t("固定语言")}</option></select>{fixedModes.locale && <input aria-label={t("固定语言")} value={form.locale} onChange={change("locale")} disabled={!allows(runtime, "locale")} placeholder="zh-CN" {...invalid("locale")} />}</>)}
+          {field("locale", t("语言"), <><select aria-label={t("语言模式")} value={fixedModes.locale ? "fixed" : "auto"} onChange={changeMode("locale")}><option value="auto">{t("跟随网络出口")}</option><option value="fixed">{t("固定语言")}</option></select>{fixedModes.locale && <input aria-label={t("固定语言")} value={form.locale} onChange={change("locale")} disabled={!allows(runtime, "locale")} placeholder="zh-CN" {...invalid("locale")} />}</>, { hint: t("浏览器语言与 Envara 界面语言独立；网站可能自行选择语言。") })}
           {field("timezone", t("时区"), confirmedNetworkTimezone ? <span className="field-hint">{confirmedNetworkTimezone}<br />{t("已保存配置")}</span> : <><select aria-label={t("时区模式")} value={fixedModes.timezone ? "fixed" : "auto"} onChange={changeMode("timezone")}><option value="auto">{t("跟随网络出口")}</option><option value="fixed">{t("固定时区")}</option></select>{fixedModes.timezone && <input aria-label={t("固定时区")} value={form.timezone} onChange={change("timezone")} disabled={!allows(runtime, "timezone")} placeholder="Asia/Shanghai" {...invalid("timezone")} />}</>)}
-          {field("platform", t("指纹平台"), <select value={form.platform} onChange={change("platform")} disabled={!allows(runtime, "platform")} {...invalid("platform")}><option value="macos">macOS</option><option value="windows">Windows</option><option value="linux">Linux</option></select>)}
+          {!selectedDevice && field("platform", t("指纹平台"), <select value={form.platform} onChange={change("platform")} disabled={!allows(runtime, "platform")} {...invalid("platform")}><option value="macos">macOS</option><option value="windows">Windows</option><option value="linux">Linux</option></select>)}
           {field("seed", t("指纹种子"), <div className="input-action"><input type="number" min="1" max="4294967295" required readOnly={!!profile} disabled={!allows(runtime, "seed")} value={allows(runtime, "seed") ? form.seed : ""} placeholder={t("不适用")} onChange={change("seed")} {...invalid("seed")} /><IconButton disabled={!!profile || !allows(runtime, "seed")} icon={ArrowsClockwise} label={t("随机生成种子")} type="button" onClick={() => setForm(value => ({
                 ...value,
                 seed: Math.floor(Math.random() * 2147483646) + 1
               }))} /></div>)}
-          {field("width", t("屏幕宽度"), <div className="input-unit"><input required type="number" min="800" max="7680" value={form.width} onChange={change("width")} {...invalid("width")} /><span>px</span></div>)}
-          {field("height", t("屏幕高度"), <div className="input-unit"><input required type="number" min="600" max="4320" value={form.height} onChange={change("height")} {...invalid("height")} /><span>px</span></div>)}
+          {!selectedDevice && field("width", t("屏幕宽度"), <div className="input-unit"><input required type="number" min="800" max="7680" value={form.width} onChange={change("width")} {...invalid("width")} /><span>px</span></div>)}
+          {!selectedDevice && field("height", t("屏幕高度"), <div className="input-unit"><input required type="number" min="600" max="4320" value={form.height} onChange={change("height")} {...invalid("height")} /><span>px</span></div>)}
           {field("startUrl", t("启动页面"), <input value={form.startUrl} onChange={change("startUrl")} placeholder="about:blank" {...invalid("startUrl")} />, {
               className: "span-two"
             })}

@@ -54,7 +54,8 @@ function ownedEnvironment(context, application, routeId) {
   const env = {};
   for (const [key, value] of Object.entries(context.environment ?? {})) if (environmentKeys.has(key) && typeof value === 'string' && value.length <= 32768 && !value.includes('\0')) env[key] = value;
   env.TZ = context.timezone; env.ENVARA_PROFILE_ID = application.profileId; env.ENVARA_ROUTE_ID = routeId;
-  if (typeof context.locale === 'string' && /^[A-Za-z0-9_.@-]{1,64}$/.test(context.locale)) env.LANG = context.locale.replaceAll('-', '_');
+  // Keep the validated LANG/LC_ALL from the shared workspace context. A BCP47
+  // browser locale is not necessarily an installed native POSIX locale.
   return env;
 }
 async function bundleMetadata(filename) {

@@ -128,3 +128,51 @@ test('a new terminal can use its own picked folder while another terminal runs, 
   assert.deepEqual([created.at(-1).id, created.at(-1).directory], ['prof_b', '/picked/for/this/terminal']);
   await assert.rejects(f.controller.dispatch('openTerminal', { id: 'prof_a', fresh: true, directoryToken: 'not-a-token' }), { code: 'TERMINAL_DIRECTORY_EXPIRED' });
 });
+
+test('Claude account IPC validates the environment and forwards only account metadata and launch ids', async () => {
+  const f = fixture();
+  f.state.profiles[0].cwd = '/selected/workspace';
+  const seen = [];
+  f.terminal.listClaudeAccounts = async args => { seen.push(['list', args]); return { accounts: [] }; };
+  f.terminal.createClaudeAccount = async args => { seen.push(['createAccount', args]); return { account: { id: 'default', name: args.name } }; };
+  f.terminal.renameClaudeAccount = async args => { seen.push(['renameAccount', args]); return { account: args }; };
+  f.terminal.create = async args => { seen.push(['launch', args]); return { sessionId: 'test_session' }; };
+  assert.deepEqual(await f.controller.dispatch('listClaudeAccounts', { id: 'prof_a', path: '/private/not-accepted' }), { accounts: [] });
+  await f.controller.dispatch('createClaudeAccount', { id: 'prof_a', name: '工作', path: '/private/not-accepted', token: 'not-accepted' });
+  await f.controller.dispatch('renameClaudeAccount', { id: 'prof_a', accountId: 'default', name: '个人', path: '/private/not-accepted' });
+  await assert.rejects(f.controller.dispatch('listClaudeAccounts', { id: 'missing' }), { code: 'PROFILE_NOT_FOUND' });
+  await f.controller.dispatch('openTerminal', { id: 'prof_a', kind: 'claude-code', browserProfileId: 'prof_a', claudeAccountId: 'default', requestId: 'request_a', fresh: true });
+  assert.deepEqual(seen.slice(0, 3), [
+    ['list', { id: 'prof_a' }], ['createAccount', { id: 'prof_a', name: '工作' }], ['renameAccount', { id: 'prof_a', accountId: 'default', name: '个人' }],
+  ]);
+  assert.equal(seen[3][1].claudeAccountId, 'default'); assert.equal(seen[3][1].requestId, 'request_a');
+});
+
+test('Close bypasses a pending launch queue so an installation can be cancelled', async () => {
+  const f = fixture(); f.state.profiles[0].cwd = '/selected/workspace';
+  let enter, cancel;
+  const entered = new Promise(resolve => { enter = resolve; });
+  f.terminal.create = async () => {
+    enter();
+    await new Promise(resolve => { cancel = resolve; });
+    throw Object.assign(new Error('Cancelled.'), { code: 'TERMINAL_START_CANCELLED' });
+  };
+  f.terminal.close = async args => { cancel(); return { sessionId: args.sessionId, status: 'closed' }; };
+  const creation = f.controller.dispatch('openTerminal', { id: 'prof_a', kind: 'claude-code', browserProfileId: 'prof_a', requestId: 'request_a', fresh: true });
+  const refused = assert.rejects(creation, { code: 'TERMINAL_START_CANCELLED' });
+  await entered;
+  assert.deepEqual(await f.controller.dispatch('closeTerminal', { sessionId: 'installing_session' }), { sessionId: 'installing_session', status: 'closed' });
+  await refused;
+});
+
+test('Claude install source and read-only status are explicitly scoped to the selected environment', async () => {
+  const f = fixture(); f.state.profiles[0].cwd = '/selected/workspace';
+  const seen = [];
+  f.terminal.claudeInstallationStatus = async args => { seen.push(['status', args]); return { installed: false }; };
+  f.terminal.create = async args => { seen.push(['create', args]); return { sessionId: 'test_session' }; };
+  assert.deepEqual(await f.controller.dispatch('claudeInstallationStatus', { id: 'prof_a', home: '/not-accepted', source: 'local' }), { installed: false });
+  await assert.rejects(f.controller.dispatch('claudeInstallationStatus', { id: 'missing' }), { code: 'PROFILE_NOT_FOUND' });
+  await f.controller.dispatch('openTerminal', { id: 'prof_a', kind: 'claude-code', browserProfileId: 'prof_a', claudeInstallSource: 'local', fresh: true });
+  assert.deepEqual(seen[0], ['status', { id: 'prof_a' }]);
+  assert.equal(seen[1][1].claudeInstallSource, 'local');
+});

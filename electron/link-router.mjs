@@ -112,6 +112,22 @@ export class LinkRouter {
       return this.open({ source: application.name, url: target, profile, chosen: application.browserProfileId ?? null, workspace, openOutsideHere: false });
     }
     const session = this.terminal?.sessionForProcess?.(chain) ?? null;
+    if (session && typeof this.terminal.boundBrowserLink === 'function') {
+      // Dedicated Claude sessions never inherit a later environment preference
+      // or the ordinary link router's explicit system-browser fallback.
+      let opening;
+      try { opening = this.terminal.boundBrowserLink(session.sessionId, target); }
+      catch (error) {
+        this.notify({ type: 'error', message: `Claude 浏览器链接未打开：${error?.message ?? '会话已结束'}`, profileId: session.profileId });
+        return { opened: 'environment', browser: 'Claude Code', profileId: session.profileId };
+      }
+      if (opening) {
+        const pending = Promise.resolve(opening).catch(error => this.notify({ type: 'error', message: `Claude 浏览器链接未打开：${error?.message ?? '未知错误'}`, profileId: session.profileId })).catch(() => {});
+        this.pending.add(pending);
+        void pending.finally(() => this.pending.delete(pending));
+        return { opened: 'environment', browser: 'Claude Code', profileId: session.profileId };
+      }
+    }
     if (session) return this.openFromProfile({ profileId: session.profileId, url: target, source: '终端', openOutsideHere: false });
     /* A link from an application that is not in any environment is the user's
      * ordinary browsing: it goes to their usual browser without a word. */

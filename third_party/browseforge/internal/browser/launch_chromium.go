@@ -2672,6 +2672,10 @@ func appendProfileFingerprintArgs(args []string, fp map[string]any, userAgent, p
 	if v, ok := fingerprintInt(fp, "screen.availHeight"); ok {
 		args = append(args, fmt.Sprintf("--fingerprint-screen-avail-height=%d", v))
 	}
+	if dpr := fingerprintFloatDefault(fp, "screen.devicePixelRatio", 0); dpr >= 0.5 && dpr <= 4 {
+		value := fmt.Sprintf("%g", dpr)
+		args = append(args, "--force-device-scale-factor="+value, "--fingerprint-screen-device-scale-factor="+value)
+	}
 	if v, ok := fingerprintInt(fp, "canvas:seed"); ok {
 		args = append(args, fmt.Sprintf("--fingerprint-canvas-noise=%d", v))
 	}

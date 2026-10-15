@@ -13,7 +13,8 @@
 body { margin: 0; min-width: 900px; min-height: 100vh; }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; color: inherit; -webkit-tap-highlight-color: transparent; }
-button:disabled { cursor: default; opacity: .38; }
+button:disabled, button[aria-disabled="true"] { cursor: default; opacity: .45; }
+button[aria-busy="true"] { cursor: progress; opacity: .72; }
 button, input, select, textarea { outline: none; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid #58a9ff; outline-offset: 3px; }
 svg { flex-shrink: 0; }
@@ -58,13 +59,17 @@ h1 { font-size: 28px; line-height: 1.3; font-weight: 650; letter-spacing: -.6px;
 .preview-badge { color: #91919b; font-size: 12px; line-height: 1; padding: 4px 5px; border: 1px solid #44444a; border-radius: 4px; }
 .header-actions { display: flex; align-items: center; gap: 9px; padding-top: 20px; }
 .button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 8px 13px; min-height: 33px; background: #353537; border: 1px solid #3d3d40; border-radius: 6px; font-size: 12px; color: #dedee2; line-height: 1.2; white-space: nowrap; transition: background .12s, border-color .12s; }
-.button:hover:not(:disabled) { background: #424245; border-color: #4c4c50; }
+.button:hover:not(:disabled, [aria-disabled="true"], [aria-busy="true"]) { background: #424245; border-color: #4c4c50; }
+.button:active:not(:disabled, [aria-disabled="true"], [aria-busy="true"]) { background: #2d2d30; border-color: #55555d; }
 .button.primary { background: var(--blue); border-color: #248efd; color: #fff; box-shadow: 0 2px 5px #00000020, inset 0 1px 0 #ffffff12; }
-.button.primary:hover:not(:disabled) { background: #2090ff; border-color: #489dff; }
+.button.primary:hover:not(:disabled, [aria-disabled="true"], [aria-busy="true"]) { background: #2090ff; border-color: #489dff; }
+.button.primary:active:not(:disabled, [aria-disabled="true"], [aria-busy="true"]) { background: #0875e1; border-color: #248efd; }
 .button.danger { background: #b33f43; border-color: #c6474d; color: #fff; }
-.button.danger:hover:not(:disabled) { background: #c4484d; }
+.button.danger:hover:not(:disabled, [aria-disabled="true"], [aria-busy="true"]) { background: #c4484d; }
+.button.danger:active:not(:disabled, [aria-disabled="true"], [aria-busy="true"]) { background: #9f363b; border-color: #b33f43; }
 .icon-button { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 5px; background: transparent; border: 0; color: #a5a5ac; }
-.icon-button:hover:not(:disabled) { background: #ffffff0b; color: #e3e3e8; }
+.icon-button:hover:not(:disabled, [aria-disabled="true"], [aria-busy="true"]) { background: #ffffff0b; color: #e3e3e8; }
+.icon-button:active:not(:disabled, [aria-disabled="true"], [aria-busy="true"]) { background: #ffffff14; color: #fff; }
 .search-input { display: flex; align-items: center; gap: 7px; padding: 0 10px; min-height: 34px; width: 210px; background: #2b2b2e; border: 1px solid #303033; border-radius: 6px; color: #8a8a90; }
 .search-input input { font-size: 12px; width: 100%; min-width: 0; border: 0; background: transparent; padding: 8px 0; }
 .search-input input:focus-visible { outline: 0; }
@@ -378,6 +383,11 @@ h1 { font-size: 28px; line-height: 1.3; font-weight: 650; letter-spacing: -.6px;
 .advanced-settings > summary > span { margin-left: 9px; color: #9b9ba9; font-size: 12px; font-weight: 400; }
 .advanced-settings[open] > summary { border-bottom: 1px solid #3b3b43; }
 .advanced-settings > .form-grid { padding: 16px 14px; }
+.browser-device-settings { min-width: 0; }
+.browser-device-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; padding: 12px; margin: 10px 0 0; border: 1px solid #3b3b43; border-radius: 5px; background: #202024; }
+.browser-device-summary div { min-width: 0; }
+.browser-device-summary dt { color: #9696a4; font-size: 11px; overflow-wrap: anywhere; }
+.browser-device-summary dd { color: #d7d7e0; font-size: 13px; margin: 5px 0 0; }
 .advanced-settings > .field-hint, .advanced-settings > p { margin: 0; padding: 0 14px 14px; font-size: 12px; color: #9696a4; line-height: 1.6; }
 .field-error { color: #ed909a; font-size: 12px; line-height: 1.6; }
 .field input[aria-invalid="true"], .field select[aria-invalid="true"], .field textarea[aria-invalid="true"] { border-color: #c96878; }
@@ -727,3 +737,60 @@ body.language-onboarding { min-width: 0; overflow: hidden; }
 .section-heading h2 { font-size: 13px; font-weight: 550; color: #c9c9d6; letter-spacing: -.1px; }
 .page-heading h1 { letter-spacing: -.5px; }
 .page-heading > p { color: #8b8b98; }
+
+/* Action feedback stays still: only surface, edge and text colours change.
+ * Terminal controls keep their compact dimensions and contextual colours. */
+button:is(.button, .icon-button, .terminal-icon-button, .terminal-text-button, .terminal-empty-start, .terminal-close-session, .terminal-duplicate-session) {
+  transition: background-color .12s ease, border-color .12s ease, color .12s ease;
+}
+.terminal-icon-button, .terminal-close-session, .terminal-duplicate-session {
+  --control-rest-background: transparent;
+  --control-rest-border: transparent;
+  --control-rest-color: #9999a7;
+  --control-hover-background: #ffffff0b;
+  --control-hover-border: transparent;
+  --control-hover-color: #e3e3e8;
+  --control-active-background: #ffffff14;
+}
+.terminal-icon-button { --control-rest-color: #a8a8b3; }
+.terminal-close-session { --control-hover-color: #e5b5b8; }
+.terminal-duplicate-session { --control-hover-color: #c7d8ec; }
+.terminal-text-button {
+  --control-rest-background: #2d2d33;
+  --control-rest-border: #404049;
+  --control-rest-color: #bcbcc9;
+  --control-hover-background: #383840;
+  --control-hover-border: #50505b;
+  --control-hover-color: #eeeef4;
+  --control-active-background: #24242a;
+}
+.terminal-start-button, .terminal-empty-start {
+  --control-rest-background: #283a4e;
+  --control-rest-border: #354e69;
+  --control-rest-color: #b9d8fa;
+  --control-hover-background: #304a65;
+  --control-hover-border: #4b7096;
+  --control-hover-color: #d7e9ff;
+  --control-active-background: #213347;
+}
+.terminal-empty-start {
+  --control-rest-background: #253b52;
+  --control-rest-border: #385b80;
+  --control-rest-color: #b4d5fa;
+}
+button:is(.terminal-icon-button, .terminal-text-button, .terminal-empty-start, .terminal-close-session, .terminal-duplicate-session):hover:not(:disabled, [aria-disabled="true"], [aria-busy="true"]) {
+  background: var(--control-hover-background);
+  border-color: var(--control-hover-border);
+  color: var(--control-hover-color);
+}
+button:is(.terminal-icon-button, .terminal-text-button, .terminal-empty-start, .terminal-close-session, .terminal-duplicate-session):active:not(:disabled, [aria-disabled="true"], [aria-busy="true"]) {
+  background: var(--control-active-background);
+  border-color: var(--control-hover-border);
+  color: var(--control-hover-color);
+}
+/* Earlier terminal hover rules must not brighten unavailable controls. */
+button:is(.terminal-icon-button, .terminal-text-button, .terminal-empty-start, .terminal-close-session, .terminal-duplicate-session):hover:is(:disabled, [aria-disabled="true"], [aria-busy="true"]) {
+  background: var(--control-rest-background);
+  border-color: var(--control-rest-border);
+  color: var(--control-rest-color);
+}

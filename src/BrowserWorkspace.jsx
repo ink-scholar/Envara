@@ -86,7 +86,7 @@ export function BrowserWorkspace({
 
   return (
     <div className="browser-workspace">
-      <div className="workspace-toolbar">
+      {profiles.length > 0 && <div className="workspace-toolbar">
         <div className="workspace-segments" aria-label={translate('浏览器筛选')}>
           <button
             type="button"
@@ -118,7 +118,7 @@ export function BrowserWorkspace({
           <Plus size={17} aria-hidden="true" />
           {translate('新建环境')}
         </button>
-      </div>
+      </div>}
 
       {visibleProfiles.length > 0 ? (
         <table className="browser-profile-list" aria-label={translate('浏览器环境')}>

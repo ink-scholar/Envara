@@ -55,6 +55,29 @@ test('snapshots and folder selection never resolve the network; creation require
   assert.deepEqual(Object.keys(saved.profiles[0]).sort(), ['cwd', 'id']);
 });
 
+test('terminal language follows its launch context, reports native fallback and never inherits host Chinese', async t => {
+  const previous = { LANG: process.env.LANG, LC_ALL: process.env.LC_ALL };
+  t.after(() => { for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
+  // Only this test process's environment changes; no system preferences change.
+  process.env.LANG = 'zh_CN.UTF-8'; process.env.LC_ALL = 'zh_CN.UTF-8';
+  const context = { id: 'profile_a', timezone: 'Asia/Manila', locale: 'en-PH', proxy: null };
+  const f = await fixture(t, { availableLocales: ['C', 'en_US.UTF-8', 'en_PH.UTF-8', 'zh_CN.UTF-8'], resolveContext: async () => context });
+  const first = await f.service.create({ id: 'profile_a', directory: f.cwd });
+  assert.equal(f.fakes[0].options.env.LANG, 'en_PH.UTF-8'); assert.equal(f.fakes[0].options.env.LC_ALL, 'en_PH.UTF-8');
+  assert.deepEqual(first.language, { requested: 'en-PH', effective: 'en-PH', posix: 'en_PH.UTF-8', fallback: false });
+  context.locale = 'ms-MY';
+  const duplicate = await f.service.duplicate({ sessionId: first.sessionId });
+  assert.deepEqual(duplicate.language, first.language);
+  assert.equal(f.fakes[1].options.env.LANG, 'en_PH.UTF-8');
+  const fresh = await f.service.create({ id: 'profile_a', directory: f.cwd, fresh: true });
+  assert.deepEqual(fresh.language, { requested: 'ms-MY', effective: 'en-US', posix: 'en_US.UTF-8', fallback: true });
+  assert.equal(f.fakes[2].options.env.LANG, 'en_US.UTF-8'); assert.equal(f.fakes[2].options.env.LC_ALL, 'en_US.UTF-8');
+  assert.deepEqual((await f.service.snapshot()).profiles[0].language, fresh.language);
+  await f.service.close({ sessionId: first.sessionId });
+  assert.deepEqual(f.service.metadata(f.service.sessions.get(first.sessionId)).language, first.language);
+  assert.equal(process.env.LANG, 'zh_CN.UTF-8'); assert.equal(process.env.LC_ALL, 'zh_CN.UTF-8');
+});
+
 test('duplicates create fresh independent PTYs from the resolved launch context while sharing profile tool configuration', async t => {
   let resolutions = 0;
   const context = { id: 'profile_a', name: 'Original', timezone: 'Asia/Shanghai', timezoneSource: 'manual', privacy: { mode: 'strict' }, geolocation: { latitude: 14.6, longitude: 121, accuracy: 50000 }, network: { ok: true, ip: '8.8.8.8', countryCode: 'PH' }, proxy: { protocol: 'https', host: 'proxy.invalid', port: 8443, username: 'fixture-user', password: 'secret-original' } };

@@ -16,6 +16,7 @@ import { BrowserRuntime } from './runtime.mjs';
 import { SidecarManager } from './sidecar-manager.mjs';
 import { BrowseForgeService } from './browseforge-service.mjs';
 import { TerminalService } from './terminal-service.mjs';
+import { TerminalBrowserBroker } from './terminal-browser-broker.mjs';
 import { TerminalController, TERMINAL_METHODS } from './terminal-controller.mjs';
 import { resolveTerminalView, terminalViewSnapshot } from './terminal-view.mjs';
 import { ProxyCoreManager } from './proxy-core-manager.mjs';
@@ -52,6 +53,7 @@ let window;
 let service;
 let sidecar;
 let terminal;
+let terminalBrowserBroker;
 let terminalController;
 let proxyCore;
 let applications;
@@ -150,6 +152,7 @@ async function shutdownOwnedServices() {
   try { await applications?.shutdown(); }
   finally { await notionDiagnostics?.pending.catch(() => {}); }
   await terminal?.shutdown().catch(() => {});
+  await terminalBrowserBroker?.shutdown().catch(() => {});
   await linkChannel?.close().catch(() => {});
   await routerChannel?.close().catch(() => {});
   try {
@@ -646,7 +649,12 @@ if (ownsLock) void app.whenReady().then(async () => {
     service = new EnvaraService(dataDir, runtime, { platform: process.platform, appVersion: app.getVersion() }, publish);
   } else {
     proxyCore = new ProxyCoreManager({ dataDir, resourcesDir: app.isPackaged ? path.join(process.resourcesPath, 'proxy-core') : path.join(root, 'build/proxy-core'), onChange: event => {
-      if (event?.id && event.status === 'failed') service?.invalidateManagedProxy?.(event.id);
+      if (event?.id && event.status === 'failed') {
+        service?.invalidateManagedProxy?.(event.id);
+        // Revoke matching dedicated Claude sessions immediately; the core's
+        // event delivery must not wait for slow child-process cleanup.
+        void terminal?.invalidateManagedProxy?.(event.id)?.catch(() => {});
+      }
       return publish();
     } });
     await proxyCore.initialize().catch(() => {});
@@ -671,9 +679,13 @@ if (ownsLock) void app.whenReady().then(async () => {
       onLink: request => linkRouter.openFromProcess(request),
       log: message => console.info(`Envara link router: ${message}`) });
     await routerChannel.listen().catch(error => { console.error(`Envara link router unavailable: ${error.message}`); routerChannel = null; });
+    terminalBrowserBroker = new TerminalBrowserBroker({ service, dataDir,
+      nodeExecutable: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'backend', 'playwright-driver', process.platform === 'win32' ? 'node.exe' : 'node'),
+      onError: event => { for (const { window: view, kind } of views.values()) if (!view.isDestroyed() && kind === 'workspace') view.webContents.send('envara:link-event', { ...event, type: 'error' }); } });
     terminal = new TerminalService({
       dataDir,
       linkChannel,
+      browserBroker: terminalBrowserBroker,
       additionalExecutablePaths: [path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'backend', 'playwright-driver')],
       resolveContext: id => service.resolveWorkspaceContext(id),
       onEvent: event => {
@@ -738,7 +750,7 @@ if (ownsLock) void app.whenReady().then(async () => {
       if (source.kind === 'terminal' && !TERMINAL_METHODS.has(request.method) && !['snapshot', 'openTerminalWindow'].includes(request.method)) throw new Error('此窗口仅支持终端操作。');
       if (source.kind === 'terminal') {
         if (request.method === 'terminalSnapshot') request.args = { ...request.args, id: source.profileId };
-        if (['chooseWorkspaceDirectory', 'pickTerminalDirectory', 'setTerminalLinkBrowser', 'openTerminal', 'openTerminalWindow'].includes(request.method) && request.args?.id !== source.profileId) throw new Error('此窗口仅操作当前环境。');
+        if (['chooseWorkspaceDirectory', 'pickTerminalDirectory', 'setTerminalLinkBrowser', 'openTerminal', 'openTerminalWindow', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'claudeInstallationStatus'].includes(request.method) && request.args?.id !== source.profileId) throw new Error('此窗口仅操作当前环境。');
         if (['duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal'].includes(request.method)) {
           const current = await terminal.snapshot({ id: source.profileId });
           if (!current.profiles?.some(profile => profile.sessions?.some(session => session.sessionId === request.args?.sessionId))) throw new Error('该会话不属于此终端窗口。');

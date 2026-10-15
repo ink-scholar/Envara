@@ -5,7 +5,7 @@ const identifier = (value) => {
   return value;
 };
 
-export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser']);
+export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'claudeInstallationStatus']);
 const PROFILE_CONFIGURATION = new Set(['updateProfile', 'deleteProfile']);
 const PROXY_CONFIGURATION = new Set(['saveProxy', 'deleteProxy']);
 const GROUP_CONFIGURATION = new Set(['saveGroup', 'deleteGroup', 'clearGroupProxy']);
@@ -85,8 +85,14 @@ export class TerminalController {
     }
     if (method === 'writeTerminal') return this.terminal.write(args);
     if (method === 'resizeTerminal') return this.terminal.resize(args);
+    // Installation can await network I/O inside serialize(). Close must reach
+    // its AbortController immediately instead of waiting behind that launch.
+    if (method === 'closeTerminal') return this.terminal.close({ sessionId: args.sessionId });
+    if (method === 'listClaudeAccounts' || method === 'claudeInstallationStatus') {
+      await this.profile(args.id);
+      return this.terminal[method]({ id: args.id });
+    }
     return this.serialize(async () => {
-      if (method === 'closeTerminal') return this.terminal.close(args);
       if (method === 'duplicateTerminal') {
         const state = await this.terminal.snapshot();
         const profile = state.profiles?.find(row => row.sessions?.some(session => session.sessionId === args.sessionId));
@@ -101,9 +107,14 @@ export class TerminalController {
        * a link resolves the setting when it is opened. */
       if (method === 'setTerminalLinkBrowser') return this.setLinkBrowser(args);
       await this.profile(args.id);
+      if (method === 'createClaudeAccount') return this.terminal.createClaudeAccount({ id: args.id, name: args.name });
+      if (method === 'renameClaudeAccount') return this.terminal.renameClaudeAccount({ id: args.id, accountId: args.accountId, name: args.name });
       // Only the fields a caller may set; a directory comes from a picked token.
       const directory = this.takeDirectory(args.directoryToken ?? null);
-      const request = { id: args.id, columns: args.columns, rows: args.rows, fresh: args.fresh === true, directory };
+      const request = { id: args.id, columns: args.columns, rows: args.rows, fresh: args.fresh === true, directory,
+        ...(args.kind !== undefined ? { kind: args.kind } : {}), ...(args.browserProfileId !== undefined ? { browserProfileId: args.browserProfileId } : {}),
+        ...(args.claudeAccountId !== undefined ? { claudeAccountId: args.claudeAccountId } : {}), ...(args.requestId !== undefined ? { requestId: args.requestId } : {}),
+        ...(args.claudeInstallSource !== undefined ? { claudeInstallSource: args.claudeInstallSource } : {}) };
       if (!directory) {
         const state = await this.terminal.snapshot({ id: args.id });
         const current = state.profiles?.find((row) => row.profileId === args.id);

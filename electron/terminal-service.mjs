@@ -7,6 +7,10 @@ import { access, chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, writ
 import { constants } from 'node:fs';
 import { captureTerminalProcess, closeTerminalProcess } from './terminal-process.mjs';
 import { TerminalNetworkFence } from './terminal-network-fence.mjs';
+import { findClaudeExecutable, prepareClaudeSession } from './claude-code-session.mjs';
+import { ensureClaudeInstallation, claudeInstallationStatus as inspectClaudeInstallation } from './claude-code-installation.mjs';
+import { ClaudeAccountStore, DEFAULT_CLAUDE_ACCOUNT, claudeAccountId as validateClaudeAccountId } from './claude-account-store.mjs';
+import { installedProcessLocales, resolveProcessLanguage } from './workspace-context.mjs';
 
 const require = createRequire(import.meta.url);
 const MAX_SESSIONS = 8;
@@ -109,7 +113,7 @@ export class TerminalService {
     networkFence = process.platform === 'darwin' ? new TerminalNetworkFence() : null,
     /* Links a fenced terminal asks to open come back through this channel and
      * are opened by the app, never by the host's default browser. */
-    linkChannel = null }) {
+    linkChannel = null, browserBroker = null, claudeExecutableResolver = findClaudeExecutable, claudeInstaller = ensureClaudeInstallation, availableLocales = null }) {
     if (!path.isAbsolute(dataDir ?? '') || typeof resolveContext !== 'function') throw codeError('终端数据目录或环境解析器无效。');
     this.dataDir = path.resolve(dataDir);
     this.onEvent = onEvent;
@@ -122,21 +126,32 @@ export class TerminalService {
     this.additionalExecutablePaths = [...additionalExecutablePaths];
     if (linkChannel != null && (typeof linkChannel.environment !== 'function' || typeof linkChannel.executableDirectory !== 'function')) throw codeError('终端链接通道无效。');
     this.linkChannel = linkChannel;
+    this.browserBroker = browserBroker;
+    this.claudeExecutableResolver = claudeExecutableResolver;
+    this.claudeInstaller = claudeInstaller;
+    if (availableLocales !== null && (!Array.isArray(availableLocales) || availableLocales.some(value => typeof value !== 'string'))) throw codeError('终端语言区域列表无效。');
+    this.availableLocales = availableLocales && [...availableLocales];
     this.hostHome = os.homedir();
     this.settings = new Map();
     this.contexts = new Map();
     this.sessions = new Map();
     this.profileQueues = new Map();
     this.settingsQueue = Promise.resolve();
+    // Failure generations catch a core exit while resolveContext is awaiting
+    // its probe, before the starting session knows its managed proxy id.
+    this.managedProxyFailures = new Map();
     this.closed = false;
     this.ready = this.initialize().catch(error => { throw storageFailure(error); });
   }
   async initialize() {
+    this.availableLocales ??= await installedProcessLocales();
     await mkdir(this.dataDir, { recursive: true, mode: 0o700 });
     const canonical = await realpath(this.dataDir);
     this.root = await privateDirectory(canonical, 'terminal');
     this.profilesDir = await privateDirectory(this.root, 'profiles');
     this.settingsFile = path.join(this.root, 'workspace.json');
+    this.claudeAccounts = new ClaudeAccountStore({ root: this.root });
+    await this.claudeAccounts.ready;
     try {
       const info = await lstat(this.settingsFile);
       if (info.isSymbolicLink() || !info.isFile() || info.size > 1024 * 1024) throw codeError('终端元数据文件无效。', 'TERMINAL_UNSAFE_PATH');
@@ -167,10 +182,14 @@ export class TerminalService {
     settled.then(() => { if (this.profileQueues.get(id) === settled) this.profileQueues.delete(id); });
     return task;
   }
-  active(id) { return [...this.sessions.values()].find(session => session.profileId === id && ['starting', 'running', 'closing'].includes(session.status)); }
+  active(id, kind = null, accountId = null) { return [...this.sessions.values()].find(session => session.profileId === id && (!kind || session.kind === kind) && (!accountId || session.claudeAccountId === accountId) && ['starting', 'running', 'closing'].includes(session.status)); }
   metadata(session) {
-    return { sessionId: session.sessionId, profileId: session.profileId, status: session.status, cwd: session.cwd, timezone: session.timezone ?? null, networkFence: session.networkFence === true, privacy: session.launchContext?.privacy ?? { mode: 'standard' }, geolocation: session.launchContext?.geolocation ?? null, network: session.network ?? unknownNetwork(), columns: session.columns, rows: session.rows, startedAt: session.startedAt, sequence: session.sequence, replay: session.replay,
-      ...(session.exitCode != null ? { exitCode: session.exitCode } : {}), ...(session.error ? { error: session.error } : {}) };
+    return { sessionId: session.sessionId, profileId: session.profileId, kind: session.kind ?? 'shell', ...(session.browserProfileId ? { browserProfileId: session.browserProfileId, browserName: session.browserName ?? null } : {}), status: session.status, cwd: session.cwd, timezone: session.timezone ?? null, language: session.language ?? null, networkFence: session.networkFence === true, privacy: session.launchContext?.privacy ?? { mode: 'standard' }, geolocation: session.launchContext?.geolocation ?? null, network: session.network ?? unknownNetwork(), columns: session.columns, rows: session.rows, startedAt: session.startedAt, sequence: session.sequence, replay: session.replay,
+      ...(session.requestId ? { requestId: session.requestId } : {}),
+      ...(session.kind === 'claude-code' ? { claudeAccountId: session.claudeAccountId, claudeAccountName: session.claudeAccountName ?? null, claudeInstallSource: session.claudeInstallSource } : {}),
+      ...(session.claudeInstall ? { claudeInstall: { ...session.claudeInstall } } : {}),
+      ...(session.exitCode != null ? { exitCode: session.exitCode } : {}), ...(session.error ? { error: session.error } : {}),
+      ...(session.errorCode ? { errorCode: session.errorCode } : {}), ...(session.cleanupError ? { cleanupError: session.cleanupError } : {}) };
   }
   async snapshot({ id } = {}) {
     await this.ready;
@@ -178,7 +197,7 @@ export class TerminalService {
     const ids = id ? [id] : [...new Set([...this.settings.keys(), ...this.contexts.keys(), ...this.sessions.values()].map(value => typeof value === 'string' ? value : value.profileId))];
     return { profiles: ids.map(profileId => {
       const context = this.contexts.get(profileId);
-      return { profileId, name: context?.name ?? null, cwd: this.settings.get(profileId)?.cwd ?? null, browserProfileId: this.settings.get(profileId)?.browserProfileId ?? null, timezone: context?.timezone ?? null, timezoneSource: context?.timezoneSource ?? 'unknown', network: context?.network ?? unknownNetwork(),
+      return { profileId, name: context?.name ?? null, cwd: this.settings.get(profileId)?.cwd ?? null, browserProfileId: this.settings.get(profileId)?.browserProfileId ?? null, timezone: context?.timezone ?? null, timezoneSource: context?.timezoneSource ?? 'unknown', language: context?.language ?? null, network: context?.network ?? unknownNetwork(),
         configDir: context?.configDir ?? null, claudeConfigDir: context?.claudeConfigDir ?? null,
         sessions: [...this.sessions.values()].filter(session => session.profileId === profileId).map(session => this.metadata(session)) };
     }) };
@@ -186,6 +205,32 @@ export class TerminalService {
   /* The browser this environment's links use. It is read when a link arrives,
    * so changing it applies to the next link without a restart. */
   linkBrowser(id) { validId(id); return this.settings.get(id)?.browserProfileId ?? null; }
+  accountInUse(id, accountId) {
+    return [...this.sessions.values()].some(session => session.profileId === id && session.kind === 'claude-code'
+      && session.claudeAccountId === accountId && ['starting', 'running', 'closing'].includes(session.status));
+  }
+  async listClaudeAccounts({ id }) {
+    validId(id); await this.ready;
+    return { accounts: (await this.claudeAccounts.list(id)).map(account => ({ ...account, inUse: this.accountInUse(id, account.id) })) };
+  }
+  async claudeInstallationStatus({ id }) {
+    validId(id); await this.ready;
+    return inspectClaudeInstallation({ home: path.join(this.profilesDir, id, 'home') });
+  }
+  createClaudeAccount({ id, name }) {
+    return this.serialized(id, async () => {
+      if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
+      return { account: { ...await this.claudeAccounts.create(id, name), inUse: false } };
+    });
+  }
+  renameClaudeAccount({ id, accountId, name }) {
+    return this.serialized(id, async () => {
+      if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
+      validateClaudeAccountId(accountId);
+      if (this.accountInUse(id, accountId)) throw codeError('请先关闭使用此登录档案的 Claude 终端，再重命名。', 'CLAUDE_ACCOUNT_IN_USE');
+      return { account: { ...await this.claudeAccounts.rename(id, accountId, name), inUse: false } };
+    });
+  }
   async setLinkBrowser({ id, browserProfileId }) {
     return this.serialized(id, async () => {
       if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
@@ -205,6 +250,46 @@ export class TerminalService {
     for (const session of this.sessions.values())
       if (['running', 'starting'].includes(session.status) && pids.has(Number(session.identity?.pid ?? session.pty?.pid))) return { profileId: session.profileId, sessionId: session.sessionId };
     return null;
+  }
+  // A dedicated session keeps its browser choice even if the ordinary terminal
+  // preference changes. A refusal never delegates to the host browser.
+  boundBrowserLink(sessionId, url) {
+    const session = this.session(sessionId);
+    if (session.kind !== 'claude-code') return null;
+    if (session.status !== 'running' || !session.browserBinding) throw codeError('Claude 浏览器会话已结束。', 'TERMINAL_NOT_RUNNING');
+    return session.browserBinding.openLink(url);
+  }
+  managedProxyId(session) {
+    const context = session.launchContext;
+    return context?.managedProxy === true || context?.managedRoute ? context.proxyId ?? context.managedRoute?.proxyId ?? null : null;
+  }
+  markManagedProxyFailure(session) {
+    const failure = { code: 'CLAUDE_NETWORK_ROUTE_LOST', message: '所选网络的代理内核已停止，Claude Code 会话已中止。请检查网络后新建会话。' };
+    session.networkFailure ??= failure;
+    session.error ??= failure.message;
+    session.errorCode ??= failure.code;
+    session.startCancelled = true;
+    session.abortController?.abort();
+    session.status = 'closing';
+    session.network = { ...(session.network ?? unknownNetwork()), available: false, errorCode: failure.code };
+    this.emit(session, 'status', { status: 'closing', error: session.error, errorCode: session.errorCode });
+    // Revoke synchronously before waiting for process cleanup. The broker's
+    // dispose() removes authority before its first filesystem await.
+    if (session.browserBinding && !session.browserRevocation) {
+      try { session.browserRevocation = Promise.resolve(session.browserBinding.dispose()); }
+      catch (error) { session.browserRevocation = Promise.reject(error); }
+      session.browserRevocation.catch(() => {});
+    }
+  }
+  /** Called by the owned proxy core's failed event; never repairs/restarts it.
+   * Ordinary terminals and sessions using other nodes keep their lifecycle. */
+  invalidateManagedProxy(proxyId) {
+    if (typeof proxyId !== 'string' || !proxyId) return Promise.resolve([]);
+    this.managedProxyFailures.set(proxyId, (this.managedProxyFailures.get(proxyId) ?? 0) + 1);
+    const affected = [...this.sessions.values()].filter(session => session.kind === 'claude-code' && !session.finished
+      && ['starting', 'running'].includes(session.status) && this.managedProxyId(session) === proxyId);
+    for (const session of affected) this.markManagedProxyFailure(session);
+    return Promise.allSettled(affected.map(session => this.close({ sessionId: session.sessionId })));
   }
   async setDirectory({ id, path: selectedPath }) {
     return this.serialized(id, async () => {
@@ -228,7 +313,7 @@ export class TerminalService {
     });
     return cwd;
   }
-  async directories(id) {
+  async directories(id, accountId = DEFAULT_CLAUDE_ACCOUNT) {
     const root = await privateDirectory(this.profilesDir, validId(id));
     const home = await privateDirectory(root, 'home');
     const config = await privateDirectory(home, '.config');
@@ -236,7 +321,15 @@ export class TerminalService {
     const local = await privateDirectory(home, '.local');
     const data = await privateDirectory(local, 'share');
     const state = await privateDirectory(local, 'state');
-    const claude = await privateDirectory(root, 'claude');
+    // The default is the original directory. Named accounts never copy or
+    // inspect its authentication state; the official CLI owns those files.
+    const legacyClaude = await privateDirectory(root, 'claude');
+    let claude = legacyClaude;
+    if (accountId !== DEFAULT_CLAUDE_ACCOUNT) {
+      validateClaudeAccountId(accountId);
+      await this.claudeAccounts.get(id, accountId);
+      claude = await privateDirectory(await privateDirectory(root, 'claude-accounts'), accountId);
+    }
     const temp = await privateDirectory(root, 'tmp');
     const history = path.join(home, '.envara_history');
     const zshEnv = '# Envara: environment-local initialization; do not load host shell files.\nunsetopt GLOBAL_RCS\n';
@@ -245,10 +338,12 @@ export class TerminalService {
     for (const [file, source] of [[history, ''], [path.join(home, '.gitconfig'), '# Envara environment-local Git configuration\n'], [path.join(home, '.npmrc'), ''], [path.join(home, '.zshenv'), zshEnv], [path.join(home, '.zshrc'), zshRC], [path.join(home, '.bashrc'), bashRC]]) await ownedFile(file, source);
     return { root, home, config, cache, data, state, claude, temp, history };
   }
-  childEnvironment(directories, timezone, proxyEndpoint, privacy = { mode: 'standard' }, linkShim = null) {
+  languageFor(locale) { return resolveProcessLanguage(locale, this.availableLocales ?? ['C']); }
+  childEnvironment(directories, timezone, proxyEndpoint, privacy = { mode: 'standard' }, linkShim = null, locale = null) {
     // Build from scratch: host API keys, SSH agent and author variables are
     // deliberately absent. HOME/TZ here belong only to the new child process.
     const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
+    const language = this.languageFor(locale);
     const systemPaths = process.platform === 'win32'
       ? [path.join(systemRoot, 'System32'), systemRoot, path.join(systemRoot, 'System32/WindowsPowerShell/v1.0'), path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'nodejs'), path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git/cmd'), path.join(this.hostHome, 'AppData/Roaming/npm'), path.join(this.hostHome, 'AppData/Local/Microsoft/WindowsApps')]
       : ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin', path.join(this.hostHome, '.local/bin')];
@@ -261,7 +356,7 @@ export class TerminalService {
       GIT_CONFIG_GLOBAL: path.join(directories.home, '.gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
       TMPDIR: directories.temp, TMP: directories.temp, TEMP: directories.temp,
       TZ: timezone, TERM: 'xterm-256color', COLORTERM: 'truecolor', TERM_PROGRAM: 'Envara',
-      LANG: /^[A-Za-z0-9_.@-]{1,64}$/.test(process.env.LANG ?? '') ? process.env.LANG : 'en_US.UTF-8',
+      LANG: language.posix, LC_ALL: language.posix,
       NO_PROXY: 'localhost,127.0.0.1,::1', no_proxy: 'localhost,127.0.0.1,::1',
     };
     if (process.platform === 'win32') {
@@ -287,16 +382,24 @@ export class TerminalService {
     if (process.platform === 'darwin') return { executable: '/bin/zsh', args: ['-d', '-i'], environment: { ...environment, SHELL: '/bin/zsh', PS1: 'envara %~ %# ' } };
     return { executable: '/bin/bash', args: ['--noprofile', '--rcfile', path.join(environment.HOME, '.bashrc'), '-i'], environment: { ...environment, SHELL: '/bin/bash', PS1: 'envara \\w \\$ ' } };
   }
-  async create({ id, columns, rows, fresh = false, directory = null }) {
+  async create({ id, columns, rows, fresh = false, directory = null, kind = 'shell', browserProfileId = null, claudeAccountId: accountId = null, claudeInstallSource, requestId = null }) {
+    if (!['shell', 'claude-code'].includes(kind)) throw codeError('终端会话类型无效。');
+    if (kind === 'claude-code' && (browserProfileId !== id || browserProfileId === 'system')) throw codeError('Claude Code 必须使用创建终端时选定的境舱浏览器。', 'CLAUDE_BROWSER_REQUIRED');
+    if (requestId != null) validId(requestId);
+    if (kind !== 'claude-code' && accountId != null) throw codeError('普通终端不能选择 Claude 登录档案。', 'CLAUDE_ACCOUNT_INVALID');
+    if (kind !== 'claude-code' && claudeInstallSource !== undefined) throw codeError('普通终端不能选择 Claude 安装来源。', 'CLAUDE_CODE_INSTALL_SOURCE_INVALID');
+    const installSource = kind === 'claude-code' ? claudeInstallSource === undefined ? 'download' : claudeInstallSource : null;
+    if (kind === 'claude-code' && !['download', 'local'].includes(installSource)) throw codeError('Claude 安装来源无效，请重新选择。', 'CLAUDE_CODE_INSTALL_SOURCE_INVALID');
     return this.serialized(id, async () => {
       if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
+      const account = kind === 'claude-code' ? await this.claudeAccounts.get(id, accountId ?? DEFAULT_CLAUDE_ACCOUNT) : null;
       if (!fresh) {
-        const existing = this.active(id);
+        const existing = this.active(id, kind, account?.id);
         if (existing) return this.metadata(existing);
       }
       const cwd = directory != null ? await this.rememberDirectory(id, directory) : this.settings.get(id)?.cwd;
       if (!cwd) throw codeError('请先选择终端工作目录。', 'TERMINAL_DIRECTORY_REQUIRED');
-      return this.startSession({ id, cwd, columns, rows });
+      return this.startSession({ id, cwd, columns, rows, kind, browserProfileId, account, requestId, claudeInstallSource: installSource });
     });
   }
   async duplicate({ sessionId, columns, rows }) {
@@ -307,18 +410,30 @@ export class TerminalService {
       // Credentials stay in native memory. A duplicate uses the source launch
       // context, never a fresh resolver or any interactive command/output state.
       const context = { ...source.launchContext, proxy: source.launchContext.proxy && { ...source.launchContext.proxy } };
-      return this.startSession({ id: source.profileId, cwd: source.cwd, columns: columns ?? source.columns, rows: rows ?? source.rows, context, source });
+      const account = source.kind === 'claude-code' ? await this.claudeAccounts.get(source.profileId, source.claudeAccountId) : null;
+      return this.startSession({ id: source.profileId, cwd: source.cwd, columns: columns ?? source.columns, rows: rows ?? source.rows, context, source, kind: source.kind, browserProfileId: source.browserProfileId, account, claudeInstallSource: source.claudeInstallSource });
     });
   }
   requireDuplicable(session) {
     if (session.status !== 'running' || session.finished || session.finishing || !session.launchContext) throw codeError('只能复制仍在运行的终端。', 'TERMINAL_NOT_RUNNING');
   }
   assertStarting(session) {
+    if (session.networkFailure) throw codeError(session.networkFailure.message, session.networkFailure.code);
     if (this.closed || session.startCancelled || session.status !== 'starting' || session.finished) throw codeError('终端启动已取消。', 'TERMINAL_START_CANCELLED');
   }
-  async startSession({ id, cwd, columns, rows, context: copiedContext, source }) {
+  installProgress(session, progress) {
+    if (session.status !== 'starting' || session.startCancelled || session.finished || this.closed
+      || !['metadata', 'downloading', 'verifying', 'installing'].includes(progress?.phase)) return;
+    const safe = { phase: progress.phase };
+    for (const key of ['receivedBytes', 'totalBytes']) if (Number.isSafeInteger(progress[key]) && progress[key] >= 0) safe[key] = progress[key];
+    if (typeof progress.version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(progress.version) && progress.version.length <= 80) safe.version = progress.version;
+    session.claudeInstall = safe;
+    this.emit(session, 'status', { status: 'starting', claudeInstall: safe });
+  }
+  async startSession({ id, cwd, columns, rows, context: copiedContext, source, kind = 'shell', browserProfileId = null, account = null, requestId = null, claudeInstallSource = 'download' }) {
     if ([...this.sessions.values()].filter(session => ['starting', 'running', 'closing'].includes(session.status)).length >= MAX_SESSIONS) throw codeError('最多同时打开 8 个终端会话。', 'TERMINAL_LIMIT');
-    const session = { sessionId: `term_${randomUUID().replaceAll('-', '')}`, profileId: id, status: 'starting', cwd, columns: integer(columns, 100, 20, 400), rows: integer(rows, 30, 5, 150), startedAt: new Date().toISOString(), sequence: 0, replay: '', events: [], queuedBytes: 0, secretTail: '', secrets: [], disposables: [], finished: false, pumping: false };
+    const session = { sessionId: `term_${randomUUID().replaceAll('-', '')}`, profileId: id, kind, requestId, claudeAccountId: account?.id ?? null, claudeAccountName: account?.name ?? null, claudeInstallSource: kind === 'claude-code' ? claudeInstallSource : null, abortController: new AbortController(), browserProfileId: kind === 'claude-code' ? browserProfileId : null, status: 'starting', cwd, columns: integer(columns, 100, 20, 400), rows: integer(rows, 30, 5, 150), startedAt: new Date().toISOString(), sequence: 0, replay: '', events: [], queuedBytes: 0, secretTail: '', secrets: [], disposables: [], finished: false, pumping: false };
+    const proxyFailuresAtStart = new Map(this.managedProxyFailures);
     // Reserve before the first asynchronous check so parallel profiles and
     // duplicates cannot race past the global session limit.
     this.sessions.set(session.sessionId, session);
@@ -333,9 +448,14 @@ export class TerminalService {
       this.assertStarting(session);
       if (!context || context.id !== id) throw codeError('未找到此环境的终端配置。', 'TERMINAL_PROFILE_NOT_FOUND');
       const timezone = safeTimezone(context.timezone);
+      session.language = this.languageFor(context.locale);
       const proxy = checkedProxy(context.proxy);
-      session.launchContext = { id, name: typeof context.name === 'string' ? context.name.slice(0, 100) : null, timezone, timezoneSource: typeof context.timezoneSource === 'string' ? context.timezoneSource.slice(0, 64) : 'unknown', proxy, privacy: context.privacy ?? { mode: 'standard' }, geolocation: context.geolocation ?? null, networkEgress: context.network ?? context.networkEgress ?? null };
-      const directories = await this.directories(id);
+      session.launchContext = { ...structuredClone(context), id, name: typeof context.name === 'string' ? context.name.slice(0, 100) : null, timezone, timezoneSource: typeof context.timezoneSource === 'string' ? context.timezoneSource.slice(0, 64) : 'unknown', proxy, privacy: context.privacy ?? { mode: 'standard' }, geolocation: context.geolocation ?? null, networkEgress: context.network ?? context.networkEgress ?? null };
+      const managedProxyId = this.managedProxyId(session);
+      if (kind === 'claude-code' && managedProxyId && (this.managedProxyFailures.get(managedProxyId) ?? 0) !== (proxyFailuresAtStart.get(managedProxyId) ?? 0)) {
+        this.markManagedProxyFailure(session); this.assertStarting(session);
+      }
+      const directories = await this.directories(id, account?.id ?? DEFAULT_CLAUDE_ACCOUNT);
       this.assertStarting(session);
       let endpoint;
       if (proxy?.protocol === 'socks5') {
@@ -352,7 +472,7 @@ export class TerminalService {
         session.secrets = [...new Set([endpoint, proxy && proxyURL(proxy), proxy?.password, proxy?.password && encodeURIComponent(proxy.password), parsed.password && decodeURIComponent(parsed.password), parsed.username && Buffer.from(`${decodeURIComponent(parsed.username)}:${decodeURIComponent(parsed.password)}`).toString('base64')].filter(value => typeof value === 'string' && value.length >= 4))].sort((a, b) => b.length - a.length);
       }
       session.timezone = timezone; session.network = { ...publicNetwork(proxy), ...(typeof context.proxyName === 'string' && context.proxyName ? { routeName: context.proxyName.slice(0, 100) } : {}), ...(session.launchContext.networkEgress?.ok ? { egress: session.launchContext.networkEgress } : {}) };
-      this.contexts.set(id, { name: session.launchContext.name, timezone, timezoneSource: session.launchContext.timezoneSource, network: session.network, configDir: directories.config, claudeConfigDir: directories.claude });
+      this.contexts.set(id, { name: session.launchContext.name, timezone, timezoneSource: session.launchContext.timezoneSource, language: session.language, network: session.network, configDir: directories.config, claudeConfigDir: directories.claude });
       if (source) this.requireDuplicable(source);
       /* The environment's links leave through its own designated browser; the
        * shim reports them over the app's channel instead of the host opener. */
@@ -361,9 +481,32 @@ export class TerminalService {
         try { linkShim = { directory: await this.linkChannel.executableDirectory(id), ...this.linkChannel.environment(id) }; }
         catch (error) { this.assertStarting(session); throw codeError(`终端链接通道不可用，未启动终端：${error.message}`, 'TERMINAL_LINK_CHANNEL_UNAVAILABLE'); }
       }
+      let claudeLaunch = null;
+      if (kind === 'claude-code') {
+        if (!proxy || !loopbackRoutePort(session.bridge, endpoint) || !this.networkFence) throw codeError('Claude Code 专用会话需要支持网络围栏的代理线路。', 'CLAUDE_NETWORK_FENCE_REQUIRED');
+        if (!this.browserBroker || !linkShim) throw codeError('Claude 浏览器通道不可用，未启动会话。', 'CLAUDE_BROWSER_UNAVAILABLE');
+        const installation = await this.claudeInstaller({ home: directories.home, source: session.claudeInstallSource,
+          findHostExecutable: () => this.claudeExecutableResolver({ hostHome: this.hostHome, platform: process.platform, additionalExecutablePaths: this.additionalExecutablePaths }),
+          downloadContext: { proxyUrl: endpoint, signal: session.abortController.signal },
+          onProgress: progress => this.installProgress(session, progress) });
+        this.assertStarting(session);
+        const binding = await this.browserBroker.createSession({ sessionId: session.sessionId, profileId: id, browserProfileId, context: session.launchContext });
+        try { this.assertStarting(session); } catch (error) { await binding.dispose(); throw error; }
+        session.browserBinding = binding;
+        session.browserName = binding.browser.name;
+        linkShim = { directory: linkShim.directory, ...binding.environment };
+        for (const [key, value] of Object.entries(binding.environment)) if (/TOKEN|SECRET/.test(key) && typeof value === 'string') session.secrets.push(value);
+        const environment = { ...this.childEnvironment(directories, timezone, endpoint, session.launchContext.privacy, linkShim, session.launchContext.locale), ...binding.environment };
+        const prepared = await prepareClaudeSession({ sessionId: session.sessionId, directories, installation, mcpServer: binding.mcpServer, environment, privacy: session.launchContext.privacy });
+        try { this.assertStarting(session); } catch (error) { await prepared.cleanup(); throw error; }
+        session.claudeLaunch = prepared;
+        claudeLaunch = prepared;
+      }
       if (linkShim?.ENVARA_LINK_TOKEN) session.secrets = [...new Set([...session.secrets, linkShim.ENVARA_LINK_TOKEN])];
       this.assertStarting(session);
-      let shell = this.shell(this.childEnvironment(directories, timezone, endpoint, session.launchContext.privacy, linkShim));
+      // Dedicated Claude terminals start at a normal prompt. Their private
+      // PATH wrapper supplies the binding only when the user runs `claude`.
+      let shell = this.shell(claudeLaunch?.environment ?? this.childEnvironment(directories, timezone, endpoint, session.launchContext.privacy, linkShim, session.launchContext.locale));
       // A loopback route (this session's bridge or the managed core listener)
       // is the environment's only network path for this whole process tree.
       // Fence it or refuse to start; never run it unfenced.
@@ -392,19 +535,22 @@ export class TerminalService {
       session.capturePromise = Promise.resolve().then(() => this.processControl.capture(session.pty.pid)).then(identity => { session.identity = identity; return identity; });
       if (!cancelled) session.disposables.push(session.pty.onData(data => this.receive(session, data)));
       session.disposables.push(session.pty.onExit(event => { session.nativeExited = true; void this.finish(session, event).catch(() => {}); }));
-      if (cancelled) throw codeError('终端启动已取消。', 'TERMINAL_START_CANCELLED');
+      if (cancelled) this.assertStarting(session);
       await session.capturePromise;
+      if (session.networkFailure) this.assertStarting(session);
       if (session.status === 'starting' && !session.finished && !session.finishing) { session.status = 'running'; this.emit(session, 'status', { status: 'running' }); }
       this.pruneSessions();
       return this.metadata(session);
     } catch (error) {
-      const reported = storageFailure(error);
-      session.error = this.redact(session, reported.message ?? '终端无法启动。', true);
+      const reported = session.networkFailure ? codeError(session.networkFailure.message, session.networkFailure.code)
+        : session.startCancelled || this.closed ? codeError('终端启动已取消。', 'TERMINAL_START_CANCELLED') : storageFailure(error);
+      session.error ??= this.redact(session, reported.message ?? '终端无法启动。', true);
+      session.errorCode ??= reported.code ?? 'TERMINAL_START_FAILED';
       session.status = 'closing';
       try { await this.cleanup(session); session.finished = true; session.status = reported.code === 'TERMINAL_START_CANCELLED' ? 'closed' : 'error'; this.releaseLaunchContext(session); }
-      catch { session.error += '；终端进程清理未完成。'; }
-      this.emit(session, 'status', { status: session.status, error: session.error });
-      throw codeError(session.error, reported.code ?? 'TERMINAL_START_FAILED');
+      catch { session.cleanupError = '终端进程清理未完成，请重试关闭会话。'; }
+      this.emit(session, 'status', { status: session.status, error: session.error, errorCode: session.errorCode, ...(session.cleanupError ? { cleanupError: session.cleanupError } : {}) });
+      throw codeError(session.error, session.errorCode);
     }
   }
   releaseLaunchContext(session) {
@@ -415,6 +561,9 @@ export class TerminalService {
     session.pty = null;
     session.identity = null;
     session.capturePromise = null;
+    session.browserBinding = null;
+    session.browserRevocation = null;
+    session.claudeLaunch = null;
     for (const disposable of session.disposables) disposable?.dispose?.();
     session.disposables = [];
   }
@@ -470,7 +619,7 @@ export class TerminalService {
     })().catch(() => { session.pumping = false; }); });
   }
   emit(session, type, value = {}) {
-    const event = { type, sessionId: session.sessionId, profileId: session.profileId, sequence: ++session.sequence, ...value };
+    const event = { type, sessionId: session.sessionId, profileId: session.profileId, ...(session.requestId ? { requestId: session.requestId } : {}), sequence: ++session.sequence, ...value };
     const bytes = type === 'data' ? Buffer.byteLength(value.data) : 0;
     const delivery = new Promise(resolve => session.events.push({ event, bytes, resolve }));
     session.queuedBytes += bytes;
@@ -508,14 +657,35 @@ export class TerminalService {
   async cleanup(session) {
     if (session.cleanupPromise) return session.cleanupPromise;
     session.cleanupPromise = Promise.resolve().then(async () => {
-      try {
+      let failure;
+      const attempt = async operation => { try { await operation(); } catch (error) { failure ??= error; } };
+      // Revoke first. A private-directory removal failure must never skip the
+      // process family, proxy bridge, or other independently owned resources.
+      await attempt(async () => {
+        if (session.browserRevocation) {
+          try { await session.browserRevocation; } catch (error) { session.browserRevocation = null; throw error; }
+        } else await session.browserBinding?.dispose();
+      });
+      await attempt(async () => {
         if (session.capturePromise && !session.identity) await session.capturePromise.catch(() => {});
         if (session.pty && session.identity) {
           const result = await this.processControl.close({ pty: session.pty, identity: session.identity });
           if (result?.ok === false) throw codeError('终端仍有未退出的子进程。', 'TERMINAL_CLEANUP_FAILED');
         } else if (session.pty && !session.finished && !session.nativeExited) { try { session.pty.kill(); } catch {} }
-      } finally { await session.bridge?.close(); }
+      });
+      await attempt(() => session.bridge?.close());
+      await attempt(() => session.claudeLaunch?.cleanup());
+      if (failure) {
+        if (session.networkFailure) {
+          session.cleanupError = '终端进程清理未完成，请重试关闭会话。';
+          this.emit(session, 'status', { status: 'closing', error: session.error, errorCode: session.errorCode, cleanupError: session.cleanupError });
+        }
+        throw failure;
+      }
+      session.cleanupError = null;
     });
+    // A later explicit Close can retry a failed filesystem cleanup.
+    void session.cleanupPromise.catch(() => { session.cleanupPromise = null; });
     return session.cleanupPromise;
   }
   async finish(session, event = {}) {
@@ -530,19 +700,21 @@ export class TerminalService {
       if (pending) { session.replay = tail(session.replay + pending, MAX_REPLAY_BYTES); this.emit(session, 'data', { data: pending }); }
       if (Number.isInteger(event.exitCode)) session.exitCode = event.exitCode;
       try { await this.cleanup(session); }
-      catch (error) { session.error = '终端进程清理未完成，请查看应用状态。'; this.emit(session, 'status', { status: 'closing', error: session.error }); throw error; }
-      session.finished = true; session.status = closing ? 'closed' : 'exited';
+      catch (error) { session.cleanupError = '终端进程清理未完成，请查看应用状态。'; session.error ??= session.cleanupError; this.emit(session, 'status', { status: 'closing', error: session.error, ...(session.errorCode ? { errorCode: session.errorCode } : {}), cleanupError: session.cleanupError }); throw error; }
+      session.finished = true; session.status = session.networkFailure ? 'error' : closing ? 'closed' : 'exited';
       this.releaseLaunchContext(session);
-      this.emit(session, 'exit', { exitCode: session.exitCode ?? null, status: session.status, ...(Number.isInteger(event.signal) ? { signal: event.signal } : {}) });
+      this.emit(session, 'exit', { exitCode: session.exitCode ?? null, status: session.status, ...(session.error ? { error: session.error } : {}), ...(session.errorCode ? { errorCode: session.errorCode } : {}), ...(Number.isInteger(event.signal) ? { signal: event.signal } : {}) });
       this.pruneSessions();
     });
+    void session.finishing.catch(() => { session.finishing = null; });
     return session.finishing;
   }
   async close({ sessionId }) {
     const session = this.session(sessionId);
+    session.abortController?.abort();
     if (session.finished) { await this.cleanup(session); return this.metadata(session); }
     if (session.status === 'starting') session.startCancelled = true;
-    session.status = 'closing'; this.emit(session, 'status', { status: 'closing' });
+    session.status = 'closing'; this.emit(session, 'status', { status: 'closing', ...(session.error ? { error: session.error } : {}), ...(session.errorCode ? { errorCode: session.errorCode } : {}), ...(session.cleanupError ? { cleanupError: session.cleanupError } : {}) });
     await this.cleanup(session);
     if (!session.finished) await this.finish(session);
     return this.metadata(session);
@@ -571,6 +743,7 @@ export class TerminalService {
         try { await this.saveSettings(); } catch (error) { if (previous) this.settings.set(id, previous); throw error; }
       });
       if (exists && !preserve) await rm(namespace, { recursive: true, force: true });
+      await this.claudeAccounts.removeProfile(id);
       this.contexts.delete(id);
       for (const session of this.sessions.values()) if (session.profileId === id) this.sessions.delete(session.sessionId);
       return { profileId: id, removed: true, configRemoved: !preserve, ...(preserve ? { reason: 'SELECTED_DIRECTORY_PRESERVED' } : {}) };
@@ -578,6 +751,9 @@ export class TerminalService {
   }
   async shutdown() {
     this.closed = true;
+    // A download may be awaiting inside the profile queue. Cancel it before
+    // waiting for that queue, otherwise shutdown cannot reach session cleanup.
+    for (const session of this.sessions.values()) session.abortController?.abort();
     await this.ready;
     await Promise.allSettled([...this.profileQueues.values()]);
     await this.settingsQueue;

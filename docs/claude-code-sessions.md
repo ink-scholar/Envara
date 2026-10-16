@@ -1,6 +1,6 @@
 # Claude Code sessions
 
-Applies to Envara 0.5.23. The current release target is macOS arm64. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
+Applies to Envara 0.5.24. The current release target is macOS arm64. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
 
 ## Start and installation
 

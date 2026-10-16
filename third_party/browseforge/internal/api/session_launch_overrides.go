@@ -14,11 +14,14 @@ import (
 // proxy is never part of the stored profile or its exported configuration.
 type sessionLaunchOverrides struct {
 	Timezone    string
+	CountryCode string
 	Locale      string
 	Proxy       *profile.ProxyConfig
 	Geolocation *profile.Geolocation
 	Privacy     *profile.PrivacyConfig
 }
+
+var sessionCountryCodePattern = regexp.MustCompile(`^[A-Z]{2}$`)
 
 var sessionProxyRegionPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,62}[A-Za-z0-9])?$`)
 
@@ -34,11 +37,16 @@ func decodeSessionLaunchOverrides(raw json.RawMessage) (*sessionLaunchOverrides,
 		return nil, fmt.Errorf("launch_overrides requires at least one runtime field")
 	}
 	for key := range fields {
-		if key != "timezone" && key != "proxy" && key != "locale" && key != "geolocation" && key != "privacy" {
+		if key != "timezone" && key != "proxy" && key != "locale" && key != "geolocation" && key != "privacy" && key != "country_code" {
 			return nil, fmt.Errorf("launch_overrides contains an unsupported runtime field")
 		}
 	}
 	overrides := &sessionLaunchOverrides{}
+	if value, present := fields["country_code"]; present {
+		if err := json.Unmarshal(value, &overrides.CountryCode); err != nil || !sessionCountryCodePattern.MatchString(overrides.CountryCode) {
+			return nil, fmt.Errorf("launch_overrides.country_code must be a two-letter uppercase ISO country code")
+		}
+	}
 	if value, present := fields["locale"]; present {
 		if err := json.Unmarshal(value, &overrides.Locale); err != nil || overrides.Locale == "" {
 			return nil, fmt.Errorf("launch_overrides.locale must be a nonempty BCP 47 language tag")
@@ -164,6 +172,9 @@ func profileForSessionLaunch(stored *profile.Profile, overrides *sessionLaunchOv
 	if overrides != nil && overrides.Proxy != nil {
 		proxy := *overrides.Proxy
 		launch.SessionProxy = &proxy
+	}
+	if overrides != nil {
+		launch.SessionCountryCode = overrides.CountryCode
 	}
 	launch.SessionPrivacy = &profile.PrivacyConfig{Mode: "standard"}
 	if overrides != nil && overrides.Privacy != nil {

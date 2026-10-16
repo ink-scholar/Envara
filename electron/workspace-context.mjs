@@ -56,7 +56,18 @@ const regionLocales = Object.freeze({ CN: 'zh-CN', TW: 'zh-TW', HK: 'zh-HK', SG:
 
 /** A locale preset for an observed country; it does not change interface language. */
 export function localeForCountry(countryCode) {
-  return regionLocales[String(countryCode ?? '').toUpperCase()] ?? 'en-US';
+  const country = String(countryCode ?? '').toUpperCase();
+  if (regionLocales[country]) return regionLocales[country];
+  // ICU's country defaults cover regions outside the hand-selected presets.
+  // This remains a recommendation; a saved explicit browser locale wins.
+  if (/^[A-Z]{2}$/.test(country) && !['ZZ', 'EU', 'UN'].includes(country)) {
+    const recognized = new Intl.DisplayNames('en', { type: 'region', fallback: 'none' }).of(country);
+    if (recognized) {
+      const language = new Intl.Locale(`und-${country}`).maximize().language;
+      if (language !== 'und') return `${language}-${country}`;
+    }
+  }
+  return 'en-US';
 }
 
 /** Private native launch context. Never send this object through renderer IPC. */

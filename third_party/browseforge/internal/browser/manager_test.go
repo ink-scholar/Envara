@@ -492,8 +492,9 @@ func TestLaunchChromiumAssemblesProxyFingerprintArgsWithoutLaunchingBrowser(t *t
 
 	profileDir := t.TempDir()
 	_, err := manager.launchChromium(&profile.Profile{
-		ID:        "proxy-fingerprint-args",
-		RuntimeID: "browseforge-chromium",
+		ID:                 "proxy-fingerprint-args",
+		RuntimeID:          "browseforge-chromium",
+		SessionCountryCode: "US",
 		Proxy: &profile.ProxyConfig{
 			Type:   "http",
 			Host:   "127.0.0.1",

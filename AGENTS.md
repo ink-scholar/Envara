@@ -27,6 +27,7 @@ Envara is a lightweight desktop workspace for browser environments, terminals an
 - AnyTLS uses an application-owned bundled core, without an external Clash prerequisite. Preserve SNI, ALPN, TLS fingerprint and UDP settings; verify certificates by default.
 - Managed browser, terminal and application traffic must use its selected route, including REST/MCP callers. Never silently fall back to direct traffic. Scope listeners and credentials to owned processes; do not persist runtime listener credentials in browser profiles or exports.
 - Let the selected provider manage automatic fingerprints. Keep explicit device overrides under Advanced; preserve saved seeds and settings. Only describe behavior verified against the actual engine. A browser profile is not native hardware virtualization.
+- On 2026-10-16 the user required CloakBrowser, Camoufox and BrowseForge Chromium to generate a mutually consistent random fingerprint once for each new environment and persist it. Reopening keeps that identity; cloning creates a new identity, while importing preserves the exported identity. Never implicitly reshuffle existing fixed, custom or imported configurations.
 - Tracker protection requires auditable rules and supported controls. Do not claim it removes all tracking, encrypted telemetry or service-side account checks.
 
 ## Terminals and Claude Code

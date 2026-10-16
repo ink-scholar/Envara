@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { runInNewContext } from 'node:vm';
 import { initialBrowserDeviceFields, selectBrowserDeviceProfile, changeBrowserDeviceEngine, browserDimensionValue, validBrowserDimension } from '../src/browser-device-form.mjs';
 import { BROWSER_DEVICE_PROFILES } from '../shared/browser-device-profile.mjs';
 import { translationCatalog, translate } from '../src/i18n.mjs';
@@ -43,15 +44,15 @@ test('blank dimensions explicitly restore automatic while filled values remain n
   assert.deepEqual(JSON.parse(JSON.stringify({ width: browserDimensionValue(''), height: browserDimensionValue('1080') })), { width: null, height: 1080 });
 });
 
-test('only explicit preset selection changes device fields and custom keeps the current values', () => {
+test('returning from a preset restores the custom fields it temporarily replaced', () => {
   const form = { engine: 'cloakbrowser', platform: 'macos', width: 1440, height: 900, seed: 42, proxyId: 'ph', locale: 'zh-CN', timezone: 'Asia/Manila', deviceProfileId: 'provider-default' };
   const selected = selectBrowserDeviceProfile(form, 'windows-standard-v1');
-  assert.deepEqual(selected, { ...form, platform: 'windows', width: 1920, height: 1080, deviceProfileId: 'windows-standard-v1' });
+  assert.equal(selected.platform, 'windows'); assert.equal(selected.width, 1920); assert.equal(selected.height, 1080);
   const custom = selectBrowserDeviceProfile(selected, 'provider-default');
-  assert.deepEqual(custom, { ...selected, deviceProfileId: 'provider-default' });
+  assert.deepEqual(custom, form);
   const automaticWidth = { ...custom, width: '' };
   assert.equal(browserDimensionValue(automaticWidth.width), null);
-  assert.equal(browserDimensionValue(automaticWidth.height), 1080);
+  assert.equal(browserDimensionValue(automaticWidth.height), 900);
   assert.equal(automaticWidth.seed, form.seed);
   const differentNetwork = { ...selected, proxyId: 'jp' };
   assert.equal(differentNetwork.seed, form.seed);
@@ -63,8 +64,70 @@ test('only explicit preset selection changes device fields and custom keeps the 
 test('choosing a provider without verified device mappings stops applying fixed presets', () => {
   const form = selectBrowserDeviceProfile({ engine: 'cloakbrowser', seed: 42 }, 'mac-standard-v1');
   const other = changeBrowserDeviceEngine(form, 'camoufox');
-  assert.deepEqual(other, { ...form, engine: 'camoufox', deviceProfileId: 'provider-default' });
+  assert.equal(other.engine, 'camoufox'); assert.equal(other.deviceProfileId, 'provider-default');
+  assert.equal(browserDimensionValue(other.width), null); assert.equal(browserDimensionValue(other.height), null);
   assert.equal(changeBrowserDeviceEngine(other, 'cloakbrowser').deviceProfileId, 'provider-default', 'returning to CloakBrowser does not silently replace custom settings');
+});
+
+test('leaving a saved fixed preset clears only dimensions still supplied by that preset', () => {
+  const fixed = { engine: 'cloakbrowser', deviceProfileId: 'mac-standard-v1', platform: 'macos', width: 1440, height: 900, seed: 42 };
+  const automatic = selectBrowserDeviceProfile(fixed, 'provider-default');
+  assert.equal(browserDimensionValue(automatic.width), null); assert.equal(browserDimensionValue(automatic.height), null);
+  assert.equal(automatic.platform, 'macos'); assert.equal(automatic.seed, 42);
+  const edited = changeBrowserDeviceEngine({ ...fixed, width: 1366 }, 'camoufox');
+  assert.equal(edited.width, 1366, 'an independently edited dimension is not discarded');
+  assert.equal(browserDimensionValue(edited.height), null);
+  const custom = { ...fixed, deviceProfileId: 'provider-default' };
+  assert.deepEqual(changeBrowserDeviceEngine(custom, 'camoufox'), { ...custom, engine: 'camoufox' }, 'matching numbers alone do not make saved custom fields preset-owned');
+  assert.deepEqual(fixed, { engine: 'cloakbrowser', deviceProfileId: 'mac-standard-v1', platform: 'macos', width: 1440, height: 900, seed: 42 });
+});
+
+test('preset switching retains the original custom baseline across ordinary form edits', () => {
+  const original = { engine: 'cloakbrowser', deviceProfileId: 'provider-default', platform: '', width: '', height: 800, seed: 42 };
+  const first = selectBrowserDeviceProfile(original, 'mac-standard-v1');
+  const second = selectBrowserDeviceProfile({ ...first, name: 'Renamed' }, 'windows-standard-v1');
+  const automatic = selectBrowserDeviceProfile(second, 'provider-default');
+  assert.deepEqual(automatic, { ...original, name: 'Renamed' });
+  assert.deepEqual(changeBrowserDeviceEngine(second, 'browseforge-chromium'), { ...original, name: 'Renamed', engine: 'browseforge-chromium' });
+  assert.equal(JSON.stringify(second).includes('Baseline'), false, 'transient preset provenance never enters serialized configuration');
+});
+
+test('the actual edit form and save payload preserve an automatic platform', async () => {
+  const source = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const initializer = source.match(/const \[form, setForm\] = useState\(\(\) => \(([\s\S]*?)\)\);/)?.[1];
+  const payload = source.match(/onSave\((\{\s+name: form\.name\.trim\(\),[\s\S]*?)\);\s+\};\s+const field/)?.[1];
+  assert.ok(initializer); assert.ok(payload);
+  const saved = { name: 'Automatic platform', engine: 'cloakbrowser', platform: null, width: null, height: null, seed: 42 };
+  const form = runInNewContext(`(${initializer})`, { profile: saved, systemPlatform: 'darwin', engines: [], defaultEngine: 'cloakbrowser', preferredEngine: () => 'cloakbrowser', initialBrowserDeviceFields });
+  assert.equal(form.platform, ''); assert.equal(form.seed, saved.seed);
+  form.name = 'Renamed only';
+  const output = runInNewContext(`(${payload})`, { form, profile: saved, runtime: {}, allows: () => true, browserDimensionValue, confirmedNetworkTimezone: null });
+  assert.equal(Object.hasOwn(output, 'platform'), false, 'an unrelated edit must not turn provider policy into a fixed OS override');
+  form.platform = 'windows';
+  const explicit = runInNewContext(`(${payload})`, { form, profile: saved, runtime: {}, allows: () => true, browserDimensionValue, confirmedNetworkTimezone: null });
+  assert.equal(explicit.platform, 'windows');
+  assert.match(source, /!profile\?\.platform && <option value="">\{t\("自动（由内核决定）"\)\}<\/option>/);
+});
+
+test('the actual edit form never supplies a replacement seed for an existing identity', async () => {
+  const source = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const initializer = source.match(/const \[form, setForm\] = useState\(\(\) => \(([\s\S]*?)\)\);/)?.[1];
+  const payload = source.match(/onSave\((\{\s+name: form\.name\.trim\(\),[\s\S]*?)\);\s+\};\s+const field/)?.[1];
+  assert.ok(initializer); assert.ok(payload);
+  const initialize = profile => runInNewContext(`(${initializer})`, { profile, systemPlatform: 'darwin', engines: [], defaultEngine: 'cloakbrowser', preferredEngine: () => 'cloakbrowser', initialBrowserDeviceFields });
+  const save = (form, profile) => runInNewContext(`(${payload})`, { form, profile, runtime: {}, allows: () => true, browserDimensionValue, confirmedNetworkTimezone: null });
+  for (const seed of [null, undefined, 0, 42]) {
+    const profile = { name: 'Existing identity', engine: 'cloakbrowser', seed };
+    const form = initialize(profile);
+    assert.equal(form.seed, seed == null ? '' : seed);
+    form.name = 'Renamed only';
+    assert.equal(Object.hasOwn(save(form, profile), 'seed'), false, 'read-only identity must be preserved by the existing native record');
+  }
+  const created = initialize(null);
+  created.name = 'Fresh identity';
+  const output = save(created, null);
+  assert.ok(Number.isSafeInteger(output.seed) && output.seed > 0);
+  assert.equal(output.seed, created.seed);
 });
 
 test('device form wires explicit changes, readonly fixed summaries and persisted metadata', async () => {
@@ -97,6 +160,8 @@ test('device form wires explicit changes, readonly fixed summaries and persisted
   assert.match(pane, /selectedDevice\.hardwareConcurrency/);
   assert.match(pane, /selectedDevice\.deviceMemory/);
   assert.match(pane, /浏览器语言与 Envara 界面语言独立；网站可能自行选择语言。/);
+  assert.match(profileForm, /standard: "拦截已知第三方追踪；个别网站可能需要调整防护设置。"/);
+  assert.doesNotMatch(profileForm, /不影响登录和网站功能/);
   const terminal = await readFile(new URL('../src/TerminalPane.jsx', import.meta.url), 'utf8');
   assert.match(terminal, /selectedSession\?\.language \?\? selectedMetadata\?\.language/);
   assert.match(terminal, /title=\{languageLabel\}/);
@@ -105,6 +170,8 @@ test('device form wires explicit changes, readonly fixed summaries and persisted
 test('device and effective-language copy is available in all nine languages', () => {
   const keys = ['设备档案', '自定义（保留当前配置）', '选择档案会填写平台与屏幕；切换网络不改变设备。', '平台', '屏幕', '逻辑处理器', '浏览器内存', '浏览器语言与 Envara 界面语言独立；网站可能自行选择语言。', '当前内核暂不支持固定设备档案。', '有效语言', '{requested} → {effective}（系统未提供所选语言）', ...BROWSER_DEVICE_PROFILES.map(item => item.label), '内核自动生成', '保留当前配置', '自动（由内核决定）', '未填写的设备参数由内核处理；已填写的自定义值会保留。', '固定设备或自定义参数（可选）'];
   for (const [language, catalog] of Object.entries(translationCatalog)) {
+    assert.equal(typeof catalog['拦截已知第三方追踪；个别网站可能需要调整防护设置。'], 'string', language);
+    assert.equal(Object.hasOwn(catalog, '拦截已知的第三方追踪：内置规则加 EasyPrivacy 名单，不影响登录和网站功能。'), false, language);
     for (const key of keys) assert.equal(typeof catalog[key], 'string', `${language}: ${key}`);
     for (const key of ['浏览器设备档案无效。', '此浏览器内核暂不支持固定设备档案，请保留现有配置。', '设备档案与平台或硬件参数不一致。请先切换为自定义配置。', '固定设备档案须与本机平台一致。跨平台配置请使用自定义。']) assert.equal(typeof catalog[key], 'string', `${language}: ${key}`);
     assert.ok(translate(keys[10], language, { requested: 'ms-MY', effective: 'en-US' }).includes('ms-MY'));

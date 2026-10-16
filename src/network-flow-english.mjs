@@ -87,7 +87,7 @@ export const networkFlowEnglish = {
   "选择此环境的浏览器": "Choose this environment’s browser",
   "环境中的软件和终端打开链接时使用它。": "Software and terminals in the environment use it when they open a link.",
   "新建终端": "New terminal",
-  "拦截已知的第三方追踪：内置规则加 EasyPrivacy 名单，不影响登录和网站功能。": "Blocks known third-party trackers with the built-in rules and the EasyPrivacy list, without affecting sign-in or site features.",
+  "拦截已知第三方追踪；个别网站可能需要调整防护设置。": "Blocks known third-party trackers. Some sites may need different protection settings.",
   "在标准之上，再拦截标签管理器、错误上报和广告网络；个别网站可能缺少功能。": "Adds tag managers, error reporting and ad networks to Standard; a few sites may lose features.",
   "不拦截追踪请求。": "Does not block tracking requests.",
   "本次已拦截 {count} 个追踪请求": "{count} tracking requests blocked this session",

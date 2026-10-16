@@ -170,6 +170,12 @@ func (h *handler) createProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "DEPRECATED_FIELD", "engine was removed in v2; use runtime_id")
 		return
 	}
+	identityMode, err := decodeProfileIdentityMode(raw["identity_mode"])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_IDENTITY_MODE", err.Error())
+		return
+	}
+	delete(raw, "identity_mode")
 	data, err := json.Marshal(raw)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_BODY", err.Error())
@@ -197,44 +203,15 @@ func (h *handler) createProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PROXY_REGION", err.Error())
 		return
 	}
-	if err := h.prepareProfileIdentity(&p, desc); err != nil {
-		writeError(w, http.StatusInternalServerError, "PREPARE_PROFILE_FAILED", err.Error())
-		return
+	create := h.store.Create
+	if identityMode == "preserve" {
+		create = h.store.CreatePreservingIdentity
 	}
-	if err := h.store.Create(&p); err != nil {
+	if err := create(&p); err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"data": p})
-}
-
-func (h *handler) prepareProfileIdentity(p *profile.Profile, desc bfruntime.Descriptor) error {
-	if p.Fingerprint == nil && h.fpPool != nil && desc.FingerprintPoolKey != "" {
-		fp, err := h.fpPool.Pick(desc.FingerprintPoolKey, "windows")
-		if err != nil {
-			fp, err = h.fpPool.Pick(desc.FingerprintPoolKey, "macos")
-		}
-		if err == nil {
-			effectiveProxy := h.effectiveProxyForProfile(p)
-			if effectiveProxy.Proxy != nil {
-				proxy := effectiveProxy.Proxy
-				tz, locale := fingerprint.DetectProxyGeoResult(proxy.Type, proxy.Host, proxy.Port, proxy.Username, proxy.Password)
-				fp["timezone"] = tz
-				fp["navigator.language"] = locale
-			} else {
-				fingerprint.AdjustToLocal(fp)
-			}
-			p.Fingerprint = fp
-		}
-	}
-	if desc.Capabilities.SupportsSeedFingerprint && p.FingerprintSeed == 0 {
-		b := make([]byte, 4)
-		if _, err := rand.Read(b); err != nil {
-			return fmt.Errorf("generate fingerprint seed: %w", err)
-		}
-		p.FingerprintSeed = uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
-	}
-	return nil
 }
 
 func (h *handler) listProfiles(w http.ResponseWriter, r *http.Request) {
@@ -331,6 +308,11 @@ func (h *handler) deleteProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) duplicateProfile(w http.ResponseWriter, r *http.Request) {
+	name, err := decodeDuplicateName(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", err.Error())
+		return
+	}
 	src, err := h.store.Get(chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
@@ -345,7 +327,11 @@ func (h *handler) duplicateProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_RUNTIME", err.Error())
 		return
 	}
-	p, err := h.store.Duplicate(src.ID)
+	var names []string
+	if name != nil {
+		names = append(names, *name)
+	}
+	p, err := h.store.Duplicate(src.ID, names...)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
 		return

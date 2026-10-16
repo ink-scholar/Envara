@@ -1,0 +1,48 @@
+{
+  "catalogSHA256": "f53f88a041e26d8d3be346f5e475e3504dcf8b5773aef394f96309c69e7fb9a7",
+  "generator": {
+    "browserforge": "1.2.1",
+    "camoufox": "0.4.11",
+    "numpy": "2.5.4"
+  },
+  "inputSHA256": {
+    "browserforge/fingerprints/data/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "browserforge/fingerprints/data/fingerprint-network.zip": "f52d636b9d278cddee8a036aadffdb3213ed3356a696e740fdd7dceb01f33ae9",
+    "browserforge/headers/data/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "browserforge/headers/data/browser-helper-file.json": "95eadaa31939c4c4fdd483e4e6c9818c39706541da848c77a0194fb3afb14ecc",
+    "browserforge/headers/data/header-network.zip": "88d2f6032dddf9c48f09960d19f1355ee117441d979cc0135809a9856658a8dc",
+    "browserforge/headers/data/headers-order.json": "0f097dd7df859926e041780efbda6174c73deb093392f134b5eb6e1ad212fbdd",
+    "browserforge/headers/data/input-network.zip": "dfca4a36737250894cee83e418b86bbeb44f049751bc9f490fc0c0a1014b5dc9",
+    "camoufox/browserforge.yml": "932702cc258a9226a6262cc220e86182107075f3f24355a4adde18cf978b6dde",
+    "camoufox/fingerprints.py": "cdf79548cfcadab4eaa51f0067b4d0fa32075b7308b1ce1d1fb235514734660e",
+    "camoufox/fonts.json": "7b67de8235b2454e655a6c5ba087ce8b574ee3ac70c841f2e98a4de90be66fac",
+    "camoufox/utils.py": "4cc82c16d9b9987617b38648bd6d3baa0350396ec2426024c5415ef7844dfefa",
+    "camoufox/webgl/sample.py": "374722f68f9f7ce07a61be724fd947ed781e8d3e99e9a323dbe263095bc62e60",
+    "camoufox/webgl/webgl_data.db": "d293cabe7b546bf4ac3a2fb6c3cb6aee9891910659299d61fa2c88944d38c45d"
+  },
+  "nativePropertiesSHA256": "102d6924c10d1d3560f82049cffd1c8e3e103bc0147c6fffc17d69dade53142c",
+  "nativePropertiesSource": {
+    "assetID": 237731697,
+    "observedArchiveSHA256": "40d6eff71305dcc856a5d67880d328f99783236d7e306eef664b2e9ff4981a67",
+    "publishedDigest": null,
+    "url": "https://github.com/daijro/camoufox/releases/download/v135.0.1-beta.24/camoufox-135.0.1-beta.24-mac.arm64.zip",
+    "verification": "Official HTTPS download and ZIP CRC; upstream asset has no published digest."
+  },
+  "networkFieldsExcluded": true,
+  "perTargetOS": 8,
+  "schemaVersion": 1,
+  "screenConstraint": {
+    "maxHeight": 1800,
+    "maxWidth": 2560,
+    "minHeight": 720,
+    "minWidth": 1024
+  },
+  "sources": {
+    "browserforge": "https://pypi.org/project/browserforge/1.2.1/",
+    "camoufox": "https://github.com/daijro/camoufox/tree/v135.0.1-beta.24/pythonlib",
+    "camoufoxSourceCommit": "95cc4489d025471368412b035743bb59855b160e",
+    "fingerprintModels": "https://github.com/apify/fingerprint-suite/tree/v2.1.58"
+  },
+  "tupleCount": 24,
+  "webgl2Enabled": true
+}

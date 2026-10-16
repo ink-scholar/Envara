@@ -26,7 +26,15 @@ func TestFixedLaunchOverridesPersistWithoutChangingFingerprintPool(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got.LaunchOverrides, p.LaunchOverrides) || !reflect.DeepEqual(got.Fingerprint, p.Fingerprint) {
+	wantFingerprint, err := json.Marshal(p.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotFingerprint, err := json.Marshal(got.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.LaunchOverrides, p.LaunchOverrides) || string(wantFingerprint) != string(gotFingerprint) || got.Fingerprint["timezone"] != "America/Los_Angeles" || got.Fingerprint["navigator.language"] != "en-US" {
 		t.Fatalf("fixed overrides or generated pool changed after reload: %+v", got)
 	}
 	data, err := json.Marshal(&Profile{RuntimeID: "camoufox"})

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { applicationWorkspaceContext, installedProcessLocales, resolveProcessLanguage } from '../electron/workspace-context.mjs';
+import { applicationWorkspaceContext, installedProcessLocales, localeForCountry, resolveProcessLanguage } from '../electron/workspace-context.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { realpathSync } from 'node:fs';
@@ -75,4 +75,10 @@ test('macOS native locale and ICU are checked separately with owned non-networki
   const neutral = await execute(process.execPath, ['-p', 'new Intl.DateTimeFormat().resolvedOptions().locale'], { env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' }, timeout: 3000 });
   assert.equal(neutral.stdout.trim(), 'en-US', 'ICU maps native neutral C to its own English default on this runtime');
   assert.deepEqual({ LANG: process.env.LANG, LC_ALL: process.env.LC_ALL }, host);
+});
+
+
+test('automatic browser locale follows known countries beyond the explicit presets', () => {
+  for (const [country, locale] of [['PH', 'en-PH'], ['MY', 'ms-MY'], ['IL', 'he-IL'], ['SA', 'ar-SA'], ['AR', 'es-AR']]) assert.equal(localeForCountry(country), locale);
+  for (const country of [null, '', 'ZZ', 'XX', 'EU', 'US-extra']) assert.equal(localeForCountry(country), 'en-US');
 });

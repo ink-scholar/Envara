@@ -27,6 +27,16 @@ async function fixture(t, platform = 'darwin') {
       await writeFile(path.join(profile_dir, 'profile.json'), JSON.stringify(profile));
       profiles.push(profile); return { data: structuredClone(profile) };
     }
+    const duplicateMatch = route.match(/^\/api\/profiles\/([A-Za-z0-9_-]+)\/duplicate$/);
+    if (method === 'POST' && duplicateMatch) {
+      const source = structuredClone(profiles.find(p => p.id === duplicateMatch[1]));
+      const id = `profile_${++next}`, profile_dir = path.join(profilesDir, id);
+      const profile = { ...source, id, name: body.name, profile_dir, fingerprint_seed: (source.fingerprint_seed || 1) + 1 };
+      for (const key of ['canvas:seed', 'audio:seed']) delete profile.fingerprint?.[key];
+      await mkdir(path.join(profile_dir, 'browser-data'), { recursive: true });
+      await writeFile(path.join(profile_dir, 'profile.json'), JSON.stringify(profile));
+      profiles.push(profile); return { data: structuredClone(profile) };
+    }
     const profileMatch = route.match(/^\/api\/profiles\/([A-Za-z0-9_-]+)$/);
     if (method === 'PUT' && profileMatch) {
       const profile = profiles.find(p => p.id === profileMatch[1]); Object.assign(profile, structuredClone(body));
@@ -314,4 +324,65 @@ test('externally changed native settings cannot launch under a stale fixed devic
   assert.equal(f.requests.filter(r => r.route === '/api/sessions' && r.method === 'POST').length, 0);
   delete f.profiles[0].fingerprint['navigator.hardwareConcurrency'];
   await assert.rejects(f.service.call('startProfile', { id: profile.id }), { code: 'DEVICE_PROFILE_CONFLICT' });
+});
+
+
+test('generated identity metadata survives desktop snapshots, export, import and unrelated edits', async t => {
+  const f = await fixture(t), source = await f.create({ seed: 9801 });
+  const generation = { provider: 'cloakbrowser', version: 1, tuple_id: 'mac-retina-v1', generated_fields: { 'screen.width': 1440, 'screen.height': 900 } };
+  Object.assign(f.profiles[0], { fingerprint_generation: generation, fingerprint: { ...generation.generated_fields } });
+  const snapshot = (await f.service.snapshot()).profiles[0];
+  assert.deepEqual(snapshot.fingerprintGeneration, generation);
+  const document = await f.service.exportProfiles({ id: source.id });
+  assert.deepEqual(document.profiles[0].fingerprintGeneration, generation);
+  const result = await f.service.call('importProfiles', { document });
+  const imported = result.profiles.find(p => p.id === result.actionResult.createdIds[0]);
+  assert.deepEqual(imported.fingerprintGeneration, generation);
+  assert.deepEqual(imported.fingerprint, snapshot.fingerprint);
+  assert.equal(imported.seed, snapshot.seed);
+  const request = f.requests.filter(r => r.method === 'POST' && r.route === '/api/profiles').at(-1);
+  assert.equal(request.body.identity_mode, 'preserve');
+  await f.service.call('updateProfile', { id: source.id, profile: { notes: 'Keep identity' } });
+  assert.deepEqual(f.profiles[0].fingerprint_generation, generation);
+  const invalid = { ...document.profiles[0], fingerprintGeneration: { ...generation, provider: 'camoufox' } };
+  await assert.rejects(f.service.call('importProfiles', { profiles: [invalid] }), { code: 'VALIDATION_ERROR' });
+});
+
+test('legacy imports explicitly preserve an absent seed and never request new identity generation', async t => {
+  const f = await fixture(t);
+  const result = await f.service.call('importProfiles', { profiles: [{ name: 'Legacy', engine: 'cloakbrowser', fingerprint: {} }] });
+  const request = f.requests.find(r => r.method === 'POST' && r.route === '/api/profiles');
+  assert.equal(request.body.identity_mode, 'preserve');
+  assert.equal(request.body.fingerprint_seed, 0);
+  assert.equal(request.body.fingerprint_generation, undefined);
+  assert.equal(result.profiles[0].seed, null);
+});
+
+
+test('choosing a fixed or custom value revokes generated ownership even when the value is unchanged', async t => {
+  const f = await fixture(t), source = await f.create({ seed: 9802 });
+  const fields = deviceProfileFingerprint('mac-standard-v1');
+  f.profiles[0].fingerprint = { ...fields };
+  f.profiles[0].fingerprint_generation = { provider: 'cloakbrowser', version: 1, tuple_id: 'mac-retina-v1', generated_fields: { ...fields } };
+  await f.service.call('updateProfile', { id: source.id, profile: { notes: 'Only a note', width: fields['screen.width'], height: fields['screen.height'] } });
+  assert.deepEqual(f.profiles[0].fingerprint_generation.generated_fields, fields);
+  await f.service.call('updateProfile', { id: source.id, profile: { fingerprint: { 'navigator.hardwareConcurrency': 8 } } });
+  assert.equal(Object.hasOwn(f.profiles[0].fingerprint_generation.generated_fields, 'navigator.hardwareConcurrency'), false);
+  assert.equal(f.profiles[0].fingerprint_generation.generated_fields['screen.width'], 1440);
+  await f.service.call('updateProfile', { id: source.id, profile: { deviceProfileId: 'mac-standard-v1' } });
+  assert.deepEqual(f.profiles[0].fingerprint_generation.generated_fields, {});
+  assert.equal(f.profiles[0].fingerprint_generation.version, 1, 'manual hardware keeps the native noise generation version');
+  assert.deepEqual(f.profiles[0].fingerprint, fields);
+  const result = await f.service.call('cloneProfile', { id: source.id });
+  assert.deepEqual(result.profiles.find(p => p.id === result.actionResult.createdId).fingerprint, fields);
+});
+
+
+test('editing a legacy environment without a seed never creates a new identity', async t => {
+  const f = await fixture(t);
+  const result = await f.service.call('importProfiles', { profiles: [{ name: 'Legacy zero seed', engine: 'cloakbrowser', fingerprint: { 'screen.width': 1280 } }] });
+  const id = result.actionResult.createdIds[0], before = structuredClone(f.profiles[0].fingerprint);
+  await f.service.call('updateProfile', { id, profile: { notes: 'A note', seed: null } });
+  assert.equal(f.profiles[0].fingerprint_seed, 0);
+  assert.deepEqual(f.profiles[0].fingerprint, before);
 });

@@ -557,7 +557,7 @@
   "新建环境": "Nuevo entorno",
   "新建会话": "Nueva sesión",
   "新建终端": "Nuevo terminal",
-  "拦截已知的第三方追踪：内置规则加 EasyPrivacy 名单，不影响登录和网站功能。": "Bloquea rastreadores de terceros conocidos con las reglas integradas y la lista EasyPrivacy, sin afectar el inicio de sesión ni las funciones del sitio.",
+  "拦截已知第三方追踪；个别网站可能需要调整防护设置。": "Bloquea rastreadores de terceros conocidos. Algunos sitios pueden requerir ajustes en la protección.",
   "在标准之上，再拦截标签管理器、错误上报和广告网络；个别网站可能缺少功能。": "Añade al modo estándar los gestores de etiquetas, los informes de errores y las redes publicitarias; algunos sitios pueden perder funciones.",
   "不拦截追踪请求。": "No bloquea solicitudes de rastreo.",
   "本次已拦截 {count} 个追踪请求": "{count} solicitudes de rastreo bloqueadas en esta sesión",

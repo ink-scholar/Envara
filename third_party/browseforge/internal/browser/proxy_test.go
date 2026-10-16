@@ -100,6 +100,7 @@ func TestAllBrowserLaunchBuildersUseManagedSessionProxyAndPreserveStoredProfile(
 				t.Fatal(err)
 			}
 			launch.SessionProxy = &profile.ProxyConfig{Type: "http", Host: "127.0.0.1", Port: 19427, Username: "managed-user", Password: "managed-password", Region: "jp-tokyo"}
+			launch.SessionCountryCode = "JP"
 			binaryPath := filepath.Join(t.TempDir(), "test-browser")
 			if err := os.WriteFile(binaryPath, nil, 0700); err != nil {
 				t.Fatal(err)

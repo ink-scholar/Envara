@@ -35,6 +35,27 @@ BrowseForge v2.1.15 is incorporated at commit `fa9e0bb670e749706a9c8f2d409533334
 
 The prepared backend resources include a compiled Go sidecar, the official Playwright driver 1.61.1 and its Node.js runtime. The Go standard library uses the Go project's BSD-style license; Node.js carries its own MIT and third-party notices. The resource builders retain the Go runtime and module licenses in `build/backend/licenses/`, and the driver, binding, Node and bundled dependency notices beside the prepared driver. Build provenance records exact versions and checksums. These generated resources are excluded from the source repository and are separate from browser-engine binaries.
 
+### Build-time Camoufox identity data
+
+The backend embeds a small catalog of complete OS-matched Camoufox identity
+tuples, generated with the official Camoufox Python wrapper **0.4.11**,
+BrowserForge **1.2.1**, and Apify fingerprint-suite **v2.1.58** models. Runtime
+selection uses cryptographic randomness and saves the selected tuple and the
+provider's supported font-spacing/Canvas parameters; it does not require an
+end-user Python installation or model downloads. The catalog does not promise
+that every field is unique or that audio, hardware identity or all tracking
+surfaces are replaced.
+
+The [data source record and generator](third_party/browseforge/internal/profile/camoufox-data/README.md)
+and [input/output hashes](third_party/browseforge/internal/profile/camoufox-data/provenance.json)
+retain the fixed sources. The full [Camoufox MPL-2.0 notice](third_party/browseforge/internal/profile/camoufox-data/LICENSE-Camoufox.txt),
+[BrowserForge Apache-2.0 notice](third_party/browseforge/internal/profile/camoufox-data/LICENSE-BrowserForge.txt)
+and [Apify fingerprint-suite Apache-2.0 notice](third_party/browseforge/internal/profile/camoufox-data/LICENSE-Fingerprint-Suite.txt)
+are preserved separately. Camoufox's Python wrapper declares MIT in its package
+metadata; that does not replace the repository/native-schema or model notices.
+The generated catalog and retained native schema are attributed third-party
+material, not a relicensing of those sources under Envara's MIT license.
+
 ## Separately managed Mihomo proxy core
 
 Envara prepares the unmodified official Mihomo v1.19.32 executable at commit `88dcbf7f1614a67c3b36b848ee3592dfa92ada36`, launched as an independent owned process. Its GPLv3 license and the licenses of its dependencies are retained; Envara's original application MIT notice does not replace them.

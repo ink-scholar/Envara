@@ -117,7 +117,7 @@ func (h *handler) importProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.Create(&p); err != nil {
+	if err := h.store.CreatePreservingIdentity(&p); err != nil {
 		writeError(w, 500, "IMPORT_FAILED", err.Error())
 		return
 	}
@@ -244,7 +244,7 @@ func (h *handler) restore(w http.ResponseWriter, r *http.Request) {
 		groupsImported = n
 	}
 	for i := range profilesToImport {
-		if err := h.store.Create(&profilesToImport[i]); err != nil {
+		if err := h.store.CreatePreservingIdentity(&profilesToImport[i]); err != nil {
 			writeError(w, 500, "RESTORE_FAILED", err.Error())
 			return
 		}

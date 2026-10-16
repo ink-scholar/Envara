@@ -108,12 +108,17 @@ func (m *Manager) launchChromium(p *profile.Profile) (*Session, error) {
 		} else {
 			proxyRegion = strings.TrimSpace(proxy.Region)
 		}
-		if requiresLaunchGeo(p) {
+		if requiresLaunchGeo(p) || (desc.ID == bfruntime.BrowseForgeChromium && p.SessionCountryCode == "") {
 			geoResult = fingerprint.DetectProxyGeo(proxy.Type, proxy.Host, proxy.Port, proxy.Username, proxy.Password)
 			tz, locale = geoResult.Values()
 			if tz == "" {
 				tz, locale = fallbackGeoForProxyRegion(proxyRegion)
 				geoResult = fingerprint.GeoDetectionResult{Timezone: tz, Locale: locale, Source: "proxy_region_fallback", Status: "geo_provider_unavailable"}
+			}
+		}
+		if desc.ID == bfruntime.BrowseForgeChromium {
+			if err := validateBrowseForgeProxyCountry(proxyRegion, p.SessionCountryCode, geoResult); err != nil {
+				return nil, err
 			}
 		}
 		args = append(args, "--fingerprint-webrtc-ip=auto")
@@ -125,8 +130,8 @@ func (m *Manager) launchChromium(p *profile.Profile) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !requiresLaunchGeo(p) {
-		geoResult = fingerprint.GeoDetectionResult{Timezone: tz, Locale: locale, Source: "profile_launch_overrides", Status: "manual"}
+	if !requiresLaunchGeo(p) && geoResult.Source == "" {
+		geoResult = fingerprint.GeoDetectionResult{Timezone: tz, Locale: locale, CountryCode: p.SessionCountryCode, Source: "profile_launch_overrides", Status: "manual"}
 	}
 	platform, err := resolveCloakFingerprintPlatform(policy, runtime.GOOS)
 	if err != nil {
@@ -144,6 +149,14 @@ func (m *Manager) launchChromium(p *profile.Profile) (*Session, error) {
 	}
 	persona.Native.Locale.GeoSource = geoResult.Source
 	persona.Native.Locale.GeoStatus = geoResult.Status
+	if desc.ID == bfruntime.CloakBrowser && runtime.GOOS == "darwin" && locale != "" {
+		// Playwright's regional ICU override exposes one language on the page.
+		// Use that same native preference for dedicated workers and HTTP too.
+		persona.Native.Locale.AcceptLanguage = locale
+		persona.Native.Locale.NavigatorLanguage = locale
+		persona.Native.Locale.NavigatorLanguages = []string{locale}
+		persona.Native.Locale.SecCHLang = locale
+	}
 	if desc.ID == bfruntime.BrowseForgeChromium {
 		args = appendChromiumLaunchPersonaArgs(args, persona)
 		args, err = appendBrowseForgeDockerSoftwareGPUArgs(args)
@@ -168,6 +181,7 @@ func (m *Manager) launchChromium(p *profile.Profile) (*Session, error) {
 			args = append(args, "--fingerprint-plugins-pdf="+persona.PluginsPDF)
 		}
 		args = appendCloakBrowserFingerprintArgs(args, p.Fingerprint, persona.Native.Locale.AcceptLanguage)
+		args = append(args, cloakBrowserDeviceWindowArgs(p.Fingerprint, persona.Native.Platform.OS)...)
 		// The free macOS v145 Cloak build ignores fingerprint-locale for
 		// navigator.language, but honors Chromium's native accept-lang path.
 		args = append(args, "--accept-lang="+chromiumAcceptLanguageSwitchValue(persona.Native.Locale.AcceptLanguage))
@@ -259,11 +273,8 @@ func (m *Manager) launchChromium(p *profile.Profile) (*Session, error) {
 			opts.ServiceWorkers = playwright.ServiceWorkerPolicyBlock
 		}
 		if locale != "" && desc.ID == bfruntime.CloakBrowser && runtime.GOOS == "darwin" {
-			// Keep Intl's default region aligned with the native language flags,
-			// including regions missing from the macOS launcher's locale prefs.
 			opts.Locale = playwright.String(locale)
 		}
-
 		var relay *SOCKS5Relay
 		if effectiveProxy.Proxy != nil {
 			proxy := effectiveProxy.Proxy
@@ -730,11 +741,17 @@ func buildChromiumLaunchPersona(p *profile.Profile, runtimeID bfruntime.ID, plat
 	} else if quota < 0 {
 		return chromiumLaunchPersona{}, fmt.Errorf("%s storage_quota_mb must be >= 0", runtimeID)
 	}
+	generatedNativeIdentity := runtimeID == bfruntime.BrowseForgeChromium && p.FingerprintGeneration != nil && p.FingerprintGeneration.Provider == string(runtimeID) && p.FingerprintGeneration.Version == 1
 	screenDefaults := browseForgeDefaultScreen(nativePlatform.OS)
 	screenWidth := fingerprintIntDefault(fp, "screen.width", screenDefaults.Width)
 	screenHeight := fingerprintIntDefault(fp, "screen.height", screenDefaults.Height)
-	availWidth := clampScreenAvail(fingerprintIntDefault(fp, "screen.availWidth", screenDefaults.AvailWidth), screenWidth)
-	availHeight := clampScreenAvail(fingerprintIntDefault(fp, "screen.availHeight", screenDefaults.AvailHeight), screenHeight)
+	availWidthDefault, availHeightDefault := screenDefaults.AvailWidth, screenDefaults.AvailHeight
+	if generatedNativeIdentity {
+		availWidthDefault = screenWidth
+		availHeightDefault = maxInt(screenHeight-(screenDefaults.Height-screenDefaults.AvailHeight), 1)
+	}
+	availWidth := clampScreenAvail(fingerprintIntDefault(fp, "screen.availWidth", availWidthDefault), screenWidth)
+	availHeight := clampScreenAvail(fingerprintIntDefault(fp, "screen.availHeight", availHeightDefault), screenHeight)
 	dpr := fingerprintFloatDefault(fp, "screen.devicePixelRatio", screenDefaults.DPR)
 	screenChromeInset := maxInt(screenDefaults.OuterHeight-screenDefaults.InnerHeight, 0)
 	outerWidth := fingerprintIntDefault(fp, "window.outerWidth", availWidth)
@@ -826,7 +843,16 @@ func buildChromiumLaunchPersona(p *profile.Profile, runtimeID bfruntime.ID, plat
 	if v, ok := fingerprintInt(fp, "canvas:seed"); ok {
 		persona.CanvasNoise = v
 		persona.HasCanvasNoise = true
+	} else if generatedNativeIdentity && browseForgeChromiumNativeMode(policy) != "strict" {
+		// The native engine reads a dedicated switch, not persona.canvas.seed.
+		// Versioned generation keeps existing/imported profiles unchanged.
+		persona.CanvasNoise = int64(browseForgePersonaSeed(p)%0x7ffffffe) + 1
+		persona.HasCanvasNoise = true
+		persona.Native.Canvas.Mode = "stable-seeded"
+		persona.Native.Canvas.Seed = persona.CanvasNoise
+		persona.Native.Canvas.RenderHashBaseline = "seeded"
 	}
+	// Upstream audio noise changes AudioBuffer backing-array semantics; keep it opt-in.
 	if v, ok := fingerprintInt(fp, "audio:seed"); ok {
 		persona.AudioNoise = v
 		persona.HasAudioNoise = true
@@ -1516,6 +1542,22 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// A region label is configuration, never evidence of the current proxy exit.
+func validateBrowseForgeProxyCountry(proxyRegion, sessionCountry string, detected fingerprint.GeoDetectionResult) error {
+	expected := countryCodeForProxyRegion(proxyRegion)
+	actual := sessionCountry
+	if actual == "" {
+		actual = detected.CountryCode
+	}
+	if actual == "" {
+		return fmt.Errorf("browseforge-chromium proxy country could not be verified through the selected route; check the proxy and retry")
+	}
+	if actual != expected {
+		return fmt.Errorf("browseforge-chromium proxy.region country %q does not match the detected egress country %q; update the network region before launching", expected, actual)
+	}
+	return nil
 }
 
 func timezoneMatchesCountry(timezone, countryCode string) bool {

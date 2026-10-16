@@ -3,6 +3,7 @@ package browser
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -138,16 +139,21 @@ func TestCloakLaunchDoesNotForceStaleVersionAndPreservesSelectedNetworkAndDevice
 					t.Errorf("Cloak must send its own native header %s, got %q", name, opts.ExtraHttpHeaders[name])
 				}
 			}
-			if opts.ExtraHttpHeaders["Accept-Language"] != "en-US,en" {
+			wantLanguages := "en-US,en"
+			if runtime.GOOS == "darwin" {
+				wantLanguages = "en-US"
+			}
+			if opts.ExtraHttpHeaders["Accept-Language"] != wantLanguages {
 				t.Errorf("selected Accept-Language lost: %#v", opts.ExtraHttpHeaders)
 			}
 			for _, expected := range []string{
 				chromiumWebRTCIPHandlingArg, "--fingerprint=42", "--fingerprint-webrtc-ip=auto", "--disable-features=Translate",
 				"--fingerprint-timezone=Asia/Manila", "--fingerprint-locale=en-US", "--fingerprint-platform=macos",
-				"--fingerprint-accept-language=en-US,en", "--accept-lang=en-US,en",
+				"--fingerprint-accept-language=" + wantLanguages, "--accept-lang=" + wantLanguages,
 				"--fingerprint-hardware-concurrency=8", "--fingerprint-device-memory=8",
 				"--fingerprint-screen-width=1440", "--fingerprint-screen-height=900", "--fingerprint-screen-avail-width=1440", "--fingerprint-screen-avail-height=860",
 				"--force-device-scale-factor=2", "--fingerprint-screen-device-scale-factor=2",
+				"--window-position=0,0", "--window-size=1440,773",
 				"--fingerprint-canvas-noise=1234", "--fingerprint-audio-noise=5678",
 			} {
 				if !containsArg(opts.Args, expected) {
@@ -160,8 +166,14 @@ func TestCloakLaunchDoesNotForceStaleVersionAndPreservesSelectedNetworkAndDevice
 			if opts.Env["TZ"] != "Asia/Manila" || opts.Env["LANG"] != "en_US.UTF-8" || opts.Env["LC_ALL"] != "en_US.UTF-8" {
 				t.Errorf("selected timezone/UTF-8 locale was changed: %#v", opts.Env)
 			}
-			if runtime.GOOS == "darwin" && (opts.Locale == nil || *opts.Locale != "en-US") {
-				t.Errorf("native macOS locale was lost: %#v", opts.Locale)
+			if runtime.GOOS == "darwin" {
+				if opts.Locale == nil || *opts.Locale != "en-US" {
+					t.Errorf("regional ICU locale was lost: %#v", opts.Locale)
+				}
+				launcher, err := os.ReadFile(*opts.ExecutablePath)
+				if err != nil || !strings.Contains(string(launcher), "-AppleLanguages '(en-US)'") {
+					t.Errorf("native macOS locale launcher was lost: %v", err)
+				}
 			}
 			after, err := json.Marshal(p.Fingerprint)
 			if err != nil || string(before) != string(after) {

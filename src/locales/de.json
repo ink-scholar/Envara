@@ -557,7 +557,7 @@
   "新建环境": "Neue Umgebung",
   "新建会话": "Neue Sitzung",
   "新建终端": "Neues Terminal",
-  "拦截已知的第三方追踪：内置规则加 EasyPrivacy 名单，不影响登录和网站功能。": "Blockiert bekannte Drittanbieter-Tracker mit den eingebauten Regeln und der EasyPrivacy-Liste, ohne Anmeldung oder Website-Funktionen zu beeinträchtigen.",
+  "拦截已知第三方追踪；个别网站可能需要调整防护设置。": "Blockiert bekannte Drittanbieter-Tracker. Für manche Websites müssen die Schutzeinstellungen eventuell angepasst werden.",
   "在标准之上，再拦截标签管理器、错误上报和广告网络；个别网站可能缺少功能。": "Blockiert zusätzlich zum Standard Tag-Manager, Fehlerberichte und Werbenetzwerke; einzelne Websites können Funktionen verlieren.",
   "不拦截追踪请求。": "Blockiert keine Tracking-Anfragen.",
   "本次已拦截 {count} 个追踪请求": "{count} Tracking-Anfragen in dieser Sitzung blockiert",

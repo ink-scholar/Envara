@@ -1,6 +1,8 @@
-# Envara 0.5.23 能力矩阵
+# Envara 0.5.24 能力矩阵
 
 当前发布目标为 **macOS Apple Silicon（arm64）**。下表区分源码能力、桌面入口和验收边界，不表示所有 provider、网站或原生软件都已逐项通过。
+
+三内核随机身份与最终包资料迁移的受控结果已补入下表，具体覆盖见[验证范围](verification.md)。
 
 ## 与固定 BrowseForge 基线的关系
 
@@ -11,11 +13,11 @@ Envara 纳入 BrowseForge **v2.1.15 / `fa9e0bb670e749706a9c8f2d4095333347d6c521`
 | 产品入口 | Web Dashboard、CLI、本地/服务器部署 | Electron 本机工作区；先显示窗口再初始化服务。网页预览不提供原生 PTY 或路由 |
 | 浏览器内核 | Camoufox/Firefox、CloakBrowser/Chromium、BrowseForge Chromium Alpha | 保留三个 provider 的选择、探测和安装；不是任意已安装 Chrome/Edge 的管理器 |
 | 环境管理 | 创建、编辑、复制、删除、分组、标签、独立资料目录 | 桌面操作、批量管理、预览、旧配置迁移；克隆不复制原浏览资料 |
-| 指纹与地区 | provider 各自的结构化配置、种子、语言/时区映射 | 默认交给 provider；保留保存的设置，高级固定设备档案目前仅映射 CloakBrowser |
+| 指纹与地区 | provider 各自的结构化配置、种子、语言/时区映射 | 新环境生成并持久化身份，重开复用、复制生成新身份、导入保留配置；三个 provider 的 Canvas/字体/音频覆盖有差异，见[设备边界](browser-device-profiles.md)。高级固定档案仍仅映射 CloakBrowser |
 | 代理与分组 | 认证代理、环境代理及分组默认/强制策略 | HTTP/HTTPS/SOCKS5 与托管 AnyTLS；分组和 provider 的协议/地域限制仍适用 |
 | AnyTLS | 无原始节点与内置核心管理流程 | 独立自有核心、节点身份分路由、认证回环入口；保留 SNI/ALPN/TLS 指纹/UDP，不是通用订阅客户端 |
 | 网络位置 | 浏览器 GeoIP 与启动时地区调整 | 测量认证出口后确认位置/时区，消费者共用；模拟位置与真实出口分开 |
-| 追踪保护 | provider 提供的浏览器机制 | 补丁增加可审计的规则匹配与标准/严格模式；不覆盖所有遥测或服务端关联 |
+| 追踪保护 | provider 提供的浏览器机制 | 补丁增加可审计规则与标准/严格模式；已测第三方 HTTP(S) 请求，WS/WSS 未被当前拦截接入覆盖，不代表所有遥测或服务端关联已消失 |
 | REST / MCP / Playwright | 浏览器、页面、标签、表单、Cookie、截图等自动化接口 | 保留本机后台接口；专用终端另用会话级 broker，全部工具未宣称逐项验收 |
 | YAML 工作流 | CLI/REST/MCP 的工作流执行 | 固定后端保留；没有等价的桌面可视化工作流编辑器 |
 | 备份与数据交换 | 配置 ZIP、Cookie 备份与 CLI 文件系统备份 | 增加密码加密的浏览器/终端/单软件导出；导入新环境，不覆盖已有资料，旧整环境文件兼容 |
@@ -38,13 +40,15 @@ Envara 纳入 BrowseForge **v2.1.15 / `fa9e0bb670e749706a9c8f2d4095333347d6c521`
 
 | 范围 | 当前边界 |
 | --- | --- |
-| macOS arm64 浏览器与数据 | 当前发布目标；受控回环验收覆盖真实浏览器持久 Cookie/HttpOnly、localStorage、IndexedDB、加密独立导出/恢复及原档案保留。不是全部网站或跨 Mac 登录验收 |
+| macOS arm64 浏览器与数据 | 当前发布目标；受控回环验收覆盖持久 Cookie/HttpOnly、localStorage、IndexedDB、独立导出/恢复及原档案保留。会话 Cookie 不保证恢复，真实 Gmail 登录及跨 Mac 登录未验收；本轮最终包状态见[验证范围](verification.md) |
 | macOS 终端与 Claude | 托管回环路线使用 Seatbelt 围栏；受控夹具可验证 PTY、浏览器绑定和清理。真实认证、token 刷新、模型推理及模型主动调用工具需独立验收 |
 | macOS 附加软件 | PF/进程身份/自有 utun 路线及独立 NE 路线；按实际安装、目标身份和运行条件决定准入。任意软件、DNS代发、外部 helper、整个 guard 故障与无关应用仍需对应验收 |
 | Windows x64 | 有桌面准备、WinDivert capture 与 helper 源码；未完成实机 GUI/PTY/浏览器/驱动与路由验收，不能当作已支持发布平台 |
 | macOS Intel、Linux、Windows ARM64 | provider 或 helper 的构建目标不等于 Envara 原生验收；不在当前发布承诺内 |
 
 GPU、字体、硬件身份、所有 UA/Client Hints 表面和完整网站检测不是一个统一的已通过项目。选择坐标不证明住宅地址；隔离配置或网络不保证避免服务端限制。详见[设备边界](browser-device-profiles.md)、[网络环境](network-context.md)、[附加软件路由](application-routing-options.md)和[Claude 会话](claude-code-sessions.md)。
+
+Chromium 已配置非代理 UDP 限制，但尚无有效 WebRTC 正对照验收；Camoufox 的 WebRTC 防泄漏效力也未验收。旧 BrowseForge Chromium 零种子档案若依赖原 profile ID，导入到新 ID 后不能承诺完整派生身份保持；这与新生成身份、非零旧种子的保留规则不同。
 
 ## 复核与许可
 

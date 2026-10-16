@@ -1,10 +1,18 @@
 # 浏览器设备档案与语言
 
-适用于 Envara 0.5.23，当前发布目标为 macOS arm64。基本设置选择名称、网络和内核；设备覆盖与手动参数位于 **高级设置**。
+适用于 Envara 0.5.24，发布目标为 macOS arm64。三内核随机身份已进行真实内核受控验证，最终安装包的身份配置保存与资料迁移也已验收。基本设置选择名称、网络和内核；设备覆盖与手动参数位于 **高级设置**。
 
 ## 自动与固定档案
 
-新环境默认由所选 provider 生成设备参数，自动模式的宽高留空。创建后保存并复用种子；种子不保证每一种浏览器信号都变化。旧环境保留既有档案、种子、手动设置和浏览资料，不进行隐式迁移。
+本轮修复让三个 provider 的新环境在创建时生成并保存身份：Chromium provider 保存种子及一组相容的设备参数，Camoufox 保存按目标 OS 生成的完整结构化模板与其支持的噪声参数。重新打开复用已保存身份，不在启动时重新随机。有限模板不保证每个硬件字段唯一，也不表示所有浏览器信号都已随机化。
+
+复制创建新身份，保留显式设备约束，不复制原浏览资料；导入保留已有身份配置，不把它作为新环境重新生成。旧环境保留既有档案、种子、手动设置和浏览资料，不进行隐式迁移。旧 BrowseForge Chromium 档案若种子为零、依赖原 profile ID 派生身份，导入后新 ID 可能改变派生结果，不能承诺完整身份一致；正常新生成身份及已保存的非零旧种子在已测范围内保留。
+
+| Provider | 本轮真实内核观测与边界 |
+| --- | --- |
+| CloakBrowser | 原生 Canvas 像素读回可随身份变化；本轮 `toDataURL()` 与字体测量未观察到相应变化，不能将这些表面也宣称为已随机化 |
+| BrowseForge Chromium Alpha | 新生成身份接入原生 Canvas 随机参数；默认不启用音频噪声。该版本上游音频噪声会改变音频数组的处理行为，不能将其作为默认功能承诺 |
+| Camoufox | 按 OS 抽取完整官方生成模板，保存字体间距与 Canvas 参数；受控验证覆盖新环境差异、同环境重开稳定、复制更新及配置导入保持。数据来源与许可见[模板说明](../third_party/browseforge/internal/profile/camoufox-data/README.md) |
 
 固定档案目前只映射到 CloakBrowser，并要求模板匹配宿主平台：
 
@@ -20,9 +28,11 @@
 
 ## UA、GPU 与字体
 
-CloakBrowser 使用实际内核的 UA/Client Hints，不套用其他 provider 的版本覆盖。完整 UA 可以减熵到主版本，UA-CH 的完整版本需按其实际字段判断；不能把二者字符串必须完全相同作为一致性标准。
+UA 必须与实际运行的内核家族及版本对齐；验证同时核对页面、worker、HTTP 请求头，以及支持 UA-CH 的 Chromium 字段。Firefox 没有 Chromium 的 UA-CH 接口。CloakBrowser 使用实际内核的 UA/Client Hints，不套用其他 provider 的版本覆盖。完整 UA 可以减熵到主版本，UA-CH 的完整版本需按其实际字段判断；不能把二者字符串必须完全相同作为一致性标准，也不能通过改写 UA 把旧内核当作新内核。
 
-当前模板不覆盖 GPU 字符串或字体名单，也不修改宿主字体。网页仍可能看到宿主 GPU 和可用字体；`screen.availHeight` 受内核和窗口环境影响。语言、屏幕参数或 UA 校验通过不代表完整指纹一致，也不保证第三方评分或挑战放行。
+上述 CloakBrowser 固定设备档案不覆盖 GPU 字符串或字体名单，也不修改宿主字体；网页仍可能看到宿主 GPU 和可用字体。Camoufox 的随机模板另包含按 OS 配套的完整 WebGL 样本和字体配置，但不模拟一台确定型号的物理电脑。`screen.availHeight` 等可见参数仍需按 provider 与窗口环境验收。语言、屏幕参数或 UA 校验通过不代表完整指纹一致，也不保证第三方评分或挑战放行。
+
+WebRTC 另行验收：两个 Chromium provider 已配置禁用非代理 UDP 的策略，但尚无有效正对照证明防泄漏效力；Camoufox 的 WebRTC 防泄漏效力也未验收。接口可用或没有候选地址均不足以证明已通过。
 
 ## 语言的不同层次
 
@@ -30,5 +40,7 @@ CloakBrowser 使用实际内核的 UA/Client Hints，不套用其他 provider �
 - **浏览器：** 自动模式按网络地区推荐 locale，也可手动指定。请求语言、JavaScript 和 Intl 由对应内核接入处理。网站仍可按账户、Cookie、URL或服务端规则显示其他语言。
 - **终端与 Claude：** 从宿主实际可用 locale 中选择有效 UTF-8 值，缺少请求 locale 时显示回退结果。LANG/LC_ALL 只传给自有子进程。
 - **附加软件：** 接收同一有效子进程环境，但原生软件可能忽略语言提示。这不覆盖系统语言、字体或任意定位 API。
+
+本轮地区测试使用明确标注的合成网络位置，核对传入坐标、语言与时区是否被内核消费；它不证明真实公网 IP、国家或住宅地址。真实出口需要另经指定代理检测。
 
 实现依据：[档案规范](../shared/browser-device-profile.mjs)、[表单规则](../src/browser-device-form.mjs)、[服务映射](../electron/browseforge-service.mjs)、[子进程 locale](../electron/workspace-context.mjs)。受控浏览器检查脚本见[设备验收](../scripts/verify-browser-device-profile.mjs)；其结果不能替代真实账户、所有内核或跨平台验收。

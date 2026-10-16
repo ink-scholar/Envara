@@ -374,8 +374,8 @@ function ProfileForm({
       notes: form.notes,
       engine: form.engine,
       deviceProfileId: form.deviceProfileId,
-      platform: form.platform,
-      ...(allows(runtime, "seed") ? {
+      ...(form.platform ? { platform: form.platform } : {}),
+      ...(!profile && allows(runtime, "seed") ? {
         seed: Number(form.seed)
       } : {}),
       locale: form.locale,
@@ -420,7 +420,7 @@ function ProfileForm({
             {selectedDevice && <dl className="browser-device-summary" aria-label={t("设备档案")}><div><dt>{t("平台")}</dt><dd>{platforms[selectedDevice.platform]}</dd></div><div><dt>{t("屏幕")}</dt><dd>{selectedDevice.width} × {selectedDevice.height}</dd></div><div><dt>{t("逻辑处理器")}</dt><dd>{selectedDevice.hardwareConcurrency}</dd></div><div><dt>{t("浏览器内存")}</dt><dd>{selectedDevice.deviceMemory} GB</dd></div></dl>}
           </div>
           {field("group", t("分组"), <><input maxLength={60} list="profile-groups" value={form.group} onChange={change("group")} placeholder={t("未分组")} /><datalist id="profile-groups">{groups.map(group => <option key={group} value={group} />)}</datalist></>)}
-          <Field label={t("隐私防护")} hint={t({ standard: "拦截已知的第三方追踪：内置规则加 EasyPrivacy 名单，不影响登录和网站功能。", strict: "在标准之上，再拦截标签管理器、错误上报和广告网络；个别网站可能缺少功能。", off: "不拦截追踪请求。" }[form.privacy?.mode || "standard"])}><select value={form.privacy?.mode || "standard"} onChange={event => setForm(value => ({
+          <Field label={t("隐私防护")} hint={t({ standard: "拦截已知第三方追踪；个别网站可能需要调整防护设置。", strict: "在标准之上，再拦截标签管理器、错误上报和广告网络；个别网站可能缺少功能。", off: "不拦截追踪请求。" }[form.privacy?.mode || "standard"])}><select value={form.privacy?.mode || "standard"} onChange={event => setForm(value => ({
                 ...value,
                 privacy: {
                   mode: event.target.value
@@ -428,8 +428,10 @@ function ProfileForm({
               }))}><option value="standard">{t("标准")}</option><option value="strict">{t("严格")}</option><option value="off">{t("停用")}</option></select></Field>
           {field("locale", t("语言"), <><select aria-label={t("语言模式")} value={fixedModes.locale ? "fixed" : "auto"} onChange={changeMode("locale")}><option value="auto">{t("跟随网络出口")}</option><option value="fixed">{t("固定语言")}</option></select>{fixedModes.locale && <input aria-label={t("固定语言")} value={form.locale} onChange={change("locale")} disabled={!allows(runtime, "locale")} placeholder="zh-CN" {...invalid("locale")} />}</>, { hint: t("浏览器语言与 Envara 界面语言独立；网站可能自行选择语言。") })}
           {field("timezone", t("时区"), confirmedNetworkTimezone ? <span className="field-hint">{confirmedNetworkTimezone}<br />{t("已保存配置")}</span> : <><select aria-label={t("时区模式")} value={fixedModes.timezone ? "fixed" : "auto"} onChange={changeMode("timezone")}><option value="auto">{t("跟随网络出口")}</option><option value="fixed">{t("固定时区")}</option></select>{fixedModes.timezone && <input aria-label={t("固定时区")} value={form.timezone} onChange={change("timezone")} disabled={!allows(runtime, "timezone")} placeholder="Asia/Shanghai" {...invalid("timezone")} />}</>)}
-          {!selectedDevice && field("platform", t("指纹平台"), <select value={form.platform} onChange={change("platform")} disabled={!allows(runtime, "platform")} {...invalid("platform")}><option value="macos">macOS</option><option value="windows">Windows</option><option value="linux">Linux</option></select>)}
-          {field("seed", t("指纹种子"), <div className="input-action"><input type="number" min="1" max="4294967295" required readOnly={!!profile} disabled={!allows(runtime, "seed")} value={allows(runtime, "seed") ? form.seed : ""} placeholder={t("不适用")} onChange={change("seed")} {...invalid("seed")} /><IconButton disabled={!!profile || !allows(runtime, "seed")} icon={ArrowsClockwise} label={t("随机生成种子")} type="button" onClick={() => setForm(value => ({
+          {!selectedDevice && field("platform", t("指纹平台"), <select value={form.platform} onChange={change("platform")} disabled={!allows(runtime, "platform")} {...invalid("platform")}>
+            {!profile?.platform && <option value="">{t("自动（由内核决定）")}</option>}
+            <option value="macos">macOS</option><option value="windows">Windows</option><option value="linux">Linux</option></select>)}
+          {field("seed", t("指纹种子"), <div className="input-action"><input type="number" min="1" max="4294967295" required readOnly={!!profile} disabled={!allows(runtime, "seed")} value={allows(runtime, "seed") ? form.seed : ""} placeholder={t(profile && allows(runtime, "seed") ? "保留当前配置" : "不适用")} onChange={change("seed")} {...invalid("seed")} /><IconButton disabled={!!profile || !allows(runtime, "seed")} icon={ArrowsClockwise} label={t("随机生成种子")} type="button" onClick={() => setForm(value => ({
                 ...value,
                 seed: Math.floor(Math.random() * 2147483646) + 1
               }))} /></div>)}

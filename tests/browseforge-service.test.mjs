@@ -30,6 +30,16 @@ class FakeClient {
       await mkdir(path.join(profile.profile_dir, 'browser-data'), { recursive: true });
       return { data: structuredClone(profile) };
     }
+    const duplicate = route.match(/^\/api\/profiles\/([A-Za-z0-9_-]+)\/duplicate$/);
+    if (duplicate && method === 'POST') {
+      const source = structuredClone(this.profiles.find(item => item.id === duplicate[1]));
+      assert.ok(source);
+      const id = `prof_${String(++this.createCount).padStart(12, '0')}`;
+      const copy = { ...source, id, name: body.name, fingerprint_seed: (source.fingerprint_seed || 1) + 1, profile_dir: path.join(this.profilesDir, id) };
+      this.profiles.push(copy);
+      await mkdir(path.join(copy.profile_dir, 'browser-data'), { recursive: true });
+      return { data: structuredClone(copy) };
+    }
     const profile = route.match(/^\/api\/profiles\/([A-Za-z0-9_-]+)$/);
     if (profile && method === 'PUT') { const existing = this.profiles.find((item) => item.id === profile[1]); assert.ok(existing); Object.assign(existing, structuredClone(body)); return { data: structuredClone(existing) }; }
     if (profile && method === 'DELETE') { const existing = this.profiles.find((item) => item.id === profile[1]); if (existing) await rm(existing.profile_dir, { recursive: true, force: true }); this.profiles = this.profiles.filter((item) => item.id !== profile[1]); return { data: 'deleted' }; }
@@ -352,17 +362,19 @@ test('long launch only locks its own profile; other stop and metadata actions co
   assert.equal(client.sessions[0].profile_id, first.id);
 });
 
-test('clone bypasses upstream duplicate to regenerate seed without copying structured fingerprint or data', async (t) => {
+test('clone uses the canonical native duplicate and retains custom settings without copying browser data', async (t) => {
   const { service, client } = await fixture(t);
-  const original = await create(service, { deviceProfileId: 'provider-default' });
+  const original = await create(service, { deviceProfileId: 'provider-default', fingerprint: { 'custom.fixture': true } });
   const snapshot = await service.call('cloneProfile', { id: original.id });
   const clone = snapshot.profiles.at(-1);
-  const body = client.requests.filter((request) => request.method === 'POST' && request.route === '/api/profiles').at(-1).body;
+  const request = client.requests.find(request => request.route.endsWith('/duplicate'));
+  assert.equal(request.route, `/api/profiles/${original.id}/duplicate`);
+  assert.deepEqual(request.body, { name: `${original.name} 副本` });
   assert.notEqual(clone.id, original.id);
-  assert.notEqual(body.fingerprint_seed, original.seed);
-  assert.equal(body.fingerprint, undefined);
+  assert.notEqual(clone.seed, original.seed);
+  assert.deepEqual(clone.fingerprint, original.fingerprint);
   assert.equal(clone.dataBytes, 0);
-  assert.equal(client.requests.some((request) => request.route.endsWith('/duplicate')), false);
+  assert.equal(client.requests.filter(request => request.method === 'POST' && request.route === '/api/profiles').length, 1);
 });
 
 test('proxy and group bindings are preserved and missing region or proxy reference fails explicitly', async (t) => {
@@ -561,7 +573,7 @@ test('automatic timezone resolves an enforced group proxy and sends a transient 
   const profile = await create(service, { group: '强制分组', proxyId: ownProxy.id, timezone: '' });
   const started = await service.call('startProfile', { id: profile.id });
   assert.equal(inputs[0].proxy.host, 'group.example'); assert.equal(inputs[0].options.force, true);
-  assert.deepEqual(client.requests.find((request) => request.route === '/api/sessions' && request.method === 'POST').body.launch_overrides, { timezone: 'America/New_York', locale: 'zh-CN', privacy: { mode: 'standard' }, geolocation: null });
+  assert.deepEqual(client.requests.find((request) => request.route === '/api/sessions' && request.method === 'POST').body.launch_overrides, { timezone: 'America/New_York', locale: 'zh-CN', country_code: 'US', privacy: { mode: 'standard' }, geolocation: null });
   assert.equal(client.profiles[0].launch_overrides.timezone, '', 'stored profile remains automatic');
   assert.equal(started.profiles[0].resolvedTimezone, 'America/New_York'); assert.equal(started.profiles[0].timezoneSource, 'proxy');
   assert.equal(started.profiles[0].network.ip, '8.8.8.8');
@@ -583,7 +595,7 @@ test('automatic locale and regional location use the detected egress and remain 
   assert.deepEqual(context.geolocation, { latitude: 14.6, longitude: 121, accuracy: 50000 });
   await service.call('startProfile', { id: profile.id });
   const launch = client.requests.find(request => request.route === '/api/sessions' && request.method === 'POST').body.launch_overrides;
-  assert.deepEqual(launch, { timezone: 'Asia/Manila', locale: 'en-PH', privacy: { mode: 'standard' }, geolocation: context.geolocation });
+  assert.deepEqual(launch, { timezone: 'Asia/Manila', locale: 'en-PH', country_code: 'PH', privacy: { mode: 'standard' }, geolocation: context.geolocation });
   assert.deepEqual(client.profiles[0], before, 'resolved egress values must not change the stored automatic configuration');
   const exported = await service.call('exportProfiles');
   assert.equal(JSON.stringify(exported).includes('latitude'), false);

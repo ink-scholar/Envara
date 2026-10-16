@@ -20,10 +20,11 @@ var (
 )
 
 type GeoDetectionResult struct {
-	Timezone string
-	Locale   string
-	Source   string
-	Status   string
+	CountryCode string
+	Timezone    string
+	Locale      string
+	Source      string
+	Status      string
 }
 
 func (r GeoDetectionResult) Values() (timezone, locale string) {
@@ -77,9 +78,9 @@ func DetectProxyGeo(proxyType, host string, port int, username, password string)
 	}
 	geo, ok := countryToGeo[country]
 	if !ok {
-		return GeoDetectionResult{Timezone: fallbackTimezone(tz), Locale: fallbackLocale(), Source: "provider_unknown_country", Status: "fallback_locale"}
+		return GeoDetectionResult{CountryCode: country, Timezone: fallbackTimezone(tz), Locale: fallbackLocale(), Source: "provider_unknown_country", Status: "fallback_locale"}
 	}
-	return GeoDetectionResult{Timezone: fallbackTimezone(tz), Locale: geo.Language, Source: "provider", Status: "detected"}
+	return GeoDetectionResult{CountryCode: country, Timezone: fallbackTimezone(tz), Locale: geo.Language, Source: "provider", Status: "detected"}
 }
 
 // DetectProxyGeoResult returns timezone and locale detected through the proxy.
@@ -105,9 +106,9 @@ func DetectLocalGeo() GeoDetectionResult {
 	}
 	geo, ok := countryToGeo[country]
 	if !ok {
-		return GeoDetectionResult{Timezone: fallbackTimezone(tz), Locale: fallbackLocale(), Source: "provider_unknown_country", Status: "fallback_locale"}
+		return GeoDetectionResult{CountryCode: country, Timezone: fallbackTimezone(tz), Locale: fallbackLocale(), Source: "provider_unknown_country", Status: "fallback_locale"}
 	}
-	return GeoDetectionResult{Timezone: fallbackTimezone(tz), Locale: geo.Language, Source: "provider", Status: "detected"}
+	return GeoDetectionResult{CountryCode: country, Timezone: fallbackTimezone(tz), Locale: geo.Language, Source: "provider", Status: "detected"}
 }
 
 // DetectLocalGeoResult returns timezone and locale from the machine's public IP.
@@ -141,7 +142,7 @@ func queryUndoIPGeo(client *http.Client, endpoint string) (country, timezone str
 	if json.NewDecoder(resp.Body).Decode(&result) != nil {
 		return "", ""
 	}
-	return strings.TrimSpace(result.CF.Country), strings.TrimSpace(result.CF.Timezone)
+	return normalizeDetectedCountry(result.CF.Country), strings.TrimSpace(result.CF.Timezone)
 }
 
 func queryLegacyIPGeo(client *http.Client, endpoint string) (country, timezone string) {
@@ -161,7 +162,16 @@ func queryLegacyIPGeo(client *http.Client, endpoint string) (country, timezone s
 	if json.NewDecoder(resp.Body).Decode(&result) != nil {
 		return "", ""
 	}
-	return strings.TrimSpace(result.CountryCode), strings.TrimSpace(result.Timezone)
+	return normalizeDetectedCountry(result.CountryCode), strings.TrimSpace(result.Timezone)
+}
+
+// Country is only evidence when returned by the selected-route GeoIP provider.
+func normalizeDetectedCountry(value string) string {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	if len(value) != 2 || value[0] < 'A' || value[0] > 'Z' || value[1] < 'A' || value[1] > 'Z' || value == "ZZ" {
+		return ""
+	}
+	return value
 }
 
 func buildProxyClient(proxyType, host string, port int, username, password string) *http.Client {

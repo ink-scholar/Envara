@@ -348,3 +348,29 @@ func TestSessionLaunchRejectsInvalidTimezoneOrConfigurationInjection(t *testing.
 		}
 	}
 }
+
+func TestSessionCountryCodeIsEphemeralAndStrict(t *testing.T) {
+	for _, raw := range []string{`{"country_code":""}`, `{"country_code":"ca"}`, `{"country_code":"USA"}`, `{"country_code":" US"}`, `{"country_code":null}`, `{"country_code":42}`, `{"country_code":"C1"}`} {
+		if _, err := decodeSessionLaunchOverrides(json.RawMessage(raw)); err == nil {
+			t.Fatalf("accepted invalid country override: %s", raw)
+		}
+	}
+	stored := &profile.Profile{ID: "country-fixture", FingerprintSeed: 42, Fingerprint: map[string]any{"screen.width": 1440}}
+	before, _ := json.Marshal(stored)
+	overrides, err := decodeSessionLaunchOverrides(json.RawMessage(`{"country_code":"CA"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := profileForSessionLaunch(stored, overrides)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.SessionCountryCode != "CA" || launch.FingerprintSeed != 42 || launch.LaunchOverrides != nil {
+		t.Fatal("country changed identity or was not applied")
+	}
+	exported, _ := json.Marshal(launch)
+	after, _ := json.Marshal(stored)
+	if stored.SessionCountryCode != "" || !bytes.Equal(before, after) || bytes.Contains(exported, []byte("country_code")) {
+		t.Fatal("runtime country was persisted or exported")
+	}
+}

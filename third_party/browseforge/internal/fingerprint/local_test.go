@@ -3,7 +3,11 @@ package fingerprint
 import (
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -212,5 +216,44 @@ func geoJSONResponse(req *http.Request, body string) *http.Response {
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Request:    req,
+	}
+}
+
+func TestDetectedCountryNeverComesFromConfiguredTimezone(t *testing.T) {
+	oldPrimary, oldLegacy := primaryIPGeoURL, legacyIPGeoURL
+	primaryIPGeoURL = "http://127.0.0.1:1/geo"
+	legacyIPGeoURL = "http://127.0.0.1:1/legacy"
+	t.Cleanup(func() { primaryIPGeoURL, legacyIPGeoURL = oldPrimary, oldLegacy })
+	t.Setenv("BROWSEFORGE_DEFAULT_TIMEZONE", "America/Toronto")
+	t.Setenv("BROWSEFORGE_DEFAULT_LOCALE", "en-CA")
+	result := DetectProxyGeo("http", "127.0.0.1", 1, "", "")
+	if result.CountryCode != "" || result.Status != "geo_provider_unavailable" {
+		t.Fatal("configured fallback was presented as detected country")
+	}
+	for raw, want := range map[string]string{" ca ": "CA", "US": "US", "USA": "", "C1": "", "ZZ": ""} {
+		if got := normalizeDetectedCountry(raw); got != want {
+			t.Fatalf("normalizeDetectedCountry(%q)=%q want=%q", raw, got, want)
+		}
+	}
+}
+
+func TestDetectProxyGeoRetainsCountryFromSelectedRoute(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"cf":{"country":"ca","timezone":"America/Toronto"}}`)
+	}))
+	defer proxy.Close()
+	endpoint, _ := url.Parse(proxy.URL)
+	host, portText, _ := net.SplitHostPort(endpoint.Host)
+	port, _ := strconv.Atoi(portText)
+	// The primary HTTPS destination requires CONNECT, so use a deterministic HTTP
+	// primary endpoint for this owned proxy test rather than any public service.
+	oldPrimary, oldLegacy := primaryIPGeoURL, legacyIPGeoURL
+	primaryIPGeoURL = "http://owned-geo.invalid/json"
+	legacyIPGeoURL = "http://owned-legacy.invalid/json"
+	t.Cleanup(func() { primaryIPGeoURL, legacyIPGeoURL = oldPrimary, oldLegacy })
+	result := DetectProxyGeo("http", host, port, "", "")
+	if result.CountryCode != "CA" || result.Timezone != "America/Toronto" || result.Source != "provider" || result.Status != "detected" {
+		t.Fatalf("selected route geo result=%+v", result)
 	}
 }

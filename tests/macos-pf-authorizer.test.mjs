@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, realpath, writeFile, readFile, chmod, rm, symlink, link, stat, lstat, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, writeFile, readFile, chmod, rm, symlink, link, stat, lstat, readdir, copyFile } from 'node:fs/promises';
 import { tmpdir, userInfo } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +28,6 @@ async function fixture(callback, { entries, count, manifestHash, harness } = {})
       { name: 'manifest.json', hash: digest(manifestBytes), mode: '0644' },
     ];
     await writeFile(path.join(directory, 'installer-manifest.h'),
-      `#define ENVARA_PF_INSTALL_SOURCE ${JSON.stringify(directory)}\n` +
       `#define ENVARA_PF_INSTALL_MANIFEST_SHA256 ${JSON.stringify(manifestHash ?? digest(manifestBytes))}\n` +
       'typedef struct {const char *name;const char *sha256;unsigned int mode;} EnvaraPFInstallFile;\n' +
       `static const EnvaraPFInstallFile ENVARA_PF_INSTALL_FILES[]={${files.map(file => `{${JSON.stringify(file.name)},${JSON.stringify(file.hash)},${file.mode}}`).join(',')}};\n` +
@@ -79,6 +78,7 @@ test('native default and explicit plans inspect real held file FDs without mutat
       assert.equal(value.bootstrapIdentityBound, false);
       assert.equal(value.manifestSHA256, digest(manifestBytes));
       assert.equal(value.source, directory);
+      assert.equal(Object.hasOwn(value, 'compiledSource'), false);
       assert.deepEqual(value.operations, { copyFixedResources: true, changePF: false, createGroups: false,
         createTunnel: false, startDaemon: false, launchApplication: false });
       assert.equal(value.controlledExperiment.separateApprovalRequired, true);
@@ -112,7 +112,15 @@ test('native default and explicit plans inspect real held file FDs without mutat
       '03245359a948d31c9f4b87fe88dd1b3cb6a270228fbfc13fe873de50cdcce7da',
       '2059a0870f88f6fa6caa89c9dbd751e41ee3b2cbf4101933c8519efa32f08b68',
       '127e8354fbc420e8c12e32a439129a517d2bad0e2950347fc18efaa6c24e9377',
-      '010117dbf9fb8bf28ebc5ef92de19235d34774ef114c8c86b4ee3feda48c2374'].includes(value.priorManifestSHA256));
+      '010117dbf9fb8bf28ebc5ef92de19235d34774ef114c8c86b4ee3feda48c2374',
+      '9b51cf9b161d1add0ea86049adc535ea298b6bb6e44ff7496989cd0662fa4743',
+      '91b62aeeb17c2f38339f5e749b996e30537cbf9d36434acd830ec496882d38a8',
+      '7c91a10d3935887a082f8602d74c1d5d188b5870ebba452d429953f17c704ed2',
+      'af79b180ede3776f94ac057c8558f8eb8629fcdc7d690be7c91543bd40e7a63e',
+      'dceba9d272ef7cb74fbfb09cc2e15eb0108a838183ba8841da734c5409babbe4',
+      'fa70a2ff212cf478f2165e086288815c9bd87c8c9538b40c5d75186a4398a7d4',
+      '32811e9718b4c803c23b79f90828131709f6d0e139bc6713fd3482b0122214bb',
+      '22a6f3ea8e9354c3b32b488c50e8ae6ab0d9c5aa565a80911b1848f40aea87de'].includes(value.priorManifestSHA256));
         assert.equal(value.requiresUpgradeApproval, true);
         assert.equal(value.canRequestInstall, (value.controlledRuntimeAbsent || value.privateRuntimeInspectionRequired) && !value.needsManualReview,
           'a verified prior may request an administrator precheck but cannot assume private runtime contents are empty');
@@ -124,6 +132,38 @@ test('native default and explicit plans inspect real held file FDs without mutat
     }
     assert.deepEqual(await inventory(directory), before);
   });
+});
+
+test('a relocated installer resolves only its adjacent pinned resources without a compiled build path', onlyMac, async () => {
+  await fixture(async ({ directory, binary }) => {
+    assert.equal((await readFile(binary)).includes(Buffer.from(directory)), false, 'the compiled installer must not contain its build directory');
+    const relocated = path.join(directory, 'relocated-payload');
+    await mkdir(relocated);
+    for (const name of ['EnvaraPFInstall', 'EnvaraPFHelper', 'manifest.json'])
+      await copyFile(path.join(directory, name), path.join(relocated, name));
+    await writeFile(path.join(directory, 'EnvaraPFHelper'), 'changed original fixture');
+    const original = await plan(binary);
+    assert.equal(original.value.sourceVerified, false);
+    const moved = await plan(path.join(relocated, 'EnvaraPFInstall'));
+    assert.equal(moved.code, 0); assert.equal(moved.value.sourceVerified, true);
+    assert.equal(moved.value.source, relocated);
+    assert.equal(moved.value.manifestSHA256, digest(manifestBytes));
+    assert.equal(moved.value.readOnly, true); assert.equal(moved.value.ready, false);
+    assert.equal(moved.value.systemInstallation, false); assert.equal(moved.value.activation, false);
+    assert.equal(Object.hasOwn(moved.value, 'compiledSource'), false);
+    await writeFile(path.join(relocated, 'EnvaraPFHelper'), 'changed relocated fixture');
+    assert.equal((await plan(path.join(relocated, 'EnvaraPFInstall'))).value.sourceVerified, false);
+  });
+});
+
+test('production installer source generation contains no compile-time resource directory', async () => {
+  const [builder, authorizer] = await Promise.all([
+    readFile(new URL('../scripts/build-macos-pf-routing.mjs', import.meta.url), 'utf8'), readFile(source, 'utf8'),
+  ]);
+  assert.doesNotMatch(builder, /ENVARA_PF_INSTALL_SOURCE|compiledSource/);
+  assert.doesNotMatch(authorizer, /ENVARA_PF_INSTALL_SOURCE|compiledSource/);
+  assert.match(authorizer, /_NSGetExecutablePath\(raw, &count\)/);
+  assert.match(authorizer, /if \(!self_source\(executable, source_path\)\)/);
 });
 
 test('native plan refuses mutated resource bytes even when source path is unchanged', onlyMac, async () => {
@@ -460,7 +500,7 @@ test('the forty-two earlier reviewed prior inputs remain byte-for-byte pinned', 
 test('source trust tables classify exact 14-, 15- and 19-file priors independently of the current target', async () => {
   const contents = await readFile(source, 'utf8');
   const priors = contents.match(/known_prior_snapshots\[\]\s*=\s*\{([^}]+)\}/)?.[1];
-  assert.deepEqual([...priors.matchAll(/&ENVARA_PF_UPGRADE_([A-Z0-9]+)_SNAPSHOT/g)].map(([, tag]) => tag), ['F8', 'E940', '518', '2A7', '832', 'FF9', '6F8', '199', '46A', 'C37', 'F99', '05D6', '14B87', 'DBCF', '43B', 'ACFC', 'C34', '4B9F85', '43392E', 'F0B99F', 'F39101', 'A8BD00', 'DA6E7C', '03245359', '2059A0', '127E83', '010117']);
+  assert.deepEqual([...priors.matchAll(/&ENVARA_PF_UPGRADE_([A-Z0-9]+)_SNAPSHOT/g)].map(([, tag]) => tag), ['F8', 'E940', '518', '2A7', '832', 'FF9', '6F8', '199', '46A', 'C37', 'F99', '05D6', '14B87', 'DBCF', '43B', 'ACFC', 'C34', '4B9F85', '43392E', 'F0B99F', 'F39101', 'A8BD00', 'DA6E7C', '03245359', '2059A0', '127E83', '010117', '9B51CF', '91B62A', '7C91A1', 'AF79B1', 'DCEBA9', 'FA70A2', '32811E', '22A6F3']);
   const targetNames = [...Object.keys(PF_MANIFEST_FILES), 'manifest.json'].sort();
   assert.equal(targetNames.length, 19); assert.equal(PF_MANIFEST_FILES['stateless-verifier.mjs'], false);
   const snapshotMatcher = contents.match(/static bool snapshot_matches\([^)]*\)\s*\{([\s\S]*?)\n\}/)?.[1];
@@ -470,12 +510,12 @@ test('source trust tables classify exact 14-, 15- and 19-file priors independent
   assert.doesNotMatch(snapshotMatcher, /ACTUAL_FILE_COUNT|ENVARA_PF_INSTALL_FILE_COUNT|ENVARA_PF_INSTALL_FILES/);
   const classifier = contents.match(/static int existing_installation\([^)]*\)\s*\{([\s\S]*?)\n\}/)?.[1];
   assert.ok(classifier.includes('snapshot_matches(fd, known_prior_snapshots[i], true)'));
-  for (const tag of ['f8', 'e940', '518', '2a7', '832', 'ff9', '6f8', '199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117']) {
+  for (const tag of ['f8', 'e940', '518', '2a7', '832', 'ff9', '6f8', '199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117', '9b51cf', '91b62a', '7c91a1', 'af79b1', 'dceba9', 'fa70a2', '32811e', '22a6f3']) {
     const header = await readFile(new URL(`../native/macos-pf-routing/installer-upgrade-${tag}.h`, import.meta.url), 'utf8');
     const entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
-    assert.equal(entries.length, ['199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117'].includes(tag) ? 19 : ['2a7', '832', 'ff9', '6f8'].includes(tag) ? 15 : 14);
+    assert.equal(entries.length, ['199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117', '9b51cf', '91b62a', '7c91a1', 'af79b1', 'dceba9', 'fa70a2', '32811e', '22a6f3'].includes(tag) ? 19 : ['2a7', '832', 'ff9', '6f8'].includes(tag) ? 15 : 14);
     const absentNewModules = ['helper-production-native.mjs', 'notion-front-service.mjs', 'notion-socks-front.mjs', 'notion-socks-reader.mjs'];
-    const absent = ['199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117'].includes(tag) ? [] : [...absentNewModules, ...(['2a7', '832', 'ff9', '6f8'].includes(tag) ? [] : ['stateless-verifier.mjs'])].sort();
+    const absent = ['199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117', '9b51cf', '91b62a', '7c91a1', 'af79b1', 'dceba9', 'fa70a2', '32811e', '22a6f3'].includes(tag) ? [] : [...absentNewModules, ...(['2a7', '832', 'ff9', '6f8'].includes(tag) ? [] : ['stateless-verifier.mjs'])].sort();
     assert.deepEqual(targetNames.filter(name => !entries.some(([, priorName]) => priorName === name)), absent);
     assert.match(header, /sizeof\(ENVARA_PF_UPGRADE_[A-Z0-9]+_FILES\)\/sizeof\(ENVARA_PF_UPGRADE_[A-Z0-9]+_FILES\[0\]\)/);
   }
@@ -807,4 +847,142 @@ test('actual stock macOS legacy parent is compatible only with the narrow read-o
       if (current === null) assert.equal(result.currentRuntimeAbsent, true, 'current verified idle host has no runtime evidence');
     }
   }, { harness: runtimePresenceHarness });
+});
+
+test('retained 9b51cf desktop installation has a separately pinned exact upgrade table', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = '9b51cf9b161d1add0ea86049adc535ea298b6bb6e44ff7496989cd0662fa4743';
+  const bytes = await readFile(new URL('known-installations/9b51cf.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-9b51cf.h', base), 'utf8');
+  assert.equal(digest(header), '710189d5c440ec609bf3264da4fcb80b65ada04edc810ffde659c9d1561723b8');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  const executable = new Set(['node', 'mihomo', 'envara-pf-native', 'EnvaraPFHelper', 'fixtures/EnvaraRoutingAcceptanceFixture']);
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, executable.has(name) ? '0755' : '0644');
+  }
+});
+
+test('retained 7c91a1 desktop installation has a separately pinned exact upgrade table', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = '7c91a10d3935887a082f8602d74c1d5d188b5870ebba452d429953f17c704ed2';
+  const bytes = await readFile(new URL('known-installations/7c91a1.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-7c91a1.h', base), 'utf8');
+  assert.equal(digest(header), '66d2070e88ca91404d2853958217aa526aa65b81f0bb24781afe5a0ce5c42844');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  const executable = new Set(['node', 'mihomo', 'envara-pf-native', 'EnvaraPFHelper', 'fixtures/EnvaraRoutingAcceptanceFixture']);
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, executable.has(name) ? '0755' : '0644');
+  }
+});
+test('retained af79b1 desktop installation has a separately pinned exact upgrade table', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = 'af79b180ede3776f94ac057c8558f8eb8629fcdc7d690be7c91543bd40e7a63e';
+  const bytes = await readFile(new URL('known-installations/af79b1.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-af79b1.h', base), 'utf8');
+  assert.equal(digest(header), 'cbcdc6c364a5e4a1a2bb3d7a53d92f0d543c5c136842f4fb04205ee64b74b3c6');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  const executable = new Set(['node', 'mihomo', 'envara-pf-native', 'EnvaraPFHelper', 'fixtures/EnvaraRoutingAcceptanceFixture']);
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, executable.has(name) ? '0755' : '0644');
+  }
+});
+test('retained dceba9 desktop installation has a separately pinned exact upgrade table', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = 'dceba9d272ef7cb74fbfb09cc2e15eb0108a838183ba8841da734c5409babbe4';
+  const bytes = await readFile(new URL('known-installations/dceba9.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-dceba9.h', base), 'utf8');
+  assert.equal(digest(header), 'a462b5b2a01aac44de1516a04568532600dfea0e519bde5e01be5dc706ccb1e9');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  const executable = new Set(['node', 'mihomo', 'envara-pf-native', 'EnvaraPFHelper', 'fixtures/EnvaraRoutingAcceptanceFixture']);
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, executable.has(name) ? '0755' : '0644');
+  }
+});
+test('retained fa70a2 desktop installation has a separately pinned exact upgrade table', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = 'fa70a2ff212cf478f2165e086288815c9bd87c8c9538b40c5d75186a4398a7d4';
+  const bytes = await readFile(new URL('known-installations/fa70a2.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-fa70a2.h', base), 'utf8');
+  assert.equal(digest(header), 'c4148b79580f38ace3f43f1ac795eb413f7caf1fa4dc2457b03cb747a42adf19');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  const executable = new Set(['node', 'mihomo', 'envara-pf-native', 'EnvaraPFHelper', 'fixtures/EnvaraRoutingAcceptanceFixture']);
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, executable.has(name) ? '0755' : '0644');
+  }
+});
+test('retained 32811e desktop installation has a separately pinned exact upgrade table', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = '32811e9718b4c803c23b79f90828131709f6d0e139bc6713fd3482b0122214bb';
+  const bytes = await readFile(new URL('known-installations/32811e.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-32811e.h', base), 'utf8');
+  assert.equal(digest(header), 'e77afa656af6c237324391b6311e716f43c7cea0f216752e7f4dd4977ee9053f');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  const executable = new Set(['node', 'mihomo', 'envara-pf-native', 'EnvaraPFHelper', 'fixtures/EnvaraRoutingAcceptanceFixture']);
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, executable.has(name) ? '0755' : '0644');
+  }
+});
+test('retained 91b62a desktop installation has a separately pinned exact upgrade table', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = '91b62aeeb17c2f38339f5e749b996e30537cbf9d36434acd830ec496882d38a8';
+  const bytes = await readFile(new URL('known-installations/91b62a.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-91b62a.h', base), 'utf8');
+  assert.equal(digest(header), '6ecb0fd74629c80f29432945a3a65fcde20a77d51224fa8fa451b841f3aafd75');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  const executable = new Set(['node', 'mihomo', 'envara-pf-native', 'EnvaraPFHelper', 'fixtures/EnvaraRoutingAcceptanceFixture']);
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, executable.has(name) ? '0755' : '0644');
+  }
+});
+
+test('retained 22a6f3 desktop installation has a separate exact upgrade snapshot', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = '22a6f3ea8e9354c3b32b488c50e8ae6ab0d9c5aa565a80911b1848f40aea87de';
+  const bytes = await readFile(new URL('known-installations/22a6f3.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-22a6f3.h', base), 'utf8');
+  assert.equal(digest(header), 'c089e48a4d9f23c2f48e470dce2aa624d382b58cf03f911cb8c5e3155f9940d4');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, PF_MANIFEST_FILES[name] === true ? '0755' : '0644');
+  }
 });

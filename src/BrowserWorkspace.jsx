@@ -53,6 +53,7 @@ export function BrowserWorkspace({
   );
   const activeCount = profiles.filter(isActive).length;
   const installedCount = engines.filter((runtime) => runtime.installed).length;
+  const normalizedQuery = query.trim().toLocaleLowerCase();
   const visibleProfiles = profiles.filter((profile) => {
     const runtime = runtimeById.get(profile.engine);
     const proxy = proxyById.get(profile.proxyId);
@@ -61,7 +62,7 @@ export function BrowserWorkspace({
       .join(' ')
       .toLocaleLowerCase();
     return (filter === 'all' || isActive(profile))
-      && searchText.includes(query.trim().toLocaleLowerCase());
+      && searchText.includes(normalizedQuery);
   });
 
   const isBusy = (id) => typeof busyProfile === 'function'

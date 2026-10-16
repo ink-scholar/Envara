@@ -1,7 +1,6 @@
 # PF/GID/owned-utun DNS boundary
 
-Checked on 2026-10-08. This document describes a diagnostic and a restricted
-launch candidate. It does not qualify the attached-application adapter.
+This document describes a diagnostic and a restricted launch candidate. It does not qualify the attached-application adapter.
 
 ## What PF can identify
 
@@ -48,7 +47,7 @@ any future implementation must reject invalid paths before launch.
 - [dnssd_clientstub.c:802](https://github.com/apple-oss-distributions/mDNSResponder/blob/d4658af3f5f291311c6aee4210aa6d39bda82bbe/mDNSShared/dnssd_clientstub.c#L802)
 
 The native fixture was compiled against the installed system libraries and
-run as UID 501. A short, private, listening UDS received zero connections from
+run without elevated privileges. A short, private, listening UDS received zero connections from
 DNSServiceCreateConnection, getaddrinfo, and the Network.framework connection
 probe. DNSServiceCreateConnection returned success even with an absent private
 socket. Thus the installed system library did not select this endpoint. The
@@ -101,7 +100,6 @@ port-53 operations, compares read-only system DNS snapshots, closes its own
 children and listener, and removes its temporary directory. It can save the
 JSON result with `--output=<path>`.
 
-Recorded result: `test-artifacts/mac-routing/pf-dns-uds-2026-10-08.json`.
 `ready` stays false. Passing the restricted-denial diagnostic does not enable
 the production protection gate.
 

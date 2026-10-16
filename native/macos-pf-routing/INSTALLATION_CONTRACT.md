@@ -53,44 +53,32 @@ required before protected application launch.
 
 ## Per-run hook receipts and retained recovery state
 
-The current local candidate uses `io.envara.pf.run.<canonical-v4-UUID>` for each
+The runtime uses `io.envara.pf.run.<canonical-v4-UUID>` for each
 new run. Its separate root-owned `io.envara.pf-run-ledger` burns each run identity
 before INSERT and persists a delete intent before the first DELETE attempt.
 Lost replies are resolved through read-only receipt checks; a stale or retired
 receipt cannot authorize another DELETE. The bounded ledger never resets or
 reuses an identity when storage, locking or capacity checks fail.
 
-This is a source/build contract, not native routing acceptance. The installed
-518 snapshot and its exact recovery records remain unchanged. Its empty retained
-kernel namespace is not presumed reclaimed. The standalone filesystem archive
-tool preserves original records atomically and still reports full cleanup as
-unconfirmed; it does not delete a PF namespace, activate PF or enable application
-launch. Both that system archive and the next component installation need normal
-macOS administrator interaction. There is no cache-only or no-prompt privilege
-execution mode.
+Resource installation and native routing acceptance are separate. Retained
+runtime records must be inspected before replacement; an empty namespace is not
+evidence that every lease was released. Recovery and installation use normal
+macOS authorization and retain ownership evidence.
 
 ## Exact known prior version upgrade
 
-The next locally built candidate accepts only these four previously verified arm64 snapshots for replacement:
+The compile-time prior snapshot collection is defined in `authorize-install.c`
+and `installer-upgrade-*.h`. Corresponding `known-installations/*.manifest.json`
+files preserve each accepted version's exact public build metadata. These are
+upgrade trust inputs and must retain their original bytes.
 
-* f8: `f8fce1d14566fdf822d220ef1a3469cbb815a37924c7ed709a1098729b8bed8b`
-* e940: `e940e171ac39624cd3cfeaea09234f4e8e035bfba141a843950cb0209e00db04`
-* 518: `518a75d94bac4f17d9e1ce60e842648ba6ff657a68cc62e95ce13718abda6d5a`
-* 2a7: `2a7f4ad635041c434b511034e9535b688cee8eeaebce97617586ad142db5f02d`
-
-The corresponding `known-installations/*.manifest.json` artifacts preserve
-their exact public build metadata; `installer-upgrade-f8.h`,
-`installer-upgrade-e940.h` and `installer-upgrade-518.h` each fix the hashes and modes of all 13 runtime files
-and the manifest. `installer-upgrade-2a7.h` fixes its 14 runtime files and manifest,
-including `stateless-verifier.mjs`. The compile-time prior snapshot collection contains only
-these four tables. The installer never takes an allowlist from an installed or
-caller-provided manifest. Every old byte, relative path, file type, link count,
-mode, root owner and ACL must match; extra or unknown files refuse replacement.
-All eight source artifacts participate in the build source snapshot and package
-verification. The candidate retains 14 runtime paths plus its manifest; each
-prior snapshot is checked against its own independent table and exact count.
-Preparing this upgrade support changes source only. It does not alter the
-installed 2a7 snapshot, its frozen authorization carrier or retained runtime evidence.
+The installer never takes an allowlist from an installed or caller-provided
+manifest. Every old byte, relative path, file type, link count, mode, root owner
+and ACL must match its independent fixed table; extra or unknown files refuse
+replacement. All prior snapshot source artifacts participate in the build
+snapshot and package verification. Each prior version has its own exact file
+count. Building an installer does not modify installed resources or retained
+runtime evidence.
 
 A read-only plan reports `existingInstallation:"known-prior"`, the exact
 `priorManifestSHA256` and `requiresUpgradeApproval:true`. A new system update

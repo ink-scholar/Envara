@@ -36,7 +36,7 @@ const upgradeInputs = ['installer-upgrade-f8.h', 'known-installations/f8.manifes
   'installer-upgrade-43392e.h', 'known-installations/43392e.manifest.json', 'installer-upgrade-03245359.h', 'known-installations/03245359.manifest.json',
   'installer-upgrade-2059a0.h', 'known-installations/2059a0.manifest.json',
   'installer-upgrade-127e83.h', 'known-installations/127e83.manifest.json',
-  'installer-upgrade-010117.h', 'known-installations/010117.manifest.json',
+  'installer-upgrade-010117.h', 'known-installations/010117.manifest.json', 'installer-upgrade-9b51cf.h', 'known-installations/9b51cf.manifest.json', 'installer-upgrade-91b62a.h', 'known-installations/91b62a.manifest.json', 'installer-upgrade-7c91a1.h', 'known-installations/7c91a1.manifest.json', 'installer-upgrade-af79b1.h', 'known-installations/af79b1.manifest.json', 'installer-upgrade-dceba9.h', 'known-installations/dceba9.manifest.json', 'installer-upgrade-fa70a2.h', 'known-installations/fa70a2.manifest.json', 'installer-upgrade-32811e.h', 'known-installations/32811e.manifest.json', 'installer-upgrade-22a6f3.h', 'known-installations/22a6f3.manifest.json',
   'installer-upgrade-f0b99f.h', 'known-installations/f0b99f.manifest.json',
   'installer-upgrade-f39101.h', 'known-installations/f39101.manifest.json',
   'installer-upgrade-a8bd00.h', 'known-installations/a8bd00.manifest.json',
@@ -246,6 +246,6 @@ test('PF acceptance fixture inputs must match the current dedicated source inven
 
 test('a self-authored complete manifest cannot replace the pinned source build', { skip }, async t => {
   const value = await fixture(t);
-  assert.equal(Object.keys(value.manifest.nativeSourceFiles).length, 103);
+  assert.equal(Object.keys(value.manifest.nativeSourceFiles).length, 119);
   await assert.rejects(value.inspect(), { code: 'ENOENT' });
 });

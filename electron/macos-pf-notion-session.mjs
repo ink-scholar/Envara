@@ -202,6 +202,24 @@ const operationReasons = new Set(['NATIVE_OPERATION_REFUSED', 'NATIVE_CONTEXT_LO
 const safeNativeFailure = value => exact(value, ['stage', 'reason', 'error']) && appNativeStages.has(value.stage) &&
   (value.stage === 'register' ? registerReasons.has(value.reason) : operationReasons.has(value.reason)) &&
   Number.isInteger(value.error) && value.error > 0 && value.error <= 1024 ? { stage: value.stage, reason: value.reason, error: value.error } : null;
+/* Diagnostic-only native launch step timing reported by the fixed controller:
+ * fixed step names and bounded integers only. It is never cleanup evidence or a
+ * launch, readiness or protection signal; a malformed list is dropped. */
+const stageTimingSteps = new Set(['front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'ticket-claim', 'stage-fresh',
+  'data-prepare', 'stage-plan', 'stage-recheck', 'stage-spawn', 'stage-stopped', 'stage-adopt', 'resume-verify']);
+const stageTimingMs = value => Number.isSafeInteger(value) && value >= 0 && value <= 86400000;
+export function safePFNativeStageTimings(value) {
+  if (!Array.isArray(value) || value.length > 16) return null;
+  const output = [];
+  for (const item of value) {
+    if (!exact(item, ['step', 'stepMs', 'totalMs', 'fullChecks', 'identityChecks', 'receivedMs']) || !stageTimingSteps.has(item.step) ||
+        !stageTimingMs(item.stepMs) || !stageTimingMs(item.totalMs) || item.stepMs > item.totalMs || !stageTimingMs(item.receivedMs) ||
+        ![item.fullChecks, item.identityChecks].every(count => Number.isSafeInteger(count) && count >= 0 && count <= 65535)) return null;
+    output.push({ step: item.step, stepMs: item.stepMs, totalMs: item.totalMs, fullChecks: item.fullChecks,
+      identityChecks: item.identityChecks, receivedMs: item.receivedMs });
+  }
+  return output;
+}
 const diagnosticSchema = 'envara.macos-pf-notion-response-diagnostic/v1';
 const diagnosticSource = 'verified-authorizer-session-client';
 const diagnosticFailure = value => value === null ? null : exact(value, ['stage', 'code'], ['native']) &&
@@ -237,7 +255,8 @@ export function validatePFNotionResponseDiagnostic(value, method, runId, environ
     safeErrorDiagnostic({ ...(value.native ? { nativeFailure: value.native } : {}), ...Object.fromEntries(['failureStage', 'initialFailure', 'cleanupFailure']
       .filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])) }) !== null;
   return value.kind === 'result' && exact(value, ['schema', 'source', 'kind', 'method', 'runId', 'environmentId', 'profile', 'diagnosticOnly',
-    'phase', 'staged', 'resumed', 'cleanupComplete', 'cleanupUncertain', 'failure'], ['initialFailure', 'cleanupFailure', 'applicationEnded']) && phases.has(value.phase) &&
+    'phase', 'staged', 'resumed', 'cleanupComplete', 'cleanupUncertain', 'failure'], ['initialFailure', 'cleanupFailure', 'applicationEnded', 'nativeStageTimings']) && phases.has(value.phase) &&
+    (!Object.hasOwn(value, 'nativeStageTimings') || method === 'applicationSnapshot' && safePFNativeStageTimings(value.nativeStageTimings)?.length > 0) &&
     ['staged', 'resumed', 'cleanupComplete', 'cleanupUncertain'].every(key => typeof value[key] === 'boolean') && diagnosticFailure(value.failure) !== undefined &&
     ['initialFailure', 'cleanupFailure'].every(key => !Object.hasOwn(value, key) || diagnosticFailure(value[key]) !== undefined);
 }
@@ -253,6 +272,8 @@ export function projectPFNotionResponseDiagnostic(method, result, runId, environ
    * running when the observation window closes. */
   if (typeof result.applicationEnded === 'boolean') value.applicationEnded = result.applicationEnded;
   for (const key of ['initialFailure', 'cleanupFailure']) if (Object.hasOwn(result, key)) value[key] = diagnosticFailure(result[key]);
+  const timings = method === 'applicationSnapshot' ? safePFNativeStageTimings(result.nativeStageTimings) : null;
+  if (timings?.length) value.nativeStageTimings = timings;
   return validatePFNotionResponseDiagnostic(value, method, runId, environmentId) ? value : null;
 }
 /* Only a boolean fact and its two booleans cross this boundary; nothing about
@@ -308,6 +329,10 @@ function publicResult(method, result, request = {}) {
     if (failure === undefined) throw failed('PF_HELPER_RESPONSE_INVALID');
     value[key] = failure;
   }
+  if (method === 'applicationSnapshot') {
+    const timings = safePFNativeStageTimings(result.nativeStageTimings);
+    if (timings?.length) value.nativeStageTimings = timings;
+  }
   return value;
 }
 
@@ -333,7 +358,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
       !Number.isInteger(maximumBytes) || maximumBytes < 1024 || maximumBytes > 131072) throw failed('PF_HELPER_REQUEST_INVALID');
   const bounded = Number.isFinite(lifetimeMs);
   let child, starting, startedAt = null, pending = null, buffer = Buffer.alloc(0), closing = false, closed = false,
-    uncertain = false, terminalError = null, terminal = null, closePromise, preparedRoute = null, bound = null,
+    uncertain = false, cleanupOnly = false, boundCleanupRetryable = false, terminalError = null, terminal = null, closePromise, preparedRoute = null, bound = null,
     stopKind = null, freshCleanupKind = null, resumeAttempted = false, stopAttempted = false, lastClock = null,
     selectedStatusRunId = null, lastStatusRunId = null, lastStatusInventory = null, lastStatusReadOnly = false,
     stdoutEOF = false, nonStatusRequestAttempted = false, historyComplete = true, lastSuccessfulStatusHistoryLength = 0,
@@ -355,8 +380,24 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     uncertain = true; terminalError ??= error;
     if (pending) { const current = pending; pending = null; current.finish(error); }
   };
+  const boundApplicationResult = result => bound && result?.runId === bound.runId && result.environmentId === bound.environmentId &&
+    result.profile === 'seatbelt-front-only' && phases.has(result.phase) && flags.every(key => result[key] === false) &&
+    typeof result.cleanupUncertain === 'boolean' && (!Object.hasOwn(result, 'routeId') || result.routeId === preparedRoute) &&
+    ['staged', 'resumed', 'prestageAborted', 'preflightAborted', 'cleanupComplete', 'cleanupRetryable'].every(key =>
+      !Object.hasOwn(result, key) || typeof result[key] === 'boolean');
+  const observeBoundUncertainty = result => {
+    if (!uncertainResult(result)) { boundCleanupRetryable = false; return; }
+    // A live, same-bound keeper may retain cleanup authority after an
+    // operation failed. This never restores prepare/resume admission and is
+    // not cleanup evidence: a new stop and fresh matching snapshot are still
+    // required. Unknown kernel state and channel poison keep their hard latch.
+    cleanupOnly = true; stopKind = null; freshCleanupKind = null;
+    boundCleanupRetryable = result.cleanupRetryable === true && projectPFNotionResponseDiagnostic('applicationSnapshot', result, bound.runId, bound.environmentId) != null;
+    if (!boundCleanupRetryable) uncertain = true;
+  };
   const observe = (request, result) => {
-    if (uncertainResult(result) || result.applications?.some?.(uncertainResult)) uncertain = true;
+    if (request.method !== 'status' && !notionMethods.has(request.method) &&
+        (uncertainResult(result) || result.applications?.some?.(uncertainResult))) uncertain = true;
     if (request.method === 'status') {
       if (result.anchor !== (request.statusRunId ? pfRoutingAnchor(request.statusRunId) : null) ||
           !request.statusRunId && result.ownedRootHookCanCreate !== false) throw failed('PF_HELPER_RESPONSE_INVALID');
@@ -367,10 +408,19 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
         [key, Array.isArray(result[key]) ? result[key].length : null]));
       lastStatusReadOnly = result.readOnly === true && result.acceptanceOnly === true && result.productionReceiptAllowed === false;
       lastSuccessfulStatusHistoryLength = callHistory.length;
+      // Aggregate uncertainty has no run/environment binding. Only an exact
+      // bound application record may carry the retryable-cleanup marker.
+      if (uncertainResult(result)) uncertain = true;
+      if (Array.isArray(result.applications)) for (const application of result.applications) {
+        if (uncertainResult(application)) {
+          if (boundApplicationResult(application)) observeBoundUncertainty(application);
+          else uncertain = true;
+        }
+      }
       if (Array.isArray(result.runs) && result.runs.length || Array.isArray(result.applications) && result.applications.some(item =>
         !bound || item.runId !== bound.runId || item.environmentId !== bound.environmentId)) uncertain = true;
       if (Array.isArray(result.applications) && result.applications.some(item =>
-        !bound || item.runId !== bound.runId || !cleanupKind(item, bound.runId, bound.environmentId))) freshCleanupKind = null;
+        !bound || item.runId !== bound.runId || !cleanupKind(item, bound.runId, bound.environmentId))) { stopKind = null; freshCleanupKind = null; }
     } else if (storageMethods.has(request.method)) {
       if (!validStorageResult(request.method, result)) throw failed('PF_HELPER_RESPONSE_INVALID');
     } else if (request.method === 'prepareRoute') {
@@ -378,14 +428,14 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
           result.managedRouteVerified !== false || result.profileId !== request.profileId) throw failed('PF_HELPER_RESPONSE_INVALID');
       preparedRoute = result.routeId;
     } else {
-      if (!bound || result.runId !== bound.runId || result.environmentId !== bound.environmentId ||
-          result.profile !== 'seatbelt-front-only' || !phases.has(result.phase) || flags.some(key => result[key] !== false) ||
-          typeof result.cleanupUncertain !== 'boolean' || Object.hasOwn(result, 'routeId') && result.routeId !== preparedRoute ||
-          ['staged', 'resumed', 'prestageAborted', 'preflightAborted', 'cleanupComplete'].some(key =>
-            Object.hasOwn(result, key) && typeof result[key] !== 'boolean')) throw failed('PF_HELPER_RESPONSE_INVALID');
+      if (!boundApplicationResult(result)) throw failed('PF_HELPER_RESPONSE_INVALID');
+      observeBoundUncertainty(result);
       const kind = cleanupKind(result, bound.runId, bound.environmentId);
       if (request.method === 'stopNotionApplication') { stopKind = kind; freshCleanupKind = null; }
-      else if (request.method === 'applicationSnapshot') freshCleanupKind = kind && kind === stopKind ? kind : null;
+      else if (request.method === 'applicationSnapshot') {
+        freshCleanupKind = kind && kind === stopKind ? kind : null;
+        if (!freshCleanupKind) stopKind = null;
+      }
       else { stopKind = null; freshCleanupKind = null; }
       if (request.method === 'applicationSnapshot') lastApplicationSnapshot = projectPFNotionResponseDiagnostic(
         request.method, result, bound.runId, bound.environmentId);
@@ -453,7 +503,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
         if (Object.hasOwn(response, 'error')) {
           const diagnostic = safeErrorDiagnostic(response.error);
           if (!diagnostic) throw failed('PF_HELPER_RESPONSE_INVALID');
-          if (current.method === 'prepareNotionApplication') prepareRefused = true;
+          if (current.method === 'prepareNotionApplication') { prepareRefused = true; cleanupOnly = true; }
           pending = null; current.finish(Object.assign(failed(safeNativeCode(response.error)), diagnostic));
         }
         else {
@@ -526,8 +576,8 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
      * the stop sequence that explains a failed cleanup was never recorded. */
     if (observation !== false && (observation !== true || method !== 'applicationSnapshot')) throw failed('PF_HELPER_REQUEST_INVALID');
     if (!methods.has(method) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > (method === 'prepareNotionApplication' ? 110000 : 60000) ||
-        signal?.aborted || closing || closed || pending || terminalError || uncertain && !cleanupMethods.has(method))
-      throw failed(uncertain ? 'PF_HELPER_CLEANUP_UNCERTAIN' : 'PF_HELPER_REQUEST_INVALID');
+        signal?.aborted || closing || closed || pending || terminalError || (uncertain || cleanupOnly) && !cleanupMethods.has(method))
+      throw failed(uncertain || cleanupOnly ? 'PF_HELPER_CLEANUP_UNCERTAIN' : 'PF_HELPER_REQUEST_INVALID');
     validatePFNotionSessionRequest(method, params);
     if (method !== 'status') nonStatusRequestAttempted = true;
     if (method === 'status' && params.runId && (selectedStatusRunId && params.runId !== selectedStatusRunId || bound && params.runId !== bound.runId) ||
@@ -670,6 +720,10 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     'SIGTTIN', 'SIGTTOU', 'SIGCONT', 'SIGCHLD', 'SIGWINCH', 'SIGURG', 'SIGIO', 'SIGSYS']);
   call.snapshot = () => ({ started: startedAt != null, closed, closing, pending: pending != null,
     runId: bound?.runId ?? null, environmentId: bound?.environmentId ?? null,
+    // Only a still-open, unbounded shared client can retain the exact endpoint
+    // for another cleanup attempt. This fact is never a cleanup receipt.
+    cleanupRetryable: shared && !bounded && boundCleanupRetryable && cleanupOnly && !uncertain && !terminalError &&
+      !closed && !closing && !pending && bound != null && stopAttempted && !freshCleanupKind,
     cleanupUncertain: uncertain || startedAt != null && !statusOnlyEvidence() && !statusOnlyDetached() && !refusedDetached() && (!bound || !freshCleanupKind), cleanupKind: freshCleanupKind,
     diagnostics: { selectedStatusRunId, lastStatusRunId, lastStatusInventory: lastStatusInventory ? { ...lastStatusInventory } : null,
       lastStatusReadOnly, terminalExitCode: Number.isInteger(terminal?.exitCode) && terminal.exitCode >= 0 && terminal.exitCode <= 255 ? terminal.exitCode : null,

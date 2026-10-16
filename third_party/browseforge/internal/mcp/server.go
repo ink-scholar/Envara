@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -916,9 +917,20 @@ func (s *Server) toolListTabs(args map[string]any) (any, *mcpError) {
 	return textResult(mustJSON(tabs)), nil
 }
 
+func checkedTabIndex(args map[string]any) (int, *mcpError) {
+	value, ok := args["index"].(float64)
+	if !ok || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || math.Trunc(value) != value || value >= float64(^uint(0)>>1) {
+		return 0, newError(-32602, "index must be a non-negative integer")
+	}
+	return int(value), nil
+}
+
 func (s *Server) toolSwitchTab(args map[string]any) (any, *mcpError) {
 	id, _ := args["profile_id"].(string)
-	index := int(args["index"].(float64))
+	index, indexErr := checkedTabIndex(args)
+	if indexErr != nil {
+		return nil, indexErr
+	}
 	sess, ok := s.mgr.GetSession("sess_" + id)
 	if !ok {
 		return nil, newError(-32000, "no active session")
@@ -935,7 +947,10 @@ func (s *Server) toolSwitchTab(args map[string]any) (any, *mcpError) {
 
 func (s *Server) toolCloseTab(args map[string]any) (any, *mcpError) {
 	id, _ := args["profile_id"].(string)
-	index := int(args["index"].(float64))
+	index, indexErr := checkedTabIndex(args)
+	if indexErr != nil {
+		return nil, indexErr
+	}
 	sess, ok := s.mgr.GetSession("sess_" + id)
 	if !ok {
 		return nil, newError(-32000, "no active session")

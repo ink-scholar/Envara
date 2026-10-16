@@ -20,6 +20,7 @@ const MAX_REPLAY_BYTES = 256 * 1024;
 const SECRET_TAIL_FLUSH_MS = 40;
 const MAX_QUEUE_BYTES = 256 * 1024;
 const OUTPUT_CHUNK_BYTES = 32 * 1024;
+const FALLBACK_EXIT_TIMEOUT_MS = 1000;
 const codeError = (message, code = 'TERMINAL_VALIDATION_ERROR') => Object.assign(new Error(message), { code });
 const storageFailure = error => ['EACCES', 'EPERM', 'EROFS', 'ENOSPC'].includes(error?.code)
   ? codeError('无法写入此环境的独立终端配置，请检查应用数据目录的权限与剩余空间。', 'TERMINAL_STORAGE_UNAVAILABLE') : error;
@@ -159,8 +160,10 @@ export class TerminalService {
       if (document.schema !== 'envara.terminal' || document.version !== 1 || !Array.isArray(document.profiles)) throw codeError('终端元数据版本无效。');
       for (const item of document.profiles) {
         validId(item.id);
-        if (typeof item.cwd !== 'string' || !path.isAbsolute(item.cwd) || item.cwd.includes('\0')) throw codeError('终端工作目录无效。');
-        this.settings.set(item.id, { cwd: item.cwd, ...(typeof item.browserProfileId === 'string' && /^[A-Za-z0-9_-]{1,96}$/.test(item.browserProfileId) ? { browserProfileId: item.browserProfileId } : {}) });
+        // Link preferences can be saved before the first directory is picked.
+        // A missing directory is still refused by create(), not by all startup.
+        if (item.cwd != null && (typeof item.cwd !== 'string' || !path.isAbsolute(item.cwd) || item.cwd.includes('\0'))) throw codeError('终端工作目录无效。');
+        this.settings.set(item.id, { ...(item.cwd != null ? { cwd: item.cwd } : {}), ...(typeof item.browserProfileId === 'string' && /^[A-Za-z0-9_-]{1,96}$/.test(item.browserProfileId) ? { browserProfileId: item.browserProfileId } : {}) });
       }
       await chmod(this.settingsFile, 0o600);
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -169,8 +172,19 @@ export class TerminalService {
     await ownedFile(this.settingsFile, JSON.stringify({ schema: 'envara.terminal', version: 1,
       profiles: [...this.settings].map(([id, item]) => ({ id, cwd: item.cwd, ...(item.browserProfileId ? { browserProfileId: item.browserProfileId } : {}) })) }, null, 2), true);
   }
-  mutateSettings(operation) {
-    const task = this.settingsQueue.then(operation);
+  updateSettings(id, update) {
+    const task = this.settingsQueue.then(async () => {
+      const previous = this.settings.get(id);
+      const next = update(previous);
+      if (next === undefined) this.settings.delete(id);
+      else this.settings.set(id, next);
+      try { await this.saveSettings(); }
+      catch (error) {
+        if (previous === undefined) this.settings.delete(id);
+        else this.settings.set(id, previous);
+        throw error;
+      }
+    });
     this.settingsQueue = task.catch(() => {});
     return task;
   }
@@ -186,7 +200,8 @@ export class TerminalService {
   metadata(session) {
     return { sessionId: session.sessionId, profileId: session.profileId, kind: session.kind ?? 'shell', ...(session.browserProfileId ? { browserProfileId: session.browserProfileId, browserName: session.browserName ?? null } : {}), status: session.status, cwd: session.cwd, timezone: session.timezone ?? null, language: session.language ?? null, networkFence: session.networkFence === true, privacy: session.launchContext?.privacy ?? { mode: 'standard' }, geolocation: session.launchContext?.geolocation ?? null, network: session.network ?? unknownNetwork(), columns: session.columns, rows: session.rows, startedAt: session.startedAt, sequence: session.sequence, replay: session.replay,
       ...(session.requestId ? { requestId: session.requestId } : {}),
-      ...(session.kind === 'claude-code' ? { claudeAccountId: session.claudeAccountId, claudeAccountName: session.claudeAccountName ?? null, claudeInstallSource: session.claudeInstallSource } : {}),
+      ...(session.kind === 'claude-code' ? { claudeAccountId: session.claudeAccountId, claudeAccountName: session.claudeAccountName ?? null, claudeInstallSource: session.claudeInstallSource,
+        deviceIdentifierRestrictions: session.deviceIdentifierRestrictions === true } : {}),
       ...(session.claudeInstall ? { claudeInstall: { ...session.claudeInstall } } : {}),
       ...(session.exitCode != null ? { exitCode: session.exitCode } : {}), ...(session.error ? { error: session.error } : {}),
       ...(session.errorCode ? { errorCode: session.errorCode } : {}), ...(session.cleanupError ? { cleanupError: session.cleanupError } : {}) };
@@ -236,11 +251,11 @@ export class TerminalService {
       if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
       validId(id);
       if (browserProfileId != null && browserProfileId !== '' && (typeof browserProfileId !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(browserProfileId))) throw codeError('浏览器标识无效。', 'VALIDATION_ERROR');
-      const previous = this.settings.get(id);
-      const next = { ...(previous ?? {}), ...(browserProfileId ? { browserProfileId } : {}) };
-      if (!browserProfileId) delete next.browserProfileId;
-      this.settings.set(id, next);
-      try { await this.saveSettings(); } catch (error) { if (previous) this.settings.set(id, previous); else this.settings.delete(id); throw error; }
+      await this.updateSettings(id, previous => {
+        const next = { ...(previous ?? {}), ...(browserProfileId ? { browserProfileId } : {}) };
+        if (!browserProfileId) delete next.browserProfileId;
+        return next;
+      });
       return this.snapshot({ id });
     });
   }
@@ -306,11 +321,7 @@ export class TerminalService {
     const cwd = await realpath(selectedPath);
     if (!(await stat(cwd)).isDirectory()) throw codeError('终端工作目录必须是文件夹。');
     await access(cwd, constants.R_OK | constants.X_OK);
-    await this.mutateSettings(async () => {
-      const previous = this.settings.get(id);
-      this.settings.set(id, { ...(previous ?? {}), cwd });
-      try { await this.saveSettings(); } catch (error) { if (previous) this.settings.set(id, previous); else this.settings.delete(id); throw error; }
-    });
+    await this.updateSettings(id, previous => ({ ...(previous ?? {}), cwd }));
     return cwd;
   }
   async directories(id, accountId = DEFAULT_CLAUDE_ACCOUNT) {
@@ -421,6 +432,15 @@ export class TerminalService {
     if (session.networkFailure) throw codeError(session.networkFailure.message, session.networkFailure.code);
     if (this.closed || session.startCancelled || session.status !== 'starting' || session.finished) throw codeError('终端启动已取消。', 'TERMINAL_START_CANCELLED');
   }
+  async retainLaunchCleanup(session, field, resource) {
+    // An async resource can arrive after Close finished an empty cleanup. Wait
+    // for that cleanup before retaining the new authority for the normal retry
+    // path; a failed disposal must never disappear in a local catch handler.
+    await session.finishing?.catch(() => {});
+    await session.cleanupPromise?.catch(() => {});
+    session[field] = resource;
+    session.cleanupPromise = null; session.finishing = null; session.finished = false; session.status = 'closing';
+  }
   installProgress(session, progress) {
     if (session.status !== 'starting' || session.startCancelled || session.finished || this.closed
       || !['metadata', 'downloading', 'verifying', 'installing'].includes(progress?.phase)) return;
@@ -491,14 +511,16 @@ export class TerminalService {
           onProgress: progress => this.installProgress(session, progress) });
         this.assertStarting(session);
         const binding = await this.browserBroker.createSession({ sessionId: session.sessionId, profileId: id, browserProfileId, context: session.launchContext });
-        try { this.assertStarting(session); } catch (error) { await binding.dispose(); throw error; }
+        try { this.assertStarting(session); }
+        catch (error) { await this.retainLaunchCleanup(session, 'browserBinding', binding); throw error; }
         session.browserBinding = binding;
         session.browserName = binding.browser.name;
         linkShim = { directory: linkShim.directory, ...binding.environment };
         for (const [key, value] of Object.entries(binding.environment)) if (/TOKEN|SECRET/.test(key) && typeof value === 'string') session.secrets.push(value);
         const environment = { ...this.childEnvironment(directories, timezone, endpoint, session.launchContext.privacy, linkShim, session.launchContext.locale), ...binding.environment };
         const prepared = await prepareClaudeSession({ sessionId: session.sessionId, directories, installation, mcpServer: binding.mcpServer, environment, privacy: session.launchContext.privacy });
-        try { this.assertStarting(session); } catch (error) { await prepared.cleanup(); throw error; }
+        try { this.assertStarting(session); }
+        catch (error) { await this.retainLaunchCleanup(session, 'claudeLaunch', prepared); throw error; }
         session.claudeLaunch = prepared;
         claudeLaunch = prepared;
       }
@@ -513,7 +535,11 @@ export class TerminalService {
       session.networkFence = false;
       const routePort = loopbackRoutePort(session.bridge, endpoint);
       if (routePort && this.networkFence) {
-        shell = await this.networkFence.wrap(shell, { routePort }); session.networkFence = true;
+        shell = await this.networkFence.wrap(shell, { routePort, ...(kind === 'claude-code' ? { restrictDeviceIdentifiers: true } : {}) });
+        if (kind === 'claude-code' && shell.deviceIdentifierRestrictions !== true)
+          throw codeError('设备标识读取限制未确认，未启动 Claude 终端。', 'TERMINAL_DEVICE_IDENTIFIERS_UNAVAILABLE');
+        session.deviceIdentifierRestrictions = kind === 'claude-code' && shell.deviceIdentifierRestrictions === true;
+        session.networkFence = true;
         session.network = { ...session.network, fenced: true, description: '已加网络围栏：终端里的程序只能经这条线路出网，不支持代理的程序会连不上，不会直连。' };
         const known = this.contexts.get(id);
         if (known) this.contexts.set(id, { ...known, network: session.network });
@@ -542,6 +568,10 @@ export class TerminalService {
       this.pruneSessions();
       return this.metadata(session);
     } catch (error) {
+      if (typeof error?.claudeCleanup === 'function') {
+        // Failed preparation returns the same private retry authority.
+        await this.retainLaunchCleanup(session, 'claudeLaunch', { cleanup: error.claudeCleanup });
+      }
       const reported = session.networkFailure ? codeError(session.networkFailure.message, session.networkFailure.code)
         : session.startCancelled || this.closed ? codeError('终端启动已取消。', 'TERMINAL_START_CANCELLED') : storageFailure(error);
       session.error ??= this.redact(session, reported.message ?? '终端无法启动。', true);
@@ -550,6 +580,7 @@ export class TerminalService {
       try { await this.cleanup(session); session.finished = true; session.status = reported.code === 'TERMINAL_START_CANCELLED' ? 'closed' : 'error'; this.releaseLaunchContext(session); }
       catch { session.cleanupError = '终端进程清理未完成，请重试关闭会话。'; }
       this.emit(session, 'status', { status: session.status, error: session.error, errorCode: session.errorCode, ...(session.cleanupError ? { cleanupError: session.cleanupError } : {}) });
+      this.pruneSessions();
       throw codeError(session.error, session.errorCode);
     }
   }
@@ -654,6 +685,19 @@ export class TerminalService {
     session.pty.resize(cols, height); session.columns = cols; session.rows = height;
     return this.metadata(session);
   }
+  async stopUnidentifiedPty(session) {
+    let listener, timer;
+    try {
+      const exited = new Promise(resolve => {
+        // Listen before signaling: native node-pty can report exit immediately.
+        listener = session.pty.onExit(() => { session.nativeExited = true; resolve(true); });
+        timer = setTimeout(() => resolve(false), FALLBACK_EXIT_TIMEOUT_MS);
+      });
+      session.pty.kill();
+      if (!session.nativeExited && !await exited) throw new Error('exit not confirmed');
+    } catch { throw codeError('终端仍有未退出的子进程。', 'TERMINAL_CLEANUP_FAILED'); }
+    finally { clearTimeout(timer); try { listener?.dispose?.(); } catch {} }
+  }
   async cleanup(session) {
     if (session.cleanupPromise) return session.cleanupPromise;
     session.cleanupPromise = Promise.resolve().then(async () => {
@@ -671,7 +715,11 @@ export class TerminalService {
         if (session.pty && session.identity) {
           const result = await this.processControl.close({ pty: session.pty, identity: session.identity });
           if (result?.ok === false) throw codeError('终端仍有未退出的子进程。', 'TERMINAL_CLEANUP_FAILED');
-        } else if (session.pty && !session.finished && !session.nativeExited) { try { session.pty.kill(); } catch {} }
+        } else if (session.pty && !session.finished && !session.nativeExited) {
+          // Without a captured identity this is the only remaining cleanup
+          // handle. A refused kill must keep it available for explicit retry.
+          await this.stopUnidentifiedPty(session);
+        }
       });
       await attempt(() => session.bridge?.close());
       await attempt(() => session.claudeLaunch?.cleanup());
@@ -737,11 +785,7 @@ export class TerminalService {
       } catch (error) { if (error.code !== 'ENOENT') throw error; }
       const selected = this.settings.get(id)?.cwd;
       const preserve = selected && (selected === namespace || selected.startsWith(`${namespace}${path.sep}`));
-      await this.mutateSettings(async () => {
-        const previous = this.settings.get(id);
-        this.settings.delete(id);
-        try { await this.saveSettings(); } catch (error) { if (previous) this.settings.set(id, previous); throw error; }
-      });
+      await this.updateSettings(id, () => undefined);
       if (exists && !preserve) await rm(namespace, { recursive: true, force: true });
       await this.claudeAccounts.removeProfile(id);
       this.contexts.delete(id);

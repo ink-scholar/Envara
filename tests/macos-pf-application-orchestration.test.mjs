@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { MacOSPFController, MacOSPFExecutor, validatePFAppBoundLease, validatePFRootHookLease, validatePFApplicationPrestageAbort, validatePFApplicationPreflightAbort, PF_APP_BOUND_LEASE_SCHEMA, PF_APP_SESSION_LEASE_MS, PF_APP_RELEASE_RETRY_MS, PF_ROOT_HOOK_LEASE_SCHEMA, PF_INSTALL_ROOT, PF_RUNTIME_ROOT, dispatchPFRequest } from '../native/macos-pf-routing/controller.mjs';
+import { MacOSPFController, MacOSPFExecutor, validatePFAppBoundLease, validatePFRootHookLease, validatePFApplicationPrestageAbort, validatePFApplicationPreflightAbort, PF_APP_BOUND_LEASE_SCHEMA, PF_APP_SESSION_LEASE_MS, PF_APP_RELEASE_RETRY_MS, PF_APP_STAGE_CLEANUP_WAIT_MS, PF_ROOT_HOOK_LEASE_SCHEMA, PF_INSTALL_ROOT, PF_RUNTIME_ROOT, dispatchPFRequest, APP_STAGE_PROGRESS_LIMIT, projectStageProgress } from '../native/macos-pf-routing/controller.mjs';
 import { pfApplicationRegistrationId } from '../native/macos-pf-routing/policy.mjs';
 import { pfRoutingAnchor } from '../native/macos-pf-routing/policy.mjs';
 import * as fs from 'node:fs/promises';
@@ -269,6 +269,7 @@ test('production sealed-file writer detects same-size content, replaced inode, h
 });
 function streamFixture({ forked = false, wrongParent = false, malformed = false, missingListener = false, nativeRefusal = null,
   cleanupReady = null, cleanupStopping = null, cleanupRelease = null, controlRefusal = null, controlRefusalCommand = 'L', coldStageDelay = 0, resumeDelay = 0,
+  coldStageStoppedChanges = null, coldStageRefusal = null, coldStageNoAck = false, stopNoAck = false,
   /* revokeAfterResume: the guardian revokes on its own while the application
    * runs, exactly as a crashed child makes it do. This is the case that left
    * the trial showing 'running' for 44 s after the child had stopped. */
@@ -281,7 +282,10 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
   /* refuseReleases: how many 'R' requests the armed guardian refuses before it
    * releases. The real guardian refuses, without any frame, while a helper of
    * the application is still in the owned group. */
-  refuseReleases = 0 } = {}) {
+  refuseReleases = 0,
+  /* stageProgress: diagnostic native step frames the keeper writes after L,
+   * before its stopped ACK; stageProgressRaw: exact lines, for malformed ones. */
+  stageProgress = [], stageProgressRaw = [] } = {}) {
   let refusedReleases = 0;
   const context = lease(), keeperPID = forked ? 8991 : 8990;
   context.controllerPid = process.pid;
@@ -321,7 +325,7 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
     if (fragmentAbort) { child.stdout.write(output.slice(0, 53)); child.stdout.write(output.slice(53)); } else child.stdout.write(output);
     setImmediate(() => child.emit('close', abortExit, abortSignal));
   };
-  let commands = '', ticket, guardianArmed = false, guardianRevoked = false;
+  let commands = '', ticket, guardianArmed = false, guardianRevoked = false, completeColdStage;
   const controlCommands = [];
   const emitKeeper = (event, changes = {}) => emit({ schema: 'envara.pf-app-keeper/v1', event, ticketId: ticket,
     registrationId: context.registrationId, versionId: context.versionId, environmentId: context.environmentId, runId: context.runId,
@@ -364,11 +368,21 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
         emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-started', runId: context.runId, environmentId: context.environmentId,
           interfaceName: 'utun90', corePID: 8992, coreBirth: '8992:000001', frontPID: 8993, frontBirth: '8993:000001', frontPort: 29999, keeperPID,
           ownsOriginalUTunFD: true, ownsOriginalListenerFD: !missingListener, ready: false, protected: false, ...(malformed ? { callerProof: true } : {}) });
-      } else if (command.startsWith('L ')) { ticket = command.slice(2); guardianArmed = true; const stopped = { schema: 'envara.pf-app-keeper/v1', event: 'stopped', ticketId: ticket,
+      } else if (command.startsWith('L ')) { ticket = command.slice(2); const stopped = { schema: 'envara.pf-app-keeper/v1', event: 'stopped', ticketId: ticket,
         registrationId: context.registrationId, versionId: context.versionId, runId: context.runId, environmentId: context.environmentId,
         keeperPID, pid: 8994, birth: '8994:000001', profile, persistentDenyObserved: true, stoppedBeforeExec: true,
-        ...Object.fromEntries(['childReaped', 'scopeQuiescentObserved', 'resumeSent', 'resumed', 'cancelSent', 'executedIdentityVerified', 'seatbeltAppliedByFixedExec', 'frontAdmissionVerified'].map(key => [key, false])), ready: false, protected: false };
-        if (coldStageDelay) setTimeout(() => emit(stopped), coldStageDelay); else emit(stopped);
+        ...Object.fromEntries(['childReaped', 'scopeQuiescentObserved', 'resumeSent', 'resumed', 'cancelSent', 'executedIdentityVerified', 'seatbeltAppliedByFixedExec', 'frontAdmissionVerified'].map(key => [key, false])), ready: false, protected: false, ...coldStageStoppedChanges };
+        const completeStage = () => {
+          if (coldStageRefusal) { emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-refused', runId: context.runId,
+            environmentId: context.environmentId, stage: 'guardian', reason: 'NATIVE_NOTION_STAGE_REFUSED', error: 13,
+            ready: false, protected: false, ...coldStageRefusal }); return; }
+          guardianArmed = true; emit(stopped);
+        };
+        completeColdStage = completeStage;
+        for (const progress of stageProgress) emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'stage-progress', runId: context.runId,
+          environmentId: context.environmentId, step: 'ticket-prepare', stepMs: 10, totalMs: 20, fullChecks: 2, identityChecks: 12, ready: false, protected: false, ...progress });
+        for (const raw of stageProgressRaw) child.stdout.write(raw);
+        if (!coldStageNoAck) { if (coldStageDelay) setTimeout(completeStage, coldStageDelay); else completeStage(); }
       } else if (command === 'B') {
         const resumed = { schema: 'envara.pf-app-keeper/v1', event: 'resumed', ticketId: ticket,
           registrationId: context.registrationId, versionId: context.versionId, runId: context.runId, environmentId: context.environmentId,
@@ -380,6 +394,8 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
            * and the trial is still showing 'running'. */
           if (!guardianRevoked) { guardianRevoked = true; emitKeeper('stopping', { childReaped: true, cancelSent: false, stoppedBeforeExec: false }); }
         });
+      } else if (command === 'S' && stopNoAck) {
+        continue;
       } else if (command === 'S' && guardianArmed) {
         /* The guardian owns the stopped child: S revokes exactly once and never
          * produces a second stopping frame, and the main loop's own
@@ -410,7 +426,7 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
         childAbsent: executor.appTransports.get(context.runId).cleanupOnly ? !executor.appTransports.get(context.runId).stoppedIdentity : false, ...cleanupRelease }); setImmediate(() => child.emit('close', 0, null)); }
     }
   });
-  return { executor, child, context, binding, emitKeeper, controlCommands };
+  return { executor, child, context, binding, emitKeeper, controlCommands, completeColdStage: () => completeColdStage() };
 }
 test('a one-shot keeper revocation emitted before the stop request still satisfies the later S', async t => {
   /* The fixed guardian records its reason once and returns for every later
@@ -525,6 +541,64 @@ test('release requests stop once their bounded wait ends, and never continue aft
   t.mock.timers.tick(10 * PF_APP_RELEASE_RETRY_MS); await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.controlCommands.filter(command => command === 'R').length, sent, 'nothing is sent after the wait ended');
 });
+const progressFrame = (f, changes = {}) => ({ schema: 'envara.macos-pf-app-transport/v1', event: 'stage-progress', runId: f.context.runId,
+  environmentId: f.context.environmentId, step: 'stage-plan', stepMs: 5, totalMs: 9, fullChecks: 0, identityChecks: 4, ready: false, protected: false, ...changes });
+test('native stage-progress frames are recorded as bounded diagnostics and never settle the stage', async () => {
+  const steps = ['front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'ticket-claim', 'stage-fresh', 'data-prepare', 'stage-plan',
+    'stage-recheck', 'stage-spawn', 'stage-stopped', 'stage-adopt'];
+  const f = streamFixture({ stageProgress: steps.map((step, index) => ({ step, stepMs: index, totalMs: index * 2 })) });
+  await startStream(f);
+  const stopped = await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  assert.equal(stopped.event, 'stopped');
+  const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(entry.uncertain, false); assert.equal(entry.phase, 'stopped');
+  const timings = projectStageProgress(entry.stageProgress);
+  assert.deepEqual(timings.map(item => item.step), steps);
+  for (const item of timings) {
+    assert.deepEqual(Object.keys(item).sort(), ['fullChecks', 'identityChecks', 'receivedMs', 'step', 'stepMs', 'totalMs']);
+    assert.ok(Number.isSafeInteger(item.receivedMs) && item.receivedMs >= 0);
+  }
+  assert.equal(entry.events.some(event => event.event === 'stage-progress'), false, 'diagnostics are not replayable keeper events');
+  await f.executor.applicationTransportControl(f.context.runId, 'S');
+  await f.executor.applicationTransportControl(f.context.runId, 'R');
+  assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+});
+test('stage-progress frames beyond the bound are dropped, while malformed or pre-launch ones are unknown output', async () => {
+  const many = streamFixture({ stageProgress: Array.from({ length: APP_STAGE_PROGRESS_LIMIT + 4 }, () => ({})) });
+  await startStream(many);
+  assert.equal((await many.executor.applicationTransportControl(many.context.runId, 'L', randomUUID())).event, 'stopped');
+  assert.equal(many.executor.appTransports.get(many.context.runId).stageProgress.length, APP_STAGE_PROGRESS_LIMIT);
+  assert.equal(many.executor.appTransports.get(many.context.runId).uncertain, false);
+  for (const changes of [{ step: 'arbitrary-step' }, { stepMs: 30, totalMs: 20 }, { stepMs: -1 }, { fullChecks: 70000 }, { extra: true },
+    { identityChecks: 1.5 }, { totalMs: 86400001 }]) {
+    const frame = progressFrame({ context: lease() }, changes);
+    const f = streamFixture({ coldStageNoAck: true });
+    await startStream(f);
+    frame.runId = f.context.runId; frame.environmentId = f.context.environmentId;
+    const control = f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+    f.child.stdout.write(`${JSON.stringify(frame)}\n`);
+    await assert.rejects(control);
+    assert.equal(f.executor.appTransports.get(f.context.runId).uncertain, true, JSON.stringify(changes));
+  }
+  const early = streamFixture();
+  await startStream(early);
+  early.child.stdout.write(`${JSON.stringify(progressFrame(early))}\n`);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(early.executor.appTransports.get(early.context.runId).uncertain, true, 'no step can precede the launch command');
+});
+test('late stage-progress after the stage timeout is kept for diagnosis and leaves the cleanup-only channel intact', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ coldStageDelay: 61000 }), { entry } = await expireColdStage(t, f);
+  f.child.stdout.write(`${JSON.stringify(progressFrame(f, { step: 'data-prepare', stepMs: 61000, totalMs: 61000 }))}\n`);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(entry.uncertain, false); assert.equal(entry.cleanupOnly, true);
+  assert.deepEqual(projectStageProgress(entry.stageProgress).map(item => item.step), ['data-prepare']);
+  t.mock.timers.tick(1000);
+  assert.equal((await f.executor.applicationTransportControl(f.context.runId, 'S')).event, 'stopping');
+  await f.executor.applicationTransportControl(f.context.runId, 'R');
+  assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+  assert.equal(entry.waitFailure, 'APPLICATION_APP_STAGE_TIMEOUT');
+});
 test('a signed cold stage completing after the former 15-second deadline remains bound and accepted', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const f = streamFixture({ coldStageDelay: 44000 });
@@ -540,20 +614,207 @@ test('a signed cold stage completing after the former 15-second deadline remains
   await f.executor.applicationTransportControl(f.context.runId, 'R');
   assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
 });
-test('the bounded cold-stage deadline reports its cause and cannot admit a late stopped frame or resume', async t => {
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
-  const f = streamFixture({ coldStageDelay: 61000 });
-  await f.executor.startApplicationTransport({ runId: f.context.runId, environmentId: f.context.environmentId, proxy, udpPolicy: 'block', leaseSHA256: 'a'.repeat(64), consoleUID: 501 });
-  const control = f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+async function expireColdStage(t, f) {
+  await startStream(f);
+  const ticketId = randomUUID(), control = f.executor.applicationTransportControl(f.context.runId, 'L', ticketId);
   const refused = assert.rejects(control, { code: 'APPLICATION_APP_STAGE_TIMEOUT' });
   await new Promise(resolve => setImmediate(resolve));
   t.mock.timers.tick(60000); await refused;
-  t.mock.timers.tick(1000);
   const entry = f.executor.appTransports.get(f.context.runId);
-  assert.equal(entry.uncertain, true); assert.equal(entry.phase, 'recovery-required');
-  assert.equal(entry.events.some(event => event.event === 'stopped'), false);
-  assert.equal(f.child.stdin.writableEnded, true);
+  assert.equal(entry.cleanupOnly, true); assert.equal(entry.stageTimedOut, true); assert.equal(entry.stageOutcomePending, true);
+  assert.equal(entry.uncertain, false); assert.notEqual(entry.phase, 'stopped');
+  assert.equal(entry.stoppedIdentity, undefined); assert.notEqual(entry.guardianArmed, true);
+  assert.equal(entry.waitFailure, 'APPLICATION_APP_STAGE_TIMEOUT'); assert.equal(entry.cleanupWaitFailure, undefined);
+  assert.equal(f.child.stdin.writableEnded, false); assert.equal(f.executor.applicationCleanupAvailable(f.context.runId), true);
+  for (const command of ['L', 'B', 'K']) await assert.rejects(f.executor.applicationTransportControl(f.context.runId, command, randomUUID()));
+  assert.deepEqual(f.controlCommands, [`L ${ticketId}`], 'a timed-out stage can never receive a second launch, resume or heartbeat');
+  return { entry, ticketId };
+}
+for (const stoppedBeforeStop of [true, false]) test(`a late bound stopped frame ${stoppedBeforeStop ? 'before' : 'during'} cleanup permits only guardian stop and release`, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ coldStageDelay: 61000 }), { entry, ticketId } = await expireColdStage(t, f);
+  let stopping;
+  if (!stoppedBeforeStop) {
+    stopping = f.executor.applicationTransportControl(f.context.runId, 'S');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(f.controlCommands, [`L ${ticketId}`], 'S waits for the native state before choosing its reachable stop proof');
+  }
+  t.mock.timers.tick(1000);
+  if (stoppedBeforeStop) {
+    assert.equal(entry.stageOutcomePending, false); assert.equal(entry.guardianArmed, true);
+    assert.deepEqual(entry.stoppedIdentity, { pid: 8994, birth: '8994:000001' });
+    assert.notEqual(entry.phase, 'stopped', 'a late ACK supplies cleanup identity, never launch success');
+    stopping = f.executor.applicationTransportControl(f.context.runId, 'S');
+  }
+  assert.equal((await stopping).event, 'stopping');
+  assert.equal(entry.stageOutcomePending, false); assert.equal(entry.guardianArmed, true);
+  assert.deepEqual(entry.stoppedIdentity, { pid: 8994, birth: '8994:000001' });
+  assert.equal(entry.cleanupOnly, true); assert.equal(entry.uncertain, false);
   await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'B'));
+  const released = await f.executor.applicationTransportControl(f.context.runId, 'R');
+  assert.equal(released.childReaped, true); assert.equal(released.childAbsent, false); assert.equal(entry.guardianReleased, true);
+  assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+  assert.equal(entry.waitFailure, 'APPLICATION_APP_STAGE_TIMEOUT'); assert.equal(entry.cleanupWaitFailure, undefined);
+  assert.deepEqual(f.controlCommands, [`L ${ticketId}`, 'S', 'R']);
+});
+test('a bound late stage refusal during cleanup resolves the main-loop stop path without replacing the original timeout', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const native = { stage: 'guardian', reason: 'NATIVE_NOTION_STAGE_REFUSED', error: 13 };
+  const f = streamFixture({ coldStageDelay: 61000, coldStageRefusal: native }), { entry, ticketId } = await expireColdStage(t, f);
+  const stopping = f.executor.applicationTransportControl(f.context.runId, 'S');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.controlCommands, [`L ${ticketId}`]);
+  t.mock.timers.tick(1000);
+  const stopped = await stopping;
+  assert.equal(stopped.event, 'transport-cleanup-stopping'); assert.equal(stopped.childAbsent, true); assert.equal(stopped.childReaped, false);
+  assert.equal(entry.stageOutcomePending, false); assert.equal(entry.stoppedIdentity, undefined); assert.notEqual(entry.guardianArmed, true);
+  assert.deepEqual(entry.failure, native); assert.equal(entry.cleanupFailure, undefined);
+  assert.equal(entry.waitFailure, 'APPLICATION_APP_STAGE_TIMEOUT'); assert.equal(entry.cleanupWaitFailure, undefined);
+  const released = await f.executor.applicationTransportControl(f.context.runId, 'R');
+  assert.equal(released.childAbsent, true); assert.equal(released.childReaped, false);
+  assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+  assert.deepEqual(f.controlCommands, [`L ${ticketId}`, 'S', 'R']);
+});
+test('repeated no-ACK cleanup-state waits stay bounded and retryable until an exact late outcome permits cleanup', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ coldStageNoAck: true }), { entry, ticketId } = await expireColdStage(t, f);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const stopping = f.executor.applicationTransportControl(f.context.runId, 'S');
+    const refused = assert.rejects(stopping, { code: 'APPLICATION_APP_STOP_TIMEOUT' });
+    await new Promise(resolve => setImmediate(resolve));
+    t.mock.timers.tick(PF_APP_STAGE_CLEANUP_WAIT_MS - 1);
+    assert.equal(entry.uncertain, false); assert.deepEqual(f.controlCommands, [`L ${ticketId}`]);
+    t.mock.timers.tick(1); await refused;
+    assert.equal(entry.uncertain, false); assert.equal(entry.cleanupOnly, true); assert.equal(entry.stageOutcomePending, true);
+    assert.equal(f.child.stdin.writableEnded, false); assert.equal(f.executor.applicationCleanupAvailable(f.context.runId), true);
+    assert.equal(entry.waiters.length, 0); assert.equal(entry.waitFailure, 'APPLICATION_APP_STAGE_TIMEOUT');
+    assert.equal(entry.cleanupWaitFailure, 'APPLICATION_APP_STOP_TIMEOUT'); assert.equal(entry.stoppedIdentity, undefined);
+    assert.equal(entry.events.some(event => ['transport-cleanup-stopping', 'transport-released'].includes(event.event)), false);
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'R'));
+    await assert.rejects(f.executor.confirmApplicationTransportExited(f.context.runId));
+    assert.deepEqual(f.controlCommands, [`L ${ticketId}`], 'no cleanup command or false proof exists before the native stage outcome');
+  }
+  f.completeColdStage();
+  assert.equal(entry.stageOutcomePending, false); assert.deepEqual(entry.stoppedIdentity, { pid: 8994, birth: '8994:000001' });
+  assert.notEqual(entry.phase, 'stopped'); await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'B'));
+  assert.equal((await f.executor.applicationTransportControl(f.context.runId, 'S')).event, 'stopping');
+  assert.equal((await f.executor.applicationTransportControl(f.context.runId, 'R')).childReaped, true);
+  assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+  assert.deepEqual(f.controlCommands, [`L ${ticketId}`, 'S', 'R']);
+});
+test('an actual S ACK timeout still poisons after the late stopped frame established guardian custody', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ coldStageNoAck: true, stopNoAck: true }), { entry, ticketId } = await expireColdStage(t, f);
+  f.completeColdStage();
+  const stopping = f.executor.applicationTransportControl(f.context.runId, 'S');
+  const refused = assert.rejects(stopping, { code: 'APPLICATION_APP_STOP_TIMEOUT' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.controlCommands, [`L ${ticketId}`, 'S']);
+  t.mock.timers.tick(15000); await refused;
+  assert.equal(entry.uncertain, true); assert.equal(entry.phase, 'recovery-required'); assert.equal(f.child.stdin.writableEnded, true);
+  assert.equal(entry.waitFailure, 'APPLICATION_APP_STAGE_TIMEOUT'); assert.equal(entry.cleanupWaitFailure, 'APPLICATION_APP_STOP_TIMEOUT');
+  assert.equal(f.executor.applicationCleanupAvailable(f.context.runId), false);
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'R'));
+});
+for (const [name, changes] of [
+  ['foreign run', { runId: randomUUID() }], ['foreign environment', { environmentId: randomUUID() }], ['foreign ticket', { ticketId: randomUUID() }],
+  ['foreign registration', { registrationId: randomUUID() }], ['foreign version', { versionId: randomUUID() }], ['foreign keeper', { keeperPID: 8888 }],
+  ['invalid child PID', { pid: 1 }], ['invalid child birth', { birth: 'invalid' }], ['unknown profile', { profile: 'unknown' }],
+  ['unknown field', { callerProof: true }], ['non-Boolean proof', { stoppedBeforeExec: 1 }], ['no stopped child', { stoppedBeforeExec: false }],
+  ['denial absent', { persistentDenyObserved: false }], ['already reaped child', { childReaped: true }], ['resume sent', { resumeSent: true }],
+  ['already resumed', { resumed: true }], ['cancel sent', { cancelSent: true }], ['executed identity', { executedIdentityVerified: true }],
+  ['unexpected resume', { event: 'resumed' }], ['unexpected release', { event: 'released' }], ['unbound stopping event', { event: 'stopping' }],
+]) test(`a late stopped frame with ${name} poisons instead of enabling cleanup authority`, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ coldStageDelay: 61000, coldStageStoppedChanges: changes }), { entry } = await expireColdStage(t, f);
+  t.mock.timers.tick(1000);
+  assert.equal(entry.uncertain, true); assert.equal(entry.phase, 'recovery-required'); assert.equal(f.child.stdin.writableEnded, true);
+  assert.equal(entry.stoppedIdentity, undefined); assert.notEqual(entry.guardianArmed, true);
+  assert.equal(entry.waitFailure, 'APPLICATION_APP_STAGE_TIMEOUT');
+  for (const command of ['B', 'S', 'R']) await assert.rejects(f.executor.applicationTransportControl(f.context.runId, command));
+});
+for (const changes of [{ runId: randomUUID() }, { stage: 'preflight' }, { error: true }, { extra: 'unknown' }]) test(`a malformed or foreign late stage refusal cannot preserve cleanup (${JSON.stringify(changes)})`, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ coldStageDelay: 61000, coldStageRefusal: changes }), { entry } = await expireColdStage(t, f);
+  t.mock.timers.tick(1000);
+  assert.equal(entry.uncertain, true); assert.equal(entry.failure, undefined); assert.equal(entry.cleanupFailure, undefined);
+  assert.equal(f.child.stdin.writableEnded, true); assert.equal(entry.waitFailure, 'APPLICATION_APP_STAGE_TIMEOUT');
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'));
+});
+test('malformed output while awaiting the late stage outcome closes the channel without claiming cleanup', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ coldStageNoAck: true }), { entry, ticketId } = await expireColdStage(t, f);
+  const stopping = f.executor.applicationTransportControl(f.context.runId, 'S');
+  const refused = assert.rejects(stopping);
+  await new Promise(resolve => setImmediate(resolve));
+  f.child.stdout.write('{malformed-json}\n'); await refused;
+  assert.equal(entry.uncertain, true); assert.equal(f.child.stdin.writableEnded, true);
+  assert.equal(entry.waitFailure, 'APPLICATION_APP_STAGE_TIMEOUT'); assert.equal(entry.stoppedIdentity, undefined);
+  assert.deepEqual(f.controlCommands, [`L ${ticketId}`]);
+  await assert.rejects(f.executor.confirmApplicationTransportExited(f.context.runId));
+});
+for (const outcome of ['stopped', 'refused']) test(`an overdue L ${outcome} frame observed before the timer fires preserves the stage timeout and exact cleanup path`, async t => {
+  let now = Date.now(); t.mock.method(Date, 'now', () => now);
+  const native = { stage: 'guardian', reason: 'NATIVE_NOTION_STAGE_REFUSED', error: 13 };
+  const f = streamFixture({ coldStageNoAck: true, ...(outcome === 'refused' ? { coldStageRefusal: native } : {}) });
+  await startStream(f);
+  const ticketId = randomUUID(), control = f.executor.applicationTransportControl(f.context.runId, 'L', ticketId);
+  const refused = assert.rejects(control, { code: 'APPLICATION_APP_STAGE_TIMEOUT' });
+  await new Promise(resolve => setImmediate(resolve));
+  const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(entry.stageTimedOut, undefined);
+  // Move wall-clock evidence past the bound without letting the real timer run.
+  now += 60001; f.completeColdStage(); await refused;
+  assert.equal(entry.stageTimedOut, true); assert.equal(entry.stageOutcomePending, false);
+  assert.equal(entry.cleanupOnly, true); assert.equal(entry.uncertain, false); assert.notEqual(entry.phase, 'stopped');
+  assert.equal(entry.waitFailure, 'APPLICATION_APP_STAGE_TIMEOUT'); assert.equal(entry.cleanupFailure, undefined);
+  if (outcome === 'stopped') assert.deepEqual(entry.stoppedIdentity, { pid: 8994, birth: '8994:000001' });
+  else { assert.equal(entry.stoppedIdentity, undefined); assert.deepEqual(entry.failure, native); }
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'B'));
+  const stopped = await f.executor.applicationTransportControl(f.context.runId, 'S');
+  assert.equal(stopped.event, outcome === 'stopped' ? 'stopping' : 'transport-cleanup-stopping');
+  const released = await f.executor.applicationTransportControl(f.context.runId, 'R');
+  assert.equal(released.childReaped, outcome === 'stopped'); assert.equal(released.childAbsent, outcome === 'refused');
+  assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+  assert.deepEqual(f.controlCommands, [`L ${ticketId}`, 'S', 'R']);
+});
+for (const [name, changes] of [
+  ['foreign registration', { registrationId: randomUUID() }], ['foreign version', { versionId: randomUUID() }],
+  ['foreign keeper', { keeperPID: 8888 }], ['invalid child PID', { pid: 1 }],
+]) test(`an overdue L frame with ${name} poisons even when its timer has not fired`, async t => {
+  let now = Date.now(); t.mock.method(Date, 'now', () => now);
+  const f = streamFixture({ coldStageNoAck: true, coldStageStoppedChanges: changes }); await startStream(f);
+  const control = f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  const refused = assert.rejects(control, { code: 'APPLICATION_APP_STAGE_TIMEOUT' });
+  await new Promise(resolve => setImmediate(resolve));
+  now += 60001; f.completeColdStage(); await refused;
+  const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(entry.uncertain, true); assert.equal(entry.phase, 'recovery-required'); assert.equal(f.child.stdin.writableEnded, true);
+  assert.equal(entry.stoppedIdentity, undefined); assert.notEqual(entry.guardianArmed, true);
+  assert.equal(entry.waitFailure, 'APPLICATION_APP_STAGE_TIMEOUT'); assert.equal(f.executor.applicationCleanupAvailable(f.context.runId), false);
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'));
+});
+test('a late stage outcome after the cleanup-state deadline but before its timer fires helps only a later explicit Stop', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let now = Date.now(); t.mock.method(Date, 'now', () => now);
+  const f = streamFixture({ coldStageNoAck: true }); await startStream(f);
+  const ticketId = randomUUID(), launch = f.executor.applicationTransportControl(f.context.runId, 'L', ticketId);
+  const launchRefused = assert.rejects(launch, { code: 'APPLICATION_APP_STAGE_TIMEOUT' });
+  await new Promise(resolve => setImmediate(resolve));
+  now += 60000; t.mock.timers.tick(60000); await launchRefused;
+  const stopping = f.executor.applicationTransportControl(f.context.runId, 'S');
+  const stopRefused = assert.rejects(stopping, { code: 'APPLICATION_APP_STOP_TIMEOUT' });
+  await new Promise(resolve => setImmediate(resolve));
+  now += PF_APP_STAGE_CLEANUP_WAIT_MS + 1; f.completeColdStage(); await stopRefused;
+  const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(entry.uncertain, false); assert.equal(entry.cleanupOnly, true); assert.equal(entry.stageOutcomePending, false);
+  assert.equal(entry.guardianArmed, true); assert.equal(f.child.stdin.writableEnded, false); assert.equal(entry.waiters.length, 0);
+  assert.equal(entry.waitFailure, 'APPLICATION_APP_STAGE_TIMEOUT'); assert.equal(entry.cleanupWaitFailure, 'APPLICATION_APP_STOP_TIMEOUT');
+  assert.deepEqual(f.controlCommands, [`L ${ticketId}`], 'the expired Stop request cannot turn a late outcome into a sent S command');
+  assert.equal((await f.executor.applicationTransportControl(f.context.runId, 'S')).event, 'stopping');
+  assert.equal((await f.executor.applicationTransportControl(f.context.runId, 'R')).childReaped, true);
+  assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+  assert.deepEqual(f.controlCommands, [`L ${ticketId}`, 'S', 'R']);
 });
 for (const fault of ['wrongParent', 'malformed', 'missingListener']) test(`actual native transport ${fault} poisons without sending a cold-stage ticket`, async () => {
   const f = streamFixture({ [fault]: true });
@@ -988,6 +1249,36 @@ test('original guardian errno and controller stage survive outward throws and cl
   const snapshot = f.controller.applicationSnapshot({ runId: request.runId });
   assert.deepEqual(snapshot.failure, snapshot.initialFailure); assert.equal(snapshot.initialFailure.native.error, 13);
   assert.equal(snapshot.cleanupFailure.stage, 'cleanup'); assert.equal(JSON.stringify(snapshot).includes('private detail'), false);
+  await f.controller.shutdown();
+});
+test('the controller preserves the original cold-stage timeout separately from a later cleanup-state timeout', async () => {
+  let cleanupAvailable = true;
+  const f = fixture({ applicationCleanupAvailable: () => cleanupAvailable });
+  f.executor.applicationTransportControl = async (runId, operation) => {
+    f.calls.push(`control:${operation}`);
+    throw Object.assign(new Error('private fixture detail'), { code: operation === 'L' ? 'APPLICATION_APP_STAGE_TIMEOUT' : 'APPLICATION_APP_STOP_TIMEOUT' });
+  };
+  const route = await f.prepareRoute(), request = input(route.routeId);
+  await assert.rejects(f.controller.prepareNotionApplication(request), error => {
+    assert.equal(error.code, 'APPLICATION_APP_STAGE_TIMEOUT');
+    assert.deepEqual(error.initialFailure, { stage: 'cold-stage', code: 'APPLICATION_APP_STAGE_TIMEOUT' }); return true;
+  });
+  assert.equal(f.controller.applicationSnapshot({ runId: request.runId }).cleanupRetryable, true);
+  cleanupAvailable = false;
+  assert.equal(f.controller.applicationSnapshot({ runId: request.runId }).cleanupRetryable, false, 'a hard-poisoned channel cannot advertise retryable cleanup');
+  cleanupAvailable = true;
+  await assert.rejects(f.controller.stopNotionApplication({ runId: request.runId }), error => {
+    assert.equal(error.initialFailure.code, 'APPLICATION_APP_STAGE_TIMEOUT');
+    assert.deepEqual(error.cleanupFailure, { stage: 'cleanup', code: 'APPLICATION_APP_STOP_TIMEOUT' }); return true;
+  });
+  const snapshot = f.controller.applicationSnapshot({ runId: request.runId });
+  assert.deepEqual(snapshot.failure, snapshot.initialFailure); assert.equal(snapshot.initialFailure.code, 'APPLICATION_APP_STAGE_TIMEOUT');
+  assert.equal(snapshot.cleanupFailure.code, 'APPLICATION_APP_STOP_TIMEOUT'); assert.equal(snapshot.cleanupComplete, false);
+  assert.equal(snapshot.staged, false); assert.equal(snapshot.resumed, false);
+  assert.equal(f.calls.includes('release-reference'), false); assert.equal(f.calls.includes('control:R'), false);
+  assert.equal(JSON.stringify(snapshot).includes('private fixture detail'), false);
+  cleanupAvailable = false;
+  assert.equal(f.controller.applicationSnapshot({ runId: request.runId }).cleanupRetryable, false);
   await f.controller.shutdown();
 });
 test('a host network change observed after every owned resource is reclaimed is reported, never left wedging the runtime', async () => {

@@ -368,9 +368,14 @@ test('shutdown waits for pending launch, closes contexts, and rejects subsequent
 test('a corrupt store is preserved instead of silently resetting user data', async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'envara-corrupt-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const invalid = '{broken user data';
+  const invalid = 'SYNTHETIC_PRIVATE_WORKSPACE_TOKEN';
   await writeFile(path.join(directory, 'workspace.json'), invalid);
   const store = new EnvaraStore(directory);
-  await assert.rejects(store.ready, /原文件已保留/);
+  await assert.rejects(store.ready, error => {
+    assert.match(error.message, /原文件已保留/);
+    assert.equal(error.message.includes('SYNTHETIC'), false, 'parser snippets may contain private proxy or account data');
+    assert.equal(error.cause, undefined, 'startup diagnostics must not retain the raw parse error either');
+    return true;
+  });
   assert.equal(await readFile(path.join(directory, 'workspace.json'), 'utf8'), invalid);
 });

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { swiftBuildPathOptions } from './macos-swift-build-paths.mjs';
 import { cleanSigningArtifacts, outputDirectory, signingOptions } from '../native/macos-app-routing/build-support.mjs';
 import { copyProviderVerbatim, fingerprintProvider, productionIdentity, providerRecord, readProviderReuse,
   validateReceiptProvider } from '../native/macos-app-routing/provider-reuse.mjs';
@@ -50,7 +51,8 @@ if (options.receipt) {
   validateReceiptProvider(receipt, reused.fingerprint, { osMajor });
 }
 // Keep desktop development responsive on the user's Mac.
-const argumentsForSwift = ['build', '-c', 'release', '--jobs', '2', '--scratch-path', scratch];
+const argumentsForSwift = ['build', '-c', 'release', '--jobs', '2', '--scratch-path', scratch,
+  ...swiftBuildPathOptions(root)];
 if (options.mode === 'development') argumentsForSwift.push('-Xswiftc', '-DENVARA_LOCAL_DEVELOPMENT_ROUTING');
 if (options.acceptance) argumentsForSwift.push('-Xswiftc', '-DENVARA_NATIVE_ROUTING_ACCEPTANCE');
 if (reused) {

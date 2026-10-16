@@ -10,6 +10,8 @@ import { TerminalErrorNotices } from './terminal-error-notices.mjs';
 import { TerminalStreamStore, splitTerminalInput, terminalHeightForPointer, terminalHeightForKey } from './terminal-state.mjs';
 import { terminalTimezonePresentation } from './network-flow-state.mjs';
 import { NEW_CLAUDE_ACCOUNT, validClaudeAccountChoice, claudeSessionForRequest, claudeInstallPresentation, claudeErrorMessage, validClaudeInstallationChoice, claudeInstallationOptions } from './claude-account-choice.mjs';
+import { TerminalDeviceIdentifierDetails } from './terminal-device-identifiers.mjs';
+import { reconcileTerminalProfile } from './terminal-profile-selection.mjs';
 import '@xterm/xterm/css/xterm.css';
 import './terminal.css';
 
@@ -137,15 +139,15 @@ function TerminalSession({ session, active, visible, focusRequest, preserveTabFo
   </div>;
 }
 
-export function TerminalDock({ profiles = [], visible = true, onHide, openRequest = null, onError, onProfilesChange, standalone = false, selectedProfileId = null, refreshKey = 0, expanded = false, onToggleExpanded, onHeightChange, onResizeStart, minHeight = 320, maxHeight }) {
+export function TerminalDock({ profiles = [], visible = true, onHide, openRequest = null, onError, onProfilesChange, onSelectProfile, standalone = false, selectedProfileId = null, refreshKey = 0, expanded = false, onToggleExpanded, onHeightChange, onResizeStart, minHeight = 320, maxHeight }) {
   const { t } = useI18n();
   const desktopAvailable = api.isDesktop && typeof api.onTerminalEvent === 'function';
   const storeRef = useRef(new TerminalStreamStore());
   const errorNoticesRef = useRef(new TerminalErrorNotices());
   const currentFailureRef = useRef(null);
   const receiversRef = useRef(new Map());
-  const callbacksRef = useRef({ onError, onProfilesChange, onHeightChange, onResizeStart });
-  callbacksRef.current = { onError, onProfilesChange, onHeightChange, onResizeStart };
+  const callbacksRef = useRef({ onError, onProfilesChange, onSelectProfile, onHeightChange, onResizeStart });
+  callbacksRef.current = { onError, onProfilesChange, onSelectProfile, onHeightChange, onResizeStart };
   const scopeRef = useRef({ standalone, profileIds: new Set(profiles.map(profile => profile.id)) });
   scopeRef.current = { standalone, profileIds: new Set(profiles.map(profile => profile.id)) };
   const dockRef = useRef(null), dragRef = useRef(null), dragFrameRef = useRef(null);
@@ -156,6 +158,11 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
   const handledRequestRef = useRef(null), openingRef = useRef(new Map());
   const [terminalState, setTerminalState] = useState({ profiles: [] });
   const [activeProfileId, setActiveProfileId] = useState(selectedProfileId || profiles[0]?.id || null);
+  const previousSelectedProfileRef = useRef(selectedProfileId);
+  const selectProfile = useCallback(profileId => {
+    setActiveProfileId(profileId);
+    callbacksRef.current.onSelectProfile?.(profileId);
+  }, []);
   const [activeSessions, setActiveSessions] = useState({});
   const [newSession, setNewSession] = useState(null);
   const [claudeAccounts, setClaudeAccounts] = useState({ profileId: null, status: 'idle', items: [] });
@@ -231,7 +238,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
     if (refreshRef.current) return refreshRef.current;
     const operation = api.call('terminalSnapshot', standalone ? { id: standaloneProfileId } : {}).then(value => {
       if (!mountedRef.current) return value;
-      const result = storeRef.current.applySnapshot(value);
+      const result = storeRef.current.applySnapshot(value, { complete: true });
       for (const session of (value.profiles ?? []).flatMap(profile => profile.sessions ?? []).sort((a, b) => String(a.startedAt ?? '').localeCompare(String(b.startedAt ?? '')))) retainFailure(session);
       writeOutputs(result.writes); publish();
       setLoading(false);
@@ -270,9 +277,11 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
   }, [desktopAvailable, refresh, writeOutputs, publish, scheduleRefresh, retainFailure]);
 
   useEffect(() => {
-    if (selectedProfileId && profiles.some(profile => profile.id === selectedProfileId)) { setActiveProfileId(selectedProfileId); return; }
-    if (!profiles.some(profile => profile.id === activeProfileId)) setActiveProfileId(profiles[0]?.id ?? null);
-  }, [selectedProfileId, profileIds, activeProfileId, profiles]);
+    const previousSelectedProfileId = previousSelectedProfileRef.current;
+    previousSelectedProfileRef.current = selectedProfileId;
+    setActiveProfileId(current => reconcileTerminalProfile({ activeProfileId: current, selectedProfileId,
+      previousSelectedProfileId, profileIds: profileIds ? profileIds.split('|') : [] }));
+  }, [selectedProfileId, profileIds]);
   useEffect(() => { if (desktopAvailable) void refresh(); }, [desktopAvailable, refresh, activeProfileId, refreshKey]);
 
   const acceptSession = useCallback(session => {
@@ -377,7 +386,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
     if (openingRef.current.has(profileId)) return openingRef.current.get(profileId);
     if (requestId) openingRequestsRef.current.set(profileId, requestId);
     const operation = (async () => {
-      setActiveProfileId(profileId); setFocusVersion(value => value + 1); setPending(`open:${profileId}`); clearFailure();
+      selectProfile(profileId); setFocusVersion(value => value + 1); setPending(`open:${profileId}`); clearFailure();
       try {
         await refresh();
         if (!mountedRef.current) return;
@@ -397,7 +406,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
     })();
     openingRef.current.set(profileId, operation);
     return operation;
-  }, [desktopAvailable, refresh, acceptSession, reportError, clearFailure]);
+  }, [desktopAvailable, refresh, acceptSession, reportError, clearFailure, selectProfile]);
 
   useEffect(() => {
     if (!openRequest?.profileId) return;
@@ -405,11 +414,11 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
     if (handledRequestRef.current === key) return;
     handledRequestRef.current = key;
     preserveTabFocusRef.current = false;
-    setActiveProfileId(openRequest.profileId);
+    selectProfile(openRequest.profileId);
     if (openRequest.sessionId) setActiveSessions(value => ({ ...value, [openRequest.profileId]: openRequest.sessionId }));
     setFocusVersion(value => value + 1);
     if (desktopAvailable) void refresh();
-  }, [openRequest?.profileId, openRequest?.sessionId, openRequest?.nonce, desktopAvailable, refresh]);
+  }, [openRequest?.profileId, openRequest?.sessionId, openRequest?.nonce, desktopAvailable, refresh, selectProfile]);
 
   useEffect(() => { if (shown) setFocusVersion(value => value + 1); }, [expanded]);
 
@@ -568,7 +577,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
     {!standalone && <div className="terminal-environment-tabs" role="tablist" aria-label={t('终端环境')}>{profiles.map((profile, index) => {
       const rows = liveSessions(terminalState.profiles.find(item => item.profileId === profile.id)?.sessions);
       const running = rows.some(session => activeStatuses.has(session.status));
-      return <button key={profile.id} id={`terminal-env-${profile.id}`} className={`terminal-environment-tab ${activeProfileId === profile.id ? 'is-active' : ''}`} role="tab" aria-selected={activeProfileId === profile.id} tabIndex={activeProfileId === profile.id || (!selectedProfile && index === 0) ? 0 : -1} aria-controls="terminal-environment-panel" onKeyDown={event => navigateTabs(event, profiles, index, target => { setActiveProfileId(target.id); clearFailure(); })} onClick={() => { setActiveProfileId(profile.id); clearFailure(); }} title={profile.name}><span className={`terminal-tab-dot ${running ? 'is-running' : ''}`} /><span>{profile.name}</span>{rows.length > 0 && <small>{rows.length}</small>}</button>;
+      return <button key={profile.id} id={`terminal-env-${profile.id}`} className={`terminal-environment-tab ${activeProfileId === profile.id ? 'is-active' : ''}`} role="tab" aria-selected={activeProfileId === profile.id} tabIndex={activeProfileId === profile.id || (!selectedProfile && index === 0) ? 0 : -1} aria-controls="terminal-environment-panel" onKeyDown={event => navigateTabs(event, profiles, index, target => { selectProfile(target.id); clearFailure(); })} onClick={() => { selectProfile(profile.id); clearFailure(); }} title={profile.name}><span className={`terminal-tab-dot ${running ? 'is-running' : ''}`} /><span>{profile.name}</span>{rows.length > 0 && <small>{rows.length}</small>}</button>;
     })}</div>}
     <div id="terminal-environment-panel" className="terminal-environment-panel" role="tabpanel" aria-labelledby={!standalone && activeProfileId ? `terminal-env-${activeProfileId}` : undefined} aria-label={standalone ? t('{name}终端工作区', { name: selectedProfile?.name || t('环境') }) : undefined}>
       <div className="terminal-context-bar"><div className="terminal-directory" title={sessionDirectory || t('尚未选择工作目录')}><FolderOpen size={15} /><span>{sessionDirectory || t('尚未选择工作目录')}</span></div>{selectedSession?.kind === CLAUDE_SESSION && <span className="terminal-bound-browser" title={t('浏览器固定为：{name}', { name: selectedSession.browserName || selectedSession.browserProfileId })}><span>Claude Code · {selectedSession.browserName || selectedSession.browserProfileId}</span></span>}{languageLabel && <span className={`terminal-language ${sessionLanguage.fallback ? 'is-fallback' : ''}`} title={languageLabel}>{sessionLanguage.fallback ? `${sessionLanguage.requested} → ${sessionLanguage.effective}` : sessionLanguage.effective}</span>}<span className={`terminal-timezone ${timezoneSource === 'local' ? 'is-fallback' : ''}`} title={timezoneLabel}>{timezoneLabel}</span>{selectedSession && <button className="terminal-text-button terminal-start-button" disabled={!desktopAvailable || !selectedProfile || !!pending} onClick={openNewSessionChooser} title={t('选择网络出口、浏览器和工作目录后打开终端')}><Plus size={13} />{t(pending.startsWith('open:') ? '启动中…' : '新建会话')}</button>}</div>
@@ -614,6 +623,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
           <div className="terminal-new-session-actions"><button className="terminal-text-button" disabled={!!pending && (!startingSession || !!cancellingSessionId)} onClick={cancelCreation}>{t(cancellingSessionId ? '关闭中…' : opening && claude ? '取消安装' : '取消')}</button><button className="terminal-text-button terminal-start-button" aria-busy={!!pending || undefined} disabled={!!pending || !host || (claude && (!validClaudeAccountChoice(claudeAccounts, host.id, newSession) || !validClaudeInstallationChoice(claudeInstallation, host.id, newSession.installSource)))} onClick={() => void confirmNewSession()}>{t(pending.startsWith('account:') ? '正在创建档案…' : opening ? '启动中…' : newSession.error ? '重试' : '打开终端')}</button></div>
         </div>;
       })()}
+      <TerminalDeviceIdentifierDetails session={selectedSession} t={t} />
       <footer className="terminal-footer"><div className="terminal-footer-messages" role={dockError ? 'status' : undefined}><span className="terminal-network-description" title={dockError ? t(dockError) : networkDescription}>{dockError ? t(dockError) : networkDescription}</span>{dockError && dockCleanupError && <span className="terminal-cleanup-error" title={t(dockCleanupError)}>{t('清理错误')} · {t(dockCleanupError)}</span>}</div>{dockError && dockErrorCode && <code className="terminal-error-code" title={dockErrorCode}>{dockErrorCode}</code>}{standalone && <span className="terminal-view-notice">{t('关闭窗口后，会话继续运行。')}</span>}{selectedSession && <span className="terminal-session-state">{t(statusLabels[selectedSession.status] || selectedSession.status)}{selectedSession.exitCode != null && t(' · 退出码 {code}', { code: selectedSession.exitCode })}</span>}</footer>
     </div>
   </section>;

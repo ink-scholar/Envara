@@ -27,7 +27,7 @@ export function proxyConfig(proxy) {
     region: String(proxy.region || '').trim(),
   };
   return proxy.protocol === 'anytls'
-    ? { ...config, serverName: String(proxy.serverName || '').trim() || host, skipCertVerify: proxy.skipCertVerify === true, clientFingerprint: 'chrome', alpn: alpnEntries(proxy.alpn), udp: proxy.udp !== false }
+    ? { ...config, serverName: String(proxy.serverName || '').trim() || host, skipCertVerify: proxy.skipCertVerify === true, clientFingerprint: proxy.clientFingerprint ?? 'chrome', alpn: alpnEntries(proxy.alpn), udp: proxy.udp !== false }
     : { ...config, username: proxy.username || '' };
 }
 

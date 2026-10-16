@@ -57,8 +57,14 @@ func TestPerProfilePlatformPolicyDoesNotChangeSharedRuntimeSettings(t *testing.T
 			t.Fatal(err)
 		}
 		persona, err := buildChromiumLaunchPersona(windows, runtimeID, platform, "Asia/Shanghai", "zh-CN", "", "arm64", policy)
-		if err != nil || persona.Native.Platform.OS != "windows" || persona.NavigatorPlatform != "Win32" || !strings.Contains(persona.Native.Browser.UserAgent, "Windows NT") {
+		if err != nil || persona.Native.Platform.OS != "windows" || persona.NavigatorPlatform != "Win32" {
 			t.Fatalf("native persona did not follow fixed platform: %+v %v", persona.Native.Platform, err)
+		}
+		if runtimeID == bfruntime.BrowseForgeChromium && !strings.Contains(persona.Native.Browser.UserAgent, "Windows NT") {
+			t.Fatalf("BrowseForge's native UA contract lost the selected platform: %q", persona.Native.Browser.UserAgent)
+		}
+		if runtimeID == bfruntime.CloakBrowser && persona.Native.Browser.UserAgent != "" {
+			t.Fatalf("Cloak's UA must remain owned by its actual engine: %q", persona.Native.Browser.UserAgent)
 		}
 	}
 }

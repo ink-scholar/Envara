@@ -14,30 +14,49 @@ function safeFailure(value) {
     !(native.stage === 'register' ? registerReasons : operationReasons).has(native.reason) || !Number.isInteger(native.error) || native.error < 1 || native.error > 1024)) return null;
   return { stage: value.stage, code: value.code, ...(native ? { native: { stage: native.stage, reason: native.reason, error: native.error } } : {}) };
 }
+// Failure history and timings must belong to the same verified run and environment.
+function matchesDiagnostic(diagnostic, value) {
+  return diagnostic?.schema === 'envara.macos-pf-notion-response-diagnostic/v1' && diagnostic.source === 'verified-authorizer-session-client' &&
+    diagnostic.diagnosticOnly === true && diagnostic.runId === value.runId && diagnostic.environmentId === value.environmentId;
+}
 function cachedFailure(value, key) {
   const explicit = safeFailure(value[key]); if (explicit) return explicit;
   if (key !== 'initialFailure') return null;
   for (const diagnostic of [value.applicationSnapshotDiagnostic, value.sessionDiagnostics?.lastApplicationSnapshot, value.sessionDiagnostics?.lastLatePrepare]) {
-    /* The snapshot validator in the session client does not depend on a profile
-     * field, so history written by either profile is usable here. */
-    if (diagnostic?.schema !== 'envara.macos-pf-notion-response-diagnostic/v1' || diagnostic.source !== 'verified-authorizer-session-client' ||
-      diagnostic.diagnosticOnly !== true || diagnostic.runId !== value.runId || diagnostic.environmentId !== value.environmentId) continue;
+    if (!matchesDiagnostic(diagnostic, value)) continue;
     const failure = safeFailure(diagnostic.initialFailure ?? diagnostic.failure); if (failure) return failure;
   }
   return null;
+}
+
+/* Diagnostic-only native launch step timing carried by the verified snapshot
+ * diagnostic. Fixed step names and bounded integers only; never a status. */
+const timingSteps = new Set(['front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'ticket-claim', 'stage-fresh',
+  'data-prepare', 'stage-plan', 'stage-recheck', 'stage-spawn', 'stage-stopped', 'stage-adopt', 'resume-verify']);
+const timingMs = value => Number.isSafeInteger(value) && value >= 0 && value <= 86400000;
+function nativeTimings(value) {
+  for (const diagnostic of [value.applicationSnapshotDiagnostic, value.sessionDiagnostics?.lastApplicationSnapshot]) {
+    if (!matchesDiagnostic(diagnostic, value) || !Array.isArray(diagnostic.nativeStageTimings) || diagnostic.nativeStageTimings.length > 16) continue;
+    const rows = diagnostic.nativeStageTimings.filter(item => exact(item, ['step', 'stepMs', 'totalMs', 'fullChecks', 'identityChecks', 'receivedMs']) &&
+      timingSteps.has(item.step) && timingMs(item.stepMs) && timingMs(item.totalMs) && timingMs(item.receivedMs) && item.stepMs <= item.totalMs &&
+      [item.fullChecks, item.identityChecks].every(count => Number.isSafeInteger(count) && count >= 0 && count <= 65535));
+    if (rows.length === diagnostic.nativeStageTimings.length && rows.length) return rows.map(item => ({ ...item }));
+  }
+  return [];
 }
 
 export function safeNotionTrial(application) {
   const value = application?.notionTrial;
   if (!value || value.applicationId !== application.id || !phases.has(value.phase)) return null;
   return { applicationId: application.id, active: value.active === true, phase: value.phase,
+    cleanupRetryable: value.cleanupRetryable === true && value.cleanupUncertain === true && value.phase === 'cleanup-required',
     cleanupComplete: value.cleanupComplete === true, cleanupUncertain: value.cleanupUncertain === true, errorCode: codes.has(value.errorCode) ? value.errorCode : null, initialFailure: cachedFailure(value, 'initialFailure'), cleanupFailure: cachedFailure(value, 'cleanupFailure'),
     events: Array.isArray(value.events) ? value.events.slice(-24).flatMap(event => {
       if (!event || !Number.isSafeInteger(event.sequence) || event.sequence < 0 || !failureStages.has(event.stage)) return [];
       return [{ sequence: event.sequence, stage: token(event.stage), code: codes.has(event.code) ? event.code : null, nativeStage: nativeStages.has(event.nativeStage) ? event.nativeStage : null,
         nativeReason: (event.nativeStage === 'register' ? registerReasons : operationReasons).has(event.nativeReason) ? event.nativeReason : null,
         errno: Number.isSafeInteger(event.errno) && event.errno > 0 && event.errno <= 1024 ? event.errno : null }];
-    }) : [] };
+    }) : [], nativeTimings: nativeTimings(value) };
 }
 
 export function safeNotionTrialHistory(application) {
@@ -65,7 +84,7 @@ export function notionTrialControls(application, routing, desktop, pending = {})
   return { available, trial, history, requestPending, stopPending, active: trial?.active === true || requestPending,
     show: canonical && (available || !!trial && (trial.phase !== 'idle' || trial.events.length > 0 || !!trial.errorCode) || !!history),
     canRun: available && !requestPending && !stopPending && trial?.active !== true && trial?.cleanupUncertain !== true,
-    canStop: canonical && trial?.active === true && !stopPending && trial.phase !== 'stopping' };
+    canStop: canonical && (trial?.active === true || trial?.cleanupRetryable === true) && !stopPending && trial.phase !== 'stopping' };
 }
 
 /* The row status of an application started inside its environment. It shows
@@ -82,6 +101,10 @@ export function attachedApplicationStatus(controlled) {
 
 export function notionTrialLogLine(event) {
   return [`${event.sequence}. ${event.stage}`, event.code, event.nativeStage, event.nativeReason, event.errno != null ? `errno=${event.errno}` : null].filter(Boolean).join(' · ');
+}
+
+export function notionTrialTimingLine(item) {
+  return [item.step, `${item.stepMs} ms`, `Σ ${item.totalMs} ms`, `fullChecks=${item.fullChecks}`, `identityChecks=${item.identityChecks}`].join(' · ');
 }
 
 export function notionTrialLocksConfiguration(application, pending = {}) {

@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { chmod, copyFile, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { compileClaudeFixture } from './claude-native-fixture.mjs';
 import { ensureClaudeInstallation, resolveClaudeInstallation } from '../electron/claude-code-installation.mjs';
@@ -125,6 +127,40 @@ test('cleanup refuses a replaced runtime and preserves the replacement target', 
   await symlink(elsewhere, runtime);
   await assert.rejects(launch.cleanup(), { code: 'CLAUDE_CODE_UNSAFE_PATH' });
   assert.equal(await readFile(path.join(elsewhere, 'keep'), 'utf8'), 'keep');
+});
+
+test('a preparation failure retains its first error and private retryable cleanup', async t => {
+  const f = await fixture(t), runtime = path.join(f.temp, 'claude-term_one');
+  const primary = Object.assign(new Error('fixture disk write failed'), { code: 'ENOSPC' });
+  const originalWrite = fsPromises.writeFile, originalRemove = fsPromises.rm;
+  let refuseCleanup = true, observed;
+  t.mock.method(fsPromises, 'writeFile', async (filename, ...args) => {
+    if (filename === path.join(runtime, 'mcp.json')) throw primary;
+    return originalWrite(filename, ...args);
+  });
+  t.mock.method(fsPromises, 'rm', async (filename, ...args) => {
+    if (filename === runtime && refuseCleanup) throw Object.assign(new Error('fixture private cleanup path'), { code: 'EACCES' });
+    return originalRemove(filename, ...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(prepareClaudeSession(f.request), error => {
+      observed = error;
+      assert.equal(error, primary);
+      assert.equal(error.code, 'ENOSPC');
+      assert.equal(error.message, 'fixture disk write failed');
+      assert.equal(error.cleanupError, 'Claude 会话临时文件清理未完成，请重试关闭会话。');
+      assert.equal(typeof error.claudeCleanup, 'function');
+      assert.equal(Object.getOwnPropertyDescriptor(error, 'claudeCleanup').enumerable, false);
+      assert.equal(JSON.stringify(error).includes('fixture private cleanup path'), false);
+      return true;
+    });
+    assert.ok((await lstat(runtime)).isDirectory());
+    await assert.rejects(observed.claudeCleanup(), { code: 'EACCES' });
+    refuseCleanup = false;
+    await observed.claudeCleanup(); await observed.claudeCleanup();
+    await assert.rejects(lstat(runtime), { code: 'ENOENT' });
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
 });
 
 test('session policy scopes official opt-outs to each privacy mode without changing caller environment', async t => {

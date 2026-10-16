@@ -2,10 +2,12 @@ import React, { useEffect, useState } from "react";
 import { SYSTEM_BROWSER, linkBrowserChoice } from "./link-browser.mjs";
 import { localeForInterfaceLanguage } from "../shared/interface-languages.mjs";
 import { savedNetworkPresentation } from "./network-flow-state.mjs";
-import { notionTrialControls, notionTrialLogLine, notionTrialFailureLine, notionTrialErrorHint, attachedApplicationStatus, safeNotionTrial } from "./notion-trial-state.mjs";
-import { Stack, GlobeHemisphereWest, FolderOpen, Plus, Play, Stop, Trash, Desktop, ShieldCheck, WarningCircle, ArrowRight, PencilSimple, Browsers, TerminalWindow, Clock, Info, ArrowSquareOut, CaretRight } from "@phosphor-icons/react";
+import { notionTrialControls, notionTrialLogLine, notionTrialTimingLine, notionTrialFailureLine, notionTrialErrorHint, attachedApplicationStatus, safeNotionTrial } from "./notion-trial-state.mjs";
+import { Stack, GlobeHemisphereWest, FolderOpen, Plus, Play, Stop, Trash, Desktop, ShieldCheck, WarningCircle, ArrowRight, PencilSimple, Browsers, TerminalWindow, Clock, Info, ArrowSquareOut, CaretRight, DownloadSimple } from "@phosphor-icons/react";
 import { ApplicationIcon } from "./ApplicationIcon.jsx";
+import { supportsAttachedApplication, canDeleteApplicationData } from "./application-capability.mjs";
 const live = new Set(["starting", "running", "stopping"]);
+const networkLocation = network => [network?.country || network?.countryCode, network?.city].filter(Boolean).join(" · ");
 function WorkspaceEmpty({
   icon: Icon = Stack,
   title,
@@ -45,8 +47,8 @@ export function EnvironmentOverview({
     {profiles.map(profile => {
       const proxy = proxies.find(item => item.id === profile.proxyId);
       const presentation = savedNetworkPresentation(profile, proxy);
-      const network = presentation.failed ? null : profile.network?.ok ? profile.network : proxy?.network?.ok ? proxy.network : null;
-      const location = proxy?.location?.confirmed ? proxy.location.label : [network?.country || network?.countryCode, network?.city].filter(Boolean).join(" · ");
+      const { network } = presentation;
+      const location = proxy?.location?.confirmed ? proxy.location.label : networkLocation(network);
       return <div className={`profile-row common-profile-grid ${selectedId === profile.id ? "selected" : ""}`} key={profile.id} onClick={() => onSelect(profile.id)}>
         <input className="row-checkbox" type="checkbox" checked={checkedIds.includes(profile.id)} aria-label={t("选择 {name}", {
           name: profile.name
@@ -72,20 +74,20 @@ export function ContextDetail({
   directoryDisabled,
   onNavigate,
   onClone,
-  onExport,
   onDelete,
   editingDisabled,
   t
 }) {
   if (!profile) return <div className="detail-empty"><Stack size={32} /><h2>{t("环境详情")}</h2><p>{t("选择一个环境")}</p></div>;
   const presentation = savedNetworkPresentation(profile, proxy);
-  const network = presentation.failed ? null : profile.network?.ok ? profile.network : proxy?.network?.ok ? proxy.network : null;
+  const { network } = presentation;
+  const location = networkLocation(network);
   return <>
     <div className="detail-heading"><h2>{profile.name}</h2><p>{profile.group || proxy?.name || t("本机网络")}</p></div>
-    <div className="context-network-card"><div className="context-card-icon"><GlobeHemisphereWest size={23} /></div><strong>{proxy?.name || t("本机网络")}</strong><span>{network?.ip || t("出口待识别")}</span>{network && <small>{[network.country || network.countryCode, network.city].filter(Boolean).join(" · ")}</small>}</div>
+    <div className="context-network-card"><div className="context-card-icon"><GlobeHemisphereWest size={23} /></div><strong>{proxy?.name || t("本机网络")}</strong><span>{network?.ip || t("出口待识别")}</span>{network && <small>{location}</small>}</div>
     <dl className="detail-properties compact-context-properties">
       <div><dt>{t("时区")}</dt><dd>{presentation.timezone || network?.timezone || t("启动时自动匹配")}{presentation.savedOnly && <small>{t("已保存配置")}</small>}</dd></div>
-      <div><dt>{t("定位")}</dt><dd>{proxy?.location?.confirmed ? <>{proxy.location.label || t("跟随网络出口")}<small>{t(proxy.location.mode === "ip" ? "IP 推荐位置" : "手动选择位置")}</small></> : network ? [network.country || network.countryCode, network.city].filter(Boolean).join(" · ") || t("待识别") : t("跟随网络出口")}</dd></div>
+      <div><dt>{t("定位")}</dt><dd>{proxy?.location?.confirmed ? <>{proxy.location.label || t("跟随网络出口")}<small>{t(proxy.location.mode === "ip" ? "IP 推荐位置" : "手动选择位置")}</small></> : network ? location || t("待识别") : t("跟随网络出口")}</dd></div>
       <div><dt>{t("语言")}</dt><dd>{profile.locale || t("跟随网络出口")}</dd></div>
       <div><dt>{t("隐私防护")}</dt><dd>{t({
             standard: "标准",
@@ -97,13 +99,13 @@ export function ContextDetail({
     <div className="context-launches">
       {[["browsers", "浏览器"], ["terminals", "终端"], ["applications", "附加软件"]].map(([page, label]) => <button key={page} onClick={() => onNavigate(page)}><span>{t(label)}</span><ArrowRight size={16} /></button>)}
     </div>
-    <div className="detail-actions"><button className="button" disabled={editingDisabled} onClick={onEdit}>{t("编辑")}</button><button className="button" onClick={onClone}>{t("克隆")}</button><button className="button" onClick={onExport}>{t("导出")}</button></div>
+    <div className="detail-actions"><button className="button" disabled={editingDisabled} onClick={onEdit}>{t("编辑")}</button><button className="button" onClick={onClone}>{t("克隆")}</button></div>
     <div className="danger-actions"><button disabled={editingDisabled} onClick={onDelete}>{t("删除环境…")}</button></div>
   </>;
 }
-/* Sign-in data on disk, one row per environment and application. A row of a
- * running application cannot be deleted; everything else can, on its own. */
-function SignInData({ items, totalBytes, pending, onReload, onDelete, formatBytes, t }) {
+/* Only a real environment-owned data directory is removable. A saved binding
+ * alone does not prove that the application has isolated data. */
+export function ApplicationDataPanel({ items, totalBytes, pending, onReload, onDelete, formatBytes, t }) {
   const loaded = Array.isArray(items);
   const row = item => {
     const name = item.application?.name || t("已移除的软件");
@@ -111,18 +113,18 @@ function SignInData({ items, totalBytes, pending, onReload, onDelete, formatByte
       {item.application?.path ? <ApplicationIcon path={item.application.path} size={34} /> : <span className="application-icon"><Desktop size={19} /></span>}
       <div className="sign-in-copy"><strong title={item.application?.path || ""}>{name}</strong>
         <span>{item.environment?.name || t("已删除的境舱")}</span></div>
-      <span className="sign-in-size">{item.bytes > 0 ? formatBytes(item.bytes) : t("没有登录数据")}</span>
+      <span className="sign-in-size">{item.dataScope !== "environment" || item.hasDataDirectory !== true ? t("未生成应用数据") : item.bytes > 0 ? formatBytes(item.bytes) : t("没有应用数据")}</span>
       {item.running ? <span className="sign-in-lock">{t("停止后可删除")}</span>
-        : <button className="icon-button" disabled={pending["deleteSignInData:" + item.id]} onClick={() => onDelete(item)} aria-label={t("删除")} title={t("删除")}><Trash size={16} /></button>}
+        : canDeleteApplicationData(item) && <button className="icon-button" disabled={pending["deleteSignInData:" + item.id]} onClick={() => onDelete(item)} aria-label={t("删除")} title={t("删除")}><Trash size={16} /></button>}
     </div>;
   };
   return <div className="sign-in-data">
-    <div className="sign-in-head"><span>{t("这里保存每个软件的登录状态，停止或移除软件都不会删除。")}</span>
+    <div className="sign-in-head"><span>{t("境舱内的软件登录、设置与本地内容。停止或移除软件不会删除。")}</span>
       {loaded && <span className="sign-in-total">{t("共 {value1}", { value1: formatBytes(totalBytes) })}</span>}
       <button className="button" onClick={onReload} disabled={pending["signInData:"]}>{t(pending["signInData:"] ? "检查中…" : "刷新")}</button></div>
     {!loaded ? <div className="table-loading">{t("正在读取…")}</div>
       : items.length ? <div className="sign-in-list">{items.map(row)}</div>
-        : <WorkspaceEmpty icon={Desktop} title="没有登录数据" t={t} />}
+        : <WorkspaceEmpty icon={Desktop} title="没有应用数据" t={t} />}
   </div>;
 }
 export function ApplicationsWorkspace({
@@ -130,6 +132,7 @@ export function ApplicationsWorkspace({
   proxies,
   applications = [],
   routing,
+  systemPlatform,
   selectedId,
   onSelect,
   onPick,
@@ -139,6 +142,7 @@ export function ApplicationsWorkspace({
   onStopNotionTrial,
   onShowApplicationWindow,
   onExportNotionDiagnostics,
+  onExport,
   onCheckSignInData,
   onDeleteSignInData,
   onChooseLinkBrowser,
@@ -170,8 +174,6 @@ export function ApplicationsWorkspace({
    * is why the upgrade button keys off that error rather than installed. */
   const staleComponent = desktop && routing?.backend === "pf-utun" && routing?.controlledNotionTrialErrorCode === "PF_INSTALLED_CANDIDATE_MISMATCH";
   const canUpgrade = staleComponent && routing?.component?.available === true && routing?.component?.verified === true;
-  /* The in-environment start works while full routing acceptance is still
-   * pending, so the readiness strip says exactly that instead of "cannot start". */
   const startable = desktop && routing?.controlledNotionTrialAvailable === true;
   return <div className="applications-workspace">
     <div className="application-context-strip">
@@ -182,8 +184,8 @@ export function ApplicationsWorkspace({
     {/* While software can start there is nothing to say here. Only a state that
        * stops it from starting is shown, with the action that resolves it. */}
     {!ready && !startable && <div className="routing-readiness" role="status"><ShieldCheck size={17} /><strong>{t(!desktop ? "本地软件需要桌面应用" : routing?.status === "prepared" ? "网络组件已准备" : routing?.status === "authorization-required" ? "需要系统授权" : "网络接管尚未就绪")}</strong><span>{t(routing?.message || "完成系统网络组件安装后，才能启动附加软件。")}</span>{canUpgrade && <button className="button primary" title={t("已安装的网络组件早于当前应用版本，需要更新后才能附加软件。")} onClick={onInstall} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "更新中…" : "更新网络组件")}</button>}{canInstall && <button className="button" onClick={onInstall} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "安装中…" : "安装网络组件")}</button>}</div>}
-    <div className="workspace-segments"><button className={tab === "environment" ? "selected" : ""} onClick={() => setTab("environment")}>{t("当前境舱")}</button><button className={tab === "all" ? "selected" : ""} onClick={() => setTab("all")}>{t("全部软件")}<span>{applications.length}</span></button>{desktop && typeof onCheckSignInData === "function" && <button className={tab === "signInData" ? "selected" : ""} onClick={() => setTab("signInData")}>{t("登录数据")}</button>}</div>
-    {tab === "signInData" ? <SignInData items={data?.items} totalBytes={data?.totalBytes ?? 0} pending={pending} formatBytes={formatBytes} t={t}
+    <div className="workspace-segments"><button className={tab === "environment" ? "selected" : ""} onClick={() => setTab("environment")}>{t("当前境舱")}</button><button className={tab === "all" ? "selected" : ""} onClick={() => setTab("all")}>{t("全部软件")}<span>{applications.length}</span></button>{desktop && typeof onCheckSignInData === "function" && <button className={tab === "signInData" ? "selected" : ""} onClick={() => setTab("signInData")}>{t("应用数据")}</button>}</div>
+    {tab === "signInData" ? <ApplicationDataPanel items={data?.items} totalBytes={data?.totalBytes ?? 0} pending={pending} formatBytes={formatBytes} t={t}
       onReload={async () => { const result = await onCheckSignInData(); if (result?.ok) setData(result.result); }}
       onDelete={item => onDeleteSignInData(item, async () => { const result = await onCheckSignInData(); if (result?.ok) setData(result.result); })} />
       : rows.length ? <div className="application-list">{rows.map(application => {
@@ -201,6 +203,9 @@ export function ApplicationsWorkspace({
         const inEnvironment = controlled.show;
         const rowStatus = inEnvironment ? attachedApplicationStatus(controlled) : application.status;
         const rowLive = inEnvironment ? live.has(rowStatus) : active;
+        const cleanupRetryable = inEnvironment && controlled.trial?.cleanupRetryable === true;
+        const rowStoppable = rowLive || cleanupRetryable;
+        const supported = supportsAttachedApplication(application, systemPlatform);
         // Only a start that did not complete explains itself; a running row needs no text.
         const issue = inEnvironment && !rowLive && Boolean(controlled.trial?.errorCode || diagnostics?.initialFailure || diagnostics?.cleanupFailure);
         return <div className={`application-row${issue ? " has-issue" : ""}`} key={application.id}>
@@ -210,6 +215,7 @@ export function ApplicationsWorkspace({
               : <ApplicationIcon path={application.path} />}
             <div className="application-copy"><strong title={application.path}>{application.name}</strong><span>{owner ? [owner.name, ownerNetwork?.name || t("本机网络")].join(" · ") : t("环境不可用")}</span>
               {inEnvironment && <button type="button" className="link-browser-chip" onClick={() => onChooseLinkBrowser(application)} title={t("此软件的链接")} disabled={pending[`setApplicationLinkBrowser:${application.id}`]}><Browsers size={13} /><strong>{(() => { const candidates = linkCandidates(application), value = linkBrowserChoice(candidates, application.browserProfileId); return value === SYSTEM_BROWSER ? t("系统默认浏览器") : candidates.find(item => item.id === value)?.name || t("系统默认浏览器"); })()}</strong><CaretRight size={11} /></button>}
+              {!supported && !rowLive && <span className="application-compatibility-hint" role="status">{t("暂不支持此软件的网络隔离")}</span>}
               {application.lastError && <p className="application-error"><WarningCircle size={14} />{t(typeof application.lastError === "string" ? application.lastError : application.lastError.message)}</p>}
               {capabilityError && <p className="notion-trial-error" role="status">{t("错误码")} · <code>{capabilityError}</code></p>}
             </div>
@@ -220,7 +226,7 @@ export function ApplicationsWorkspace({
               stopping: "停止中",
               error: "异常"
             }[rowStatus] || rowStatus)}</span>
-            <div className="application-actions">{inEnvironment && rowStatus === "running" && typeof onShowApplicationWindow === "function" && <button className="icon-button" disabled={pending[`showApplicationWindow:${application.id}`]} onClick={() => onShowApplicationWindow(application)} aria-label={t("打开窗口")} title={t("打开窗口")}><ArrowSquareOut size={17} /></button>}<button className={`button ${rowLive ? "" : "primary"}`} disabled={inEnvironment ? (rowLive ? !controlled.canStop : !owner || !controlled.canRun) : busy || (active ? application.status !== "running" : !ready || !owner)} onClick={() => inEnvironment ? (rowLive ? onStopNotionTrial(application) : onRunNotionTrial(application)) : active ? onStop(application) : onStart(application)}>{rowLive ? <Stop size={15} /> : <Play size={15} />}{t(rowLive ? "停止" : "启动")}</button><button className="icon-button" disabled={active || busy || controlled.trial?.cleanupUncertain === true} onClick={() => onDelete(application)} aria-label={t("移除软件")} title={t("移除软件")}><Trash size={17} /></button></div>
+            <div className="application-actions">{inEnvironment && rowStatus === "running" && typeof onShowApplicationWindow === "function" && <button className="icon-button" disabled={pending[`showApplicationWindow:${application.id}`]} onClick={() => onShowApplicationWindow(application)} aria-label={t("打开窗口")} title={t("打开窗口")}><ArrowSquareOut size={17} /></button>}<button className={`button ${rowStoppable ? "" : "primary"}`} disabled={!rowStoppable && !supported || (inEnvironment ? (rowStoppable ? !controlled.canStop : !owner || !controlled.canRun) : busy || (active ? application.status !== "running" : !ready || !owner))} onClick={() => inEnvironment ? (rowStoppable ? onStopNotionTrial(application) : onRunNotionTrial(application)) : active ? onStop(application) : onStart(application)}>{rowStoppable ? <Stop size={15} /> : <Play size={15} />}{t(cleanupRetryable ? "重试清理" : rowLive ? "停止" : "启动")}</button>{typeof onExport === "function" && <button className="icon-button" disabled={!desktop || !owner || rowLive || busy || controlled.trial?.cleanupUncertain === true} onClick={() => onExport(application)} aria-label={t("导出软件")} title={t("导出软件")}><DownloadSimple size={17} /></button>}<button className="icon-button" disabled={active || busy || controlled.trial?.cleanupUncertain === true} onClick={() => onDelete(application)} aria-label={t("移除软件")} title={t("移除软件")}><Trash size={17} /></button></div>
           </div>
           {issue && <div className="application-issue" role="status">
             <div className="application-issue-head"><WarningCircle size={15} /><strong>{t(controlled.trial?.phase === "cleanup-required" ? "清理未确认" : historicalDiagnostics ? "上次附加" : "上次启动未完成")}</strong>{controlled.trial?.errorCode && <code>{controlled.trial.errorCode}</code>}</div>
@@ -228,17 +234,18 @@ export function ApplicationsWorkspace({
             {trialHint && <p className="application-issue-hint">{t(trialHint)}</p>}
             {diagnostics?.cleanupFailure && <p><span>{t("清理错误")} · </span><code>{notionTrialFailureLine(diagnostics.cleanupFailure)}</code></p>}
             {(diagnostics?.events.length > 0 || typeof onExportNotionDiagnostics === "function") && <div className="application-issue-actions">
-              {diagnostics?.events.length > 0 && <details className="notion-trial-log"><summary>{t("查看日志")}</summary><div>{diagnostics.events.map((event, index) => <code key={`${event.sequence}-${index}`}>{notionTrialLogLine(event)}</code>)}</div></details>}
+              {(diagnostics?.events.length > 0 || diagnostics?.nativeTimings?.length > 0) && <details className="notion-trial-log"><summary>{t("查看日志")}</summary><div>{diagnostics.events.map((event, index) => <code key={`${event.sequence}-${index}`}>{notionTrialLogLine(event)}</code>)}{(diagnostics.nativeTimings ?? []).map((item, index) => <code key={`timing-${index}`}>{notionTrialTimingLine(item)}</code>)}</div></details>}
               {(diagnostics?.events.length > 0 || diagnostics?.initialFailure) && typeof onExportNotionDiagnostics === "function" && <button className="button" disabled={pending[`exportNotionDiagnostics:${application.id}`]} onClick={() => onExportNotionDiagnostics(application)}>{t("导出诊断")}</button>}
             </div>}
           </div>}
         </div>;
       })}</div> : <WorkspaceEmpty icon={Desktop} title={profile ? "添加软件到这个境舱" : "先创建网络环境"} action={desktop ? "添加软件" : undefined} onAction={onPick} t={t} />}
     {tab !== "signInData" && startable && rows.length > 0 && <details className="application-notes">
-      <summary><Info size={14} /><span>{t("运行方式与登录数据")}</span></summary>
+      <summary><Info size={14} /><span>{t("运行方式与应用数据")}</span></summary>
       <ul>{["附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。",
         "关闭窗口不会退出软件，点「打开窗口」或程序坞图标即可重新打开。",
-        "再次启动会沿用这个境舱的登录数据；它保存在「登录数据」里，停止和移除软件都不会删除。"].map(text => <li key={text}><span>{t(text)}</span></li>)}</ul>
+        "再次启动会沿用此境舱的应用数据；停止和移除软件都不会删除。",
+        "独立数据目录不等于系统沙箱；软件的硬件信息、系统定位与钥匙串不会被替换。"].map(text => <li key={text}><span>{t(text)}</span></li>)}</ul>
     </details>}
   </div>;
 }

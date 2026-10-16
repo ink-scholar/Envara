@@ -1,8 +1,10 @@
 # macOS PF native primitives
 
-This is an implementation branch for per-environment PF group routing. It
-does not require a Network Extension entitlement. It is not yet an accepted
-attached-application adapter. `ready` and `protected` remain false.
+This directory implements per-environment PF group routing without a Network
+Extension entitlement. This document describes the low-level primitives; the
+[application adapter contract](gui-contract.md) and
+[installation contract](INSTALLATION_CONTRACT.md) define their integration.
+Generic `ready` and `protected` claims remain false without native acceptance.
 
 `make test` builds with the local Apple SDK and runs only unprivileged fixtures.
 It does not use sudo, install a helper, create groups or a utun, load PF rules,

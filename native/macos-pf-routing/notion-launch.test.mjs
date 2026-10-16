@@ -14,7 +14,8 @@ import { fileURLToPath } from 'node:url';
 // production profile so Seatbelt inheritance can be exercised without a broker.
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const profile = '(version 1)(allow default)'
-  + '(deny mach-lookup (global-name "com.apple.dnssd.service"))'
+  + '(deny mach-lookup (global-name "com.apple.dnssd.service")'
+  + ' (global-name "com.apple.nsurlsessiond") (global-name "com.apple.nsurlsessiond-launchondemand"))'
   + '(deny file-read* file-write* (literal "/private/var/run/mDNSResponder")'
   + ' (literal "/var/run/mDNSResponder") (literal "/private/var/tmp/mDNSResponder") (literal "/var/tmp/mDNSResponder"))'
   + '(deny network-outbound (remote unix-socket (literal "/private/var/run/mDNSResponder"))'
@@ -89,12 +90,121 @@ test('Notion launch preparation refuses fixtures and preserves process-local Sea
       { encoding: 'utf8', timeout: 60_000 });
       assert.equal(compile.status, 0, compile.stderr);
 
-      await t.test('the actual native version predicate accepts only the two exact Electron-compatible versions', async () => {
-        const report = JSON.parse(await run(executable, ['versions']));
-        for (const key of ['ok', 'bothExactVersionsAccepted', 'otherVersionsRefused', 'electronPairRequired']) assert.equal(report[key], true, key);
+      await t.test('scoped paths, launch flags and UTF-8 environment preserve UserData and isolate every environment', async () => {
+        const environment = '00000000-0000-4000-8000-000000000204', registration = '00000000-0000-4000-8000-000000000201';
+        const context = JSON.parse(await run(executable, ['context', environment, registration, 'zh-CN']));
+        inactive(context); assert.equal(context.allocationVerified, false);
+        const root = `/Library/PrivilegedHelperTools/io.envara.pf-app-data/${environment}/${registration}`;
+        for (const name of ['UserData', 'Home', 'Cache', 'Temp', 'Extensions']) assert.equal(context[name], `${root}/${name}`);
+        assert.equal(context.SharedData, `${root}/Home/.vscode-shared`);
+        // VS Code binds its main socket inside --user-data-dir and IPC pipes in TMPDIR; macOS limits socket paths to
+        // 103 characters, which the scoped paths exceed. Both use short root-owned aliases of the same directories.
+        assert.match(context.UserDataAlias, /^\/Library\/PrivilegedHelperTools\/io\.envara\.pf-s\/[0-9a-f]{16}u$/);
+        assert.equal(context.TempAlias, context.UserDataAlias.slice(0, -1) + 't');
+        assert.ok(`${context.UserData}/1.14-main.sock`.length > 103, 'the scoped path alone is too long for a socket');
+        assert.ok(`${context.UserDataAlias}/1.14-main.sock`.length < 103);
+        assert.ok(103 - 1 - `${context.TempAlias}/vscode-ipc-.sock`.length >= 16, 'VS Code keeps at least 16 random pipe characters');
+        assert.ok(`${context.TempAlias}/scoped_dirXXXXXX/SingletonSocket`.length < 104, 'Chromium singleton socket fits');
+        for (const flag of [`--user-data-dir=${context.UserDataAlias}`, `--extensions-dir=${context.Extensions}`,
+          `--shared-data-dir=${context.SharedData}`, `--disk-cache-dir=${context.Cache}`, '--no-sandbox',
+          '--proxy-bypass-list=<-loopback>', '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1']) assert.ok(context.arguments.includes(flag), flag);
+        assert.ok(context.posixLocale.endsWith('.UTF-8'));
+        assert.ok(context.environment.includes(`HOME=${context.Home}`));
+        assert.ok(context.environment.includes(`TMPDIR=${context.TempAlias}/`));
+        assert.ok(!context.arguments.includes(`--user-data-dir=${context.UserData}`));
+        for (const key of ['LANG', 'LC_CTYPE', 'LC_ALL']) assert.ok(context.environment.includes(`${key}=${context.posixLocale}`));
+        assert.ok(!context.environment.some(item => /^(VSCODE_|HTTP_PROXY=|HTTPS_PROXY=|ALL_PROXY=|DYLD_)/.test(item)));
+        const second = JSON.parse(await run(executable, ['context', '00000000-0000-4000-8000-000000000205', registration, 'unknown-ZZ']));
+        for (const name of ['UserData', 'Home', 'Cache', 'Temp', 'Extensions', 'UserDataAlias', 'TempAlias']) assert.notEqual(second[name], context[name]);
+        const again = JSON.parse(await run(executable, ['context', environment, registration, 'zh-CN']));
+        assert.equal(again.UserDataAlias, context.UserDataAlias, 'an alias name is stable for one environment and application');
+        assert.equal(second.posixLocale, 'en_US.UTF-8'); assert.equal(second.localeFallback, true);
+      });
+
+      await t.test('engine capability follows framework metadata and defined Mach-O entry points, not application names', async () => {
+        let sequence = 0;
+        const build = async ({ chromium = false, product = false, version, principal, frameworkId, symbol, extraFramework = false } = {}) => {
+          const bundle = path.join(temporary, `Engine ${++sequence}.app`);
+          const identifier = product ? 'com.microsoft.VSCode' : `org.envara.fixture.engine${sequence}`;
+          const framework = chromium ? 'Owned Chromium Framework' : 'Electron Framework';
+          const frameworkRoot = path.join(bundle, 'Contents', 'Frameworks', `${framework}.framework`);
+          mkdirSync(path.join(bundle, 'Contents', 'MacOS'), { recursive: true });
+          mkdirSync(path.join(frameworkRoot, 'Resources'), { recursive: true });
+          copyFileSync(executable, path.join(bundle, 'Contents', 'MacOS', 'Completely Unrelated Name'));
+          const plist = fields => '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+            + Object.entries(fields).map(([key,value]) => `<key>${key}</key><string>${value}</string>`).join('') + '</dict></plist>';
+          writeFileSync(path.join(bundle, 'Contents', 'Info.plist'), plist({ CFBundlePackageType: 'APPL', CFBundleIdentifier: identifier,
+            CFBundleExecutable: 'Completely Unrelated Name', NSPrincipalClass: principal ?? (chromium ? 'BrowserCrApplication' : 'AtomApplication'), CFBundleShortVersionString: '99.99.99' }));
+          writeFileSync(path.join(frameworkRoot, 'Resources', 'Info.plist'), plist({ CFBundlePackageType: 'FMWK',
+            CFBundleIdentifier: frameworkId ?? (chromium ? `${identifier}.framework` : 'com.github.Electron.framework'),
+            CFBundleExecutable: framework, CFBundleVersion: version ?? (chromium ? '155.0.1.2' : '44.1.2') }));
+          const compile = spawnSync('xcrun', ['clang', '-dynamiclib', '-x', 'c', '-', '-o', path.join(frameworkRoot, framework)],
+            { input: `__attribute__((visibility("default"))) int ${symbol ?? (chromium ? 'ChromeMain' : 'ElectronMain')}(void) { return 0; }`, encoding: 'utf8', timeout: 15_000 });
+          assert.equal(compile.status, 0, compile.stderr);
+          if (product) {
+            mkdirSync(path.join(bundle, 'Contents', 'Resources', 'app'), { recursive: true });
+            writeFileSync(path.join(bundle, 'Contents', 'Resources', 'app', 'product.json'), JSON.stringify({
+              darwinBundleIdentifier: identifier, applicationName: 'code', quality: 'stable' }));
+          }
+          if (extraFramework) {
+            const other = path.join(bundle, 'Contents', 'Frameworks', 'Other Framework.framework');
+            mkdirSync(path.join(other, 'Resources'), { recursive: true });
+            copyFileSync(path.join(frameworkRoot, framework), path.join(other, 'Other Framework'));
+            writeFileSync(path.join(other, 'Resources', 'Info.plist'), plist({ CFBundlePackageType: 'FMWK', CFBundleIdentifier: `${identifier}.framework`, CFBundleExecutable: 'Other Framework', CFBundleVersion: '155.0.1.2' }));
+          }
+          return bundle;
+        };
+        for (const [options, expected] of [[{},1], [{ chromium: true },2], [{ product: true },3],
+          [{ principal: 'NSApplication' },0], [{ frameworkId: 'org.fake.framework' },0], [{ version: '43.6.0-suffix' },0],
+          [{ version: '43' },0], [{ symbol: 'PretendMain' },0], [{ chromium: true, extraFramework: true },0]]) {
+          const bundle = await build(options), before = tree(bundle);
+          const report = JSON.parse(await run(executable, ['metadata', bundle]));
+          assert.equal(report.engine, expected, JSON.stringify(options)); assert.equal(report.fixtureManifestRefused, true);
+          assert.equal(report.metadataOnly, true); assert.equal(report.signedCapabilityVerified, false); inactive(report);
+          assert.deepEqual(tree(bundle), before);
+        }
+        for (const corruption of ['fat-count', 'load-count', 'truncated']) {
+          const bundle = await build(); const library = path.join(bundle, 'Contents/Frameworks/Electron Framework.framework/Electron Framework');
+          let bytes = readFileSync(library);
+          if (corruption === 'fat-count') { bytes.writeUInt32BE(0xcafebabe, 0); bytes.writeUInt32BE(0xffffffff, 4); }
+          else if (corruption === 'load-count') bytes.writeUInt32LE(0xffffffff, 16);
+          else bytes = bytes.subarray(0, 5);
+          writeFileSync(library, bytes);
+          assert.equal(JSON.parse(await run(executable, ['metadata', bundle])).engine, 0, corruption);
+        }
+      });
+
+      await t.test('native validation scope re-proves identity, refuses mutations including restored times, and does not cross end, thread or fork boundaries', async () => {
+        const bundle = path.join(temporary, 'Scope Fixture.app');
+        mkdirSync(path.join(bundle, 'Contents', 'MacOS'), { recursive: true });
+        mkdirSync(path.join(bundle, 'Contents', 'Resources'), { recursive: true });
+        copyFileSync(executable, path.join(bundle, 'Contents', 'MacOS', 'Fixture'));
+        writeFileSync(path.join(bundle, 'Contents', 'Resources', 'scope-marker'), 'original', { mode: 0o600 });
+        writeFileSync(path.join(bundle, 'Contents', 'Info.plist'), '<plist version="1.0"><dict>'
+          + '<key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIdentifier</key><string>org.envara.scope-fixture</string>'
+          + '<key>CFBundleExecutable</key><string>Fixture</string></dict></plist>');
+        const report = JSON.parse(await run(executable, ['validation-scope', bundle]));
+        for (const name of ['ok', 'nestedScopesVerified', 'forgedManifestRefused', 'threadIsolationVerified', 'forkIsolationVerified', 'mutationRefused', 'scopeCleared',
+          'identityReproofCounted', 'restoredTimesMutationRefused', 'witnessEndsWithScope']) assert.equal(report[name], true, name);
         inactive(report);
       });
 
+      await t.test('diagnostic step frames are fixed, bounded, whole lines from the beginning process only, and never block', async () => {
+        const lines = (await run(executable, ['step-frames'])).split('\n');
+        assert.equal(lines.length, 16);
+        const keys = ['schema', 'event', 'runId', 'environmentId', 'step', 'stepMs', 'totalMs', 'fullChecks', 'identityChecks', 'ready', 'protected'];
+        lines.forEach((line, index) => {
+          const frame = JSON.parse(line);
+          assert.equal(line, JSON.stringify(frame));
+          assert.deepEqual(Object.keys(frame), keys);
+          assert.equal(frame.schema, 'envara.macos-pf-app-transport/v1'); assert.equal(frame.event, 'stage-progress');
+          assert.equal(frame.runId, '11111111-2222-4333-8444-555555555555'); assert.equal(frame.environmentId, '66666666-7777-4888-9999-aaaaaaaaaaaa');
+          assert.equal(frame.step, index === 0 ? 'front-commit' : 'ticket-prepare');
+          assert.ok(Number.isSafeInteger(frame.stepMs) && Number.isSafeInteger(frame.totalMs) && frame.stepMs <= frame.totalMs);
+          assert.equal(frame.fullChecks, 0); assert.equal(frame.identityChecks, 0);
+          assert.equal(frame.ready, false); assert.equal(frame.protected, false);
+        });
+      });
       await t.test('fixed production profile includes explicit resolver IPC and DNS port exclusions', async () => {
         assert.equal(await run(executable, ['profile']), profile);
       });
@@ -111,6 +221,13 @@ test('Notion launch preparation refuses fixtures and preserves process-local Sea
         await new Promise((resolve, reject) => { udp.once('error', reject); udp.bind(0, '127.0.0.1', resolve); });
         const scoped = await run(executable, ['scoped-profile', String(frontPort)]);
         assert.ok(scoped.endsWith(`(deny network-outbound)(allow network-outbound (remote tcp4 "localhost:${frontPort}"))`));
+        // Only the application's own scoped directory admits local socket connects.
+        const socketRoot = '/Library/PrivilegedHelperTools/io.envara.pf-app-data/c18de15a-7946-423e-9fee-7ec215e188e5/cbf1365d-358c-4081-a6a3-3053cfdebd7f';
+        const local = await run(executable, ['scoped-profile', String(frontPort), socketRoot]);
+        assert.ok(local.endsWith(`(allow network-outbound (remote tcp4 "localhost:${frontPort}"))` +
+          `(allow network-outbound (remote unix-socket (subpath "${socketRoot}")))`));
+        for (const bad of [socketRoot + '/UserData', socketRoot.replace('pf-app-data', 'pf-apps'), socketRoot.replace('c18de15a', 'c18de15"'), '/tmp'])
+          await assert.rejects(run(executable, ['scoped-profile', String(frontPort), bad]), undefined, bad);
         for (const mode of ['direct','inherit']) {
           const before = { allowedConnections, deniedConnections, ipv6Connections, packets };
           const probe = async (host, port, protocol, sandboxed) => JSON.parse(await run(sandboxed ? '/usr/bin/sandbox-exec' : executable,
@@ -182,16 +299,24 @@ test('Notion launch preparation refuses fixtures and preserves process-local Sea
         });
       }
 
+      const vscode = '/Applications/Visual Studio Code.app';
+      await t.test('installed VS Code passes actual read-only engine and Microsoft signature checks',
+        { skip: existsSync(path.join(vscode, 'Contents', 'Info.plist')) ? false : 'VS Code is not installed' }, async () => {
+          const report = JSON.parse(await run(executable, ['supported', vscode]));
+          assert.equal(report.supported, true); assert.equal(report.error, 0); assert.equal(report.engine, 3);
+          assert.equal(report.requiredTeam, 'UBF8T346G9'); inactive(report);
+        });
+
       const notion = '/Applications/Notion.app';
       const notionVersion = plistValue(path.join(notion, 'Contents', 'Info.plist'), 'CFBundleShortVersionString');
       const electronVersion = plistValue(path.join(notion, 'Contents', 'Frameworks', 'Electron Framework.framework', 'Resources', 'Info.plist'), 'CFBundleVersion');
-      const exactVersions = ['7.34.0', '7.37.1'].includes(notionVersion) && electronVersion === '43.6.0';
-      await t.test('exact installed Notion version passes read-only strict identity inspection',
-        { skip: exactVersions ? false : 'installed metadata differs from exact Notion 7.34.0 or 7.37.1 / Electron 43.6.0' }, async () => {
+      const exactVersions = Boolean(notionVersion && electronVersion);
+      await t.test('installed Notion passes read-only signed engine inspection without a version allowlist',
+        { skip: exactVersions ? false : 'Notion is not installed' }, async () => {
           const report = JSON.parse(await run(executable, ['supported', notion]));
           assert.equal(report.ok, true); assert.equal(report.supported, true); assert.equal(report.error, 0);
           assert.equal(report.requiredTeam, 'LBQJ96FQ8D');
-          assert.equal(report.supportedVersion, notionVersion); assert.equal(report.electronVersion, '43.6.0');
+          assert.equal(report.supportedVersion, notionVersion); assert.equal(report.electronVersion, electronVersion);
           inactive(report);
         });
     } finally {

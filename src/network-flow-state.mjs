@@ -61,11 +61,12 @@ export function networkContextFailed(profile, proxy) {
 // probe can describe them as the current resolved network context.
 export function savedNetworkPresentation(profile, proxy) {
   const failed = networkContextFailed(profile, proxy);
+  const network = failed ? null : profile?.network?.ok ? profile.network : proxy?.network?.ok ? proxy.network : null;
   const location = proxy?.location?.confirmed ? proxy.location : profile?.savedNetworkLocation;
   const savedTimezone = location?.timezone || profile?.savedNetworkTimezone || null;
   const current = !failed && profile?.network?.ok === true && profile.network.scope === 'egress';
   const timezone = current && profile?.resolvedTimezone ? profile.resolvedTimezone : savedTimezone || (!failed ? profile?.resolvedTimezone || profile?.timezone : profile?.timezone) || null;
-  return { failed, savedTimezone, timezone, savedOnly: !!timezone && (failed || !!savedTimezone && !current), location: location || null };
+  return { failed, network, savedTimezone, timezone, savedOnly: !!timezone && (failed || !!savedTimezone && !current), location: location || null };
 }
 
 export function terminalTimezonePresentation({ profile, metadata, session, hasLiveSession }) {

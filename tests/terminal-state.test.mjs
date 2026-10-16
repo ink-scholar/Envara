@@ -108,3 +108,71 @@ test('same-profile duplicate process output and exit stay separate from the sour
   assert.equal(store.replayFor('session-1'), 'source command');
   assert.equal(store.replayFor('duplicate-1'), 'new shellduplicate live');
 });
+
+test('complete snapshots retire only missing ended history and retain backend history and live sessions', () => {
+  const store = new TerminalStreamStore();
+  store.applySnapshot({ profiles: [{ profileId: 'profile-1', sessions: [
+    { sessionId: 'retained', sequence: 1, replay: 'readable history', status: 'exited' },
+    { sessionId: 'retired', sequence: 2, replay: 'old history', status: 'closed' },
+    { sessionId: 'still-live', sequence: 1, replay: 'running shell', status: 'running' },
+  ] }] });
+  store.applySnapshot({ profiles: [{ profileId: 'profile-1', sessions: [
+    { sessionId: 'retained', sequence: 1, replay: 'readable history', status: 'exited' },
+  ] }] }, { complete: true });
+  assert.equal(store.getSession('retired'), null);
+  assert.equal(store.replayFor('retired'), '');
+  assert.equal(store.replayFor('retained'), 'readable history');
+  assert.equal(store.getSession('still-live').status, 'running');
+  assert.deepEqual(store.snapshot().profiles[0].sessions.map(session => session.sessionId), ['retained', 'still-live']);
+});
+
+test('partial open replies never discard other ended history or other environments', () => {
+  const store = new TerminalStreamStore();
+  store.applySnapshot(state(2, 'old but retained', 'closed'));
+  store.applySnapshot({ profiles: [{ profileId: 'profile-2', sessions: [
+    { sessionId: 'new-session', sequence: 0, replay: '', status: 'starting' },
+  ] }] });
+  assert.equal(store.replayFor('session-1'), 'old but retained');
+  assert.equal(store.getSession('new-session').status, 'starting');
+  assert.equal(store.snapshot().profiles.length, 2);
+});
+
+test('late data, exit and stale snapshots do not resurrect retired history or queue unknown events', () => {
+  const store = new TerminalStreamStore();
+  store.applySnapshot(state(1, 'finished output', 'closed'));
+  store.applySnapshot({ profiles: [] }, { complete: true });
+  assert.deepEqual(store.applyEvent(data(2, 'late output')), { writes: [], refreshNeeded: false });
+  assert.deepEqual(store.applyEvent({ ...data(3, ''), type: 'exit', status: 'closed' }), { writes: [], refreshNeeded: false });
+  assert.deepEqual(store.applySnapshot(state(1, 'finished output', 'running')).writes, []);
+  assert.equal(store.getSession('session-1'), null);
+  assert.equal(store.unknown.size, 0);
+});
+
+test('events preceding a missing complete snapshot still join a later open reply in sequence', () => {
+  const store = new TerminalStreamStore();
+  store.applyEvent(data(2, 'last data'));
+  store.applyEvent({ ...data(3, ''), type: 'exit', status: 'exited', exitCode: 0 });
+  assert.equal(store.applySnapshot({ profiles: [] }, { complete: true }).refreshNeeded, true);
+  assert.deepEqual(store.applySnapshot(state(1, 'initial')).writes, [
+    { sessionId: 'session-1', data: 'initial' }, { sessionId: 'session-1', data: 'last data' },
+  ]);
+  assert.equal(store.getSession('session-1').status, 'exited');
+  assert.equal(store.replayFor('session-1'), 'initiallast data');
+  store.applySnapshot({ profiles: [] }, { complete: true });
+  assert.equal(store.getSession('session-1'), null);
+});
+
+test('retirement bookkeeping and ended replay remain bounded over repeated session churn', () => {
+  const store = new TerminalStreamStore();
+  for (let index = 0; index < 1000; index++) {
+    store.applySnapshot({ profiles: [{ profileId: 'profile-1', sessions: [
+      { sessionId: `session-${index}`, sequence: 0, replay: 'retired buffer', status: index % 2 ? 'error' : 'exited' },
+    ] }] }, { complete: true });
+  }
+  assert.equal(store.sessions.size, 1);
+  assert(store.retired.size <= 256);
+  store.applySnapshot({ profiles: [] }, { complete: true });
+  assert.equal(store.sessions.size, 0);
+  assert.equal(store.profiles.size, 0);
+  assert.equal(store.unknown.size, 0);
+});

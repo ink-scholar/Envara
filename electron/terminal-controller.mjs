@@ -152,7 +152,7 @@ export class TerminalController {
       const result = await operation();
       if (method === 'deleteProfile' && typeof this.terminal.removeProfile === 'function') await this.terminal.removeProfile({ id: args.id });
       if (method === 'bulkProfiles' && args.action === 'delete' && typeof this.terminal.removeProfile === 'function') {
-        for (const row of result?.results ?? []) if (row.ok) await this.terminal.removeProfile({ id: row.id });
+        for (const row of result?.actionResult?.results ?? result?.results ?? []) if (row.ok) await this.terminal.removeProfile({ id: row.id });
       }
       return result;
     });

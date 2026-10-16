@@ -22,7 +22,7 @@ struct keeper {
     struct envara_app_ticket ticket;
     struct envara_app_supervisor_report *report;
     struct envara_gui_lifecycle *child;
-    int output, prepared, output_failed, stopped_before_exec;
+    int output, prepared, output_failed, stopped_before_exec, validation_scope_open;
 };
 /* Installed before any descriptor transfer/claim/fork and retained across the
  * guardian's handler restoration. Catchable signals cannot drop socket custody
@@ -199,8 +199,15 @@ static int quarantine(struct keeper *k) {
         quarantine_refusal_delay();
     }
 }
+/* Staging, from claim to the exact stopped child, is one native operation.
+ * Custody is not: the guardian holds the child for the run's whole lifetime,
+ * and resume re-verifies in its own operation. */
+static void staging_scope_end(struct keeper *k) {
+    if (k->validation_scope_open) { envara_gui_validation_scope_end(); k->validation_scope_open = 0; }
+}
 static int adopt(const struct envara_app_ticket *ticket, struct envara_gui_lifecycle *child, void *context) {
-    struct keeper *k = context; k->ticket = *ticket; k->child = child; k->guard.child = child->child;
+    struct keeper *k = context; staging_scope_end(k);
+    k->ticket = *ticket; k->child = child; k->guard.child = child->child;
     struct envara_launch_guard_authority authority = {deny, scope, observe, k};
     if (envara_launch_guard_run(&k->guard, &authority, &k->report->guardian)) {
         if (k->report->guardian.child_reaped) {
@@ -256,9 +263,11 @@ static int adapter_stage(struct keeper *k, struct envara_app_ticket_store *store
                          struct envara_app_registry *registry, const char *id,
                          const struct envara_app_ticket_authority *authority) {
     if (envara_app_ticket_claim(store, registry, id, authority, &k->ticket)) return -1;
+    envara_gui_step(ENVARA_GUI_STEP_TICKET_CLAIM);
     struct adapter_stage_context context = {k, registry};
     struct envara_gui_stage_authority fresh = {adapter_fresh, &context};
     if (adapter_fresh(&k->ticket.request, &context)) return -1;
+    envara_gui_step(ENVARA_GUI_STEP_STAGE_FRESH);
     struct envara_gui_lifecycle *child = &k->report->child;
     int result = k->provider->stage(&k->ticket.app, &k->ticket.request, &fresh, child, k->provider->context);
     int error = result ? (errno ? errno : EIO) : EACCES;
@@ -294,6 +303,7 @@ static int adapter_stage(struct keeper *k, struct envara_app_ticket_store *store
     if (result || phase != ENVARA_GUI_SUSPENDED || protected_ready || !error_reader || !k->stopped_before_exec ||
         !envara_identity_matches(&actual, k->ticket.request.console_uid, k->ticket.request.realm_gid) ||
         adapter_fresh(&k->ticket.request, &context)) return reject(error);
+    envara_gui_step(ENVARA_GUI_STEP_STAGE_ADOPT);
     return adopt(&k->ticket, child, k);
 }
 int envara_app_supervisor_run(const struct envara_app_supervisor_context *context, const char *id,
@@ -319,9 +329,14 @@ int envara_app_supervisor_run(const struct envara_app_supervisor_context *contex
     if (envara_app_registry_open(&registry, context->fixture_registry_root, context->fixture_only, 0) ||
         envara_app_ticket_store_open(&store, context->fixture_ticket_root, context->fixture_only, 0)) goto done;
     struct envara_app_ticket_authority authority = {inspect, verify, adopt, &k};
+    /* Its first check of each bundle is a full signed inspection; later
+     * staging boundaries re-prove that exact state's identity. adopt ends it. */
+    if (!envara_gui_validation_scope_begin()) { result = -1; errno = EOVERFLOW; goto done; }
+    k.validation_scope_open = 1;
     result = p->stage ? adapter_stage(&k, &store, &registry, id, &authority) :
         envara_app_ticket_stage(&store, &registry, id, &authority, &out->child);
 done:
+    { int saved = errno; staging_scope_end(&k); errno = saved; }
     error = result ? errno : 0;
     /* Prior to a child, failing claim/stage can release local reservation FDs.
      * After a child, adopt never returns before exact reap + fixed deny/scope. */

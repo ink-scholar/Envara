@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { BrowseForgeService } from '../electron/browseforge-service.mjs';
 import { BROWSER_DEVICE_PROFILES, PROVIDER_DEFAULT_DEVICE_PROFILE_ID, defaultBrowserDeviceProfileId, deviceProfileFingerprint, getBrowserDeviceProfile, supportsBrowserDeviceProfiles, validateBrowserDeviceProfileInput } from '../shared/browser-device-profile.mjs';
 
@@ -24,11 +24,14 @@ async function fixture(t, platform = 'darwin') {
       const id = `profile_${++next}`, profile_dir = path.join(profilesDir, id);
       await mkdir(path.join(profile_dir, 'browser-data'), { recursive: true });
       const profile = { ...structuredClone(body), id, profile_dir, created_at: new Date().toISOString() };
+      await writeFile(path.join(profile_dir, 'profile.json'), JSON.stringify(profile));
       profiles.push(profile); return { data: structuredClone(profile) };
     }
     const profileMatch = route.match(/^\/api\/profiles\/([A-Za-z0-9_-]+)$/);
     if (method === 'PUT' && profileMatch) {
-      const profile = profiles.find(p => p.id === profileMatch[1]); Object.assign(profile, structuredClone(body)); return { data: structuredClone(profile) };
+      const profile = profiles.find(p => p.id === profileMatch[1]); Object.assign(profile, structuredClone(body));
+      await writeFile(path.join(profile.profile_dir, 'profile.json'), JSON.stringify(profile));
+      return { data: structuredClone(profile) };
     }
     if (method === 'POST' && route === '/api/sessions') {
       const session = { session_id: `sess_${body.profile_id}`, profile_id: body.profile_id }; sessions.push(session); return { data: session };
@@ -42,14 +45,22 @@ async function fixture(t, platform = 'darwin') {
     const malaysia = proxy?.host === 'my.example';
     return { ok: true, ip: malaysia ? '203.0.113.2' : '203.0.113.1', countryCode: malaysia ? 'MY' : 'US', timezone: malaysia ? 'Asia/Kuala_Lumpur' : 'America/New_York', geolocation: null };
   } };
-  const service = new BrowseForgeService(root, client, { platform }, () => {}, { profilesDir, networkProbe });
+  let service = new BrowseForgeService(root, client, { platform }, () => {}, { profilesDir, networkProbe });
   await service.ready;
   t.after(async () => { await service.shutdown(); await rm(root, { recursive: true, force: true }); });
   const create = async patch => {
     const result = await service.call('createProfile', { profile: { name: 'Device fixture', engine: 'cloakbrowser', ...patch } });
     return result.profiles.find(p => p.id === result.actionResult.createdId);
   };
-  return { root, service, client, profiles, sessions, requests, create };
+  const reopen = async () => {
+    await service.shutdown();
+    const stored = await Promise.all((await readdir(profilesDir)).map(async id => JSON.parse(await readFile(path.join(profilesDir, id, 'profile.json'), 'utf8'))));
+    profiles.splice(0, profiles.length, ...stored);
+    service = new BrowseForgeService(root, client, { platform }, () => {}, { profilesDir, networkProbe });
+    await service.ready;
+    return service;
+  };
+  return { root, get service() { return service; }, client, profiles, sessions, requests, create, reopen };
 }
 
 test('device catalog is versioned, country-independent and limited to tested provider mappings', () => {
@@ -70,16 +81,53 @@ test('device catalog is versioned, country-independent and limited to tested pro
   assert.throws(() => validateBrowserDeviceProfileInput({ deviceProfileId: 'windows-standard-v1' }, 'cloakbrowser', 'darwin'), { code: 'DEVICE_PROFILE_PLATFORM_UNSUPPORTED' });
 });
 
-test('new native-platform drafts persist the concrete browser settings and profile id', async t => {
-  for (const [host, id, platform] of [['darwin', 'mac-standard-v1', 'macos'], ['win32', 'windows-standard-v1', 'windows'], ['linux', 'linux-standard-v1', 'linux']]) {
-    const f = await fixture(t, host), profile = await f.create();
+test('minimal new environments delegate all device defaults to their selected provider on every host', async t => {
+  for (const host of ['darwin', 'win32', 'linux']) for (const engine of ['cloakbrowser', 'camoufox', 'browseforge-chromium']) await t.test(`${host}/${engine}`, async t => {
+    const f = await fixture(t, host), profile = await f.create({ engine });
+    assert.equal(profile.deviceProfileId, PROVIDER_DEFAULT_DEVICE_PROFILE_ID);
+    assert.equal(profile.platform, null);
+    assert.equal(profile.width, null); assert.equal(profile.height, null);
+    assert.deepEqual(profile.fingerprint, {});
+    const created = f.requests.find(request => request.method === 'POST' && request.route === '/api/profiles').body;
+    assert.equal(created.identity, undefined, 'provider uses its native platform without a fabricated override');
+    assert.equal(created.fingerprint, undefined, 'no shared CPU, RAM, geometry or other device tuple is injected');
+    assert.equal(created.deviceProfileId, undefined, 'desktop metadata is not a native field');
+    assert.equal((await f.service.store.read()).profiles[0].deviceProfileId, PROVIDER_DEFAULT_DEVICE_PROFILE_ID);
+    const saved = JSON.parse(await readFile(path.join(f.root, 'browseforge-manager/workspace.json'), 'utf8'));
+    assert.equal(saved.profiles[0].deviceProfileId, PROVIDER_DEFAULT_DEVICE_PROFILE_ID);
+    if (engine === 'camoufox') assert.equal(created.fingerprint_seed, undefined, 'structured provider retains its own generation contract');
+    else assert.ok(Number.isSafeInteger(created.fingerprint_seed) && created.fingerprint_seed > 0 && created.fingerprint_seed <= 4294967295);
+  });
+});
+
+test('an explicit fixed preset still persists its concrete settings instead of becoming provider-default', async t => {
+  for (const [host, id, platform] of [['darwin', 'mac-standard-v1', 'macos'], ['win32', 'windows-standard-v1', 'windows'], ['linux', 'linux-standard-v1', 'linux']]) await t.test(host, async t => {
+    const f = await fixture(t, host), profile = await f.create({ deviceProfileId: id });
     assert.equal(profile.deviceProfileId, id); assert.equal(profile.platform, platform);
     assert.deepEqual(f.profiles[0].fingerprint, deviceProfileFingerprint(id));
-    assert.equal(f.profiles[0].deviceProfileId, undefined, 'desktop metadata does not leak as an unsupported native field');
     assert.equal((await f.service.store.read()).profiles[0].deviceProfileId, id);
-    const saved = JSON.parse(await readFile(path.join(f.root, 'browseforge-manager/workspace.json'), 'utf8'));
-    assert.equal(saved.profiles[0].deviceProfileId, id);
-  }
+  });
+});
+
+test('provider defaults get independent saved seeds that survive service restart and unrelated edits without touching browser data', async t => {
+  const f = await fixture(t), first = await f.create(), second = await f.create();
+  assert.ok(Number.isSafeInteger(first.seed) && first.seed > 0);
+  assert.ok(Number.isSafeInteger(second.seed) && second.seed > 0);
+  assert.notEqual(first.seed, second.seed, 'fresh environments receive separate randomly generated seeds');
+  const source = f.profiles.find(profile => profile.id === first.id), marker = path.join(source.profile_dir, 'browser-data', 'Cookies');
+  await writeFile(marker, 'fixture-login-data');
+  const persisted = JSON.parse(await readFile(path.join(source.profile_dir, 'profile.json'), 'utf8'));
+  assert.equal(persisted.fingerprint_seed, first.seed);
+  const writesBefore = f.requests.filter(request => ['POST', 'PUT'].includes(request.method) && /^\/api\/profiles(?:\/[^/]+)?$/.test(request.route)).length;
+  await f.reopen();
+  const restarted = (await f.service.snapshot()).profiles.find(profile => profile.id === first.id);
+  assert.equal(restarted.seed, first.seed); assert.equal(restarted.deviceProfileId, PROVIDER_DEFAULT_DEVICE_PROFILE_ID);
+  assert.deepEqual(restarted.fingerprint, {});
+  assert.equal(f.requests.filter(request => ['POST', 'PUT'].includes(request.method) && /^\/api\/profiles(?:\/[^/]+)?$/.test(request.route)).length, writesBefore, 'restart does not recreate or reseed a profile');
+  await f.service.call('updateProfile', { id: first.id, profile: { notes: 'An unrelated edit' } });
+  const updated = (await f.service.snapshot()).profiles.find(profile => profile.id === first.id);
+  assert.equal(updated.seed, first.seed); assert.deepEqual(updated.fingerprint, {});
+  assert.equal(await readFile(marker, 'utf8'), 'fixture-login-data');
 });
 
 test('old custom creation calls and unsupported providers preserve their explicit configuration', async t => {
@@ -88,6 +136,7 @@ test('old custom creation calls and unsupported providers preserve their explici
     { platform: 'windows', width: 1920, height: 1080 },
     { platform: 'macos', width: 1280, height: 800 },
     { fingerprint: { 'navigator.hardwareConcurrency': 4, 'navigator.deviceMemory': 4 } },
+    { platform: 'macos', width: 1440, height: 900 },
     { engine: 'camoufox' },
   ]) {
     const result = await f.create(patch);
@@ -129,7 +178,74 @@ test('network changes alter regional context without changing the device or seed
   const context = await f.service.resolveWorkspaceContext(profile.id);
   assert.equal(context.locale, 'ms-MY'); assert.equal(context.timezone, 'Asia/Kuala_Lumpur');
   assert.deepEqual(f.profiles[0].fingerprint, fingerprint); assert.equal(f.profiles[0].fingerprint_seed, seed);
-  assert.equal((await f.service.snapshot()).profiles[0].deviceProfileId, 'mac-standard-v1');
+  assert.equal((await f.service.snapshot()).profiles[0].deviceProfileId, PROVIDER_DEFAULT_DEVICE_PROFILE_ID);
+  assert.deepEqual(fingerprint ?? {}, {}, 'changing egress never injects a fixed device specification');
+});
+
+test('explicit null geometry restores provider defaults without clearing hardware, seed, other configuration or browser data', async t => {
+  const f = await fixture(t);
+  const fingerprint = { 'screen.width': 2560, 'screen.height': 1440, 'screen.availWidth': 2560, 'screen.availHeight': 1400,
+    'screen.devicePixelRatio': 1.5, 'navigator.hardwareConcurrency': 4, 'navigator.deviceMemory': 16, 'canvas:seed': 918, 'custom.fixture': true };
+  const profile = await f.create({ seed: 12345, fingerprint });
+  const marker = path.join(f.profiles[0].profile_dir, 'browser-data', 'Cookies');
+  await writeFile(marker, 'existing-login-data');
+  await f.service.call('updateProfile', { id: profile.id, profile: { notes: 'omitted geometry stays unchanged' } });
+  assert.deepEqual(f.profiles[0].fingerprint, fingerprint);
+  await f.service.call('updateProfile', { id: profile.id, profile: { width: null } });
+  const withoutWidth = { ...fingerprint }; delete withoutWidth['screen.width']; delete withoutWidth['screen.availWidth'];
+  assert.deepEqual(f.profiles[0].fingerprint, withoutWidth, 'height and its available area survive when omitted');
+  await f.service.call('updateProfile', { id: profile.id, profile: { width: null, height: null } });
+  const automatic = { ...withoutWidth }; delete automatic['screen.height']; delete automatic['screen.availHeight'];
+  assert.deepEqual(f.profiles[0].fingerprint, automatic);
+  assert.equal(f.profiles[0].fingerprint_seed, 12345);
+  const result = (await f.service.snapshot()).profiles[0];
+  assert.equal(result.width, null); assert.equal(result.height, null);
+  assert.equal(result.deviceProfileId, PROVIDER_DEFAULT_DEVICE_PROFILE_ID);
+  assert.equal(await readFile(marker, 'utf8'), 'existing-login-data');
+});
+
+test('null dimensions on new drafts add no geometry while an explicitly fixed preset still owns its dimensions', async t => {
+  const f = await fixture(t), automatic = await f.create({ width: null, height: null });
+  assert.deepEqual(automatic.fingerprint, {});
+  const fixed = await f.create({ deviceProfileId: 'mac-standard-v1', width: null, height: null });
+  assert.deepEqual(fixed.fingerprint, deviceProfileFingerprint('mac-standard-v1'));
+  await f.service.call('updateProfile', { id: fixed.id, profile: { width: null, height: null } });
+  const updated = (await f.service.snapshot()).profiles.find(profile => profile.id === fixed.id);
+  assert.equal(updated.deviceProfileId, 'mac-standard-v1');
+  assert.deepEqual(updated.fingerprint, fixed.fingerprint);
+  assert.equal(updated.seed, fixed.seed);
+});
+
+test('existing fixed environments keep their label, custom fields, seed and data through unrelated updates', async t => {
+  const f = await fixture(t), fixed = await f.create({ deviceProfileId: 'mac-standard-v1', seed: 45678, fingerprint: { 'custom.fixture': true, 'canvas:seed': 567 } });
+  const fingerprint = structuredClone(f.profiles[0].fingerprint), marker = path.join(f.profiles[0].profile_dir, 'browser-data', 'Cookies');
+  await writeFile(marker, 'fixed-login-data');
+  await f.service.call('updateProfile', { id: fixed.id, profile: { notes: 'Keep an existing user selection' } });
+  const result = (await f.service.snapshot()).profiles[0];
+  assert.equal(result.deviceProfileId, 'mac-standard-v1');
+  assert.equal(result.seed, 45678); assert.deepEqual(result.fingerprint, fingerprint);
+  assert.equal(await readFile(marker, 'utf8'), 'fixed-login-data');
+});
+
+test('default-device export/import preserves the seed and explicitly mapped network without adding hardware settings', async t => {
+  const f = await fixture(t);
+  const proxies = await f.service.call('saveProxy', { proxy: { name: 'US', protocol: 'http', host: 'us.example', port: 8080 } });
+  const proxy = proxies.proxies.find(item => item.name === 'US');
+  const source = await f.create({ proxyId: proxy.id });
+  const exported = await f.service.exportProfiles({ id: source.id });
+  assert.equal(exported.profiles[0].deviceProfileId, PROVIDER_DEFAULT_DEVICE_PROFILE_ID);
+  assert.deepEqual(exported.profiles[0].fingerprint, {});
+  const importedResult = await f.service.call('importProfiles', { document: exported, proxyMap: { [proxy.id]: proxy.id } });
+  const imported = importedResult.profiles.find(profile => profile.id === importedResult.actionResult.createdIds[0]);
+  assert.equal(imported.seed, source.seed);
+  assert.equal(imported.deviceProfileId, PROVIDER_DEFAULT_DEVICE_PROFILE_ID);
+  assert.equal(imported.proxyId, proxy.id);
+  assert.equal(imported.platform, null); assert.equal(imported.width, null); assert.equal(imported.height, null);
+  assert.deepEqual(imported.fingerprint, {});
+  const payload = f.requests.filter(request => request.method === 'POST' && request.route === '/api/profiles').at(-1).body;
+  assert.equal(payload.fingerprint_seed, source.seed);
+  assert.deepEqual(payload.proxy, f.profiles[0].proxy);
+  assert.deepEqual(payload.fingerprint, {});
 });
 
 test('selecting a fixed device clears stale available geometry while custom mode preserves it', async t => {
@@ -146,7 +262,7 @@ test('selecting a fixed device clears stale available geometry while custom mode
 });
 
 test('clones retain immutable device specs with a fresh seed and no generated noise or browser data', async t => {
-  const f = await fixture(t), original = await f.create();
+  const f = await fixture(t), original = await f.create({ deviceProfileId: 'mac-standard-v1' });
   f.profiles[0].fingerprint['canvas:seed'] = 123;
   f.profiles[0].fingerprint['audio:seed'] = 456;
   await writeFile(path.join(f.profiles[0].profile_dir, 'browser-data', 'owned-fixture'), 'source data');
@@ -158,7 +274,7 @@ test('clones retain immutable device specs with a fresh seed and no generated no
 });
 
 test('export/import retains fixed profiles, while legacy imports preserve custom values', async t => {
-  const f = await fixture(t), original = await f.create();
+  const f = await fixture(t), original = await f.create({ deviceProfileId: 'mac-standard-v1' });
   const document = await f.service.exportProfiles({ id: original.id });
   assert.equal(document.profiles[0].deviceProfileId, 'mac-standard-v1');
   const result = await f.service.call('importProfiles', { document });
@@ -175,7 +291,7 @@ test('export/import retains fixed profiles, while legacy imports preserve custom
 });
 
 test('invalid or conflicting device selections fail before native writes and a running browser cannot change', async t => {
-  const f = await fixture(t), profile = await f.create();
+  const f = await fixture(t), profile = await f.create({ deviceProfileId: 'mac-standard-v1' });
   const before = structuredClone(f.profiles), metadata = await f.service.store.read();
   for (const patch of [{ deviceProfileId: 'missing' }, { deviceProfileId: null }, { width: 1200 }, { platform: 'windows' }, { fingerprint: { 'navigator.hardwareConcurrency': 4 } }]) {
     await assert.rejects(f.service.call('updateProfile', { id: profile.id, profile: patch }), { code: patch.deviceProfileId === null || patch.deviceProfileId === 'missing' ? 'DEVICE_PROFILE_INVALID' : 'DEVICE_PROFILE_CONFLICT' });
@@ -192,7 +308,7 @@ test('invalid or conflicting device selections fail before native writes and a r
 });
 
 test('externally changed native settings cannot launch under a stale fixed device label', async t => {
-  const f = await fixture(t), profile = await f.create();
+  const f = await fixture(t), profile = await f.create({ deviceProfileId: 'mac-standard-v1' });
   f.profiles[0].fingerprint['navigator.hardwareConcurrency'] = 4;
   await assert.rejects(f.service.call('startProfile', { id: profile.id }), { code: 'DEVICE_PROFILE_CONFLICT' });
   assert.equal(f.requests.filter(r => r.route === '/api/sessions' && r.method === 'POST').length, 0);

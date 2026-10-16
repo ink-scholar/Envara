@@ -70,9 +70,19 @@ int envara_fixture_notion_postcheck(const struct envara_app_registration *app,
     if (fd < 0) return -1;
     struct envara_gui_request refused = *request;
     refused.realm_gid = 0; /* Actual child's supplementary vector cannot be sole gid0. */
+    struct envara_notion_plan plan = {0};
+    strcpy(plan.user_data, request->cwd);
+    struct notion_data_holds holds;
+    for (unsigned i = 0; i < 6; i++) holds.fds[i] = -1;
+    /* This fixture deliberately refuses at the sole-group predicate before
+     * inspecting data paths. Keep one real owned descriptor to verify that
+     * the new multi-directory postcheck closes its holds without reaping. */
+    holds.fds[0] = fd;
     original = child->child.identity;
-    int result = finish_stopped_stage(app, &refused, request->cwd, fd, child);
+    int result = finish_stopped_stage(app, &refused, &plan, &holds, child);
     int error = errno; struct proc_bsdinfo actual;
+    errno = 0;
+    if (fcntl(fd, F_GETFD) != -1 || errno != EBADF) { errno = EIO; return -1; }
     if (result != -1 || error != ESTALE || child->phase != ENVARA_GUI_SUSPENDED || child->leader_reaped ||
         memcmp(&original, &child->child.identity, sizeof(original)) || child->child.error_fd < 3 ||
         fcntl(child->child.error_fd, F_GETFD) < 0 || !envara_same_process(&original) ||

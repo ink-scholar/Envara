@@ -201,3 +201,31 @@ test('malformed metadata is rejected without reflecting private file contents', 
   await assert.rejects(store.ready, hasCode('CLAUDE_ACCOUNT_STORAGE_INVALID'));
   assert.equal(await readFile(f.filename, 'utf8'), `invalid-json ${SYNTHETIC_AUTH}`);
 });
+
+test('an oversized UTF-8 update preserves readable account metadata and its in-memory state', async t => {
+  const f = await fixture(t);
+  const limit = 1024 * 1024;
+  const document = { schema: 'envara.claude-accounts', version: 1, profiles: [] };
+  const account = index => ({ id: `account_${index.toString(16).padStart(32, '0')}`, name: '界'.repeat(76) + String(index).padStart(4, '0') });
+  const full = [{ id: 'default', name: '默认' }, ...Array.from({ length: 19 }, (_, index) => account(index))];
+  while (true) {
+    document.profiles.push({ id: `synthetic_${document.profiles.length}`, accounts: full });
+    if (Buffer.byteLength(JSON.stringify(document)) > limit) { document.profiles.pop(); break; }
+  }
+  const growing = { id: 'growing', accounts: [{ id: 'default', name: '默认' }] };
+  document.profiles.push(growing);
+  for (let index = 0; index < 19; index++) {
+    growing.accounts.push(account(index));
+    if (Buffer.byteLength(JSON.stringify(document)) > limit) { growing.accounts.pop(); break; }
+  }
+  const before = JSON.stringify(document);
+  assert(Buffer.byteLength(before) <= limit);
+  assert(growing.accounts.length < 20);
+  await writeFile(f.filename, before, { mode: 0o600 });
+  const store = await openStore(f.root);
+  const accounts = await store.list(growing.id);
+  await assert.rejects(store.create(growing.id, account(9999).name), hasCode('CLAUDE_ACCOUNT_STORAGE_INVALID'));
+  assert.equal(await readFile(f.filename, 'utf8'), before);
+  assert.deepEqual(await store.list(growing.id), accounts);
+  assert.deepEqual(await (await openStore(f.root)).list(growing.id), accounts);
+});

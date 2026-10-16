@@ -3,6 +3,8 @@
  * personal browser/profile is used. Run with the installed Electron runtime:
  * ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/Electron.app/Contents/MacOS/Electron scripts/verify-claude-terminal.mjs
  * Or use the compiled app's executable and append --packaged /absolute/Envara.app.
+ * --browser /absolute/.../chromium-145.../Chromium.app/Contents/MacOS/Chromium
+ * explicitly reuses that existing engine if the old fixture cache is absent.
  */
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -36,6 +38,9 @@ const baselineExecutable = baselineCLIIndex < 0 ? path.join(os.homedir(), '.loca
 const packagedIndex = process.argv.indexOf('--packaged');
 const packagedApplication = packagedIndex < 0 ? null : process.argv[packagedIndex + 1];
 if (packagedIndex >= 0 && (!packagedApplication || !path.isAbsolute(packagedApplication) || !packagedApplication.endsWith('.app'))) throw new Error('--packaged requires an absolute macOS .app path.');
+const browserIndex = process.argv.indexOf('--browser');
+const browserExecutable = browserIndex < 0 ? null : process.argv[browserIndex + 1];
+if (browserIndex >= 0) assert(browserExecutable && path.isAbsolute(browserExecutable), '--browser requires an absolute existing Chromium 145 executable.');
 const packageResources = packagedApplication ? path.join(packagedApplication, 'Contents/Resources') : null;
 if (packageResources) assert.equal(await realpath(process.resourcesPath), await realpath(packageResources), 'Use this packaged application\'s own executable with ELECTRON_RUN_AS_NODE=1.');
 const moduleRoot = packageResources ? path.join(packageResources, 'app.asar') : root;
@@ -64,6 +69,7 @@ const proof = { passed: false, platform: `${process.platform}-${process.arch}`, 
   'Authenticated fixture routes prove selection and refusal; they are not a public-IP or AnyTLS measurement. Only --download-cli permits route A to forward the official host through an explicit external leg; --fixture-download-cli stays entirely local.',
   'An isolated shell invokes Claude only after an explicit terminal command, using a fresh environment configuration. No user login, account, inference, or model-directed tool choice is tested.',
   'Route-loss acceptance injects the owned-core failure notification against a managed local proxy fixture. It does not crash or validate a real AnyTLS core.',
+  'Device-read acceptance covers the named IOKit serial/UUID, gethostuuid and kern.uuid surfaces only. Model, memory, CPU count, hostname and boot-session UUID remain available; no replacement identity or full hardware isolation is claimed.',
   packageResources ? 'This exercises archived packaged modules, bundled Node/sidecar and the real native PTY; it does not exercise renderer selection UI.' : 'This exercises the current source and real native dependencies; a separate packaged-app check is required after building.',
 ] };
 const check = message => { proof.checks.push(message); console.log(`PASS ${message}`); };
@@ -90,6 +96,60 @@ const fileHash = async filename => { const hash = createHash('sha256'); for awai
 // A CLI may restore its cursor immediately before the shell prints our marker.
 // Compare rendered text while retaining the raw terminal output for diagnostics.
 const terminalText = sessionId => stripVTControlCharacters(output.get(sessionId) ?? '');
+const shellWord = value => `'${value.replaceAll("'", "'\\''")}'`;
+const booleanOnly = value => typeof value === 'boolean' || value && typeof value === 'object' && !Array.isArray(value) && Object.values(value).every(booleanOnly);
+const deviceProbeSource = path.join(root, 'scripts/fixtures/terminal-device-identifier-probe.c');
+async function compileDeviceProbe() {
+  const binary = path.join(temporary, 'device-identifier-probe');
+  await execute('/usr/bin/xcrun', ['clang', '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations', deviceProbeSource,
+    '-framework', 'IOKit', '-framework', 'CoreFoundation', '-o', binary], { timeout: 30000, maxBuffer: 16384 });
+  return binary;
+}
+function parseDeviceProbe(text) {
+  let result;
+  try { result = JSON.parse(text); } catch { throw new Error('The owned device probe did not return its boolean JSON report.'); }
+  assert.equal(booleanOnly(result), true, 'Device probe output must contain booleans only, never hardware values.');
+  return result;
+}
+function assertDeviceReads(control, restricted, descendant) {
+  assert.equal(control.platformEntryPresent, true); assert.equal(control.registryRootPresent, true);
+  for (const surface of ['single', 'searchDirect', 'searchRecursive', 'bytes']) for (const key of ['serial', 'uuid']) {
+    assert.equal(control[surface][key].present, true, `${surface}.${key} requires an observable control.`);
+    assert.equal(restricted[surface][key].present, false, `${surface}.${key} must not return an identifier.`);
+  }
+  for (const key of ['serial', 'uuid']) assert.equal(restricted.bytes[key].denied, true);
+  assert.equal(control.batch.serialPresent, true); assert.equal(control.batch.uuidPresent, true);
+  assert.equal(restricted.batch.present, true); assert.equal(restricted.batch.serialPresent, false); assert.equal(restricted.batch.uuidPresent, false);
+  assert.equal(restricted.batch.modelPresent, true); assert.equal(restricted.single.model.present, true);
+  for (const method of ['library', 'syscall']) {
+    assert.equal(control.hostUuid[method].present, true);
+    assert.deepEqual(restricted.hostUuid[method], { present: false, denied: true });
+  }
+  for (const method of ['byName', 'numericMib']) {
+    assert.equal(control.sysctl['kern.uuid'][method].present, true);
+    assert.deepEqual(restricted.sysctl['kern.uuid'][method], { present: false, denied: true, absent: false });
+  }
+  for (const key of ['hw.model', 'hw.memsize', 'hw.logicalcpu', 'kern.hostname', 'kern.bootsessionuuid'])
+    for (const method of ['byName', 'numericMib']) assert.equal(restricted.sysctl[key][method].present, true, `${key} remains available.`);
+  assert.deepEqual(descendant, restricted, 'The real PTY shell and an additional /bin/sh descendant must enforce the same named read restrictions.');
+}
+async function assertRealDeviceReads(owner, session, binary) {
+  assert.equal(owner.metadata(owner.sessions.get(session.sessionId)).deviceIdentifierRestrictions, true);
+  const control = parseDeviceProbe((await execute(binary, [], { timeout: 10000, maxBuffer: 16384,
+    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C' } })).stdout);
+  const begin = `ENVARA_DEVICE_${randomBytes(8).toString('hex')}`, middle = `${begin}_CHILD`, end = `${begin}_END`;
+  await owner.write({ sessionId: session.sessionId, data: `printf '%s\\n' '${begin}'; ${shellWord(binary)}; printf '%s\\n' '${middle}'; /bin/sh -c '"$1"' envara-owned-identifier-child ${shellWord(binary)}; printf '%s\\n' '${end}'\r` });
+  await waitFor(() => new RegExp(`(?:^|[\\r\\n])${end}[\\r\\n]`).test(terminalText(session.sessionId)), 'The real PTY device-read probe did not complete.');
+  const between = (start, finish) => {
+    const body = terminalText(session.sessionId).match(new RegExp(`(?:^|[\\r\\n])${start}\\r?\\n([^]*?)\\r?\\n${finish}(?:\\r?\\n)`))?.[1];
+    assert(body, 'The device probe result must be distinguished from echoed shell input.');
+    return parseDeviceProbe(body);
+  };
+  const restricted = between(begin, middle), descendant = between(middle, end);
+  assertDeviceReads(control, restricted, descendant);
+  proof.deviceIdentifierRestrictions = { metadataVerified: true, realPtyVerified: true, descendantVerified: true,
+    sourceSha256: await fileHash(deviceProbeSource), probeSha256: await fileHash(binary), control, restricted, descendant };
+}
 const stopChild = async child => {
   if (!child || child.exitCode !== null) return;
   child.stdin?.end();
@@ -189,6 +249,7 @@ async function assertIdleClaudeShell(owner, session, launch) {
   assert.doesNotMatch(terminalText(session.sessionId), /Welcome[\s\S]*Claude|Claude[\s\S]*Code[\s\S]*v\d/);
   assert.equal((await cliProcesses(launch, preparation(owner, session.sessionId).executable)).length, 0, 'Creating a dedicated session must not automatically start Claude.');
   assert.equal(owner.metadata(owner.sessions.get(session.sessionId)).status, 'running');
+  assert.equal(owner.metadata(owner.sessions.get(session.sessionId)).deviceIdentifierRestrictions, true, 'Every dedicated Claude session must retain the verified read-restriction metadata.');
 }
 async function assertRealProcessLocale(owner, session, launch, requested, expectedFallback) {
   const language = owner.metadata(owner.sessions.get(session.sessionId)).language;
@@ -232,8 +293,9 @@ try {
   assert(process.versions.electron && process.env.ELECTRON_RUN_AS_NODE === '1', 'Run in Electron as documented to load the production PTY binding.');
   await access(nodeExecutable);
   proof.version = JSON.parse(await readFile(path.join(moduleRoot, 'package.json'), 'utf8')).version;
-  proof.moduleHashes = Object.fromEntries(await Promise.all(['terminal-service.mjs', 'terminal-browser-broker.mjs', 'terminal-browser-mcp.mjs', 'claude-code-session.mjs', 'claude-code-installation.mjs', 'claude-code-download.mjs', 'claude-account-store.mjs'].map(async filename => [filename, createHash('sha256').update(await readFile(path.join(moduleRoot, 'electron', filename))).digest('hex')])));
+  proof.moduleHashes = Object.fromEntries(await Promise.all(['terminal-service.mjs', 'terminal-network-fence.mjs', 'terminal-browser-broker.mjs', 'terminal-browser-mcp.mjs', 'claude-code-session.mjs', 'claude-code-installation.mjs', 'claude-code-download.mjs', 'claude-account-store.mjs'].map(async filename => [filename, createHash('sha256').update(await readFile(path.join(moduleRoot, 'electron', filename))).digest('hex')])));
   proof.sidecarSha256 = createHash('sha256').update(await readFile(path.join(resourcesDir, 'BrowseForge-sidecar'))).digest('hex');
+  const deviceProbe = await compileDeviceProbe();
   const { ensureClaudeInstallation, claudeInstallationStatus } = await import(moduleURL('claude-code-installation.mjs'));
   const { createClaudeNativeDownloader, downloadClaudeNative } = await import(moduleURL('claude-code-download.mjs'));
   if (fixtureDownloadExecutable) {
@@ -253,9 +315,22 @@ try {
   await execute('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-config', opensslConfig, '-keyout', path.join(temporary, 'key.pem'), '-out', path.join(temporary, 'cert.pem')], { timeout: 15000 });
   const certificate = { key: await readFile(path.join(temporary, 'key.pem')), cert: await readFile(path.join(temporary, 'cert.pem')) };
   const a = await fixtureRoute('A', '45.1.2.3', certificate), b = await fixtureRoute('B', '45.2.3.4', certificate);
-  manager = new SidecarManager({ dataDir, resourcesDir, legacyCacheDir: path.join(root, 'test-artifacts/engine-cache') });
+  let legacyCacheDir = path.join(root, 'test-artifacts/engine-cache');
+  if (browserExecutable) {
+    await access(browserExecutable, constants.X_OK);
+    assert.equal(await realpath(browserExecutable), browserExecutable, 'The explicitly reused browser executable must be canonical.');
+    for (let index = 0, parent = browserExecutable; index < 5; index++) { parent = path.dirname(parent); legacyCacheDir = parent; }
+    assert.match(path.relative(legacyCacheDir, browserExecutable), /^chromium-145(?:\.\d+){1,5}\/Chromium\.app\/Contents\/MacOS\/Chromium$/, 'Only an existing Chromium 145 cache layout may be reused.');
+  }
+  manager = new SidecarManager({ dataDir, resourcesDir, legacyCacheDir });
   await manager.initialize();
   assert.equal(manager.getEngineStates().cloakbrowser.installed, true, 'The existing test CloakBrowser cache is required.');
+  if (browserExecutable) {
+    const engine = manager.getEngineStates().cloakbrowser;
+    assert.equal(await realpath(engine.binaryPath), browserExecutable, 'The manager must use exactly the explicitly reused browser, without an install or download.');
+    assert.match(engine.version, /^145\./);
+    proof.browserReuse = { existingOnly: true, downloaded: false, version: engine.version, sha256: await fileHash(browserExecutable) };
+  }
   const networkProbe = new ProxyNetworkProbe({ endpoints: [{ url: 'https://geo.envara.invalid/', source: 'offline-authenticated-fixture', format: 'ipwho' }], tlsOptions: { ca: certificate.cert }, cacheTtlMs: 600000 });
   service = new BrowseForgeService(dataDir, manager.client, { appVersion: '0.5.0-verification' }, () => {}, {
     profilesDir: path.join(manager.baseDir, 'profiles'), networkProbe, getEngineStates: () => manager.getEngineStates(), shutdown: () => manager.shutdown(),
@@ -288,6 +363,7 @@ try {
   await writeFile(preexistingMarkerPath, preexistingMarker, { mode: 0o600 });
   const created = await terminal.create({ id: selected.id, directory: workingDirectory, kind: 'claude-code', browserProfileId: selected.id, claudeInstallSource: installingDownload ? 'download' : 'local', fresh: true, columns: 110, rows: 30, ...(installingDownload ? { requestId: downloadRequestId } : {}) });
   assert.equal(created.kind, 'claude-code'); assert.equal(created.networkFence, true); assert.equal(created.browserProfileId, selected.id);
+  assert.equal(created.deviceIdentifierRestrictions, true);
   const launch = launches.at(-1);
   const prepared = preparation(terminal, created.sessionId);
   const cli = prepared.executable; assert.match(cli, /claude/);
@@ -333,6 +409,8 @@ try {
   assert.equal(launch.options.env.ANTHROPIC_API_KEY, undefined);
   await assertAccountPolicy(launch, prepared, 'standard', [a.proxy.password, b.proxy.password]);
   await assertIdleClaudeShell(terminal, created, launch);
+  await assertRealDeviceReads(terminal, created, deviceProbe);
+  check(`The real ${packageResources ? 'packaged ' : ''}Claude PTY reports device-read restrictions, refuses the named serial/UUID surfaces in an owned native probe and its shell descendant, and preserves ordinary hardware queries; only booleans are recorded.`);
   assert.equal(launch.options.env.PATH.split(path.delimiter)[0], prepared.binDirectory);
   assert.equal(await realpath(path.join(prepared.binDirectory, 'claude')), await realpath(prepared.wrapperPath));
   check('Creating the dedicated session starts a real isolated shell under Seatbelt, shows its prompt, and does not start a Claude process or display Claude onboarding.');

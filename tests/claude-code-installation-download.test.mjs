@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { ensureClaudeInstallation, resolveClaudeInstallation } from '../electron/claude-code-installation.mjs';
 
@@ -62,6 +64,70 @@ test('failed or cancelled downloads leave no temporary file or native entry and 
     await ensureClaudeInstallation(f);
     assert.equal(await resolveClaudeInstallation({ home: f.home }), path.join(f.versions, '2.1.300'));
   }
+});
+
+test('download failure remains primary when staging cleanup fails and can be retried privately', async t => {
+  const f = await fixture(t), originalRemove = fsPromises.rm;
+  const primary = Object.assign(new Error('fixture download cancelled'), { code: 'CLAUDE_CODE_DOWNLOAD_CANCELLED' });
+  let refuseCleanup = true, observed;
+  t.mock.method(fsPromises, 'rm', async (filename, ...args) => {
+    if (path.dirname(filename) === f.versions && path.basename(filename).startsWith('.envara-bootstrap-') && refuseCleanup)
+      throw Object.assign(new Error('fixture private cleanup path'), { code: 'EACCES' });
+    return originalRemove(filename, ...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(ensureClaudeInstallation({ ...f, downloadNative: async options => {
+      await writeFile(options.destination, 'partial', { flag: 'wx', mode: 0o600 });
+      throw primary;
+    } }), error => {
+      observed = error;
+      assert.equal(error, primary);
+      assert.equal(error.code, 'CLAUDE_CODE_DOWNLOAD_CANCELLED');
+      assert.equal(error.message, 'fixture download cancelled');
+      assert.equal(error.cleanupError, 'Claude 安装临时文件清理未完成，请重试关闭会话。');
+      assert.equal(typeof error.claudeCleanup, 'function');
+      assert.equal(Object.getOwnPropertyDescriptor(error, 'claudeCleanup').enumerable, false);
+      assert.equal(JSON.stringify(error).includes('fixture private cleanup path'), false);
+      return true;
+    });
+    assert.equal((await readdir(f.versions)).length, 1);
+    await assert.rejects(observed.claudeCleanup(), { code: 'EACCES' });
+    refuseCleanup = false;
+    await observed.claudeCleanup(); await observed.claudeCleanup();
+    assert.deepEqual(await readdir(f.versions), []);
+    await assert.rejects(lstat(f.entry), { code: 'ENOENT' });
+    await ensureClaudeInstallation(f);
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+});
+
+test('a final cleanup failure cannot turn an otherwise completed installation into success', async t => {
+  const f = await fixture(t), originalRemove = fsPromises.rm;
+  let stagingRemovals = 0, refuseCleanup = true, observed;
+  t.mock.method(fsPromises, 'rm', async (filename, ...args) => {
+    if (path.dirname(filename) === f.versions && path.basename(filename).startsWith('.envara-bootstrap-')) {
+      stagingRemovals += 1;
+      if (stagingRemovals >= 2 && refuseCleanup) throw Object.assign(new Error('fixture private final cleanup path'), { code: 'EACCES' });
+    }
+    return originalRemove(filename, ...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(ensureClaudeInstallation(f), error => {
+      observed = error;
+      assert.equal(error.code, 'CLAUDE_CODE_INSTALLATION_CLEANUP_FAILED');
+      assert.equal(error.message, 'Claude 安装临时文件清理未完成，请重试关闭会话。');
+      assert.equal(error.cleanupError, error.message);
+      assert.equal(Object.getOwnPropertyDescriptor(error, 'claudeCleanup').enumerable, false);
+      assert.equal(JSON.stringify(error).includes('fixture private final cleanup path'), false);
+      return true;
+    });
+    assert.equal(await resolveClaudeInstallation({ home: f.home }), path.join(f.versions, '2.1.300'));
+    await assert.rejects(observed.claudeCleanup(), { code: 'EACCES' });
+    refuseCleanup = false;
+    await observed.claudeCleanup();
+    await ensureClaudeInstallation(f);
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
 });
 
 test('cancellation after verification but before publication does not commit a native entry', async t => {

@@ -22,6 +22,9 @@ const application = packageIndex < 0 ? null : process.argv[packageIndex + 1];
 if (packageIndex >= 0) assert(application && path.isAbsolute(application) && application.endsWith('.app'));
 const resources = application ? path.join(application, 'Contents/Resources/backend') : path.join(root, 'build/backend');
 const moduleRoot = application ? path.join(application, 'Contents/Resources/app.asar') : root;
+// This owned localhost subdomain is a trustworthy loopback origin. Chromium
+// still bypasses it, so the route assertion remains a pending fixture gate.
+const fixtureHostname = 'device.envara.localhost';
 if (application) {
   assert(process.versions.electron && process.env.ELECTRON_RUN_AS_NODE === '1', 'Run using the selected packaged app executable with ELECTRON_RUN_AS_NODE=1.');
   assert.equal(await realpath(process.resourcesPath), await realpath(path.join(application, 'Contents/Resources')));
@@ -39,7 +42,8 @@ const report = { passed: false, startedAt: new Date().toISOString(), mode: capab
   'Offline pages measure observable browser properties, not account safety or fingerprint-detector scores.',
   'Font tests measure rendered local families without changing any host fonts.',
   'Authenticated offline routes prove selection and saved context changes, not actual public geolocation or AnyTLS behavior.',
-  'Current CloakBrowser 145 does not honor font/GPU overrides; UA and UA-CH consistency is not part of the device-profile guarantee.',
+  'Chromium can omit UA-CH on worker-script requests; worker JavaScript UAData and actual HTTP User-Agent are checked against the page, and any emitted worker client hints are checked.',
+  'Current CloakBrowser 145 does not honor font/GPU overrides.',
 ] };
 const check = message => { report.checks.push(message); console.log('PASS ' + message); };
 const sockets = new Set();
@@ -59,6 +63,99 @@ const listen = async server => {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   servers.push(server); return server.address().port;
 };
+const fixtureResponseHeaders = {
+  'Content-Type': 'text/html; charset=utf-8',
+  'Cache-Control': 'no-store',
+  'Accept-CH': 'Sec-CH-UA, Sec-CH-UA-Platform, Sec-CH-UA-Full-Version-List',
+};
+const fixtureRequestHeaders = (req, extra = {}) => ({
+  acceptLanguage: req.headers['accept-language'] ?? null,
+  userAgent: req.headers['user-agent'] ?? null,
+  secChUa: req.headers['sec-ch-ua'] ?? null,
+  secChUaPlatform: req.headers['sec-ch-ua-platform'] ?? null,
+  secChUaFullVersionList: req.headers['sec-ch-ua-full-version-list'] ?? null,
+  ...extra,
+});
+const chromeBrands = new Set(['Google Chrome', 'Chromium']);
+const versionMajor = (version, label) => {
+  assert.equal(typeof version, 'string', `${label} must be a version string.`);
+  assert(/^\d+(?:\.\d+)*$/.test(version), `${label} must contain a nonempty numeric version.`);
+  return Number(version.split('.')[0]);
+};
+const meaningfulBrands = (entries, label) => {
+  assert(Array.isArray(entries) && entries.length, `${label} must contain UA brands.`);
+  const versions = new Map();
+  for (const entry of entries) {
+    if (!chromeBrands.has(entry?.brand)) continue;
+    assert(!versions.has(entry.brand), `${label} must not repeat ${entry.brand}.`);
+    versionMajor(entry.version, `${label} ${entry.brand}`);
+    versions.set(entry.brand, entry.version);
+  }
+  assert(versions.size, `${label} must contain a nonempty Chrome or Chromium version.`);
+  return versions;
+};
+const parseClientHintBrands = (header, label) => {
+  assert.equal(typeof header, 'string', `${label} must be captured from the actual HTTP request.`);
+  const entries = [];
+  const member = /\s*("(?:[^"\\]|\\["\\])*")\s*;\s*v\s*=\s*"(\d+(?:\.\d+)*)"\s*(,|$)/gy;
+  let offset = 0;
+  while (offset < header.length) {
+    member.lastIndex = offset;
+    const match = member.exec(header);
+    assert(match, `${label} must be a valid brand/version list.`);
+    entries.push({ brand: JSON.parse(match[1]), version: match[2] });
+    offset = member.lastIndex;
+    assert(match[3] !== ',' || offset < header.length, `${label} must not have a trailing comma.`);
+  }
+  return meaningfulBrands(entries, label);
+};
+const assertUserAgentConsistency = (actual, label, requireClientHints = true) => {
+  const prefix = `${label}: `;
+  const pageMajor = /\b(?:Chrome|Chromium)\/(\d+)(?:\.|\b)/.exec(actual.userAgent ?? '');
+  const httpMajor = /\b(?:Chrome|Chromium)\/(\d+)(?:\.|\b)/.exec(actual.headers?.userAgent ?? '');
+  assert(pageMajor, prefix + 'Page UA must contain a Chrome major version.');
+  assert(httpMajor, prefix + 'Actual HTTP User-Agent must contain a Chrome major version.');
+  const expectedMajor = Number(pageMajor[1]);
+  assert.equal(Number(httpMajor[1]), expectedMajor, prefix + 'Page and HTTP UA Chrome major versions must agree.');
+  const pageBrands = meaningfulBrands(actual.uaData?.brands, prefix + 'UAData brands');
+  const pageFullVersions = meaningfulBrands(actual.uaData?.fullVersionList, prefix + 'UAData fullVersionList');
+  const hasClientHints = ['secChUa', 'secChUaPlatform', 'secChUaFullVersionList'].some(name => actual.headers?.[name] != null);
+  const httpBrands = requireClientHints || hasClientHints ? parseClientHintBrands(actual.headers?.secChUa, prefix + 'HTTP Sec-CH-UA') : null;
+  const httpFullVersions = requireClientHints || hasClientHints ? parseClientHintBrands(actual.headers?.secChUaFullVersionList, prefix + 'HTTP Sec-CH-UA-Full-Version-List') : null;
+  for (const [name, versions] of [['UAData brands', pageBrands], ['UAData fullVersionList', pageFullVersions], ['HTTP Sec-CH-UA', httpBrands], ['HTTP Sec-CH-UA-Full-Version-List', httpFullVersions]]) {
+    if (!versions) continue;
+    for (const [brand, version] of versions) assert.equal(versionMajor(version, prefix + name + ' ' + brand), expectedMajor, prefix + name + ' ' + brand + ' must match the page/HTTP UA major version.');
+  }
+  if (httpBrands) assert.deepEqual(httpBrands, pageBrands, prefix + 'Actual HTTP low-entropy brand versions must equal UAData brands.');
+  if (httpFullVersions) assert.deepEqual(httpFullVersions, pageFullVersions, prefix + 'Actual HTTP full brand versions must equal UAData fullVersionList.');
+  assert.deepEqual([...pageFullVersions.keys()].sort(), [...pageBrands.keys()].sort(), prefix + 'Low/high entropy UAData must describe the same Chrome brands.');
+  assert.equal(typeof actual.uaData?.platform, 'string', prefix + 'UAData platform must be available.');
+  assert(actual.uaData.platform.length, prefix + 'UAData platform must be nonempty.');
+  if (requireClientHints || hasClientHints) {
+    assert.equal(typeof actual.headers?.secChUaPlatform, 'string', prefix + 'Actual HTTP Sec-CH-UA-Platform must be captured.');
+    assert.equal(JSON.parse(actual.headers.secChUaPlatform), actual.uaData.platform, prefix + 'Page and actual HTTP UA-CH platform must agree.');
+  }
+  if (actual.worker) {
+    assertUserAgentConsistency(actual.worker, `${label} worker`, false);
+    assert.equal(actual.worker.userAgent, actual.userAgent, prefix + 'Dedicated worker and page UA must agree.');
+    assert.deepEqual(actual.worker.uaData, actual.uaData, prefix + 'Dedicated worker and page UAData must agree.');
+  }
+};
+const uaDataProbe = `async () => {
+  const data = navigator.userAgentData;
+  return data ? { brands: data.brands, mobile: data.mobile, platform: data.platform,
+    ...await data.getHighEntropyValues(['architecture','bitness','platform','platformVersion','fullVersionList']) } : null;
+}`;
+const respondFixture = (req, res, extra = {}) => {
+  const headers = fixtureRequestHeaders(req, extra);
+  if (new URL(req.url, 'http://localhost').pathname === '/worker.js') {
+    res.writeHead(200, { ...fixtureResponseHeaders, 'Content-Type': 'application/javascript; charset=utf-8' });
+    res.end(`onmessage = async () => postMessage({ userAgent: navigator.userAgent, platform: navigator.platform, uaData: await (${uaDataProbe})(), headers: ${JSON.stringify(headers)} });`);
+    return;
+  }
+  res.writeHead(200, fixtureResponseHeaders);
+  res.end('<!doctype html><meta charset="utf-8"><title>Envara device probe</title><h1>Owned offline device probe</h1><script>window.fixtureHeaders=' + JSON.stringify(headers) + '</script>');
+};
 const probe = `async () => {
   const canvas = document.createElement('canvas'), context = canvas.getContext('2d');
   const sample = 'mmmmmmmmmmlliW@#漢字字体';
@@ -68,25 +165,37 @@ const probe = `async () => {
   const fonts = Object.fromEntries(families.map(family => { const measurements = widths(family); return [family, { present: measurements.some((value, i) => value !== baseWidths[i]), widths: measurements }]; }));
   const gl = document.createElement('canvas').getContext('webgl');
   const ext = gl?.getExtension('WEBGL_debug_renderer_info');
-  let uaData; try { uaData = await navigator.userAgentData?.getHighEntropyValues(['architecture','bitness','platform','platformVersion','fullVersionList']); } catch {}
+  const uaData = await (${uaDataProbe})();
+  const worker = await new Promise((resolve, reject) => {
+    const instance = new Worker('/worker.js');
+    const finish = (error, value) => { clearTimeout(timer); instance.terminate(); error ? reject(error) : resolve(value); };
+    const timer = setTimeout(() => finish(new Error('Owned device worker timed out.')), 5000);
+    instance.onmessage = event => finish(null, event.data);
+    instance.onerror = () => finish(new Error('Owned device worker failed.'));
+    instance.postMessage(null);
+  });
   return { title: document.title, url: location.href, userAgent: navigator.userAgent, platform: navigator.platform, hardwareConcurrency: navigator.hardwareConcurrency, deviceMemory: navigator.deviceMemory ?? null,
-    secureContext: isSecureContext, language: navigator.language, languages: navigator.languages, intl: Intl.DateTimeFormat().resolvedOptions(), uaData,
+    secureContext: isSecureContext, language: navigator.language, languages: navigator.languages, intl: Intl.DateTimeFormat().resolvedOptions(), uaData, worker,
     screen: { width: screen.width, height: screen.height, availWidth: screen.availWidth, availHeight: screen.availHeight, colorDepth: screen.colorDepth, dpr: devicePixelRatio, innerWidth, innerHeight, outerWidth, outerHeight },
     gpu: ext ? { vendor: gl.getParameter(ext.UNMASKED_VENDOR_WEBGL), renderer: gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) } : null,
     fonts, headers: window.fixtureHeaders ?? null };
 }`;
 let manager, service, directContext, networkProbe;
 const routeFixtures = [];
+const loadSidecarFixture = async (id, url) => {
+  // The first response opts this owned origin into high-entropy hints. Only the
+  // subsequent navigation is sampled, so it contains real negotiated headers.
+  for (let count = 0; count < 2; count++) await manager.client.request('POST', `/api/sessions/${id}/navigate`, { url }, { timeoutMs: 30000 });
+};
 try {
   const respond = (req, res) => {
     const target = new URL(req.url, 'http://localhost');
-    if (!['localhost', '127.0.0.1'].includes(target.hostname)) { res.writeHead(502); res.end('Offline native probe'); return; }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end('<!doctype html><meta charset="utf-8"><title>Envara device probe</title><h1>Owned offline device probe</h1><script>window.fixtureHeaders=' + JSON.stringify({ acceptLanguage: req.headers['accept-language'] ?? null }) + '</script>');
+    if (![fixtureHostname, 'localhost', '127.0.0.1'].includes(target.hostname)) { res.writeHead(502); res.end('Offline native probe'); return; }
+    respondFixture(req, res);
   };
   const proxyPort = await listen(http.createServer(respond).on('connect', (_req, socket) => socket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n')));
   const fixturePort = await listen(http.createServer(respond));
-  const url = `http://localhost:${fixturePort}/`;
+  const url = `http://${fixtureHostname}:${fixturePort}/`;
   manager = new SidecarManager({ dataDir, resourcesDir: resources, legacyCacheDir: path.join(root, 'test-artifacts/engine-cache') });
   await manager.initialize();
   const engine = manager.getEngineStates().cloakbrowser; assert(engine.installed);
@@ -108,12 +217,13 @@ try {
     assert(created?.id, JSON.stringify(created));
     const session = (await manager.client.request('POST', '/api/sessions', { profile_id: created.id }, { timeoutMs: 180000 })).data;
     const id = session.session_id;
-    await manager.client.request('POST', `/api/sessions/${id}/navigate`, { url }, { timeoutMs: 30000 });
+    await loadSidecarFixture(id, url);
     await captureOwnedProcesses();
     const actual = (await manager.client.request('POST', `/api/sessions/${id}/eval`, { script: `(${probe})()` })).data;
     assert.equal(actual.title, 'Envara device probe', 'The actual owned fixture page must have loaded.');
     assert(actual.headers?.acceptLanguage, 'The fixture must capture the actual HTTP Accept-Language header.');
     report.observations.push({ mode: 'sidecar', desired, actual });
+    assertUserAgentConsistency(actual, desired.label);
     console.log(JSON.stringify({ label: desired.label, actual: { ...actual, fonts: Object.fromEntries(Object.entries(actual.fonts).map(([key, value]) => [key, value.present])) } }));
     await manager.client.request('DELETE', `/api/sessions/${id}`);
   }
@@ -124,9 +234,11 @@ try {
     directContext = await chromium.launchPersistentContext(path.join(dataDir, `native-dpr-${dpr}`), { executablePath: engine.binaryPath, headless: false, viewport: null, args, proxy: { server: `http://127.0.0.1:${proxyPort}` }, ignoreDefaultArgs: ['--enable-automation'], timeout: 30000 });
     const page = directContext.pages()[0] ?? await directContext.newPage();
     await page.goto(url);
+    await page.goto(url);
     await captureOwnedProcesses();
     const actual = await page.evaluate(`(${probe})()`);
     report.observations.push({ mode: 'native-dpr', desired: { dpr, args }, actual });
+    assertUserAgentConsistency(actual, `native-dpr-${dpr}`);
     console.log(JSON.stringify({ label: `native-dpr-${dpr}`, screen: actual.screen, cpu: actual.hardwareConcurrency, memory: actual.deviceMemory }));
     await directContext.close(); directContext = null;
   }
@@ -134,6 +246,7 @@ try {
   } else {
     await verifyDeviceProfiles(url);
   }
+  check('Every owned page has matching UA, nonempty UAData Chrome/Chromium versions, actual HTTP User-Agent/UA-CH versions and UA-CH platform; its dedicated worker matches page UAData and actual HTTP User-Agent.');
   report.passed = true;
 } catch (error) {
   report.error = { message: error.message, stack: error.stack }; console.error(error);
@@ -176,8 +289,7 @@ async function verifyDeviceProfiles(fixtureURL) {
       const url = new URL(req.url, 'http://localhost');
       if (url.origin !== new URL(fixtureURL).origin) { stats.refusedExternal++; res.writeHead(502); res.end('Offline route only'); return; }
       stats.browserRequests++;
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end('<!doctype html><meta charset="utf-8"><title>Envara device probe</title><h1>Route ' + label + '</h1><script>window.fixtureHeaders=' + JSON.stringify({ acceptLanguage: req.headers['accept-language'] ?? null, route: label }) + '</script>');
+      respondFixture(req, res, { route: label });
     });
     proxy.on('connect', (req, socket, head) => {
       if (req.headers['proxy-authorization'] !== authorization) { socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="Envara device probe"\r\n\r\n'); return; }
@@ -216,14 +328,16 @@ async function verifyDeviceProfiles(fixtureURL) {
     const session = sessions.find(item => item.profile_id === id); assert(session); return session.session_id;
   };
   const hardware = observation => ({ cpu: observation.hardwareConcurrency, memory: observation.deviceMemory, width: observation.screen.width, height: observation.screen.height, dpr: observation.screen.dpr, platform: observation.platform });
-  const capture = async (id, label, expectedDevice, route, locale) => {
+  const capture = async (id, label, expectedDevice, route, locale, verifyNewTab = false) => {
     await service.call('startProfile', { id });
     await captureOwnedProcesses();
     const sid = await sessionId(id);
+    await loadSidecarFixture(sid, fixtureURL);
     const actual = (await manager.client.request('POST', `/api/sessions/${sid}/eval`, { script: `(${probe})()` })).data;
     report.observations.push({ label, deviceProfileId: expectedDevice.id, route: route.label, actual });
     assert.equal(actual.title, 'Envara device probe');
     assert.equal(actual.headers?.route, route.label, 'The actual page must come from the selected authenticated proxy.');
+    assertUserAgentConsistency(actual, label);
     assert.equal(actual.language, locale);
     assert.equal(new Intl.Locale(actual.intl.locale).maximize().baseName, new Intl.Locale(locale).maximize().baseName);
     assert(actual.headers.acceptLanguage.startsWith(locale));
@@ -232,10 +346,24 @@ async function verifyDeviceProfiles(fixtureURL) {
     assert.equal(actual.deviceMemory, expectedDevice.deviceMemory);
     assert.equal(actual.screen.width, expectedDevice.width); assert.equal(actual.screen.height, expectedDevice.height); assert.equal(actual.screen.dpr, expectedDevice.deviceScaleFactor);
     assert.equal(actual.platform, { macos: 'MacIntel', windows: 'Win32', linux: 'Linux x86_64' }[expectedDevice.platform]);
+    if (verifyNewTab) {
+      await manager.client.callMcpTool('new_tab', { profile_id: id, url: fixtureURL });
+      await loadSidecarFixture(sid, fixtureURL);
+      const tab = (await manager.client.request('POST', `/api/sessions/${sid}/eval`, { script: `(${probe})()` })).data;
+      report.observations.push({ label: `${label}-new-tab`, deviceProfileId: expectedDevice.id, route: route.label, actual: tab });
+      assert.equal(tab.title, 'Envara device probe');
+      assert.equal(tab.headers?.route, route.label);
+      assertUserAgentConsistency(tab, `${label}-new-tab`);
+      assert.deepEqual(tab.uaData, actual.uaData, 'A newly created tab must retain the same UAData.');
+      assert.deepEqual(hardware(tab), hardware(actual), 'A newly created tab must retain the selected device.');
+      assert.equal(tab.intl.timeZone, route.timezone);
+      assert.equal(tab.language, locale);
+      check('A new owned browser tab retains the same UA/UA-CH, device, selected route and timezone.');
+    }
     await service.call('stopProfile', { id });
     return actual;
   };
-  const first = await capture(profile, 'fresh-default-device', device, a, 'en-US');
+  const first = await capture(profile, 'fresh-default-device', device, a, 'en-US', true);
   check('A newly created environment defaults to the versioned Mac device, with real 8-thread/8-GB browser values, 1440×900 screen and DPR 2.');
   await manager.stop(); await manager.start(); service = makeService();
   const persisted = await current(profile);

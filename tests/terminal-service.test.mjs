@@ -368,6 +368,136 @@ test('parallel directory persistence retains both profiles and deletion only rem
   await assert.rejects(stat(path.join(f.root, 'data/terminal/profiles/profile_a')), { code: 'ENOENT' });
 });
 
+test('a link-browser preference saved before selecting a folder survives restart without breaking terminals', async t => {
+  const f = await fixture(t);
+  await f.service.setLinkBrowser({ id: 'profile_a', browserProfileId: 'system' });
+  assert.equal(f.resolutions(), 0);
+  await f.service.shutdown();
+  const restored = new TerminalService({ dataDir: f.service.dataDir, availableLocales: ['C'], resolveContext: async id => ({ id, timezone: 'UTC', proxy: null }),
+    ptyFactory: (_shell, _args, options) => new FakePty(options), processControl: { capture: async pid => ({ pid }), close: async ({ pty }) => { pty.exit(); return { ok: true }; } } });
+  t.after(() => restored.shutdown().catch(() => {}));
+  await restored.ready;
+  const saved = (await restored.snapshot({ id: 'profile_a' })).profiles[0];
+  assert.equal(saved.cwd, null);
+  assert.equal(saved.browserProfileId, 'system');
+  await assert.rejects(restored.create({ id: 'profile_a' }), { code: 'TERMINAL_DIRECTORY_REQUIRED' });
+  await restored.setDirectory({ id: 'profile_a', path: f.cwd });
+  assert.equal((await restored.create({ id: 'profile_a' })).status, 'running');
+  assert.equal(restored.linkBrowser('profile_a'), 'system');
+});
+
+test('link-browser changes share the directory persistence queue across different environments', async t => {
+  const f = await fixture(t);
+  const persist = f.service.saveSettings.bind(f.service);
+  let first = true, entered, release;
+  const saving = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  f.service.saveSettings = async () => {
+    if (!first) return persist();
+    first = false; await persist(); entered(); await gate;
+  };
+  const directory = f.service.setDirectory({ id: 'profile_a', path: f.cwd });
+  await saving;
+  const browser = f.service.setLinkBrowser({ id: 'profile_b', browserProfileId: 'system' });
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.service.settings.has('profile_b'), false, 'another profile must not mutate shared settings before the pending commit finishes');
+  } finally { release(); }
+  await Promise.all([directory, browser]);
+  const stored = JSON.parse(await readFile(f.service.settingsFile, 'utf8'));
+  assert.equal(stored.profiles.find(row => row.id === 'profile_a').cwd, await import('node:fs/promises').then(fs => fs.realpath(f.cwd)));
+  assert.equal(stored.profiles.find(row => row.id === 'profile_b').browserProfileId, 'system');
+});
+
+test('settings transactions roll back failed directory, browser and removal commits and permit retry', async t => {
+  for (const operation of ['directory', 'browser', 'new-browser', 'remove']) {
+    await t.test(operation, async t => {
+      const f = await fixture(t);
+      await f.service.setDirectory({ id: 'profile_a', path: f.cwd });
+      await f.service.setLinkBrowser({ id: 'profile_a', browserProfileId: 'system' });
+      const namespace = await f.service.directories('profile_a');
+      const other = path.join(f.root, 'other'); await mkdir(other);
+      const before = [...f.service.settings];
+      const disk = await readFile(f.service.settingsFile, 'utf8');
+      const failure = Object.assign(new Error('owned fixture commit refused'), { code: 'EACCES' });
+      const persist = f.service.saveSettings.bind(f.service);
+      let refused = true;
+      f.service.saveSettings = () => refused ? Promise.reject(failure) : persist();
+      const commit = {
+        directory: () => f.service.setDirectory({ id: 'profile_a', path: other }),
+        browser: () => f.service.setLinkBrowser({ id: 'profile_a', browserProfileId: null }),
+        'new-browser': () => f.service.setLinkBrowser({ id: 'profile_b', browserProfileId: 'system' }),
+        remove: () => f.service.removeProfile({ id: 'profile_a' }),
+      }[operation];
+      await assert.rejects(commit(), error => error === failure);
+      assert.deepEqual([...f.service.settings], before);
+      assert.equal(await readFile(f.service.settingsFile, 'utf8'), disk);
+      assert.equal((await stat(namespace.root)).isDirectory(), true, 'failed persistence must precede owned-data removal');
+      refused = false;
+      await commit();
+      const stored = JSON.parse(await readFile(f.service.settingsFile, 'utf8'));
+      assert.deepEqual(stored.profiles.map(({ id, ...item }) => [id, item]), [...f.service.settings]);
+    });
+  }
+});
+
+test('a failed fallback PTY kill retains its cleanup authority until an explicit Close succeeds', async t => {
+  let canKill = false, kills = 0;
+  const f = await fixture(t, { processControl: { capture: async () => { throw Object.assign(new Error('metadata unavailable'), { code: 'TERMINAL_PROCESS_METADATA_UNAVAILABLE' }); }, close: async () => { throw new Error('no identity was captured'); } },
+    ptyFactory: (_shell, _args, options) => {
+      const pty = new FakePty(options); f.fakes.push(pty);
+      pty.kill = () => { kills++; if (!canKill) throw new Error('fixture signal refused'); pty.exit(); };
+      return pty;
+    } });
+  await f.service.setDirectory({ id: 'profile_a', path: f.cwd });
+  await assert.rejects(f.service.create({ id: 'profile_a' }), { code: 'TERMINAL_PROCESS_METADATA_UNAVAILABLE' });
+  const session = [...f.service.sessions.values()][0];
+  assert.equal(session.status, 'closing');
+  assert.equal(session.finished, false);
+  assert.equal(session.pty, f.fakes[0]);
+  assert.equal(session.errorCode, 'TERMINAL_PROCESS_METADATA_UNAVAILABLE');
+  assert.ok(session.cleanupError);
+  await assert.rejects(f.service.setDirectory({ id: 'profile_a', path: f.cwd }), { code: 'TERMINAL_RUNNING' });
+  canKill = true;
+  const closed = await f.service.close({ sessionId: session.sessionId });
+  assert.equal(closed.status, 'closed');
+  assert.equal(kills, 2);
+  assert.equal(session.pty, null);
+});
+
+test('a fallback kill signal without a confirmed PTY exit cannot release the cleanup handle', async t => {
+  let kills = 0;
+  const f = await fixture(t, { processControl: { capture: async () => { throw Object.assign(new Error('metadata unavailable'), { code: 'TERMINAL_PROCESS_METADATA_UNAVAILABLE' }); }, close: async () => { throw new Error('no identity was captured'); } },
+    ptyFactory: (_shell, _args, options) => {
+      const pty = new FakePty(options); f.fakes.push(pty);
+      pty.kill = () => { kills++; };
+      return pty;
+    } });
+  await f.service.setDirectory({ id: 'profile_a', path: f.cwd });
+  await assert.rejects(f.service.create({ id: 'profile_a' }), { code: 'TERMINAL_PROCESS_METADATA_UNAVAILABLE' });
+  const session = [...f.service.sessions.values()][0];
+  assert.equal(session.status, 'closing');
+  assert.equal(session.finished, false);
+  assert.equal(session.pty, f.fakes[0]);
+  assert.equal(session.nativeExited, undefined);
+  assert.ok(session.cleanupError);
+  assert.equal(kills, 1);
+  await assert.rejects(f.service.setDirectory({ id: 'profile_a', path: f.cwd }), { code: 'TERMINAL_RUNNING' });
+  f.fakes[0].exit();
+  assert.equal((await f.service.close({ sessionId: session.sessionId })).status, 'closed');
+  assert.equal(session.pty, null);
+});
+
+test('repeated refused launches keep only bounded finished history without spawning a process', async t => {
+  const f = await fixture(t, { resolveContext: async () => { throw new Error('fixture unavailable route'); } });
+  await f.service.setDirectory({ id: 'profile_a', path: f.cwd });
+  for (let attempt = 0; attempt < 40; attempt++) await assert.rejects(f.service.create({ id: 'profile_a' }), /fixture unavailable route/);
+  assert.equal(f.fakes.length, 0);
+  const sessions = (await f.service.snapshot({ id: 'profile_a' })).profiles[0].sessions;
+  assert.equal(sessions.length, 32);
+  assert.equal(sessions.every(session => session.status === 'error'), true);
+});
+
 test('short proxy credentials are redacted as complete credential-bearing URLs without corrupting ordinary output', async t => {
   const f = await fixture(t, { resolveContext: async id => ({ id, timezone: 'UTC', proxy: { protocol: 'http', host: 'proxy.invalid', port: 8080, username: 'user', password: 'x' } }) });
   await f.service.setDirectory({ id: 'profile_a', path: f.cwd }); await f.service.create({ id: 'profile_a' });

@@ -114,6 +114,9 @@ export class ApplicationService {
   metadata(application) {
     const session = this.sessions.get(application.id);
     return { ...application, args: [...application.args], status: session?.status ?? 'stopped', sessionId: session?.sessionId ?? null,
+      routeId: session?.routeId ?? null, cleanupUncertain: session?.status === 'error' && Boolean(session.routeId || session.sessionId),
+      initialFailure: session?.initialFailure ? { ...session.initialFailure } : null,
+      cleanupFailure: session?.cleanupFailure ? { ...session.cleanupFailure } : null,
       pid: session?.pid ?? null, startedAt: session?.startedAt ?? null, lastError: session?.lastError ?? null,
       timezone: session?.timezone ?? null, timezoneSource: session?.timezoneSource ?? null, geolocation: session?.geolocation ?? null,
       proxyId: session?.proxyId ?? null, network: session?.network ?? null, udpPolicy: session?.udpPolicy ?? null,
@@ -189,7 +192,7 @@ export class ApplicationService {
       const application = this.find(id), active = this.activeSession(id);
       if (active) { if (active.status === 'running') return this.snapshot(); throw fail('APPLICATION_RUNNING', '软件仍在启动、停止或等待清理。'); }
       await this.checkProfile(application.profileId);
-      const session = { status: 'starting', sessionId: null, routeId: null, lastError: null, proxyId: null };
+      const session = { status: 'starting', sessionId: null, routeId: null, lastError: null, initialFailure: null, cleanupFailure: null, proxyId: null };
       this.sessions.set(id, session); this.notify(application);
       try {
         const state = await this.routing.status(); this.routingState = publicApplicationRoutingStatus(state, this.platform);
@@ -227,7 +230,11 @@ export class ApplicationService {
       } catch (error) {
         const known = error?.code?.startsWith('APPLICATION_') && !error?.code?.startsWith('APPLICATION_ROUTING_') ? error : applicationRoutingError(error);
         session.lastError = { code: known.code ?? 'APPLICATION_START_FAILED', message: known.message ?? '软件无法启动。' };
-        try { await this.cleanupSession(session); } catch { session.lastError = { code: 'APPLICATION_CLEANUP_FAILED', message: '软件进程尚未确认停止，网络规则仍保留，请重试停止。' }; }
+        session.initialFailure ??= { ...session.lastError };
+        try { await this.cleanupSession(session); } catch {
+          session.lastError = { code: 'APPLICATION_CLEANUP_FAILED', message: '软件进程尚未确认停止，网络规则仍保留，请重试停止。' };
+          session.cleanupFailure ??= { ...session.lastError };
+        }
         session.status = 'error'; this.notify(application); throw fail(session.lastError.code, session.lastError.message);
       }
     });
@@ -251,7 +258,8 @@ export class ApplicationService {
       if (!session || !this.activeSession(id)) return this.snapshot();
       session.status = 'stopping'; this.notify(application);
       try { await this.cleanupSession(session); session.status = 'stopped'; session.lastError = null; this.notify(application); }
-      catch { session.status = 'error'; session.lastError = { code: 'APPLICATION_CLEANUP_FAILED', message: '软件进程尚未确认停止，网络规则仍保留，请重试。' }; this.notify(application); throw fail(session.lastError.code, session.lastError.message); }
+      catch { session.status = 'error'; session.lastError = { code: 'APPLICATION_CLEANUP_FAILED', message: '软件进程尚未确认停止，网络规则仍保留，请重试。' };
+        session.cleanupFailure ??= { ...session.lastError }; this.notify(application); throw fail(session.lastError.code, session.lastError.message); }
       this.stopPollingWhenIdle(); return this.snapshot();
     });
   }
@@ -277,19 +285,27 @@ export class ApplicationService {
           if (session.status !== 'running') continue;
           const application = this.applications.get(id);
           if (!applicationRoutingReady(state)) {
-            try { await this.cleanupSession(session); } catch {}
-            session.status = 'error'; session.lastError = { code: 'APPLICATION_ROUTING_NOT_READY', message: '网络接管中断，已请求停止软件。' }; this.notify(application); continue;
+            session.lastError = { code: 'APPLICATION_ROUTING_NOT_READY', message: '网络接管中断，已请求停止软件。' };
+            session.initialFailure ??= { ...session.lastError };
+            try { await this.cleanupSession(session); } catch {
+              session.lastError = { code: 'APPLICATION_CLEANUP_FAILED', message: '网络接管中断，停止或网络规则清理尚未完成，请重试停止。' };
+              session.cleanupFailure ??= { ...session.lastError };
+            }
+            session.status = 'error'; this.notify(application); continue;
           }
           const native = Array.isArray(state.sessions) ? state.sessions.find(item => item.sessionId === session.sessionId) : null;
           if (Array.isArray(state.sessions) && !native) {
             session.status = 'error'; session.lastError = { code: 'APPLICATION_ROUTING_SESSION_MISSING', message: '软件会话的网络保护状态无法确认，正在请求停止软件。' }; this.notify(application);
+            session.initialFailure ??= { ...session.lastError };
             try { await this.cleanupSession(session); session.lastError.message = '软件会话的网络保护状态无法确认，已停止软件并清理网络规则。'; }
-            catch { session.lastError = { code: 'APPLICATION_CLEANUP_FAILED', message: '软件会话的网络保护状态无法确认，停止或网络规则清理尚未完成，请重试停止。' }; }
+            catch { session.lastError = { code: 'APPLICATION_CLEANUP_FAILED', message: '软件会话的网络保护状态无法确认，停止或网络规则清理尚未完成，请重试停止。' };
+              session.cleanupFailure ??= { ...session.lastError }; }
             this.notify(application); continue;
           }
           if (native && ['stopped', 'exited', 'error'].includes(native.status)) {
             try { await this.cleanupSession(session); session.status = native.status === 'error' ? 'error' : 'stopped'; session.exitCode = Number.isInteger(native.exitCode) ? native.exitCode : null; }
-            catch { session.status = 'error'; session.lastError = { code: 'APPLICATION_CLEANUP_FAILED', message: '软件已退出，网络规则仍等待清理。' }; }
+            catch { session.status = 'error'; session.lastError = { code: 'APPLICATION_CLEANUP_FAILED', message: '软件已退出，网络规则仍等待清理。' };
+              session.cleanupFailure ??= { ...session.lastError }; }
             this.notify(application);
           }
         }
@@ -299,6 +315,9 @@ export class ApplicationService {
   }
   async shutdown() {
     this.closed = true; if (this.pollTimer) clearInterval(this.pollTimer); this.pollTimer = null;
+    /* An attached application's start holds this queue for its whole run, so
+     * its stop is requested first; otherwise quitting waits behind it forever. */
+    try { this.routing.beginShutdown?.(); } catch { /* the queued cleanup below reports it */ }
     await this.serialized(async () => {
       const failures = [];
       for (const [id, session] of this.sessions) {

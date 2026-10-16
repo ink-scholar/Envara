@@ -45,6 +45,10 @@ const APP_KEEPER_REPORT_KEYS = ['schema', 'event', 'ticketId', 'registrationId',
 // stopped child. Its bounded wait must cover that work, rather than treating
 // it like a small control ACK and revoking a healthy, still-preparing keeper.
 export const PF_APP_COLD_STAGE_TIMEOUT_MS = 60000;
+// A stage deadline burns launch authority, but does not corrupt this original
+// keeper's authenticated channel. Cleanup gets a separate bounded interval to
+// learn whether the keeper adopted a child or returned to its transport loop.
+export const PF_APP_STAGE_CLEANUP_WAIT_MS = 15000;
 // Resume revalidates the signed application before SIGCONT, then verifies the
 // executed identity. Give that whole native operation its own bounded wait;
 // the desktop client additionally reserves time for stop/snapshot/close.
@@ -68,6 +72,28 @@ const MAXIMUM_TIMER_MS = 2147483647;
 const APP_NATIVE_STAGES = new Set(['register', 'preflight', 'gui-session', 'route-read', 'transport-start', 'front-listen', 'front-spawn', 'front-handshake',
   'factory-open', 'deny-commit', 'transport-ack', 'front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'guardian']);
 const APP_ACTIVE_NATIVE_FAILURE_STAGES = new Set(['front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'guardian']);
+/* Diagnostic-only native launch step timing (gui-launch.h enum envara_gui_step).
+ * A frame names a fixed completed step with monotonic milliseconds and how many
+ * full signed inspections and identity re-proofs it ran. It never settles a
+ * waiter, changes a phase, burns or restores launch authority, or proves any
+ * custody; at most APP_STAGE_PROGRESS_LIMIT are kept per transport. */
+const APP_STAGE_PROGRESS_STEPS = new Set(['front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'ticket-claim', 'stage-fresh',
+  'data-prepare', 'stage-plan', 'stage-recheck', 'stage-spawn', 'stage-stopped', 'stage-adopt', 'resume-verify']);
+const APP_STAGE_PROGRESS_KEYS = ['schema', 'event', 'runId', 'environmentId', 'step', 'stepMs', 'totalMs', 'fullChecks', 'identityChecks', 'ready', 'protected'].sort().join('|');
+export const APP_STAGE_PROGRESS_LIMIT = 16;
+const APP_STAGE_PROGRESS_MAX_MS = 86400000;
+const stageProgressMs = value => Number.isSafeInteger(value) && value >= 0 && value <= APP_STAGE_PROGRESS_MAX_MS;
+const stageProgressCount = value => Number.isSafeInteger(value) && value >= 0 && value <= 65535;
+function validStageProgress(event) {
+  return Object.keys(event).sort().join('|') === APP_STAGE_PROGRESS_KEYS && APP_STAGE_PROGRESS_STEPS.has(event.step) &&
+    stageProgressMs(event.stepMs) && stageProgressMs(event.totalMs) && event.stepMs <= event.totalMs &&
+    stageProgressCount(event.fullChecks) && stageProgressCount(event.identityChecks);
+}
+export function projectStageProgress(entries) {
+  if (!Array.isArray(entries)) return [];
+  return entries.slice(0, APP_STAGE_PROGRESS_LIMIT).map(item => ({ step: item.step, stepMs: item.stepMs, totalMs: item.totalMs,
+    fullChecks: item.fullChecks, identityChecks: item.identityChecks, receivedMs: item.receivedMs }));
+}
 const APP_FAILURE_STAGES = new Set(['register', 'registry-lock', 'root-hook', 'group-allocation', 'sealed-context', 'pf-reference', 'transport', 'cold-stage', 'resume', 'cleanup']);
 const APP_RELEASE_FACTS = Object.freeze(['coreReaped', 'frontReaped', 'childReaped', 'scopeQuiescentObserved', 'originalUTunClosed', 'originalListenerClosed', 'filterEmptyVerified', 'privateJournalRetired']);
 const appReleasedFactsVerified = value => APP_RELEASE_FACTS.filter(key => key !== 'childReaped').every(key => value?.[key] === true) &&
@@ -998,6 +1024,47 @@ export class MacOSPFExecutor {
       // exact children. It never SIGKILLs original utun/listener custodians.
       try { entry.child?.stdin.end(); } catch {}
     };
+    const expireWaiter = waiter => {
+      rememberWaitFailure(waiter.timeoutCode);
+      if (waiter.timeoutCode === 'APPLICATION_APP_STAGE_TIMEOUT' && entry.ack && entry.ticketId &&
+          !entry.uncertain && !entry.resumeAttempted && !entry.stoppingRequested && !entry.releasing) {
+        // No B was sent. L may still be checking the sealed app, or may have
+        // adopted a stopped child. Preserve only this keeper's S/R channel;
+        // a late ACK can establish custody for cleanup, never stage success.
+        entry.stageTimedOut = true;
+        entry.stageOutcomePending = !entry.stoppedIdentity && !entry.failure;
+        denyLaunch();
+      } else if (waiter.stageOutcomeWait && entry.cleanupOnly && entry.stageTimedOut && entry.ack &&
+          !entry.uncertain && !entry.resumeAttempted && !entry.releasing) {
+        // Only waiting to learn native state expired; no S was sent. Preserve
+        // this original cleanup-only channel for a later explicit Stop, rather
+        // than manufacturing EOF and stranding its still-working custodian.
+        const index = entry.waiters.indexOf(waiter);
+        if (index >= 0) entry.waiters.splice(index, 1);
+        clearTimeout(waiter.timer); waiter.reject(transportError());
+      } else poison();
+    };
+    const settleWaiters = event => {
+      for (const waiter of [...entry.waiters]) if (waiter.predicate(event)) {
+        // A delayed event loop must not turn an expired ACK into success.
+        if (Date.now() >= waiter.deadline) { expireWaiter(waiter); break; }
+        entry.waiters.splice(entry.waiters.indexOf(waiter), 1); clearTimeout(waiter.timer); waiter.resolve(event);
+      }
+    };
+    const captureStopped = event => {
+      if (!entry.ticketId || entry.stoppedIdentity || entry.resumeAttempted ||
+          event.ticketId !== entry.ticketId || event.registrationId !== entry.registrationId || event.versionId !== entry.versionId ||
+          event.keeperPID !== entry.ack?.keeperPID || !Number.isSafeInteger(event.pid) || event.pid < 2 || !nativeBirth(event.birth) ||
+          Object.keys(event).sort().join('|') !== APP_KEEPER_REPORT_KEYS ||
+          APP_KEEPER_REPORT_BOOLEANS.some(key => typeof event[key] !== 'boolean') ||
+          !['cold', 'seatbelt-front-only'].includes(event.profile) || keeperProfile(entry) != null && event.profile !== keeperProfile(entry) ||
+          event.persistentDenyObserved !== true || event.stoppedBeforeExec !== true ||
+          ['childReaped', 'scopeQuiescentObserved', 'resumeSent', 'resumed', 'cancelSent',
+            'executedIdentityVerified', 'seatbeltAppliedByFixedExec', 'frontAdmissionVerified'].some(key => event[key] !== false)) throw new Error();
+      entry.stoppedIdentity = Object.freeze({ pid: event.pid, birth: event.birth });
+      entry.guardianArmed = true; entry.guardianReleased = false;
+      observeKeeperProfile(entry, event);
+    };
     entry.poison = poison; entry.denyLaunch = denyLaunch;
     try { entry.child = this.spawnChild(`${PF_INSTALL_ROOT}/envara-pf-native`, ['app-tunnel-bootstrap', runId, environmentId], {
       shell: false, env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C' }, stdio: ['pipe', 'pipe', 'pipe'],
@@ -1015,6 +1082,20 @@ export class MacOSPFExecutor {
           if (++count > 64 || !event || event.ready !== false || event.protected !== false || event.runId !== runId || event.environmentId !== environmentId ||
               ![PF_APP_TRANSPORT_SCHEMA, PF_APP_KEEPER_SCHEMA].includes(event.schema)) throw new Error();
           if (entry.abortReceipt || entry.preflightAbortReceipt) throw new Error();
+          // stdout can run before an already-due timer. The absolute L
+          // deadline still burns launch before either a stopped ACK or a
+          // refusal is interpreted; neither can replace the elapsed timeout.
+          const overdueStage = entry.waiters.find(waiter => waiter.timeoutCode === 'APPLICATION_APP_STAGE_TIMEOUT' && Date.now() >= waiter.deadline);
+          if (overdueStage) expireWaiter(overdueStage);
+          if (event.schema === PF_APP_TRANSPORT_SCHEMA && event.event === 'stage-progress') {
+            // Malformed timing output is still unknown native output.
+            if (!Number.isFinite(entry.launchSentAt) || !validStageProgress(event)) throw new Error();
+            if (!entry.stageProgress) entry.stageProgress = [];
+            if (entry.stageProgress.length < APP_STAGE_PROGRESS_LIMIT) entry.stageProgress.push(Object.freeze({ step: event.step,
+              stepMs: event.stepMs, totalMs: event.totalMs, fullChecks: event.fullChecks, identityChecks: event.identityChecks,
+              receivedMs: Math.max(0, Math.min(APP_STAGE_PROGRESS_MAX_MS, Date.now() - entry.launchSentAt)) }));
+            continue;
+          }
           if (event.schema === PF_APP_TRANSPORT_SCHEMA && event.event === 'transport-refused') {
             const expected = ['schema', 'event', 'runId', 'environmentId', 'stage', 'reason', 'error', 'ready', 'protected'];
             if (Object.keys(event).sort().join('|') !== expected.sort().join('|') || !APP_NATIVE_STAGES.has(event.stage) || event.stage === 'register' || !APP_NATIVE_FAILURE_REASONS.has(event.reason) ||
@@ -1024,7 +1105,8 @@ export class MacOSPFExecutor {
              * already recorded and whether or not cleanup-only was latched yet.
              * It is never merged into the first launch failure, and the first
              * launch failure is never restated as a cleanup failure. */
-            if (entry.stoppingRequested || entry.releasing) {
+            const lateStageRefusal = entry.stageTimedOut === true && entry.stageOutcomePending === true;
+            if (!lateStageRefusal && (entry.stoppingRequested || entry.releasing)) {
               entry.cleanupFailure = Object.freeze({ stage: event.stage, reason: event.reason, error: event.error }); denyLaunch(); continue;
             }
             if (entry.failure || entry.phase !== 'starting' &&
@@ -1036,6 +1118,10 @@ export class MacOSPFExecutor {
               // No resource is called absent until its own terminal proof.
               if (entry.phase === 'starting' && !['deny-commit', 'transport-ack'].includes(event.stage)) { poison(); break; }
               entry.cleanupOnly = true;
+              if (lateStageRefusal) {
+                entry.stageOutcomePending = false;
+                entry.events.push(event); settleWaiters(event);
+              }
               if (entry.phase !== 'starting') denyLaunch();
               continue;
             }
@@ -1043,7 +1129,13 @@ export class MacOSPFExecutor {
             // may follow this diagnostic within the original startup deadline.
             entry.refusalPending = true; continue;
           }
-          if (entry.cleanupOnly) {
+          const lateStopped = entry.stageTimedOut === true && entry.stageOutcomePending === true &&
+            event.schema === PF_APP_KEEPER_SCHEMA && event.event === 'stopped';
+          if (lateStopped) {
+            captureStopped(event);
+            entry.stageOutcomePending = false;
+          }
+          if (entry.cleanupOnly && !lateStopped) {
             if (event.schema !== PF_APP_TRANSPORT_SCHEMA || !['transport-cleanup-ready', 'transport-cleanup-stopping', 'transport-released'].includes(event.event)) {
               // Late launch ACKs cannot revive a refused run. A valid bound
               // old ACK is ignored; unknown output still poisons the channel.
@@ -1054,11 +1146,26 @@ export class MacOSPFExecutor {
                   event.ticketId === entry.ticketId && event.registrationId === entry.registrationId && event.versionId === entry.versionId &&
                   event.keeperPID === entry.ack?.keeperPID && Object.keys(event).sort().join('|') === APP_KEEPER_REPORT_KEYS &&
                   APP_KEEPER_REPORT_BOOLEANS.every(key => typeof event[key] === 'boolean') && event.profile === keeperProfile(entry) &&
+                  (!entry.stageTimedOut || event.event !== 'resumed' && event.resumeSent === false && event.resumed === false &&
+                    event.executedIdentityVerified === false && event.seatbeltAppliedByFixedExec === false && event.frontAdmissionVerified === false) &&
                   (!entry.stoppedIdentity || event.pid === entry.stoppedIdentity.pid && event.birth === entry.stoppedIdentity.birth);
               if (boundKeeperFrame) {
                 if (event.event === 'released' && entry.guardianArmed === true && event.childReaped === true &&
                     event.persistentDenyObserved === true && event.scopeQuiescentObserved === true) entry.guardianReleased = true;
                 continue;
+              }
+              // The S waiter is attached only after an exact late stopped
+              // frame bound the guardian. Its stopping frame remains the only
+              // reachable proof while the guardian owns that child.
+              if (entry.stageTimedOut && event.schema === PF_APP_KEEPER_SCHEMA && event.event === 'stopping' &&
+                  entry.guardianArmed === true && entry.stoppedIdentity && event.ticketId === entry.ticketId &&
+                  event.registrationId === entry.registrationId && event.versionId === entry.versionId &&
+                  event.keeperPID === entry.ack?.keeperPID && event.pid === entry.stoppedIdentity.pid && event.birth === entry.stoppedIdentity.birth &&
+                  Object.keys(event).sort().join('|') === APP_KEEPER_REPORT_KEYS &&
+                  APP_KEEPER_REPORT_BOOLEANS.every(key => typeof event[key] === 'boolean') && event.profile === keeperProfile(entry) &&
+                  event.persistentDenyObserved === true && event.resumeSent === false && event.resumed === false &&
+                  event.executedIdentityVerified === false && event.seatbeltAppliedByFixedExec === false && event.frontAdmissionVerified === false) {
+                entry.events.push(event); settleWaiters(event); continue;
               }
               throw new Error();
             }
@@ -1082,12 +1189,10 @@ export class MacOSPFExecutor {
               event.versionId === entry.versionId && event.keeperPID === entry.ack?.keeperPID;
             // Capture only the first exact stopped child. It also binds a
             // revocation arriving in the same chunk as the stopped ACK.
-            if (!entry.stoppedIdentity && event.event === 'stopped' && boundKeeper &&
-                Number.isSafeInteger(event.pid) && event.pid > 1 && nativeBirth(event.birth)) {
-              entry.stoppedIdentity = Object.freeze({ pid: event.pid, birth: event.birth });
+            if (!entry.stoppedIdentity && event.event === 'stopped') {
+              captureStopped(event);
               // The guardian owns the stopped child from this ACK until it
               // emits its own released frame, which decides what S can expect.
-              entry.guardianArmed = true; entry.guardianReleased = false;
             }
             if (event.event === 'released' && boundKeeper && entry.guardianArmed === true) entry.guardianReleased = true;
             if (APP_KEEPER_RESUME_NEGATIVE_EVENTS.has(event.event) && entry.stoppedIdentity && !entry.stoppingRequested &&
@@ -1115,11 +1220,7 @@ export class MacOSPFExecutor {
           }
           observeKeeperProfile(entry, event);
           entry.events.push(event);
-          for (const waiter of [...entry.waiters]) if (waiter.predicate(event)) {
-            // A delayed event loop must not turn an expired ACK into success.
-            if (Date.now() >= waiter.deadline) { rememberWaitFailure(waiter.timeoutCode); poison(); break; }
-            entry.waiters.splice(entry.waiters.indexOf(waiter), 1); clearTimeout(waiter.timer); waiter.resolve(event);
-          }
+          settleWaiters(event);
         } catch { poison(); }
       }
     });
@@ -1141,8 +1242,10 @@ export class MacOSPFExecutor {
       const captured = replay ? entry.events.find(predicate) : null;
       if (captured) return resolve(captured);
       const limit = entry.phase === 'starting' || entry.refusalPending ? Math.max(1, Math.min(timeoutMs, entry.deadline - Date.now())) : timeoutMs;
-      const waiter = { predicate, resolve, reject, timer: null, deadline: Date.now() + limit, timeoutCode };
-      waiter.timer = setTimeout(() => { rememberWaitFailure(timeoutCode); poison(); }, limit); entry.waiters.push(waiter);
+      const waiter = { predicate, resolve, reject, timer: null, deadline: Date.now() + limit, timeoutCode,
+        stageOutcomeWait: timeoutCode === 'APPLICATION_APP_STOP_TIMEOUT' && entry.stageTimedOut === true &&
+          entry.stageOutcomePending === true && entry.cleanupOnly === true && entry.stoppingRequested === true };
+      waiter.timer = setTimeout(() => expireWaiter(waiter), limit); entry.waiters.push(waiter);
     });
     try { entry.bootstrapIdentity = await this.identify(entry.child.pid); }
     catch { entry.bootstrapIdentityUnavailable = true; }
@@ -1201,6 +1304,17 @@ export class MacOSPFExecutor {
         entry.cleanupOnly && !['S', 'R'].includes(command) || command === 'R' && (!entry.stoppingRequested || entry.phase !== 'stopping') ||
         command === 'L' && (!uuid(ticketId) || entry.ticketId))
       throw failure(command === 'B' && entry?.resumeRefused ? 'APPLICATION_APP_RESUME_UNCONFIRMED' : 'APPLICATION_APP_TRANSPORT_UNCONFIRMED');
+    if (command === 'S' && entry.stageTimedOut && entry.stageOutcomePending) {
+      // Sending S while native signature/stage work is still running can send
+      // it to a relay that is then retired on refusal. First learn the exact
+      // native state from this original channel, then choose its reachable S
+      // proof. No reply within this separate bound is still uncertain.
+      entry.stoppingRequested = true;
+      await entry.wait(event => event.schema === PF_APP_KEEPER_SCHEMA && event.event === 'stopped' ||
+        event.schema === PF_APP_TRANSPORT_SCHEMA && event.event === 'transport-refused',
+        PF_APP_STAGE_CLEANUP_WAIT_MS, 'APPLICATION_APP_STOP_TIMEOUT', true);
+      if (entry.uncertain || entry.stageOutcomePending) throw failure('APPLICATION_APP_CLEANUP_UNCONFIRMED');
+    }
     let keeper;
     try { await this.verifyApplicationLease(runId); keeper = await this.identify(entry.ack.keeperPID); }
     catch { entry.poison(); throw failure(command === 'B' && entry.resumeRefused ? 'APPLICATION_APP_RESUME_UNCONFIRMED' : 'APPLICATION_APP_TRANSPORT_UNCONFIRMED'); }
@@ -1230,6 +1344,7 @@ export class MacOSPFExecutor {
       /* Only the keeper stopping frame is a one-shot transition. 'R' is
        * answered per request, so a stale release frame must never satisfy it. */
       command === 'S' && (!entry.cleanupOnly || guardianOnly)) : null;
+    if (command === 'L') entry.launchSentAt = Date.now();
     entry.child.stdin.write(`${command}${command === 'L' ? ` ${ticketId}` : ''}\n`);
     /* A single 'R' sent while the helpers were still leaving was refused in
      * silence, and the run then waited out its whole deadline for an answer
@@ -1958,6 +2073,9 @@ export class MacOSPFController {
       prestageAborted: run.prestageAbort != null,
       preflightAborted: run.preflightAbort != null,
       cleanupUncertain: run.cleanupUncertain === true, cleanupComplete: appCleanPhase(run.phase) && run.cleanupUncertain === false,
+      // Capability to ask this original keeper for cleanup, never cleanup
+      // evidence and never permission to launch. A poisoned channel is false.
+      cleanupRetryable: run.cleanupUncertain === true && this.executor.applicationCleanupAvailable?.(run.runId) === true,
       failure: projectAppFailure(run.initialFailure),
       initialFailure: projectAppFailure(run.initialFailure),
       cleanupFailure: projectAppFailure(run.cleanupFailure),
@@ -1975,6 +2093,8 @@ export class MacOSPFController {
      * that to the user rather than implying a normal stop. */
     const ended = entry?.applicationEnded;
     return { ...this.publicApplication(run),
+      // Diagnostic-only native step timing of this run's launch, if any arrived.
+      nativeStageTimings: projectStageProgress(entry?.stageProgress),
       // The recorded revocation is an object; its presence is the fact.
       applicationEnded: ended != null,
       ...(ended ? { endedChildReaped: entry.applicationEnded.childReaped === true, endedChildSignalled: entry.applicationEnded.childSignalled === true } : {}) };
@@ -2216,6 +2336,7 @@ export class MacOSPFController {
       }
       if (run.cleanupUncertain && this.executor.applicationCleanupAvailable?.(run.runId) === true) {
         run.cleanupMode = 'native-refusal';
+        run.cleanupRetryable = true;
         const transport = this.executor.appTransports?.get(run.runId)?.ack;
         if (transport) run.transport = structuredClone(transport);
       } else if (run.cleanupUncertain) this.executor.appTransports?.get(run.runId)?.poison?.();

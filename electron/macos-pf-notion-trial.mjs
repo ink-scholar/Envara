@@ -20,8 +20,8 @@ import { createPersistentPFNotionSessionClient, validatePFNotionSessionRequest,
 export const PF_ATTACH_POLL_INTERVAL_MS = 2000;
 
 export const PF_NOTION_TRIAL_CANDIDATE = Object.freeze({
-  authorizerSHA256: 'b09dabba84d54f051c6005d680e14cf15d88c05f29f84cf41e3c3ab5867028bd',
-  manifestSHA256: '9b51cf9b161d1add0ea86049adc535ea298b6bb6e44ff7496989cd0662fa4743',
+  authorizerSHA256: '0c5b27600b82aa1bed58649663ce2789db24c88a9f1b8faf1b26cd85b31baa35',
+  manifestSHA256: 'e3c598d15104ebc32e1e5d21d295d396eb3f85c7f2e13fd653de9c2828b8add1',
 });
 /* The bundled carrier is named after the manifest it carries. Deriving the path
  * from the pin keeps a single source of truth: a pinned candidate with a stale
@@ -38,7 +38,7 @@ const codes = new Set(['PF_INSTALLED_CANDIDATE_MISMATCH', 'PF_NOTION_CARRIER_MIS
   'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED', 'APPLICATION_ROUTING_NOT_READY', 'APPLICATION_PROXY_UNAVAILABLE',
   'APPLICATION_ROUTING_PROTOCOL_ERROR', 'APPLICATION_APP_CONTEXT_REFUSED', 'APPLICATION_APP_IDENTITY_REFUSED',
   'APPLICATION_APP_NATIVE_REFUSED', 'APPLICATION_APP_STAGE_UNCONFIRMED', 'APPLICATION_APP_TRANSPORT_UNCONFIRMED',
-  'APPLICATION_APP_STAGE_TIMEOUT', 'APPLICATION_APP_RESUME_TIMEOUT', 'APPLICATION_APP_STOP_TIMEOUT', 'APPLICATION_APP_RELEASE_TIMEOUT', 'APPLICATION_APP_RESUME_UNCONFIRMED', 'APPLICATION_APP_CLEANUP_UNCONFIRMED', 'APPLICATION_ROUTING_CLEANUP_UNCONFIRMED', 'APPLICATION_NATIVE_REFUSED']);
+  'APPLICATION_APP_STAGE_TIMEOUT', 'APPLICATION_APP_RESUME_TIMEOUT', 'APPLICATION_APP_STOP_TIMEOUT', 'APPLICATION_APP_RELEASE_TIMEOUT', 'APPLICATION_APP_RESUME_UNCONFIRMED', 'APPLICATION_APP_CLEANUP_UNCONFIRMED', 'APPLICATION_ROUTING_CLEANUP_UNCONFIRMED', 'APPLICATION_NATIVE_REFUSED', 'IMPORT_APPLICATION_DATA_PENDING']);
 const safeCode = value => codes.has(value?.code) ? value.code : 'PF_NOTION_TRIAL_FAILED';
 const nativeStages = new Set(['register', 'preflight', 'gui-session', 'route-read', 'transport-start', 'front-listen', 'front-spawn',
   'front-handshake', 'factory-open', 'deny-commit', 'transport-ack', 'front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'guardian']);
@@ -132,6 +132,7 @@ async function hashFile(filename, refusal) {
   } catch { throw error(refusal); }
 }
 export async function verifyNotionTrialSignature(application) {
+  if (!trialBundlePath(application)) throw error('PF_NOTION_TRIAL_REQUEST_INVALID');
   try {
     await new Promise((resolve, reject) => execFile('/usr/bin/codesign', ['--verify', '--strict', '--deep', '--all-architectures', application],
       { timeout: 10000, maxBuffer: 16384, env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } }, failure => failure ? reject(failure) : resolve()));
@@ -145,6 +146,7 @@ export async function verifyNotionTrialSignature(application) {
  * upgrades a signature check into a routing or protection claim.
  */
 export async function verifyNotionTrialCandidate({ authorizerPath, applicationPath, carrierOnly = false } = {}) {
+  if (carrierOnly !== true && !trialBundlePath(applicationPath)) throw error('PF_NOTION_TRIAL_REQUEST_INVALID');
   if (process.platform !== 'darwin') throw error('PF_NOTION_TRIAL_PLATFORM_REQUIRED');
   if (typeof authorizerPath !== 'string' || !path.isAbsolute(authorizerPath) || !authorizerPath.endsWith(`.app${suffix}`) || /[\0\r\n]/.test(authorizerPath))
     throw error('PF_NOTION_TRIAL_NOT_ENABLED');
@@ -163,9 +165,7 @@ export async function verifyNotionTrialCandidate({ authorizerPath, applicationPa
   // caller cannot substitute a different or modified application at this layer.
   // Storage maintenance binds no application: every check above still applies.
   if (carrierOnly === true) return true;
-  const bundle = applicationPath ?? '/Applications/Notion.app';
-  if (!trialBundlePath(bundle)) throw error('PF_NOTION_TRIAL_REQUEST_INVALID');
-  await verifyNotionTrialSignature(bundle);
+  await verifyNotionTrialSignature(applicationPath);
   return true;
 }
 const trialBundlePath = value => typeof value === 'string' && path.isAbsolute(value) && value.endsWith('.app') && value.length <= 4096 && !/[\0\r\n]/.test(value) ? value : null;
@@ -185,7 +185,7 @@ const cleanKind = (value, runId, environmentId) => value?.environmentId !== envi
 
 export class MacOSPFNotionTrial {
   constructor({ authorizerPath, verifyCandidate = ({ applicationPath, carrierOnly } = {}) => verifyNotionTrialCandidate({ authorizerPath, applicationPath, carrierOnly }),
-    verifyNotion = bundle => verifyNotionTrialSignature(bundle ?? '/Applications/Notion.app'),
+    verifyNotion = bundle => verifyNotionTrialSignature(bundle),
     createClient = ({ runId } = {}) => {
       /* One authorized root session per Envara launch: the carrier is spawned
        * inside the shared mux on the first attach and reused by every later
@@ -214,11 +214,12 @@ export class MacOSPFNotionTrial {
     this.watchMs = watchMs; this.onEvent = onEvent; this.persistDiagnostics = persistDiagnostics;
     this.observationSeconds = Number.isFinite(watchMs) && watchMs > 0 ? watchMs / 1000 : null;
     this.state = null; this.pending = null; this.stopObservation = null; this.closed = false;
-    this.mux = null; this.activeTarget = null; this.runTargets = new Map();
+    this.mux = null; this.activeTarget = null; this.runTargets = new Map(); this.cleanupEndpoint = null;
     this.authorizerPath = authorizerPath; this.spawnCarrier = spawnCarrier;
     this.pruneApplicationData = pruneApplicationData; this.housekeeping = null; this.lastHousekeeping = null;
+    this.applicationDataFailures = new Set();
   }
-  stateFlags() { return { active: false, phase: 'idle', staged: false, resumed: false, cleanupComplete: false, cleanupUncertain: false,
+  stateFlags() { return { active: false, phase: 'idle', staged: false, resumed: false, cleanupComplete: false, cleanupUncertain: false, cleanupRetryable: false,
     lifecyclePassed: false, errorCode: null, events: [], ...fixedFlags, initialFailure: null, cleanupFailure: null,
     maximumLifetimeSeconds: PF_APP_SESSION_LEASE_SECONDS,
     observationSeconds: this.observationSeconds }; }
@@ -247,12 +248,14 @@ export class MacOSPFNotionTrial {
   /* Ending one run's channel leaves the shared authorized session open for the
    * next attach; only disposeShared() closes the root session itself. */
   closeRunChannel() {
+    if (this.cleanupEndpoint) return Promise.reject(error('APPLICATION_ROUTING_CLEANUP_UNCONFIRMED'));
     const target = this.activeTarget; this.activeTarget = null;
     if (target?.key) this.runTargets.delete(target.key);
     try { target?.end?.(); } catch { /* already ended */ }
     return Promise.resolve({ closed: true, cleanupUncertain: false });
   }
   async disposeShared() {
+    if (this.cleanupEndpoint) throw error('APPLICATION_ROUTING_CLEANUP_UNCONFIRMED');
     const mux = this.mux;
     this.mux = null;
     if (mux) await mux.dispose();
@@ -267,11 +270,17 @@ export class MacOSPFNotionTrial {
     if (this.closed && !housekeeping) throw error('PF_NOTION_TRIAL_STOPPED');
     if (this.pending && !housekeeping) throw error('PF_NOTION_TRIAL_BUSY');
     if (this.state?.cleanupUncertain) throw error('PF_OWNED_RUNTIME_NOT_EMPTY');
+    const housekeepingMux = housekeeping ? this.mux : null;
     // Housekeeping never opens a session: no administrator prompt for cleanup.
     if (housekeeping && (!this.mux || this.mux.snapshot().ended === true)) throw error('PF_NOTION_TRIAL_STOPPED');
     await this.verifyCandidate({ carrierOnly: true });
+    if (this.closed && !housekeeping) throw error('PF_NOTION_TRIAL_STOPPED');
     if (this.pending && !housekeeping) throw error('PF_NOTION_TRIAL_BUSY');
-    const key = randomUUID(), target = this.ensureMux().acquire({ key });
+    if (this.state?.cleanupUncertain) throw error('PF_OWNED_RUNTIME_NOT_EMPTY');
+    // Verification can yield while quit disposes the old mux. Housekeeping
+    // may use only the session it started with, never authorize a new one.
+    if (housekeeping && (this.mux !== housekeepingMux || housekeepingMux?.snapshot().ended !== false)) throw error('PF_NOTION_TRIAL_STOPPED');
+    const key = randomUUID(), target = (housekeeping ? housekeepingMux : this.ensureMux()).acquire({ key });
     const call = createPersistentPFNotionSessionClient({ spawnRootControlledLifecycle: null, acquireChannel: () => target,
       lifetimeMs: PF_SESSION_CHANNEL_LIFETIME_MS, channelKey: key });
     try { return await call(method, params, { timeoutMs: 60000 }); }
@@ -296,6 +305,17 @@ export class MacOSPFNotionTrial {
         outcome.copy = result?.registrations?.find(item => item.registrationId === registrationId)?.outcome ?? 'failed';
       } catch { outcome.copy = 'failed'; }
       try { outcome.cacheBytesFreed = await this.pruneApplicationData({ environmentId, registrationId }); } catch { outcome.cacheBytesFreed = null; }
+      /* Imported sign-in data waits for this point: the directories exist and
+       * the application is stopped. A start waits for this whole step. */
+      if (typeof this.afterHousekeeping === 'function') {
+        try {
+          await this.afterHousekeeping({ applicationId: request.application.id });
+          this.applicationDataFailures.delete(request.application.id);
+        } catch {
+          this.applicationDataFailures.add(request.application.id);
+          outcome.applicationDataErrorCode = 'IMPORT_APPLICATION_DATA_PENDING';
+        }
+      }
       this.lastHousekeeping = outcome;
       try { this.onEvent({ housekeeping: { ...outcome } })?.catch?.(() => {}); } catch { /* observers never affect cleanup */ }
       return outcome;
@@ -349,12 +369,69 @@ export class MacOSPFNotionTrial {
   }
   /** Availability is a property of the fixed carrier, not of one application. */
   async available() {
-    try { await this.verifyCandidate(); return { controlledNotionTrialAvailable: true, errorCode: null, ...fixedFlags }; }
+    try { await this.verifyCandidate({ carrierOnly: true }); return { controlledNotionTrialAvailable: true, errorCode: null, ...fixedFlags }; }
     catch (failure) { return { controlledNotionTrialAvailable: false, errorCode: safeCode(failure), ...fixedFlags }; }
   }
   stop(applicationId) {
     if (this.pending && this.state.applicationId === applicationId) { this.state.stopRequested = true; this.stopObservation?.(); }
+    else if (this.cleanupEndpoint?.application.id === applicationId) {
+      const endpoint = this.cleanupEndpoint, task = Promise.resolve().then(() => this.retryCleanup(endpoint)); this.pending = task;
+      task.finally(() => { if (this.pending === task) this.pending = null; }).catch(() => {});
+      return task;
+    }
     return this.snapshot(applicationId);
+  }
+  retryableEndpoint(call, runId, environmentId) {
+    try {
+      const snapshot = call.snapshot();
+      return snapshot.runId === runId && snapshot.environmentId === environmentId && snapshot.cleanupRetryable === true &&
+        snapshot.closed === false && snapshot.closing === false && snapshot.pending === false && snapshot.diagnostics?.uncertaintyLatched === false;
+    } catch { return false; }
+  }
+  retainCleanupEndpoint(call, runId, environmentId, application) {
+    if (!this.retryableEndpoint(call, runId, environmentId)) return false;
+    // Retain only the already authenticated client and public application
+    // identity. Proxy credentials and the workspace request are not stored.
+    this.cleanupEndpoint = { call, runId, environmentId, application: {
+      id: application.id, profileId: application.profileId, executablePath: application.executablePath } };
+    return true;
+  }
+  async retryCleanup(endpoint) {
+    if (this.cleanupEndpoint !== endpoint) return this.snapshot();
+    const { call, runId, environmentId } = endpoint;
+    let stoppedKind = null, snapshotKind = null, closeConfirmed = false;
+    this.state.active = true; this.state.stopRequested = true; this.state.cleanupRetryable = false; this.state.phase = 'stopping'; this.emit('stopping');
+    try {
+      try {
+        const stopped = await call('stopNotionApplication', { runId }, { timeoutMs: 60000 });
+        stoppedKind = cleanKind(stopped, runId, environmentId); this.captureSnapshot(stopped);
+        if (stopped.cleanupFailure) this.emit('stopping', stopped.cleanupFailure);
+        else if (!stoppedKind && stopped.failure?.stage === 'cleanup') this.emit('stopping', stopped.failure);
+      } catch (failure) { this.emit('stopping', failure); }
+      try {
+        const snapshot = await call('applicationSnapshot', { runId }, { timeoutMs: 5000 });
+        snapshotKind = cleanKind(snapshot, runId, environmentId); this.captureSnapshot(snapshot);
+        this.state.applicationSnapshotDiagnostic = projectPFNotionResponseDiagnostic('applicationSnapshot', snapshot, runId, environmentId);
+      } catch (failure) { this.emit('stopping', failure); }
+    } finally {
+      const retryable = this.retryableEndpoint(call, runId, environmentId);
+      if (!retryable) {
+        this.cleanupEndpoint = null;
+        try { const closed = await call.close({ timeoutMs: 15000 }); closeConfirmed = closed.closed === true && closed.cleanupUncertain === false; }
+        catch (failure) { this.emit('stopping', failure); }
+        try { await this.closeRunChannel(); } catch { /* reported by the run */ }
+      }
+      try { this.state.sessionDiagnostics = sessionDiagnostics(call.snapshot().diagnostics, runId, environmentId); }
+      catch { this.state.sessionDiagnostics = null; }
+      this.state.cleanupComplete = stoppedKind != null && stoppedKind === snapshotKind && closeConfirmed;
+      this.state.cleanupUncertain = !this.state.cleanupComplete;
+      this.state.cleanupRetryable = retryable;
+      this.state.active = false; this.state.phase = this.state.cleanupComplete ? 'cleaned' : 'cleanup-required';
+      this.state.lifecyclePassed = this.state.resumed && this.state.cleanupComplete && !this.state.errorCode;
+      this.emit(this.state.phase);
+      if (this.state.cleanupComplete) this.scheduleHousekeeping({ application: endpoint.application });
+    }
+    return this.snapshot();
   }
   /* The running application is polled until it is stopped, it ends on its own,
    * the owner quits, or a bounded trial's own window elapses. A poll is
@@ -383,7 +460,20 @@ export class MacOSPFNotionTrial {
             this.state.applicationEnded = true; this.state.applicationEndedChildReaped = current.endedChildReaped === true;
             finish(); return;
           }
-        } catch { /* A failed poll is not evidence; the run continues. */ }
+          if (current.phase !== 'running' || current.cleanupUncertain === true) {
+            this.emit('failed', current.initialFailure ?? current.failure ?? error('APPLICATION_ROUTING_NOT_READY'));
+            finish(); return;
+          }
+        } catch (failure) {
+          // A transient failed read is not exit evidence. A client whose
+          // framing/identity is poisoned cannot provide another observation,
+          // so finish watching and request the ordinary verified cleanup.
+          let client;
+          try { client = call.snapshot(); } catch { /* an unavailable snapshot grants no cleanup evidence */ }
+          if (client?.closed === true || client?.closing === true || client?.diagnostics?.uncertaintyLatched === true) {
+            this.emit('failed', failure); finish(); return;
+          }
+        }
         if (!done) timer = setTimeout(poll, PF_ATTACH_POLL_INTERVAL_MS);
       })();
     };
@@ -401,26 +491,45 @@ export class MacOSPFNotionTrial {
     const pending = this.pending;
     if (pending) { this.state.stopRequested = true; this.stopObservation?.(); }
     try { await pending; } catch { /* the run records its own first failure */ }
+    if (this.cleanupEndpoint) try { await this.stop(this.cleanupEndpoint.application.id); } catch { /* keep the exact endpoint for a later stop */ }
     try { await this.housekeeping; } catch { /* housekeeping reports its own outcome */ }
     try { await this.closeRunChannel(); } catch { /* a failed end is reported by the run */ }
     try { await this.disposeShared(); } catch { /* dispose never spawns and never throws */ }
-    onProgress({ closed: true, cleanupUncertain: this.state?.cleanupUncertain === true });
+    onProgress({ closed: this.cleanupEndpoint === null, cleanupUncertain: this.state?.cleanupUncertain === true });
     return this.snapshot();
   }
   run({ request, applicationId, activationAuthorized }) {
+    if (this.closed) return Promise.reject(error('PF_NOTION_TRIAL_STOPPED'));
     if (this.pending || this.state?.cleanupUncertain) return Promise.reject(error(this.state?.cleanupUncertain ? 'PF_OWNED_RUNTIME_NOT_EMPTY' : 'PF_NOTION_TRIAL_BUSY'));
     if (activationAuthorized !== true || typeof applicationId !== 'string' || request?.application?.id !== applicationId)
       return Promise.reject(error('PF_NOTION_TRIAL_REQUEST_INVALID'));
     try { validatePFNotionSessionRequest('prepareRoute', request); } catch { return Promise.reject(error('PF_NOTION_TRIAL_REQUEST_INVALID')); }
     this.state = { applicationId, profileId: request.application.profileId, active: true, phase: 'verifying', staged: false, resumed: false,
-      stopRequested: false, cleanupComplete: false, cleanupUncertain: false, lifecyclePassed: false, errorCode: null,
+      stopRequested: false, cleanupComplete: false, cleanupUncertain: false, cleanupRetryable: false, lifecyclePassed: false, errorCode: null,
       initialFailure: null, cleanupFailure: null, events: [], ...fixedFlags,
       maximumLifetimeSeconds: PF_APP_SESSION_LEASE_SECONDS,
       observationSeconds: this.observationSeconds };
     /* A start right after a stop waits for that stop's housekeeping, so the
      * removal of the old copy never races the registration of the new one. */
     const before = this.housekeeping;
-    const task = (before ? before.catch(() => {}).then(() => this.execute(request)) : this.execute(request)); this.pending = task;
+    const execute = async () => {
+      if (this.closed || this.state.stopRequested) return this.execute(request);
+      // A failed imported-data restore must be retried before another launch;
+      // never start the application with a fresh, apparently signed-out Home.
+      if (this.applicationDataFailures.has(applicationId)) {
+        try {
+          await this.afterHousekeeping({ applicationId });
+          this.applicationDataFailures.delete(applicationId);
+        } catch {
+          this.state.active = false; this.state.phase = 'failed'; this.state.cleanupComplete = true;
+          const failure = error('IMPORT_APPLICATION_DATA_PENDING');
+          this.emit('failed', failure);
+          throw failure;
+        }
+      }
+      return this.execute(request);
+    };
+    const task = before ? before.catch(() => {}).then(execute) : execute(); this.pending = task;
     task.finally(() => { if (this.pending === task) this.pending = null; }).catch(() => {});
     task.then(snapshot => { if (snapshot?.cleanupComplete === true && snapshot.cleanupUncertain !== true) this.scheduleHousekeeping(request); }).catch(() => {});
     return task;
@@ -434,12 +543,14 @@ export class MacOSPFNotionTrial {
     const runId = randomUUID(), environmentId = pfAttachEnvironmentId(request.application.profileId);
     this.state.runId = runId; this.state.environmentId = environmentId;
     const advance = (phase, failure) => { this.state.phase = phase; this.emit(phase, failure); };
-    const checkStop = () => { if (this.state.stopRequested) throw error('PF_NOTION_TRIAL_STOPPED'); };
+    const checkStop = () => { if (this.closed || this.state.stopRequested) throw error('PF_NOTION_TRIAL_STOPPED'); };
     try {
+      checkStop();
       /* Both the carrier and the bound application are re-verified read-only.
        * The bound bundle comes from the sealed request, never from the renderer
        * at this point. */
       const boundBundle = applicationBundleFor(request.application.executablePath);
+      if (!boundBundle) throw error('PF_NOTION_TRIAL_REQUEST_INVALID');
       advance('verifying'); await this.verifyCandidate({ applicationPath: boundBundle }); checkStop();
       call = this.createClient({ runId }); advance('authorizing');
       const status = await call('status', { runId }, { timeoutMs: 60000 });
@@ -463,7 +574,7 @@ export class MacOSPFNotionTrial {
         throw Object.assign(error(safeCode(stage.failure?.code ? stage.failure : { code: 'APPLICATION_APP_STAGE_UNCONFIRMED' })),
           { native: stage.failure?.native, failureStage: stage.failure?.stage, initialFailure: stage.initialFailure });
       this.state.staged = true; advance('staged'); checkStop();
-      await this.verifyNotion(); checkStop(); advance('resuming');
+      await this.verifyNotion(boundBundle); checkStop(); advance('resuming');
       // This covers controller preflight plus cold native validation and ACK.
       const resumed = await call('resumeNotionApplication', { runId, activationAuthorized: true }, { timeoutMs: PF_NOTION_RESUME_TIMEOUT_MS });
       this.captureSnapshot(resumed);
@@ -492,18 +603,21 @@ export class MacOSPFNotionTrial {
       }
       if (runCreated && call) {
         advance('stopping');
-        try { const stopped = await call('stopNotionApplication', { runId }, { timeoutMs: 25000 }); stoppedKind = cleanKind(stopped, runId, environmentId);
+        // A timed-out stage can still return its bound custody frame; allow
+        // the controller's bounded stage grace, stop and release waits to finish.
+        try { const stopped = await call('stopNotionApplication', { runId }, { timeoutMs: 60000 }); stoppedKind = cleanKind(stopped, runId, environmentId);
           this.captureSnapshot(stopped);
           if (stopped.cleanupFailure) this.emit('stopping', stopped.cleanupFailure);
-          else if (!stoppedKind && stopped.failure) this.emit('stopping', stopped.failure);
+          else if (!stoppedKind && stopped.failure?.stage === 'cleanup') this.emit('stopping', stopped.failure);
         } catch (failure) { this.emit('stopping', failure); }
         try { const snapshot = await call('applicationSnapshot', { runId }, { timeoutMs: 5000 }); snapshotKind = cleanKind(snapshot, runId, environmentId);
           this.captureSnapshot(snapshot);
           this.state.applicationSnapshotDiagnostic = projectPFNotionResponseDiagnostic('applicationSnapshot', snapshot, runId, environmentId); }
         catch (failure) { this.emit('stopping', failure); }
       }
+      const retainedCleanup = call && runCreated && this.retainCleanupEndpoint(call, runId, environmentId, request.application);
       if (call) {
-        try { const closed = await call.close({ timeoutMs: 15000 }); closeConfirmed = closed.closed === true && closed.cleanupUncertain === false;
+        if (!retainedCleanup) try { const closed = await call.close({ timeoutMs: 15000 }); closeConfirmed = closed.closed === true && closed.cleanupUncertain === false;
           statusOnlyClosed = !prepared && closeConfirmed && validatePFNotionStatusOnlyCloseEvidence(closed.statusOnlyEvidence, runId);
           /* On the shared session the run detaches instead of the session
            * closing; the client establishes that it held nothing. */
@@ -512,7 +626,7 @@ export class MacOSPFNotionTrial {
         catch (failure) { this.emit('stopping', failure); }
         /* This run's virtual channel ends here; the shared authorized session
          * stays open so the next attach asks for no password. */
-        try { await this.closeRunChannel(); } catch { /* reported by the run above */ }
+        if (!retainedCleanup) try { await this.closeRunChannel(); } catch { /* reported by the run above */ }
         try { this.state.sessionDiagnostics = sessionDiagnostics(call.snapshot().diagnostics, runId, environmentId);
           if (this.state.sessionDiagnostics && this.state.applicationSnapshotDiagnostic)
             this.state.sessionDiagnostics.lastApplicationSnapshot = structuredClone(this.state.applicationSnapshotDiagnostic); }
@@ -525,6 +639,7 @@ export class MacOSPFNotionTrial {
         }
       }
       this.state.cleanupComplete = prepared && stoppedKind != null && stoppedKind === snapshotKind && closeConfirmed;
+      this.state.cleanupRetryable = Boolean(retainedCleanup);
       this.state.statusOnlySessionClosed = statusOnlyClosed;
       this.state.statusOnlyRunDetached = statusOnlyDetached;
       this.state.refusedRunDetached = refusedDetached;

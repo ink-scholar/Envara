@@ -137,9 +137,29 @@ test('ambiguous native launch failure is reclaimed by route, and failed cleanup 
   f.routing.stop = async () => ({ stopped: false });
   await assert.rejects(f.service.startApplication({ id: item.id }), { code: 'APPLICATION_CLEANUP_FAILED' });
   assert.equal(f.routing.routes.size, 1); assert.equal(f.service.hasActiveProfile('profile_a'), true);
+  const failed = (await f.service.snapshot()).applications[0];
+  assert.equal(failed.initialFailure.code, 'APPLICATION_ROUTING_TIMEOUT');
+  assert.equal(failed.cleanupFailure.code, 'APPLICATION_CLEANUP_FAILED');
+  assert.equal(failed.lastError.code, 'APPLICATION_CLEANUP_FAILED');
+  assert.equal(failed.routeId, 'route_0'); assert.equal(failed.cleanupUncertain, true);
+  assert.equal(JSON.stringify(failed).includes('runtime-secret'), false);
   await assert.rejects(f.service.deleteApplication({ id: item.id }), { code: 'APPLICATION_RUNNING' });
   f.routing.stop = TestRouting.prototype.stop.bind(f.routing);
   await f.service.stopApplication({ id: item.id }); assert.equal(f.routing.routes.size, 0);
+  const cleaned = (await f.service.snapshot()).applications[0];
+  assert.equal(cleaned.cleanupUncertain, false); assert.equal(cleaned.routeId, null);
+  assert.deepEqual(cleaned.initialFailure, failed.initialFailure); assert.deepEqual(cleaned.cleanupFailure, failed.cleanupFailure);
+  assert.equal(cleaned.lastError, null, 'successful cleanup clears the current alert, not the first-operation diagnostic');
+});
+
+test('a preflight refusal keeps its cause without claiming uncertain cleanup or retaining a route', async t => {
+  const f = await fixture(t), item = await add(f);
+  f.routing.state.authorized = false;
+  await assert.rejects(f.service.startApplication({ id: item.id }), { code: 'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED' });
+  const failed = (await f.service.snapshot()).applications[0];
+  assert.equal(failed.initialFailure.code, 'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED');
+  assert.equal(failed.cleanupFailure, null); assert.equal(failed.cleanupUncertain, false);
+  assert.equal(failed.sessionId, null); assert.equal(failed.routeId, null); assert.deepEqual(f.routing.calls, []);
 });
 
 test('external process exit and loss of verified network component are reconciled without touching unrelated children', async t => {
@@ -239,4 +259,16 @@ test('the designated link browser is stored on the binding, changed without a re
   t.after(() => reloaded.shutdown());
   await reloaded.ready;
   assert.equal((await reloaded.snapshot()).applications[0].browserProfileId, 'profile_ph3');
+});
+
+test('quitting asks a running attached application to stop instead of waiting behind its start', { timeout: 5000 }, async t => {
+  const routing = new TestRouting(); let release;
+  const run = new Promise(resolve => { release = resolve; });
+  routing.beginShutdown = () => release('stopped');
+  const f = await fixture(t, { routing });
+  // An attach start holds the queue until its application stops.
+  const held = f.service.serialized(() => run);
+  const quit = f.service.shutdown();
+  assert.equal(await held, 'stopped');
+  await quit;
 });

@@ -173,6 +173,19 @@ test('standalone application registrar: copy, invalidation, durable intent and p
     const xattrs = scenario(); run(['open-create', xattrs.root]);
     const xattr = spawnSync('/usr/bin/xattr', ['-w', 'user.envara.fixture', 'fixture', xattrs.marker], { encoding: 'utf8', timeout: 5000 });
     assert.equal(xattr.status, 0, xattr.stderr); register(xattrs, xattrs.version, '-', 'none', false);
+    /* macOS attaches its TCC access list (com.apple.macl) to a bundle that was
+     * launched directly. It is system metadata, not app content: accepted on
+     * the original when bounded, never copied, and any other name still refuses. */
+    const macl = scenario(); run(['open-create', macl.root]);
+    const accessList = spawnSync('/usr/bin/xattr', ['-wx', 'com.apple.macl', '0300'.padEnd(144, '0'), macl.bundle], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(accessList.status, 0, accessList.stderr);
+    const sealed = register(macl);
+    const copiedAttributes = spawnSync('/usr/bin/xattr', ['-r', path.dirname(sealed.snapshotBundle)], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(copiedAttributes.status, 0, copiedAttributes.stderr);
+    assert.doesNotMatch(copiedAttributes.stdout, /com\.apple\.macl/, 'the access list is never copied into the sealed snapshot');
+    const oversized = scenario(); run(['open-create', oversized.root]);
+    const large = spawnSync('/usr/bin/xattr', ['-wx', 'com.apple.macl', '03'.padEnd(600, '0'), oversized.bundle], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(large.status, 0, large.stderr); register(oversized, oversized.version, '-', 'none', false);
     const acl = scenario(); run(['open-create', acl.root]);
     const addACL = spawnSync('/bin/chmod', ['+a', 'everyone deny write', acl.marker], { encoding: 'utf8', timeout: 5000 });
     assert.equal(addACL.status, 0, addACL.stderr);

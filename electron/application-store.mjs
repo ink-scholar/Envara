@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 
 const fail = () => Object.assign(new Error('附加软件配置目录或文件无效。'), { code: 'APPLICATION_STORAGE_UNAVAILABLE' });
+const MAX_BYTES = 4 * 1024 * 1024;
 const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,96}$/.test(value);
 export function storedApplication(value) {
   if (!value || !validId(value.id) || !validId(value.profileId) || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 128 ||
@@ -13,6 +14,12 @@ export function storedApplication(value) {
   // Explicit allowlist: routing credentials and runtime sessions are never persisted.
   return { id: value.id, profileId: value.profileId, name: value.name.trim(), path: value.path, executablePath: value.executablePath,
     identity: value.identity, args: [...value.args], ...(value.browserProfileId ? { browserProfileId: value.browserProfileId } : {}) };
+}
+function storedApplications(values) {
+  const applications = values.map(storedApplication), ids = new Set(), identities = new Set();
+  for (const item of applications) { if (ids.has(item.id) || identities.has(item.identity)) throw fail(); ids.add(item.id); identities.add(item.identity); }
+  if (applications.length > 1000) throw fail();
+  return applications;
 }
 export class ApplicationStore {
   constructor(dataDir) {
@@ -32,24 +39,22 @@ export class ApplicationStore {
     await this.ready;
     try {
       const info = await lstat(this.filename);
-      if (!info.isFile() || info.isSymbolicLink() || info.size > 4 * 1024 * 1024) throw fail();
+      if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_BYTES) throw fail();
       const document = JSON.parse(await readFile(this.filename, 'utf8'));
       if (document.schema !== 'envara.applications' || document.version !== 1 || !Array.isArray(document.applications) || document.applications.length > 1000) throw fail();
-      const values = document.applications.map(storedApplication), ids = new Set(), identities = new Set();
-      for (const item of values) { if (ids.has(item.id) || identities.has(item.identity)) throw fail(); ids.add(item.id); identities.add(item.identity); }
+      const values = storedApplications(document.applications);
       await chmod(this.filename, 0o600); return values;
     } catch (error) { if (error.code === 'ENOENT') return []; throw fail(); }
   }
   async write(values) {
     await this.ready;
-    const applications = values.map(storedApplication);
-    const ids = new Set(), identities = new Set();
-    for (const item of applications) { if (ids.has(item.id) || identities.has(item.identity)) throw fail(); ids.add(item.id); identities.add(item.identity); }
-    if (applications.length > 1000) throw fail();
+    const applications = storedApplications(values);
+    const serialized = JSON.stringify({ schema: 'envara.applications', version: 1, applications }, null, 2);
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_BYTES) throw fail();
     try { const info = await lstat(this.filename); if (!info.isFile() || info.isSymbolicLink()) throw fail(); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     const temporary = `${this.filename}.${randomUUID()}.tmp`;
-    try { await writeFile(temporary, JSON.stringify({ schema: 'envara.applications', version: 1, applications }, null, 2), { flag: 'wx', mode: 0o600 }); await rename(temporary, this.filename); }
+    try { await writeFile(temporary, serialized, { flag: 'wx', mode: 0o600 }); await rename(temporary, this.filename); }
     finally { await rm(temporary, { force: true }); }
   }
 }

@@ -94,6 +94,50 @@ struct envara_gui_lifecycle {
  * bind to the original canonical bundle and hash its complete physical tree. */
 int envara_gui_manifest_inspect(const char *bundle, int fixture_only, struct envara_gui_manifest *out);
 int envara_gui_manifest_unchanged(const struct envara_gui_manifest *expected);
+/* Internal native operation scope, never a wire capability or launch receipt.
+ * The first check of an exact manifest in a scope performs full signed
+ * inspection: every byte hashed twice around strict nested signature
+ * validation. Later checks of that manifest in the same scope re-walk the whole
+ * tree and require every entry's exact physical identity (path, device, inode,
+ * size, both times, owner, group, mode, links, link target) to equal the state
+ * that inspection proved; they read no bytes. No time-based cache; a witness
+ * never crosses threads, processes or scopes, and the outermost end clears it. */
+uint64_t envara_gui_validation_scope_begin(void);
+void envara_gui_validation_scope_end(void);
+uint64_t envara_gui_validation_scope_current(void);
+/* Whether the active scope holds a fully inspected witness for this exact
+ * manifest. Information for callers that skip a check the witness subsumes;
+ * it proves nothing until envara_gui_manifest_unchanged re-proves identity. */
+int envara_gui_validation_witnessed(const struct envara_gui_manifest *manifest);
+/* Diagnostic-only per-thread counts of full inspections and identity re-proofs. */
+struct envara_gui_validation_counts { uint32_t full_inspections, identity_checks; };
+void envara_gui_validation_counts(struct envara_gui_validation_counts *out);
+/* Diagnostic-only launch step timing. One bounded series per accepted launch,
+ * written as whole newline-delimited frames to the native keeper's own output
+ * only when that output can take a frame now; a frame that cannot is dropped
+ * and never blocks staging. Fixed step names, monotonic milliseconds and the
+ * validation counts above: no path, PID, account, network or credential value.
+ * Never a capability, receipt, acceptance or readiness signal. */
+enum envara_gui_step {
+    ENVARA_GUI_STEP_FRONT_COMMIT, ENVARA_GUI_STEP_FRONT_ADMISSION, ENVARA_GUI_STEP_TICKET_PREPARE,
+    ENVARA_GUI_STEP_RELAY_FORK, ENVARA_GUI_STEP_TICKET_CLAIM, ENVARA_GUI_STEP_STAGE_FRESH,
+    ENVARA_GUI_STEP_DATA_PREPARE, ENVARA_GUI_STEP_STAGE_PLAN, ENVARA_GUI_STEP_STAGE_RECHECK,
+    ENVARA_GUI_STEP_STAGE_SPAWN, ENVARA_GUI_STEP_STAGE_STOPPED, ENVARA_GUI_STEP_STAGE_ADOPT,
+    ENVARA_GUI_STEP_RESUME_VERIFY, ENVARA_GUI_STEP_COUNT
+};
+#define ENVARA_GUI_STEP_FRAME_LIMIT 16
+int envara_gui_steps_begin(int fd, const char *schema, const char *run_id, const char *environment_id);
+void envara_gui_step(enum envara_gui_step step);
+void envara_gui_steps_end(void);
+const char *envara_gui_step_name(enum envara_gui_step step);
+/* Short root-owned aliases of scoped application directories. macOS limits a
+ * Unix socket path to 103 characters, and applications such as VS Code bind
+ * their main socket inside the user data directory; the scoped paths are far
+ * longer. Each alias is a root-owned symlink in this root-owned 0755 directory
+ * naming exactly one scoped directory, under a name derived from both
+ * identifiers. The data itself never moves, and an alias is not a capability. */
+#define ENVARA_GUI_ALIAS_ROOT "/Library/PrivilegedHelperTools/io.envara.pf-s"
+int envara_gui_scoped_alias_id(const char *environment_id, const char *registration_id, char out[17]);
 /* Read-only, nofollow ACL inspection with held-file and named-path identity.
  * Zero means verified no extended entries; an entry or unknown state refuses. */
 int envara_gui_acl_free(const char *path);

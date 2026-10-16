@@ -18,18 +18,36 @@ struct envara_notion_context {
 };
 struct envara_notion_plan {
     int ready, protected_ready, resumed;
-    char user_data[PATH_MAX];
-    char arguments[10][PATH_MAX];
+    char user_data[PATH_MAX], home[PATH_MAX], cache[PATH_MAX], temp[PATH_MAX], extensions[PATH_MAX];
+    char shared_data[PATH_MAX];
+    /* Root-owned short aliases (gui-launch.h ENVARA_GUI_ALIAS_ROOT) of the
+     * UserData and Temp directories above, for socket paths only. */
+    char user_data_alias[PATH_MAX], temp_alias[PATH_MAX];
+    char posix_locale[64];
+    int locale_fallback, argument_count;
+    char arguments[13][PATH_MAX];
 };
-/* Read-only exact original signed version inspection. Never loads ASAR code. */
+/* Names remain stable for the private native protocol. Capability is derived
+ * from the unchanged signed bundle and its contained engine, never app names.
+ * VS Code is a narrower Electron capability with explicit extension/shared
+ * data flags. It does not provide independent OS Keychain storage. */
+enum envara_notion_engine {
+    ENVARA_NOTION_ENGINE_NONE = 0,
+    ENVARA_NOTION_ENGINE_ELECTRON = 1,
+    ENVARA_NOTION_ENGINE_CHROMIUM = 2,
+    ENVARA_NOTION_ENGINE_VSCODE = 3
+};
+int envara_notion_engine(const struct envara_gui_manifest *manifest, enum envara_notion_engine *engine);
+/* Read-only signed engine inspection. Never loads application/ASAR code. */
 int envara_notion_supported(const struct envara_gui_manifest *manifest);
 const char *envara_notion_dns_profile(void);
 /* First-app scope: all outbound socket traffic is denied except this exact
  * held IPv4 TCP front. Nonproxy Node/QUIC/UDP requests fail. No generic routing
  * claim follows; external Mach/XPC delegates still require actual acceptance. */
-int envara_notion_scoped_profile(uint16_t front_port, char *out, size_t capacity);
+int envara_notion_scoped_profile(uint16_t front_port, const char *socket_root, char *out, size_t capacity);
 /* Fixed native activation only. Creates root-owned nonwritable ancestors and
- * an exact console-owned 0700 UserData leaf. Never called by plan/status; no
+ * exact console-owned 0700 UserData/Home/Cache/Temp/Extensions leaves. The
+ * existing UserData login path is unchanged. Never called by plan/status; no
  * caller path, chmod of preexisting data, deletion or original modification. */
 int envara_notion_data_prepare(const struct envara_app_registration *app,
     const struct envara_gui_request *request, const struct envara_notion_context *context,
@@ -44,7 +62,7 @@ int envara_notion_plan(const struct envara_app_registration *app,
  * fixed Electron SOCKS/host-resolver/user-data-dir/locale arguments. The fixed
  * native authority must re-attest actual front admission, realm deny, original
  * utun/core and session before fork; this library installs no PF or route.
- * Does not resume. Flags and profile coverage for this signed Notion version,
+ * Does not resume. Flags and profile coverage for the selected signed engine,
  * external helpers, keychain/TCC and whole-guard remain acceptance gates. */
 int envara_notion_stage(const struct envara_app_registration *app,
     const struct envara_gui_request *request, const struct envara_notion_context *context,

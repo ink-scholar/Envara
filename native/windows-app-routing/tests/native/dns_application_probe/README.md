@@ -12,7 +12,7 @@ x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Werror \
   -o /tmp/envara-dns-application-probe.exe main.cpp -lws2_32 -lbcrypt
 ```
 
-2026-10-07 在 macOS 上以上命令编译成功，**没有运行 Windows exe，也没有 Windows 行为验收**。Windows 上可在普通控制台执行：
+交叉编译不等于 Windows 行为验收。Windows 上可在普通控制台执行：
 
 ```powershell
 .\envara-dns-application-probe.exe

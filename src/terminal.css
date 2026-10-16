@@ -91,6 +91,7 @@
 .terminal-claude-settings dd { margin: 0; color: #b8b8c5; line-height: 1.5; }
 .terminal-claude-settings dd small { display: block; margin-top: 3px; color: #9292a0; font-size: 11px; }
 .terminal-claude-settings p { margin: 9px 0 0; color: #8e8e9e; font-size: 11px; line-height: 1.5; }
+.terminal-session-settings { flex-shrink: 0; padding: 7px 13px; }
 .terminal-error-code { flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; color: #dbb2b9; font-family: Menlo, Monaco, Consolas, monospace; font-size: 10px; }
 .terminal-footer-messages { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 .terminal-cleanup-error { color: #dfb78a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

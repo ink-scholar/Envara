@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { chmod, copyFile, mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { TerminalService } from '../electron/terminal-service.mjs';
 import { LinkRouter } from '../electron/link-router.mjs';
@@ -32,7 +34,7 @@ async function fixture(t, overrides = {}) {
       return { version: '2.1.296' };
     } }),
     linkChannel: { executableDirectory: async () => '/private/owned-bin', environment: () => ({ ENVARA_LINK_SOCKET: '/private/ordinary.sock', ENVARA_LINK_TOKEN: 'ordinary-link-token' }) },
-    networkFence: { wrap: async launch => { order.push('fence'); return launch; } },
+    networkFence: { wrap: async (launch, options) => { order.push('fence'); return { ...launch, deviceIdentifierRestrictions: options.restrictDeviceIdentifiers === true }; } },
     ptyFactory: (executable, args, options) => {
       const exits = new Set(); const pty = { pid: 1000 + launches.length, onData: () => ({ dispose() {} }), onExit: fn => { exits.add(fn); return { dispose() {} }; }, kill: () => { for (const fn of exits) fn({ exitCode: 0 }); } };
       launches.push({ executable, args, options, pty }); return pty;
@@ -56,6 +58,7 @@ function managedContext(context, id = 'chosen', proxyId = 'route_a') {
 test('dedicated session opens a shell with a manual Claude wrapper and pinned MCP/link credentials', async t => {
   const f = await fixture(t), session = await f.start(), launch = f.launches[0];
   assert.equal(session.kind, 'claude-code'); assert.equal(session.browserProfileId, 'chosen'); assert.equal(session.browserName, 'Chosen browser');
+  assert.equal(session.deviceIdentifierRestrictions, true);
   const internal = f.service.sessions.get(session.sessionId), prepared = internal.claudeLaunch;
   assert.equal(launch.executable, process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash');
   assert.equal(launch.args.at(-1), '-i');
@@ -264,11 +267,149 @@ test('dedicated sessions reject a system or other browser and an unfenced route 
   await assert.rejects(f.start(), { code: 'CLAUDE_NETWORK_FENCE_REQUIRED' }); assert.equal(f.launches.length, 0); assert.equal(f.bindings.length, 0);
 });
 
+test('dedicated sessions and duplicates require confirmed device restrictions; ordinary terminals do not request them', async t => {
+  const options = [];
+  const f = await fixture(t, { networkFence: { wrap: async (launch, configuration) => {
+    options.push(configuration); return { ...launch, deviceIdentifierRestrictions: configuration.restrictDeviceIdentifiers === true };
+  } } });
+  const first = await f.start();
+  const duplicate = await f.service.duplicate({ sessionId: first.sessionId });
+  assert.equal(first.deviceIdentifierRestrictions, true);
+  assert.equal(duplicate.deviceIdentifierRestrictions, true);
+  assert.equal(options[0].restrictDeviceIdentifiers, true);
+  assert.equal(options[1].restrictDeviceIdentifiers, true);
+  const ordinary = await f.service.create({ id: 'chosen', directory: f.cwd, fresh: true });
+  assert.equal(options[2].restrictDeviceIdentifiers, undefined);
+  assert.equal(ordinary.deviceIdentifierRestrictions, undefined);
+});
+
+test('an unconfirmed or refused device restriction never launches a Claude process and cleans its temporary authority', async t => {
+  for (const refusal of ['missing-confirmation', 'failed-preflight']) await t.test(refusal, async t => {
+    const f = await fixture(t, { networkFence: { wrap: async launch => {
+      if (refusal === 'failed-preflight') throw Object.assign(new Error('设备标识读取限制不可用。'), { code: 'TERMINAL_DEVICE_IDENTIFIERS_UNAVAILABLE' });
+      return launch;
+    } } });
+    await assert.rejects(f.start(), { code: 'TERMINAL_DEVICE_IDENTIFIERS_UNAVAILABLE' });
+    assert.equal(f.launches.length, 0);
+    assert.equal(f.bindings[0].disposed, true);
+    const internal = [...f.service.sessions.values()][0];
+    assert.equal(f.service.metadata(internal).deviceIdentifierRestrictions, false);
+    await assert.rejects(stat(path.join(f.root, 'data/terminal/profiles/chosen/tmp', `claude-${internal.sessionId}`)), { code: 'ENOENT' });
+  });
+});
+
 test('native launch failure revokes browser authority and deletes temporary MCP settings', async t => {
   const f = await fixture(t, { ptyFactory: () => { throw new Error('fixture PTY refusal'); } });
   await assert.rejects(f.start(), /fixture PTY refusal/); assert.equal(f.bindings[0].disposed, true);
   const internal = [...f.service.sessions.values()][0]; assert.equal(internal.status, 'error'); assert.equal(internal.browserBinding, null);
   await assert.rejects(stat(path.join(f.root, 'data/terminal/profiles/chosen/tmp', `claude-${internal.sessionId}`)), { code: 'ENOENT' });
+});
+
+test('failed installation cleanup keeps the first failure and a late retry handle after an earlier Close', async t => {
+  for (const earlyClose of [false, true]) {
+    let allowCleanup = false, cleanupAttempts = 0;
+    const entered = deferred(), release = deferred();
+    const failure = Object.assign(new Error('Claude 下载已取消。'), { code: 'CLAUDE_CODE_DOWNLOAD_CANCELLED', cleanupError: 'Claude 临时文件清理未完成。' });
+    Object.defineProperty(failure, 'claudeCleanup', { value: async () => {
+      cleanupAttempts++;
+      if (!allowCleanup) throw new Error('fixture private cleanup path');
+    } });
+    const f = await fixture(t, { claudeInstaller: async () => { entered.resolve(); await release.promise; throw failure; } });
+    const starting = f.start();
+    const rejected = assert.rejects(starting, { code: earlyClose ? 'TERMINAL_START_CANCELLED' : 'CLAUDE_CODE_DOWNLOAD_CANCELLED' });
+    await entered.promise;
+    const session = [...f.service.sessions.values()][0];
+    if (earlyClose) assert.equal((await f.service.close({ sessionId: session.sessionId })).status, 'closed');
+    release.resolve(); await rejected;
+    assert.equal(session.status, 'closing');
+    assert.equal(session.finished, false);
+    assert.ok(session.cleanupError);
+    assert.equal(cleanupAttempts, 1, 'the newly returned cleanup handle cannot reuse a previous empty cleanup result');
+    assert.equal(f.launches.length, 0);
+    const snapshot = JSON.stringify(await f.service.snapshot());
+    assert.doesNotMatch(snapshot, /fixture private cleanup path|claudeCleanup/);
+    assert.equal(session.errorCode, earlyClose ? 'TERMINAL_START_CANCELLED' : 'CLAUDE_CODE_DOWNLOAD_CANCELLED');
+    allowCleanup = true;
+    const ended = await f.service.close({ sessionId: session.sessionId });
+    assert.equal(ended.status, 'closed');
+    assert.equal(ended.cleanupError, undefined);
+    assert.equal(cleanupAttempts, 2);
+    assert.equal(session.claudeLaunch, null);
+  }
+});
+
+test('a successful late browser binding keeps failed disposal retryable after Close already completed', async t => {
+  const entered = deferred(), release = deferred();
+  let allowCleanup = false, cleanupAttempts = 0;
+  const binding = { browser: { name: 'Fixture browser' }, dispose: async () => {
+    cleanupAttempts++;
+    if (!allowCleanup) throw Object.assign(new Error('fixture private binding directory'), { code: 'EACCES' });
+  } };
+  const f = await fixture(t, { claudeInstaller: async () => ({}), browserBroker: { createSession: async () => {
+    entered.resolve(); await release.promise; return binding;
+  } } });
+  try {
+    const starting = f.start();
+    const rejected = assert.rejects(starting, { code: 'TERMINAL_START_CANCELLED' });
+    await entered.promise;
+    const session = [...f.service.sessions.values()][0];
+    assert.equal((await f.service.close({ sessionId: session.sessionId })).status, 'closed');
+    release.resolve(); await rejected;
+    assert.equal(session.status, 'closing');
+    assert.equal(session.finished, false);
+    assert.equal(session.browserBinding, binding);
+    assert.ok(session.cleanupError);
+    assert.equal(cleanupAttempts, 1);
+    assert.equal(f.launches.length, 0);
+    assert.doesNotMatch(JSON.stringify(await f.service.snapshot()), /fixture private binding directory/);
+    allowCleanup = true;
+    assert.equal((await f.service.close({ sessionId: session.sessionId })).status, 'closed');
+    assert.equal(cleanupAttempts, 2);
+    assert.equal(session.browserBinding, null);
+  } finally { allowCleanup = true; release.resolve(); }
+});
+
+test('a successful late Claude preparation keeps failed runtime cleanup retryable after Close', async t => {
+  const f = await fixture(t);
+  const entered = deferred(), release = deferred();
+  const originalWrite = fsPromises.writeFile, originalRemove = fsPromises.rm;
+  let runtime, allowCleanup = false, cleanupAttempts = 0;
+  t.mock.method(fsPromises, 'writeFile', async (filename, ...args) => {
+    const result = await originalWrite(filename, ...args);
+    if (typeof filename === 'string' && filename.startsWith(f.root + path.sep) && filename.endsWith(path.join('bin', 'claude'))) {
+      runtime = path.dirname(path.dirname(filename));
+      entered.resolve(); await release.promise;
+    }
+    return result;
+  });
+  t.mock.method(fsPromises, 'rm', async (filename, ...args) => {
+    if (filename === runtime) {
+      cleanupAttempts++;
+      if (!allowCleanup) throw Object.assign(new Error('fixture private prepared runtime'), { code: 'EACCES' });
+    }
+    return originalRemove(filename, ...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    const starting = f.start();
+    const rejected = assert.rejects(starting, { code: 'TERMINAL_START_CANCELLED' });
+    await entered.promise;
+    const session = [...f.service.sessions.values()][0];
+    assert.equal((await f.service.close({ sessionId: session.sessionId })).status, 'closed');
+    release.resolve(); await rejected;
+    assert.equal(session.status, 'closing');
+    assert.equal(session.finished, false);
+    assert.equal(typeof session.claudeLaunch?.cleanup, 'function');
+    assert.ok(session.cleanupError);
+    assert.equal(cleanupAttempts, 1);
+    assert.equal(f.launches.length, 0);
+    assert.equal((await stat(runtime)).isDirectory(), true);
+    assert.doesNotMatch(JSON.stringify(await f.service.snapshot()), /fixture private prepared runtime/);
+    allowCleanup = true;
+    assert.equal((await f.service.close({ sessionId: session.sessionId })).status, 'closed');
+    assert.equal(cleanupAttempts, 2);
+    await assert.rejects(stat(runtime), { code: 'ENOENT' });
+  } finally { allowCleanup = true; release.resolve(); t.mock.restoreAll(); syncBuiltinESMExports(); }
 });
 
 test('failed broker filesystem cleanup still closes the process and permits an explicit cleanup retry', async t => {

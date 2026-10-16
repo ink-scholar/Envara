@@ -1,12 +1,21 @@
 # Cold GUI launch library preparation
 
-`gui-launch.h` and `gui-launch.m` are an unintegrated native library. No current
-controller, helper, installer, native CLI, resource map, or desktop action calls
-them. `ENVARA_GUI_PRODUCTION_READY` is `0`. Production staging implements strict
-preconditions for an already installed sealed snapshot and leaves its native
-child stopped before app code; no production resume API exists. These files do
-not install, activate PF, create groups or utun, change routes/DNS, or launch a
-user application in their current disconnected state.
+`gui-launch.h` and `gui-launch.m` provide shared native inspection and
+suspended-process lifecycle primitives. This document retains the original
+standalone preparation and diagnostics. The production factory uses the
+capability-gated `envara_notion_*` front adapter for recognized, signed
+Electron/Chromium bundles. Its protocol names remain stable; they no longer mean
+an exact Notion version allowlist. Unknown/native engine layouts refuse, with no
+unfenced cold-launch fallback. The separate generic cold primitive remains for
+fixtures and does not establish a production adapter.
+
+`ENVARA_GUI_PRODUCTION_READY` and `ENVARA_NOTION_READY` remain `0`. Native staging
+checks an installed sealed snapshot and leaves its child stopped before target
+code; the surrounding authenticated supervisor controls the launch lifecycle.
+Read-only inspection/plan does not install resources, activate PF, create groups
+or utun, change routes/DNS or launch a user application. Metadata, signatures and
+fixture checks do not establish full application acceptance. See
+[the current front adapter and historical Notion inspection](notion-launch-versions.md).
 
 ## Implemented read-only inspection
 
@@ -39,15 +48,44 @@ registration must put the expected manifest in the authenticated controller's
 root-owned registry; a caller-supplied manifest/hash cannot authorize a launch.
 App updates invalidate that registration and require fresh inspection.
 
+### One verification per native operation
+
+Native launch work is grouped into operations: ticket preparation, staging (from
+ticket claim until the exact stopped child enters guardian custody) and resume.
+The first check of an exact manifest in an operation is the full signed
+inspection above: all bytes hashed in two scans around strict nested signature
+validation. Later checks of that manifest in the same operation re-walk the
+whole tree and require every entry's physical identity (relative path, device,
+inode, size, modification and status-change times, owner, group, mode, link
+count, link target) to equal the state the full inspection proved; they read
+no bytes. The first registry resolve of an operation also validates the sealed
+tree; later resolves in it rely on that identity re-proof. A witness never
+crosses operations, threads or processes, and the outermost scope end clears
+it. There is no time-based cache.
+
+Without root, any write, truncate, chmod, chown, ACL, xattr, link or rename
+changes at least one bound field, because the kernel stamps the status-change
+time. The sealed snapshot is root-owned and read-only. For the user-owned
+original, which is never executed, a change made through a shared writable
+mapping may reach its times only at writeback; the next operation hashes its
+bytes again. Root can bypass every one of these checks.
+
+### Diagnostic step timing
+
+After `L` is accepted, the keeper writes at most 16 `stage-progress` frames on
+its own output: a fixed step name (`front-commit` … `stage-adopt`,
+`resume-verify`), its monotonic milliseconds, the total since `L`, and how many
+full inspections and identity re-proofs it ran. A frame is written whole only
+when the output can take it now; otherwise it is dropped and never delays
+staging. The controller keeps them with their receipt time and reports them
+only as `applicationSnapshot().nativeStageTimings`. They are diagnostics, never
+a receipt, readiness, protection or cleanup signal.
+
 `envara_gui_original_running()` refuses a registered running app with the same
 bundle identifier and any inspected executable under the original or sealed bundle for
 the intended UID, including in-bundle helpers. An unreadable live process is
 an error, not evidence of absence. The fixture version inspects only its own
-direct children; it cannot establish a UID-wide production inventory. During
-development on this Mac, a live unrelated extension-host process returned
-`proc_pidpath` `ENOENT` while its process identity remained alive. Production
-therefore currently fails closed on that inventory. No unrelated process was
-stopped to make the test pass.
+direct children; it cannot establish a UID-wide production inventory.
 
 ## Strict request and fixed bootstrap route
 
@@ -74,11 +112,10 @@ constructs exactly this argument vector, with `ready=false`:
 
 The plan stores strings without internal pointers; `envara_gui_bootstrap_argv()`
 builds the pointer vector against the chosen plan instance, so copying the plan
-does not leave dangling pointers. There is no execution API for this plan. The installed native binary does not
-currently expose `gui-launch-lease`. Future integration must execute the fixed
-system `launchctl` with `shell:false`, a sanitized fixed environment and explicitly
-controlled stdio; its UUID must resolve to one existing root-owned controller
-lease. Public REST/MCP requests must never become an arbitrary root command,
+does not leave dangling pointers. The production helper dispatches `gui-launch-lease`
+through the fixed system `launchctl` with `shell:false`, a sanitized environment
+and controlled stdio. Its UUID must resolve to an existing root-owned controller
+lease; constructing this plan alone does not authorize execution. Public REST/MCP requests must never become an arbitrary root command,
 launcher pathname, manifest/hash override or environment block.
 
 The local `launchctl(1)` manual documents that `asuser` adopts the target user's
@@ -149,11 +186,31 @@ the caller's ordinary supplementary groups, and do not prove root credential
 transition. The new library includes a read-only `KERN_PROC_PID` sole-group
 predicate for future stopped-process integration.
 
-The child's environment is built explicitly from console HOME/USER/LOGNAME,
-fixed system PATH, `LANG=C`, request `TZ` and `ENVARA_BROWSER_LOCALE`. No proxy
-environment variables substitute for network enforcement. CWD and TZ affect
-only the owned child; `ENVARA_BROWSER_LOCALE` is a hint which generic GUI apps
-may ignore, and does not attest actual browser locale support.
+The front adapter preserves the existing
+`<environment>/<registration>/UserData` login path and prepares fixed `Home`,
+`Cache`, `Temp` and `Extensions` siblings; VS Code shared data uses
+`Home/.vscode-shared`. All are within Envara's own application-data layout.
+Creation requires the existing authorized data-preparation operation, and the
+console-owned `0700` directories are held and rechecked through suspended
+staging. No plan or metadata inspection creates them.
+
+Its child environment explicitly selects those home/cache/config/temp paths,
+console USER/LOGNAME, fixed system PATH, request TZ and browser locale. LANG,
+LC_CTYPE and LC_ALL use an installed UTF-8 locale with an explicit
+`en_US.UTF-8` fallback recorded in the plan. The generic low-level fixture/cold
+primitive still has its original console-HOME/`LANG=C` environment; the production
+factory does not use it as a fallback for an unsupported application. Proxy,
+`VSCODE_*` and loader variables are not inherited by the front adapter.
+
+The supported engine receives fixed SOCKS/resolver/user-data/cache/locale flags;
+verified VS Code also receives extension/shared-data directory flags. The outer
+Seatbelt profile permits only the private IPv4 TCP front and denies direct DNS,
+DNS-SD and known NSURLSession network-broker IPC. Its `--no-sandbox` flag keeps
+the established Chromium internal-sandbox trade-off inside that outer fence.
+Applications may ignore locale or storage conventions, and external helpers or
+brokers require separate acceptance. These paths do not virtualize hardware,
+fully isolate macOS Keychain or prove all native networking is covered. Actual
+VS Code startup and extension behavior remain unverified.
 
 Fixture resume rejects duplicate/out-of-order calls, re-inspects both manifests,
 repeats running-instance refusal, checks exact PID/birth/credentials, and waits

@@ -1,10 +1,20 @@
-import { PROVIDER_DEFAULT_DEVICE_PROFILE_ID, defaultBrowserDeviceProfileId, getBrowserDeviceProfile, supportsBrowserDeviceProfiles } from '../shared/browser-device-profile.mjs';
+import { PROVIDER_DEFAULT_DEVICE_PROFILE_ID, getBrowserDeviceProfile, supportsBrowserDeviceProfiles } from '../shared/browser-device-profile.mjs';
 
 // Editing an old environment is not consent to replace its device settings.
 export function initialBrowserDeviceFields(profile, hostPlatform, engine) {
-  if (profile) return { deviceProfileId: profile.deviceProfileId || PROVIDER_DEFAULT_DEVICE_PROFILE_ID };
-  const id = supportsBrowserDeviceProfiles(engine) ? defaultBrowserDeviceProfileId(hostPlatform) : PROVIDER_DEFAULT_DEVICE_PROFILE_ID;
-  return selectBrowserDeviceProfile({}, id);
+  const deviceProfileId = profile?.deviceProfileId || PROVIDER_DEFAULT_DEVICE_PROFILE_ID;
+  return profile ? { deviceProfileId } : { deviceProfileId, width: '', height: '' };
+}
+
+// Null explicitly clears a previous override; omission would retain it on edit.
+export function browserDimensionValue(value) {
+  if (value == null || typeof value === 'string' && !value.trim()) return null;
+  return ['number', 'string'].includes(typeof value) ? Number(value) : NaN;
+}
+
+export function validBrowserDimension(value, minimum, maximum) {
+  const dimension = browserDimensionValue(value);
+  return dimension === null || Number.isSafeInteger(dimension) && dimension >= minimum && dimension <= maximum;
 }
 
 export function selectBrowserDeviceProfile(form, deviceProfileId) {

@@ -93,10 +93,12 @@ export class LinkSocketServer {
     if (socketPath != null && Buffer.byteLength(socketPath, 'utf8') > 100) throw fail('终端链接通道路径过长。');
     this.flatSocketPath = socketPath; this.socketOwner = socketOwner;
     this.server = null; this.socketPath = null; this.directory = null; this.tokens = new Map();
+    this.sockets = new Set(); this.closing = false; this.closePromise = null;
   }
   /* One directory and one socket for the whole app; each environment gets a
    * token, so nothing about a session is guessable from the URL. */
   async listen({ directory: chosen = null, socketName = TERMINAL_LINK_SOCKET } = {}) {
+    if (this.closing || this.server) throw fail('终端链接通道已关闭或正在监听。');
     /* A flat path is what a native helper needs: a unix socket path is limited
      * to 104 bytes, so the shared temporary directory is the only place short
      * enough. The socket is user-only and a stale one from an earlier run is
@@ -119,15 +121,25 @@ export class LinkSocketServer {
       if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.() || (info.mode & 0o077)) throw fail('终端链接通道目录不安全。');
       await chmod(directory, 0o700);
     }
+    if (this.closing) throw fail('终端链接通道已关闭。');
     this.directory = directory;
     this.socketPath = this.flatSocketPath ?? path.join(directory, socketName);
     try { await rm(this.socketPath, { force: true }); } catch {}
-    this.server = net.createServer(socket => { socket.setTimeout(10000, () => socket.destroy()); void this.handle(socket); });
+    if (this.closing) throw fail('终端链接通道已关闭。');
+    this.server = net.createServer(socket => {
+      this.sockets.add(socket); socket.once('close', () => this.sockets.delete(socket));
+      socket.on('error', () => {});
+      if (this.closing) { socket.destroy(); return; }
+      socket.setTimeout(10000, () => socket.destroy()); void this.handle(socket);
+    });
     await new Promise((resolve, reject) => { this.server.once('error', reject); this.server.listen(this.socketPath, resolve); }).catch(error => { throw fail(`终端链接通道无法监听：${error.message}`); });
+    if (this.closing) throw fail('终端链接通道已关闭。');
     await chmod(this.socketPath, 0o600);
+    if (this.closing) throw fail('终端链接通道已关闭。');
     return this.socketPath;
   }
   token(profileId) {
+    if (this.closing) throw fail('终端链接通道已关闭。');
     const existing = [...this.tokens.entries()].find(([, value]) => value.profileId === profileId);
     if (existing) return existing[0];
     const token = randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', '');
@@ -143,6 +155,7 @@ export class LinkSocketServer {
     const reply = async (status, body) => { try { socket.end(`HTTP/1.1 ${status}\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`); } catch {} };
     const settle = async () => {
       if (settled) return; settled = true;
+      if (this.closing) { socket.destroy(); return; }
       socket.setTimeout(0); // the request is complete; answering may take a moment
       try {
         const request = Buffer.concat(chunks).toString('utf8');
@@ -187,14 +200,24 @@ export class LinkSocketServer {
     socket.on('end', () => { void settle(); });
   }
   async close() {
+    if (this.closePromise) return this.closePromise;
+    this.closing = true;
     this.tokens.clear(); this.directory = null;
     const server = this.server; this.server = null;
-    if (server) await new Promise(resolve => server.close(() => resolve())).catch(() => {});
-    if (this.socketPath) await rm(this.socketPath, { force: true }).catch(() => {});
+    const socketPath = this.socketPath; this.socketPath = null;
+    this.closePromise = (async () => {
+      // A complete request may still be waiting for its opener. Stop accepting
+      // first, then close our connections instead of waiting for that callback.
+      const closed = server ? new Promise(resolve => server.close(() => resolve())) : Promise.resolve();
+      for (const socket of this.sockets) socket.destroy();
+      await closed;
+      if (socketPath) await rm(socketPath, { force: true }).catch(() => {});
+    })();
+    return this.closePromise;
   }
   /* The environment's own executable directory, with the shim in place. */
   async executableDirectory(profileId) {
-    if (!this.directory) throw fail('终端链接通道尚未就绪。');
+    if (this.closing || !this.directory) throw fail('终端链接通道尚未就绪。');
     const directory = path.join(this.directory, 'bin');
     const perProfile = path.join(this.directory, 'bin', profileId);
     await mkdir(perProfile, { recursive: true, mode: 0o700 });
@@ -208,7 +231,7 @@ export class LinkSocketServer {
     return perProfile;
   }
   environment(profileId) {
-    if (!this.socketPath) throw fail('终端链接通道尚未就绪。');
+    if (this.closing || !this.socketPath) throw fail('终端链接通道尚未就绪。');
     return { ENVARA_LINK_SOCKET: this.socketPath, ENVARA_LINK_TOKEN: this.token(profileId) };
   }
 }

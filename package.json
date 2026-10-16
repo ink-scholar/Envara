@@ -1,6 +1,6 @@
 {
   "name": "envara",
-  "version": "0.5.7",
+  "version": "0.5.23",
   "description": "Envara 境舱 — an open-source desktop workspace for isolated fingerprint browser environments",
   "author": "ink-scholar",
   "license": "MIT",
@@ -100,13 +100,41 @@
       "icon": "build/icon.png",
       "extendInfo": {
         "NSAppleEventsUsageDescription": "Envara asks an attached application that is already running in its environment to open its window again. 用于让已在境舱中运行的附加软件重新打开窗口。"
-      }
+      },
+      "extraResources": [
+        {
+          "from": "build/app-routing",
+          "to": "app-routing",
+          "filter": [
+            "macos/**/*",
+            "macos-local/**/*",
+            "macos-link-router/**/*",
+            "!**/.swift-build/**"
+          ]
+        },
+        {
+          "from": "build/local-authorization",
+          "to": "local-authorization",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
     },
     "win": {
       "target": [
         "nsis"
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "extraResources": [
+        {
+          "from": "build/app-routing",
+          "to": "app-routing",
+          "filter": [
+            "win32/${arch}/**/*"
+          ]
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -144,24 +172,6 @@
       {
         "from": "build/proxy-core",
         "to": "proxy-core",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "build/app-routing",
-        "to": "app-routing",
-        "filter": [
-          "**/*",
-          "!**/.swift-build/**",
-          "!macos-pf-*/**",
-          "!macos-pf-*",
-          "!macos-link-router.json"
-        ]
-      },
-      {
-        "from": "build/local-authorization",
-        "to": "local-authorization",
         "filter": [
           "**/*"
         ]

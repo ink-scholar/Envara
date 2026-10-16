@@ -5,7 +5,7 @@ import { PassThrough, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import { realpath } from 'node:fs/promises';
-import { MacOSPFNotionTrial } from '../electron/macos-pf-notion-trial.mjs';
+import { MacOSPFNotionTrial, verifyNotionTrialCandidate, verifyNotionTrialSignature } from '../electron/macos-pf-notion-trial.mjs';
 import { MacOSPFApplicationRouting, ownedRootSessionInProcessList } from '../electron/macos-pf-application-routing.mjs';
 import { createPersistentPFNotionSessionClient, PF_SESSION_LEASE_SECONDS } from '../electron/macos-pf-notion-session.mjs';
 import { servePFHelper } from '../native/macos-pf-routing/helper.mjs';
@@ -24,11 +24,16 @@ const request = () => ({ application: { id: 'notion_bound', profileId: 'owned_pr
   managedRoute: { profileId: 'owned_profile', proxyId: 'owned_node', nodeType: 'anytls', routeIdentity: randomUUID(), coreGeneration: randomUUID(), corePid: 999, coreVersion: 'v1.19.32' } });
 function fixture({ dirty = false, selectedRefused = false, missingEOF = false, foreignSnapshot = false, foreignStatus = false,
   resumeFailure = false, snapshotFailure = false, prepareDelayMs = 0, prepareTimeoutMs = null, resumeDelayMs = 0, now,
-  diagnosticOverride = null, onEvent = () => {}, watchMs = 0, applicationEndedAfterMs = null } = {}) {
-  const input = new PassThrough(), child = new EventEmitter(), calls = [], statusRequests = []; let bound, stageResolve;
+  stageTimeout = false, stopInitialFailureOnly = false,
+  diagnosticOverride = null, onEvent = () => {}, watchMs = 0, applicationEndedAfterMs = null,
+  verifyCandidate = async () => true, verifyNotion = async () => true } = {}) {
+  const input = new PassThrough(), child = new EventEmitter(), calls = [], statusRequests = [], callOptions = []; let bound, stageResolve;
   const startedAt = Date.now();
   const running = new Promise(resolve => { stageResolve = resolve; });
   const state = phase => ({ ...flags, ...bound, profile: 'seatbelt-front-only', phase, staged: true, resumed: phase === 'running', cleanupComplete: false, cleanupUncertain: false });
+  const stageFailure = { stage: 'cold-stage', code: 'APPLICATION_APP_STAGE_TIMEOUT' };
+  const failedStage = () => ({ ...state('cleanup-required'), staged: false, cleanupUncertain: true, cleanupRetryable: true,
+    failure: stageFailure, initialFailure: stageFailure, cleanupFailure: null });
   const cleanup = () => ({ ...state('cleaned'), cleanupComplete: true, cleanupEvidence: {
     schema: 'envara.macos-pf-notion-cleanup/v1', source: 'native-notion-controller', ...bound, profile: 'seatbelt-front-only', complete: true, cleanupUncertain: false,
     ...Object.fromEntries(facts.map(key => [key, true])) } });
@@ -39,16 +44,21 @@ function fixture({ dirty = false, selectedRefused = false, missingEOF = false, f
   if (dirty) statusController.runs.set('old', { runId: randomUUID(), phase: 'cleanup-required', cleanupUncertain: true });
   const controller = { closed: false,
     status: async params => { statusRequests.push(params); const result = await statusController.status(params);
+      if (stageTimeout && bound) { result.applications = [failedStage()]; result.routes = [{ routeId: 'route_owned' }]; }
       if (foreignStatus) result.anchor = pfRoutingAnchor(randomUUID()); return result; },
     prepareRoute: async value => { calls.push('prepareRoute'); assert.equal(value.route.password, 'PRIVATE_TRIAL_PASSWORD');
       return { routeId: 'route_owned', profileId: value.application.profileId, ready: false, failClosed: false, guardArmed: false, managedRouteVerified: false }; },
     prepareNotionApplication: async value => { calls.push('prepare'); assert.equal(value.runId, statusRequests[0].runId);
       bound = { runId: value.runId, environmentId: value.environmentId };
+      if (stageTimeout) throw Object.assign(new Error('PRIVATE_TRIAL_PASSWORD'), { code: stageFailure.code,
+        failureStage: stageFailure.stage, initialFailure: stageFailure });
       if (prepareDelayMs) await new Promise(resolve => setTimeout(resolve, prepareDelayMs)); return state('staged'); },
     resumeNotionApplication: async () => { calls.push('resume'); stageResolve();
       if (resumeDelayMs) await new Promise(resolve => setTimeout(resolve, resumeDelayMs));
       if (resumeFailure) throw Object.assign(new Error('PRIVATE_TRIAL_PASSWORD'), { code: 'APPLICATION_APP_RESUME_UNCONFIRMED' }); return state('running'); },
-    stopNotionApplication: async () => { calls.push('stop'); return cleanup(); },
+    stopNotionApplication: async () => { calls.push('stop');
+      if (stopInitialFailureOnly) return failedStage();
+      return stageTimeout ? { ...cleanup(), failure: stageFailure, initialFailure: stageFailure, cleanupFailure: null } : cleanup(); },
     applicationSnapshot: async () => { calls.push('snapshot');
       /* The controller reports that the guardian already stopped the exact
        * child. The trial must end its observation window then instead of
@@ -59,6 +69,7 @@ function fixture({ dirty = false, selectedRefused = false, missingEOF = false, f
         return calls.includes('stop') ? { ...cleanup(), applicationEnded: true, endedChildReaped: true, endedChildSignalled: false }
           : { ...state('running'), applicationEnded: true, endedChildReaped: true, endedChildSignalled: false };
       const value = cleanup();
+      if (stopInitialFailureOnly) return failedStage();
       if (snapshotFailure) return { ...state('cleanup-required'), cleanupUncertain: true,
         failure: { stage: 'cold-stage', code: 'APPLICATION_APP_NATIVE_REFUSED',
           native: { stage: 'ticket-prepare', reason: 'NATIVE_OPERATION_REFUSED', error: 70 } }, private: 'PRIVATE_TRIAL_PASSWORD' };
@@ -67,22 +78,158 @@ function fixture({ dirty = false, selectedRefused = false, missingEOF = false, f
   child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => { input.end(); return true; };
   child.stdin = new Writable({ write(bytes, encoding, done) { input.write(Buffer.from(bytes)); done(); }, final(done) { input.end(); done(); } });
   let starts = 0;
-  const trial = new MacOSPFNotionTrial({ verifyCandidate: async () => true, verifyNotion: async () => true, watchMs, onEvent,
+  const trial = new MacOSPFNotionTrial({ verifyCandidate, verifyNotion, watchMs, onEvent,
     createClient: () => {
       const call = createPersistentPFNotionSessionClient({ ...(now ? { now } : {}), spawnRootControlledLifecycle: () => {
       starts++; servePFHelper({ controller, input, output: child.stdout, signalSource: null }).then(() => {
         if (!missingEOF) child.stdout.end(); setImmediate(() => child.emit('close', 0, null)); }); return child;
       } });
-      const controlled = (method, params, options) => call(method, params, method === 'prepareNotionApplication' && prepareTimeoutMs !== null
-        ? { ...options, timeoutMs: prepareTimeoutMs } : options);
+      const controlled = (method, params, options) => {
+        callOptions.push({ method, timeoutMs: options?.timeoutMs });
+        return call(method, params, method === 'prepareNotionApplication' && prepareTimeoutMs !== null
+          ? { ...options, timeoutMs: prepareTimeoutMs } : options);
+      };
       controlled.close = call.close;
       controlled.snapshot = () => { const value = call.snapshot();
         if (diagnosticOverride) diagnosticOverride(value.diagnostics, bound); return value; };
       return controlled;
     } });
-  return { trial, calls, running, statusRequests, starts: () => starts };
+  return { trial, calls, running, statusRequests, callOptions, starts: () => starts };
 }
 const run = value => value.trial.run({ request: request(), applicationId: 'notion_bound', activationAuthorized: true });
+
+test('a closed trial refuses a new run before verification or acquiring an authorized channel', async () => {
+  let verifications = 0;
+  const value = fixture({ verifyCandidate: async () => { verifications++; return true; } });
+  await value.trial.shutdownAll();
+  await assert.rejects(run(value), { code: 'PF_NOTION_TRIAL_STOPPED' });
+  assert.equal(verifications, 0); assert.equal(value.starts(), 0); assert.deepEqual(value.calls, []);
+});
+
+test('storage verification cannot reopen a channel after shutdown or newly observed cleanup uncertainty', async () => {
+  for (const closing of [true, false]) {
+    let verified, release, acquisitions = 0;
+    const entered = new Promise(resolve => { verified = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const trial = new MacOSPFNotionTrial({ verifyCandidate: async () => { verified(); await gate; } });
+    trial.ensureMux = () => { acquisitions++; throw new Error('inert acquisition must not be reached'); };
+    const reading = trial.applicationStorage();
+    await entered;
+    if (closing) await trial.shutdownAll(); else trial.state = { cleanupUncertain: true };
+    release();
+    await assert.rejects(reading, { code: closing ? 'PF_NOTION_TRIAL_STOPPED' : 'PF_OWNED_RUNTIME_NOT_EMPTY' });
+    assert.equal(acquisitions, 0, 'the post-verification check must precede any new shared channel');
+  }
+});
+
+test('a failed observation on a poisoned client ends the running state without treating it as cleanup proof', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const value = fixture({ watchMs: 45000, foreignSnapshot: true }), completion = run(value);
+  await value.running;
+  while (value.trial.snapshot().phase !== 'running') await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(2000);
+  for (let turn = 0; turn < 12; turn++) await new Promise(resolve => setImmediate(resolve));
+  const observed = value.trial.snapshot();
+  // Let a regressed implementation leave its observation loop before failing.
+  if (observed.phase === 'running') value.trial.stop('notion_bound');
+  const report = await completion;
+  assert.notEqual(observed.phase, 'running');
+  assert.equal(report.errorCode, 'PF_HELPER_RESPONSE_INVALID');
+  assert.equal(report.cleanupComplete, false); assert.equal(report.cleanupUncertain, true);
+  assert.equal(report.lifecyclePassed, false); assert.equal(report.active, false);
+  assert.equal(JSON.stringify(report).includes('PRIVATE_TRIAL_'), false);
+});
+
+test('a failed imported application-data restore is reported and retried before any new native launch', async () => {
+  const value = fixture(), events = [];
+  value.trial.storage = async () => ({ registrations: [] });
+  value.trial.pruneApplicationData = async () => 0;
+  value.trial.onEvent = event => events.push(event);
+  let refused = true, attempts = 0;
+  value.trial.afterHousekeeping = async () => { attempts++; if (refused) throw new Error('PRIVATE_IMPORTED_DATA'); };
+  const outcome = await value.trial.scheduleHousekeeping(request());
+  assert.equal(outcome.applicationDataErrorCode, 'IMPORT_APPLICATION_DATA_PENDING');
+  await assert.rejects(run(value), { code: 'IMPORT_APPLICATION_DATA_PENDING' });
+  assert.equal(value.starts(), 0, 'the privileged client was never started with empty application data');
+  assert.equal(value.trial.snapshot().active, false);
+  assert.equal(value.trial.snapshot().cleanupUncertain, false);
+  assert.equal(JSON.stringify(events).includes('PRIVATE_IMPORTED_DATA'), false);
+  refused = false;
+  const result = await run(value);
+  assert.equal(result.cleanupComplete, true);
+  assert.equal(result.cleanupUncertain, false);
+  assert.equal(value.starts(), 1);
+  assert.ok(attempts >= 3);
+  await value.trial.housekeeping;
+});
+
+test('carrier availability and another selected application do not depend on Notion being installed', async () => {
+  const target = '/System/Applications/Calculator.app', verifications = [];
+  const value = fixture({
+    verifyCandidate: async options => {
+      verifications.push(['candidate', options]);
+      if (options.carrierOnly === true) return true;
+      assert.equal(options.applicationPath, target, 'a missing Notion installation cannot substitute for the bound target');
+      return true;
+    },
+    verifyNotion: async bundle => { verifications.push(['signature', bundle]); assert.equal(bundle, target); return true; },
+  });
+  assert.deepEqual(await value.trial.available(), { controlledNotionTrialAvailable: true, errorCode: null, ...flags });
+  const selected = request(); selected.application.executablePath = `${target}/Contents/MacOS/Calculator`;
+  const report = await value.trial.run({ request: selected, applicationId: selected.application.id, activationAuthorized: true });
+  assert.deepEqual(verifications, [
+    ['candidate', { carrierOnly: true }], ['candidate', { applicationPath: target }], ['signature', target],
+  ]);
+  assert.equal(report.phase, 'cleaned'); assert.equal(report.lifecyclePassed, true); assert.equal(report.cleanupComplete, true);
+  assert.deepEqual(value.calls, ['prepareRoute', 'prepare', 'resume', 'stop', 'snapshot', 'shutdown']);
+});
+
+test('Notion remains an explicit supported target and is verified again before resume', async () => {
+  const verifications = [], value = fixture({
+    verifyCandidate: async options => { verifications.push(options.applicationPath); return true; },
+    verifyNotion: async bundle => { verifications.push(bundle); return true; },
+  });
+  const report = await run(value);
+  assert.deepEqual(verifications, ['/Applications/Notion.app', '/Applications/Notion.app']);
+  assert.equal(report.lifecyclePassed, true); assert.equal(report.cleanupUncertain, false);
+});
+
+test('a missing or malformed bound application cannot bypass verification through injected callbacks', async () => {
+  for (const executablePath of [undefined, null, '/usr/bin/true', '/Applications/.app/Contents/MacOS/Empty']) {
+    let verifications = 0;
+    const value = fixture({ verifyCandidate: async () => { verifications++; return true; }, verifyNotion: async () => { verifications++; return true; } });
+    const selected = request(); selected.application.executablePath = executablePath;
+    let report;
+    try { report = await value.trial.run({ request: selected, applicationId: selected.application.id, activationAuthorized: true }); }
+    catch (failure) { assert.equal(failure.code, 'PF_NOTION_TRIAL_REQUEST_INVALID'); }
+    if (report) {
+      assert.equal(report.errorCode, 'PF_NOTION_TRIAL_REQUEST_INVALID'); assert.equal(report.resumed, false);
+      assert.equal(report.cleanupUncertain, false);
+    }
+    assert.equal(verifications, 0); assert.equal(value.starts(), 0); assert.deepEqual(value.calls, []);
+  }
+});
+
+test('application verification APIs reject a missing target before reading installation or invoking codesign', async () => {
+  for (const applicationPath of [undefined, null, '', '/usr/bin/true', 'Relative.app']) {
+    await assert.rejects(verifyNotionTrialCandidate({ applicationPath }), { code: 'PF_NOTION_TRIAL_REQUEST_INVALID' });
+    await assert.rejects(verifyNotionTrialSignature(applicationPath), { code: 'PF_NOTION_TRIAL_REQUEST_INVALID' });
+  }
+});
+
+test('a failed bound-target recheck never resumes and retains the existing cleanup and diagnostics contract', async () => {
+  const target = '/Applications/Other App.app', checks = [];
+  const value = fixture({ verifyCandidate: async options => { checks.push(options.applicationPath); return true; },
+    verifyNotion: async bundle => { checks.push(bundle); throw Object.assign(new Error('PRIVATE_TRIAL_PASSWORD'), { code: 'PF_NOTION_SIGNATURE_REFUSED' }); } });
+  const selected = request(); selected.application.executablePath = `${target}/Contents/MacOS/Other App`;
+  const report = await value.trial.run({ request: selected, applicationId: selected.application.id, activationAuthorized: true });
+  assert.deepEqual(checks, [target, target]); assert.equal(value.calls.includes('resume'), false);
+  assert.deepEqual(value.calls, ['prepareRoute', 'prepare', 'stop', 'snapshot', 'shutdown']);
+  assert.equal(report.errorCode, 'PF_NOTION_SIGNATURE_REFUSED'); assert.equal(report.cleanupComplete, true); assert.equal(report.cleanupUncertain, false);
+  assert.equal(report.resumed, false); assert.equal(report.lifecyclePassed, false);
+  assert.equal(report.initialFailure.code, 'PF_NOTION_SIGNATURE_REFUSED');
+  assert.equal(JSON.stringify(report).includes('PRIVATE_TRIAL_PASSWORD'), false);
+});
 
 test('candidate mismatch and invalid approval/schema never create a channel', async () => {
   let starts = 0;
@@ -228,6 +375,26 @@ test('native failure and async rejected logger cannot skip cleanup or expose raw
   assert.equal(JSON.stringify(report).includes('PRIVATE_TRIAL_PASSWORD'), false);
 });
 
+test('a native stage timeout followed by bound retryable status can complete fresh cleanup without losing the first failure', async () => {
+  const value = fixture({ stageTimeout: true }), report = await run(value);
+  assert.equal(report.phase, 'cleaned'); assert.equal(report.cleanupComplete, true); assert.equal(report.cleanupUncertain, false);
+  assert.equal(report.errorCode, 'APPLICATION_APP_STAGE_TIMEOUT'); assert.equal(report.lifecyclePassed, false);
+  assert.equal(report.staged, false); assert.equal(report.resumed, false); assert.equal(value.calls.includes('resume'), false);
+  assert.deepEqual(report.initialFailure, { stage: 'cold-stage', code: 'APPLICATION_APP_STAGE_TIMEOUT' });
+  assert.equal(report.cleanupFailure, null); assert.equal(report.sessionDiagnostics.uncertaintyLatched, false);
+  assert.deepEqual(report.sessionDiagnostics.callHistory, ['status', 'prepareRoute', 'prepareNotionApplication', 'status', 'stopNotionApplication', 'applicationSnapshot']);
+  assert.equal(value.callOptions.find(item => item.method === 'stopNotionApplication').timeoutMs, 60000,
+    'the stop RPC must cover the bounded stage-outcome wait and both native cleanup waits');
+  assert.equal(JSON.stringify(report).includes('PRIVATE_TRIAL_PASSWORD'), false);
+});
+
+test('an unresolved stop that repeats only the initial stage failure does not invent a cleanup failure', async () => {
+  const value = fixture({ stageTimeout: true, stopInitialFailureOnly: true }), report = await run(value);
+  assert.equal(report.phase, 'cleanup-required'); assert.equal(report.cleanupComplete, false); assert.equal(report.cleanupUncertain, true);
+  assert.deepEqual(report.initialFailure, { stage: 'cold-stage', code: 'APPLICATION_APP_STAGE_TIMEOUT' });
+  assert.equal(report.cleanupFailure, null); assert.equal(report.lifecyclePassed, false); assert.equal(value.calls.includes('resume'), false);
+});
+
 test('fresh bound failure diagnostics reach the final log, while late prepare remains abandoned despite positive cleanup', async () => {
   for (const variant of ['fresh-failure', 'late-prepare']) {
     const events = [], value = fixture({ onEvent: event => events.push(event),
@@ -307,4 +474,32 @@ test('adapter projects only private exact context into the dedicated trial and n
   assert.equal(passed.request.workspace.timezoneSource, 'fixed'); assert.equal((await adapter.status()).ready, false);
   await assert.rejects(adapter.controlledNotionTrial({ application, context: { ...context, network: { ok: false } }, activationAuthorized: true }), { code: 'PF_NOTION_TRIAL_CONTEXT_REQUIRED' });
   await assert.rejects(adapter.controlledNotionTrial({ application: { ...application, args: ['--anything'] }, context, activationAuthorized: true }), { code: 'PF_NOTION_TRIAL_REQUEST_INVALID' });
+});
+
+test('quitting during application inspection prevents a late trial from starting while native shutdown is still pending', async () => {
+  let inspectEntered, finishInspect, shutdownEntered, finishShutdown, runs = 0;
+  const inspecting = new Promise(resolve => { inspectEntered = resolve; });
+  const inspection = new Promise(resolve => { finishInspect = resolve; });
+  const shuttingDown = new Promise(resolve => { shutdownEntered = resolve; });
+  const shutdownGate = new Promise(resolve => { finishShutdown = resolve; });
+  const selected = request(), application = { id: 'notion_bound', profileId: 'owned_profile', path: '/Applications/Notion.app',
+    executablePath: selected.application.executablePath, identity: 'bundle:notion.id', name: 'Notion', args: [] };
+  const trial = { available: async () => ({ controlledNotionTrialAvailable: true }), run: async () => { runs++; return flags; } };
+  const adapter = new MacOSPFApplicationRouting({ notionTrial: trial,
+    native: { shutdown: async () => { shutdownEntered(); await shutdownGate; },
+      stop: async () => ({ stopped: true }), revoke: async () => ({ revoked: true }) },
+    inspectApplication: async () => { inspectEntered(); await inspection; return application; } });
+  const starting = adapter.controlledNotionTrial({ application, activationAuthorized: true,
+    context: { profileId: application.profileId, cwd: await realpath(os.tmpdir()), timezone: 'Asia/Manila',
+      locale: 'en-PH', network: { ok: true, ip: '203.0.113.7' }, proxyEndpoint: selected.route, managedRoute: selected.managedRoute } });
+  await inspecting;
+  const closing = adapter.shutdown(); await shuttingDown;
+  try {
+    assert.throws(() => adapter.applicationStorage(), { code: 'APPLICATION_ROUTING_CLOSED' });
+    assert.deepEqual(await adapter.stop({ routeId: 'route_owned' }), { stopped: true });
+    assert.deepEqual(await adapter.revoke({ routeId: 'route_owned' }), { revoked: true });
+    finishInspect();
+    await assert.rejects(starting, { code: 'APPLICATION_ROUTING_CLOSED' });
+    assert.equal(runs, 0);
+  } finally { finishInspect(); finishShutdown(); await closing; }
 });

@@ -19,7 +19,7 @@ No upstream client stub is substituted into the system or user applications. App
 
 ## Observed boundary
 
-On the development Mac, the stock `DNSServiceCreateConnection` returns success but **does not connect to the supplied `DNSSD_UDS_PATH`**. The earlier `pf-dns-uds-2026-10-08.json` also records `ownedEndpointUsed:false` and `missingEndpointRejected:false`. Source code containing `getenv` does not establish that the current system dynamic library uses that transport.
+In the tested macOS system-library path, the stock `DNSServiceCreateConnection` returns success but **does not connect to the supplied `DNSSD_UDS_PATH`**. The fixture records `ownedEndpointUsed:false` and `missingEndpointRejected:false`. Source code containing `getenv` does not establish that the current system dynamic library uses that transport.
 
 Sandbox denial of default DNS access makes the stock library return PolicyDenied before using the custom socket. The actual sandboxed `getaddrinfo` fixture fails. Therefore **stock getaddrinfo positive routing is unsupported/unverified**, and UDS alone gives no Network.framework, original Notion, delegated-helper, packet-leak, or production protection guarantee.
 

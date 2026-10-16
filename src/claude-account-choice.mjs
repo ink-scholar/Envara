@@ -3,6 +3,7 @@ export const NEW_CLAUDE_ACCOUNT = '__new__';
 const downloadErrors = {
   CLAUDE_CODE_LOCAL_INSTALL_UNAVAILABLE: '本机未找到可用的 Claude 原生安装，请选择下载独立安装。',
   CLAUDE_CODE_INSTALLATION_INVALID: '境舱的 Claude 安装无效，请检查其本地安装后重试；未改用本机版本。',
+  CLAUDE_CODE_INSTALLATION_CLEANUP_FAILED: 'Claude 安装临时文件清理未完成，请重试关闭会话。',
   CLAUDE_CODE_DOWNLOAD_ROUTE_REQUIRED: 'Claude 下载需要此境舱可用的代理线路。',
   CLAUDE_CODE_DOWNLOAD_FAILED: 'Claude 下载失败，请检查网络后重试。',
   CLAUDE_CODE_DOWNLOAD_TIMEOUT: 'Claude 下载超时，请重试。',

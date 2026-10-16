@@ -1,71 +1,100 @@
-<p align="center"><img src="../../build/icon.png" width="88" alt="Envara" /></p>
-<h1 align="center">Envara · 境舱</h1>
-<p align="center"><strong>多個環境，一個工作臺。</strong></p>
 <p align="center">
-  <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原創應用程式碼：MIT" /></a>
-  <a href="../verification.md"><img src="https://img.shields.io/badge/0.5.0-local_candidate-475569" alt="0.5.0 本機候選版" /></a>
+  <img src="../../build/icon.png" width="88" alt="Envara 境舱" />
 </p>
-<p align="center"><a href="../../README.md">简体中文</a> · <strong>繁體中文</strong> · <a href="en.md">English</a> · <a href="ja.md">日本語</a> · <a href="ko.md">한국어</a> · <a href="es.md">Español</a> · <a href="fr.md">Français</a> · <a href="de.md">Deutsch</a> · <a href="pt-BR.md">Português (Brasil)</a></p>
+<h1 align="center">Envara · 境舱</h1>
+<p align="center"><strong>多個環境，一個工作台。</strong><br />整合瀏覽器、終端與網路環境的本機工作區。</p>
+<p align="center">
+  <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原創程式碼授權：MIT" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.23-475569" alt="Envara 0.5.23" /></a>
+  <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 種 README 語言" /></a>
+</p>
+<p align="center">
+  <a href="../../README.md">简体中文</a> · <strong>繁體中文</strong> · <a href="en.md">English</a> · <a href="ja.md">日本語</a> · <a href="ko.md">한국어</a> · <a href="es.md">Español</a> · <a href="fr.md">Français</a> · <a href="de.md">Deutsch</a> · <a href="pt-BR.md">Português (Brasil)</a>
+</p>
+<p align="center">
+  <a href="https://github.com/ink-scholar/Envara/releases/latest">下載 macOS 版</a> · <a href="../capability-matrix.md">功能與邊界</a> · <a href="../../CONTRIBUTING.md">參與貢獻</a> · <a href="../SUPPORT.md">支持專案</a>
+</p>
 
 ![Envara 中文原生工作區](../media/workspace-zh-CN.png)
 
-*中文原生 Electron 候選介面，網路為隔離測試夾具中的合成資料，不是實際出口或附加軟體分流的證明。[先前的原生截圖](../envara-workspace-0.5.png)。*
+<p align="center"><sub>原生 Electron 工作區，截圖使用合成範例資料。</sub></p>
 
-## 本機工作區
+## 一個環境，一套工作脈絡
 
-Envara 將 BrowseForge 的瀏覽器環境功能帶進桌面應用程式。導覽依序為 **環境 → 網路出口 → 瀏覽器 → 終端機 → 附加應用程式 → 執行監控**；詳細設定集中於進階選項。
+Envara 把瀏覽器、網路出口、工作目錄和命令列工具放在同一個本機工作台。每個環境保留自己的瀏覽資料、工具設定與歷史；不同環境可以選擇不同網路。
 
-- **環境：**獨立瀏覽資料、群組、標籤、複製及設定匯入匯出。
-- **網路：**HTTP、HTTPS、SOCKS5 與內建 AnyTLS；透過認證請求偵測真正出口、概略地區與時區，無須另外設定 Clash。
-- **瀏覽器：**CloakBrowser / Chromium、Camoufox / Firefox，以及實驗性的 BrowseForge Chromium。
-- **終端機：**真正的本機 PTY、自選目錄、調整尺寸、獨立視窗與多工作階段。複製會產生新行程，不重播指令。
-- **附加應用程式：**將本機軟體綁定環境；系統網路接管元件未獲授權或尚未通過驗證時，不允許以受保護模式啟動。
+| 工作區 | 功能 |
+| --- | --- |
+| 環境 | 建立、複製、分組與搜尋，儲存工作目錄和網路環境 |
+| 網路出口 | HTTP、HTTPS、SOCKS5 和內建 AnyTLS，偵測實際出口、概略地區與時區 |
+| 瀏覽器 | CloakBrowser / Chromium、Camoufox / Firefox、實驗性的 BrowseForge Chromium；自動設定與進階設定 |
+| 終端 | 真實 PTY、目錄選擇、多工作階段、可調整大小的面板與獨立視窗 |
+| Claude Code | 每個環境獨立的官方 CLI 安裝、具名登入檔案、綁定環境瀏覽器的 MCP 工具 |
+| 附加軟體 | 將支援的 Chromium/Electron 應用程式綁定到環境，管理執行個體與獨立應用資料 |
+| 資料移轉 | 分別匯出瀏覽器、選定終端登入檔案或附加應用資料，並以密碼加密 |
 
-瀏覽器和終端機共用境舱的網路與時區。不同環境的工具設定與紀錄彼此分開。
+內建 AnyTLS 核心由 Envara 管理，無需另外設定 Clash。瀏覽器、終端與附加軟體沿用已確認的網路位置與時區。位置設定不會修改系統時區；IP 定位僅表示大致地區。
+
+複製終端會建立新的獨立程序，不會重播命令。Claude Code 工作階段先進入 shell，由你輸入 `claude`；可下載獨立的官方安裝，或使用現有本機原生程式初始化。Envara 不修改官方 CLI、不複製主機帳號，也不預設啟用權限略過。[了解 Claude Code 工作階段](../claude-code-sessions.md)。
+
+附加軟體啟動前會檢查相容性、現有執行個體與路由元件狀態。不符合條件時會明確拒絕啟動。停止、移除綁定及退出 Envara 都會保留登入資料；只有明確刪除登入資料或環境時才會清除。詳見[附加軟體](../application-routing-options.md)。
+
+## 下載與安裝
+
+從 [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) 下載 **macOS Apple Silicon（arm64）** 的 DMG 或 ZIP。開啟 DMG 後，將 Envara 拖入「應用程式」。校驗檔與版本說明隨 Release 提供。
+
+**目前 macOS 成品未使用 Apple Developer ID 簽章，也未經公證。** 首次開啟可能受到 macOS 安全檢查；請確認下載來自本儲存庫並核對校驗值。Envara 不會自動關閉系統安全檢查。附加軟體的系統路由元件需要另外取得管理員授權，啟動瀏覽器或一般工作區不會自動安裝它。
+
+| 平台 | 發布範圍 |
+| --- | --- |
+| macOS Apple Silicon | 本次提供 DMG、ZIP 與 SHA-256 校驗檔 |
+| macOS Intel | 保留原始碼路徑，未提供已驗證成品 |
+| Windows / Linux | 保留相關原始碼；本次不發布成品，實機驗證範圍請見功能矩陣 |
+
+瀏覽器核心由使用者透過應用程式內的入口安裝，適用各自授權。應用程式內含桌面執行所需相依元件，無需另外安裝 Node.js 或 Go。
 
 ## 選擇介面語言
 
-候選介面支援簡體中文、繁體中文、英語、日語、韓語、西班牙語、法語、德語與巴西葡萄牙語。首次開啟時可選擇語言，之後可在設定中更改。介面語言不會改變瀏覽器語系、時區、節點、工作目錄或終端機輸出。
+支援 **简体中文、繁體中文、English、日本語、한국어、Español、Français、Deutsch、Português (Brasil)**。首次啟動會推薦系統語言並由你確認，之後可在設定中切換。
 
-![英文介面的原生首次啟動語言選擇](../media/first-launch.png)
+![首次啟動語言選擇](../media/first-launch.png)
 
-*英文介面的原生 Electron 首次啟動截圖；語言選擇、儲存、重新啟動後保留，以及獨立終端機視窗同步均已單獨驗證。*
+<p align="center"><sub>原生首次啟動語言選擇介面。</sub></p>
 
-## 安裝狀態與限制
+介面語言與瀏覽器環境語言分開，切換選單語言不會修改既有網路、時區或工作目錄。
 
-**0.5.0 是開發候選版，目前沒有公開正式下載。** 最新原始碼進展已獲授權上傳；安裝發行版仍為草稿，自動發行維持停用。Notion 啟動與清理尚未通過驗收，請見[目前診斷交接](../notion-launch-handoff-20261010.md)。
+## 能力邊界
 
-macOS Apple Silicon 是目前主要驗證平台，瀏覽器、AnyTLS 與真實 PTY 具有各版本的原生驗證紀錄；候選套件尚未簽章或公證。Windows 已有原始碼及建置候選，仍待實機驗收；macOS Intel 和 Linux 也未完成實機驗證。
+- 設定與資料隔離並不提供獨立的作業系統使用者、Keychain 或虛擬硬體。瀏覽器指紋設定不會改變原生應用程式的硬體身分。
+- 支援的 macOS 終端路由使用網路圍欄；尚未具備此邊界的平台和路由不能視為強制隔離。詳細範圍請見[功能矩陣](../capability-matrix.md)。
+- 附加應用程式使用外層網路圍欄時，Chromium/Electron 的內部沙箱會關閉。原生元件狀態、支援引擎與實際驗證範圍分別說明，不把「可識別」當作「所有軟體均已驗證」。
+- 匯出不含 Keychain、程式本體、快取或暫存檔。換機後部分帳號仍需重新登入；同機還原成功不保證跨機器登入有效。
+- 追蹤攔截僅涵蓋已實作規則與核心支援的控制。網路、帳號與設定隔離不保證避免服務限制，也不會消除所有追蹤。
 
-**兩個平台的附加軟體完整強制分流都尚未就緒。** Mac 現在預設使用 PF、專用程序群組與自有 utun，透過 Envara 管理的已驗證節點連線。此路線需要本機管理員授權，不必先申請 Apple 開發者帳號。獨立 DNS、故障保護與實際應用程式仍待驗收；Notion 尚未以受保護模式執行。參閱[分流邊界](../application-routing-options.md)與[驗證紀錄](../verification.md)。
+[驗證說明](../verification.md) · [架構](../architecture.md) · [網路環境](../network-context.md) · [瀏覽器裝置與語言](../browser-device-profiles.md)
 
-追蹤規則無法消除所有追蹤。設定隔離不是作業系統沙箱；IP 定位只估計地區，不提供住宅地址，也不保證避免帳號停權。
+## 從原始碼開發
 
-## 開發
-
-需要 Node.js 24 LTS 或 22.12+、npm、Go 1.25+ 與目標平台建置工具。
+需要 Node.js 24 LTS（或 22.12+）、npm、Go 1.25，以及目標平台的編譯工具。macOS 原生元件需要 Xcode Command Line Tools。
 
 ```bash
 npm ci
 npm run desktop
 ```
 
-首次準備需要連網。瀏覽器核心由使用者主動從官方來源安裝。準備好的桌面套件內含執行所需的相依元件，一般使用者不需要自行安裝 Go 或 Node.js。
+首次準備會下載固定版本的建置相依套件。開發預覽與檢查：
 
 ```bash
+npm run dev
 npm test
 npm run build
 npm run test:sites
 ```
 
-Web 預覽用於介面開發；原生操作需要桌面模式。參閱[貢獻指南](../../CONTRIBUTING.md)。
+Web 預覽僅用於介面開發；真實瀏覽器、PTY 和系統路由需要桌面應用程式。建置與發布說明請見[貢獻指南](../../CONTRIBUTING.md)與[發布流程](../releasing.md)。GitHub 自動編譯和發布工作流程維持停用，推送原始碼不會觸發建置。
 
-## 深入了解與支持
+## 開源與支持
 
-[功能與 BrowseForge 對照](../capability-matrix.md) · [架構](../architecture.md) · [驗證](../verification.md) · [問題回報](https://github.com/ink-scholar/Envara/issues)
+Envara 原創程式碼採用 [MIT](../../LICENSE)。BrowseForge 保留其 [MIT 授權](../../third_party/browseforge/LICENSE)及[固定版本紀錄](../../third_party/browseforge/ENVARA_UPSTREAM.md)。獨立 Mihomo 核心保留 [GPLv3](../../third_party/proxy-core/LICENSE)及[對應原始碼](../../third_party/proxy-core/SOURCE.md)。瀏覽器二進位檔適用各自授權，不包含在應用程式的 MIT 授權內。完整歸屬請見[第三方聲明](../../THIRD_PARTY_NOTICES.md)。
 
-歡迎 Star、回饋、翻譯和程式碼貢獻。[自願支持](../SUPPORT.md)的收款管道目前尚未啟用。
-
-## 授權
-
-Envara 原創程式碼與納入的 BrowseForge 分別保留 MIT 授權。獨立 Mihomo 核心保留 GPLv3 與對應原始碼。瀏覽器二進位檔案適用各自授權；CloakBrowser 的 Binary License 不屬於應用程式的 MIT。詳見 [LICENSE](../../LICENSE)、[BrowseForge 來源](../../third_party/browseforge/ENVARA_UPSTREAM.md)、[代理核心來源](../../third_party/proxy-core/SOURCE.md)與[第三方聲明](../../THIRD_PARTY_NOTICES.md)。
+歡迎[回報問題](https://github.com/ink-scholar/Envara/issues)、提交程式碼、改進翻譯或 Star。支持均為自願；捐贈管道尚未啟用。[支持專案](../SUPPORT.md)

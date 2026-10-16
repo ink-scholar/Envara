@@ -2,6 +2,7 @@ package browser
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -179,6 +180,50 @@ func blockTrackerRequest(raw, firstParty, mode string, kind uint16) bool {
 }
 
 // requestKind is the filter-list kind of a Playwright request.
+// Loopback stays on this Mac instead of going to the remote proxy, which
+// cannot reach it: a sign-in that redirects to a local application's callback
+// (http://127.0.0.1:PORT/...) otherwise ends in a proxy 502. Only a top-level
+// navigation to loopback, and requests made by such a local page, may reach it;
+// any other page's request to loopback is refused, so sites cannot probe local
+// services.
+const loopbackProxyBypass = "127.0.0.1,localhost,[::1]"
+
+func loopbackHost(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func loopbackRequestRefused(request playwright.Request) (refused bool) {
+	defer func() {
+		if recover() != nil {
+			refused = true
+		}
+	}()
+	if !loopbackHost(request.URL()) {
+		return false
+	}
+	frame := request.Frame()
+	if frame == nil {
+		return true
+	}
+	top := frame
+	for top.ParentFrame() != nil {
+		top = top.ParentFrame()
+	}
+	if request.IsNavigationRequest() && frame == top {
+		return false
+	}
+	return !loopbackHost(top.URL())
+}
+
 func requestKind(request playwright.Request) (kind uint16) {
 	defer func() {
 		if recover() != nil {
@@ -339,19 +384,21 @@ func installBrowserPrivacy(ctx playwright.BrowserContext, p *profile.Profile, ch
 			}()
 		})
 	}
-	if mode != "off" {
-		if err := ctx.Route("**/*", func(route playwright.Route) {
-			request := route.Request()
-			if blockTrackerRequest(request.URL(), requestFirstParty(request), mode, requestKind(request)) {
-				if route.Abort("blockedbyclient") == nil {
-					state.BlockedRequests.Add(1)
-				}
-			} else {
-				route.Continue()
-			}
-		}); err != nil {
-			return nil, err
+	if err := ctx.Route("**/*", func(route playwright.Route) {
+		request := route.Request()
+		if loopbackRequestRefused(request) {
+			route.Abort("blockedbyclient")
+			return
 		}
+		if mode != "off" && blockTrackerRequest(request.URL(), requestFirstParty(request), mode, requestKind(request)) {
+			if route.Abort("blockedbyclient") == nil {
+				state.BlockedRequests.Add(1)
+			}
+		} else {
+			route.Continue()
+		}
+	}); err != nil {
+		return nil, err
 	}
 	return state, nil
 }

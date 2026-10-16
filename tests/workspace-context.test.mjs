@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { applicationWorkspaceContext, installedProcessLocales, resolveProcessLanguage } from '../electron/workspace-context.mjs';
+import os from 'node:os';
+import path from 'node:path';
+import { realpathSync } from 'node:fs';
 
 const execute = promisify(execFile);
 const available = ['C', 'C.UTF-8', 'en_US.UTF-8', 'en_GB.UTF-8', 'en_PH.UTF-8', 'zh_CN.UTF-8', 'zh_HK.UTF-8', 'sr_RS.UTF-8', 'sr_RS.UTF-8@latin'];
@@ -34,11 +37,24 @@ test('application context passes the shared locale without changing the requeste
     languageFor: locale => resolveProcessLanguage(locale, available),
     childEnvironment: (...args) => { calls.push(args); const selected = resolveProcessLanguage(args[5], available); return { LANG: selected.posix, LC_ALL: selected.posix }; },
   };
-  const result = await applicationWorkspaceContext('profile_a', { terminal, service: { resolveWorkspaceContext: async () => context } });
+  const result = await applicationWorkspaceContext('profile_a', { terminal, service: { resolveWorkspaceContext: async () => context },
+    directoryUsable: async cwd => cwd === '/owned/project' });
   assert.equal(calls[0][5], 'ms-MY'); assert.equal(calls[0][4], null);
   assert.equal(result.locale, 'ms-MY'); assert.equal(result.language.effective, 'en-US');
   assert.deepEqual(result.environment, { LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' });
   assert.deepEqual(context, { id: 'profile_a', locale: 'ms-MY', timezone: 'Asia/Kuala_Lumpur', privacy: { mode: 'standard' } });
+});
+
+test('a saved working directory that no longer exists asks for a new one instead of failing the launch later', async () => {
+  const context = { id: 'profile_a', locale: 'en-US', timezone: 'America/New_York', privacy: { mode: 'standard' } };
+  const missing = path.join(realpathSync(os.tmpdir()), `envara-missing-${process.pid}-${Date.now()}`);
+  const terminal = { snapshot: async () => ({ profiles: [{ profileId: 'profile_a', cwd: missing }] }),
+    directories: async () => ({}), languageFor: () => ({}), childEnvironment: () => ({}) };
+  await assert.rejects(applicationWorkspaceContext('profile_a', { terminal, service: { resolveWorkspaceContext: async () => context } }),
+    { code: 'APPLICATION_DIRECTORY_REQUIRED', message: '境舱工作目录已改变，请重新选择。' });
+  const existing = realpathSync(os.tmpdir());
+  terminal.snapshot = async () => ({ profiles: [{ profileId: 'profile_a', cwd: existing }] });
+  assert.equal((await applicationWorkspaceContext('profile_a', { terminal, service: { resolveWorkspaceContext: async () => context } })).cwd, existing);
 });
 
 test('macOS native locale and ICU are checked separately with owned non-networking children', { skip: process.platform !== 'darwin' }, async () => {

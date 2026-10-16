@@ -1,5 +1,7 @@
 const validSequence = value => Number.isSafeInteger(value) && value >= 0;
 const MAX_REPLAY_CHARACTERS = 256 * 1024;
+const MAX_RETIRED_SESSIONS = 256;
+const endedStatuses = new Set(['closed', 'exited', 'error']);
 const metadata = value => {
   const { replay, ...result } = value;
   return result;
@@ -38,6 +40,7 @@ export class TerminalStreamStore {
     this.profiles = new Map();
     this.sessions = new Map();
     this.unknown = new Map();
+    this.retired = new Set();
   }
   snapshot() {
     return { profiles: [...this.profiles.values()].map(profile => ({ ...profile, sessions: [...this.sessions.values()].filter(entry => entry.meta.profileId === profile.profileId).map(entry => ({ ...entry.meta, sequence: entry.sequence })) })) };
@@ -76,6 +79,7 @@ export class TerminalStreamStore {
   applyEvent(event) {
     const writes = [];
     if (!event || typeof event.sessionId !== 'string' || typeof event.profileId !== 'string' || !validSequence(event.sequence) || !['data', 'exit', 'status'].includes(event.type)) return { writes, refreshNeeded: false };
+    if (this.retired.has(event.sessionId)) return { writes, refreshNeeded: false };
     const entry = this.sessions.get(event.sessionId);
     if (!entry) {
       const pending = this.unknown.get(event.sessionId) ?? new Map();
@@ -88,14 +92,18 @@ export class TerminalStreamStore {
     this.drain(entry, writes);
     return { writes, refreshNeeded: entry.pending.size > 0 };
   }
-  applySnapshot(snapshot) {
+  applySnapshot(snapshot, { complete = false } = {}) {
     const writes = [];
+    const profileIds = new Set(), sessionIds = new Set();
     for (const profile of snapshot?.profiles ?? []) {
       if (!profile || typeof profile.profileId !== 'string') continue;
+      profileIds.add(profile.profileId);
       const { sessions = [], ...profileMetadata } = profile;
       this.profiles.set(profile.profileId, { ...(this.profiles.get(profile.profileId) ?? {}), ...profileMetadata });
       for (const session of sessions) {
         if (!session || typeof session.sessionId !== 'string' || !validSequence(session.sequence)) continue;
+        sessionIds.add(session.sessionId);
+        if (this.retired.has(session.sessionId)) continue;
         const replay = typeof session.replay === 'string' ? session.replay : '';
         let entry = this.sessions.get(session.sessionId);
         if (!entry) {
@@ -113,6 +121,22 @@ export class TerminalStreamStore {
           entry.meta = { ...entry.meta, ...metadata(session), profileId: profile.profileId };
         }
         this.drain(entry, writes);
+      }
+    }
+    // Open/duplicate replies are partial. Only a complete backend snapshot can
+    // retire history it no longer keeps, and missing live sessions may still
+    // be waiting for their first snapshot or an in-flight exit event.
+    if (complete && Array.isArray(snapshot?.profiles)) {
+      for (const [sessionId, entry] of this.sessions) {
+        if (sessionIds.has(sessionId) || !endedStatuses.has(entry.meta.status)) continue;
+        this.sessions.delete(sessionId);
+        this.unknown.delete(sessionId);
+        this.retired.add(sessionId);
+        while (this.retired.size > MAX_RETIRED_SESSIONS) this.retired.delete(this.retired.values().next().value);
+      }
+      const retainedProfileIds = new Set([...this.sessions.values()].map(entry => entry.meta.profileId));
+      for (const profileId of this.profiles.keys()) {
+        if (!profileIds.has(profileId) && !retainedProfileIds.has(profileId)) this.profiles.delete(profileId);
       }
     }
     return { writes, refreshNeeded: this.unknown.size > 0 || [...this.sessions.values()].some(entry => entry.pending.size > 0) };

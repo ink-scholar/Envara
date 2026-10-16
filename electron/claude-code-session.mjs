@@ -6,6 +6,7 @@ import { resolveClaudeInstallation } from './claude-code-installation.mjs';
 const fail = (message, code = 'CLAUDE_CODE_INVALID_CONFIGURATION') => Object.assign(new Error(message), { code });
 const absolute = value => typeof value === 'string' && path.isAbsolute(value) && !/[\0\r\n]/.test(value);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const validEnvironment = environment => object(environment) && Object.entries(environment).every(([key, value]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && typeof value === 'string' && !value.includes('\0'));
 const accountConflict = () => fail('此境舱的 Claude 设置含 API、网关或外部登录配置；请移除冲突后使用账号登录会话。', 'CLAUDE_CODE_ACCOUNT_CONFIGURATION_CONFLICT');
 const policyConflict = () => fail('此境舱的 Claude 设置会覆盖会话网络或目录；请移除冲突后重试。', 'CLAUDE_CODE_SESSION_POLICY_CONFLICT');
 const invalidSettings = () => fail('此境舱的 Claude 设置无法安全读取，请检查 settings.json。', 'CLAUDE_CODE_SETTINGS_INVALID');
@@ -90,14 +91,14 @@ async function readUserSettings(directory) {
     const after = await handle.stat();
     if (count > MAX_SETTINGS_BYTES || count !== opened.size || after.mtimeMs !== opened.mtimeMs || after.size !== opened.size) throw invalidSettings();
     const settings = JSON.parse(buffer.toString('utf8', 0, count));
-    if (!object(settings) || (settings.env !== undefined && (!object(settings.env) || Object.entries(settings.env).some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== 'string' || value.includes('\0'))))) throw invalidSettings();
+    if (!object(settings) || (settings.env !== undefined && !validEnvironment(settings.env))) throw invalidSettings();
     return settings;
   } catch { throw invalidSettings(); }
   finally { await handle?.close(); }
 }
 
 async function sessionPolicy({ directories, environment, privacy }) {
-  if (!object(environment) || Object.entries(environment).some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== 'string' || value.includes('\0'))) throw fail('Claude Code 会话环境无效。');
+  if (!validEnvironment(environment)) throw fail('Claude Code 会话环境无效。');
   await checkedDirectory(directories?.home);
   const user = await readUserSettings(directories?.claude);
   if (environment.HOME !== directories.home || environment.USERPROFILE !== directories.home || environment.CLAUDE_CONFIG_DIR !== directories.claude) throw policyConflict();
@@ -217,7 +218,13 @@ export async function prepareClaudeSession({ sessionId, directories, installatio
     await writeFile(wrapperPath, claudeShim({ node, resolver, home: directories.home }, args), { mode: 0o700, flag: 'wx' });
     return { executable: selected, installation, args, environment: policy.environment, binDirectory, wrapperPath, cleanup };
   } catch (error) {
-    await cleanup();
+    try { await cleanup(); }
+    catch {
+      error.cleanupError = 'Claude 会话临时文件清理未完成，请重试关闭会话。';
+      // The terminal service retains this same owned runtime for Close retries.
+      // It is private authority, never part of public session metadata.
+      Object.defineProperty(error, 'claudeCleanup', { value: cleanup, configurable: true });
+    }
     throw error;
   }
 }

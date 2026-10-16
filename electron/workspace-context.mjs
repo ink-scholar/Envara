@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { constants } from 'node:fs';
+import { access, realpath, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -58,11 +60,23 @@ export function localeForCountry(countryCode) {
 }
 
 /** Private native launch context. Never send this object through renderer IPC. */
-export async function applicationWorkspaceContext(profileId, { service, terminal }) {
+/* The same rule the launch validation applies: an existing, canonical,
+ * readable directory. */
+async function usableDirectory(cwd) {
+  try {
+    if (await realpath(cwd) !== cwd || !(await stat(cwd)).isDirectory()) return false;
+    await access(cwd, constants.R_OK | constants.X_OK); return true;
+  } catch { return false; }
+}
+export async function applicationWorkspaceContext(profileId, { service, terminal, directoryUsable = usableDirectory }) {
   const context = await service.resolveWorkspaceContext(profileId, { force: true });
   const state = await terminal.snapshot({ id: profileId });
   const cwd = state.profiles?.find(item => item.profileId === profileId)?.cwd;
   if (!cwd || !path.isAbsolute(cwd)) throw Object.assign(new Error('请先为此境舱选择工作目录。'), { code: 'APPLICATION_DIRECTORY_REQUIRED' });
+  /* A saved folder can be deleted or moved later. Asking for another one fixes
+   * it; letting the launch validation refuse it showed an unrelated "network
+   * component not verified" message instead. */
+  if (!(await directoryUsable(cwd))) throw Object.assign(new Error('境舱工作目录已改变，请重新选择。'), { code: 'APPLICATION_DIRECTORY_REQUIRED' });
   const directories = await terminal.directories(profileId);
   const language = terminal.languageFor(context.locale);
   const environment = terminal.childEnvironment(directories, context.timezone, null, context.privacy, null, context.locale);

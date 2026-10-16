@@ -1,0 +1,11 @@
+{
+  "name": "front-acceptance",
+  "displayName": "Envara local front acceptance probe",
+  "publisher": "envara-local-fixture",
+  "version": "0.0.1",
+  "private": true,
+  "engines": { "vscode": "^1.74.0" },
+  "extensionKind": ["ui"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.cjs"
+}

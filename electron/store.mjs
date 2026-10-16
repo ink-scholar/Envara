@@ -28,7 +28,10 @@ export class EnvaraStore {
       this.value = value;
     } catch (error) {
       if (error.code !== 'ENOENT') {
-        throw new Error(`无法读取工作区，原文件已保留：${error.message}`, { cause: error });
+        // JSON parser snippets can contain proxy credentials or account data.
+        // Keep the original file, but never carry its raw error into startup
+        // logs, IPC errors or their cause chain.
+        throw Object.assign(new Error('无法读取工作区，原文件已保留，请检查文件权限或从备份恢复。'), { code: 'WORKSPACE_STORAGE_UNAVAILABLE' });
       }
       this.value = {
         schema: 'envara.workspace', version: 1,

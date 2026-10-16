@@ -111,8 +111,9 @@ func applyCamoufoxLaunchOverrides(camouConfig map[string]any, p *profile.Profile
 			}
 			camouConfig["locale:all"] = locale
 			camouConfig["navigator.language"] = locale
-			camouConfig["navigator.languages"] = navigatorLanguagesFromAcceptLanguage(acceptLanguageForLocale(locale))
-			camouConfig["headers.Accept-Language"] = acceptLanguageForLocale(locale)
+			acceptLanguage := acceptLanguageForLocale(locale)
+			camouConfig["navigator.languages"] = navigatorLanguagesFromAcceptLanguage(acceptLanguage)
+			camouConfig["headers.Accept-Language"] = acceptLanguage
 		}
 	}
 	if targetOS == "" {

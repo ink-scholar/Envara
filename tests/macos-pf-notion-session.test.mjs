@@ -247,6 +247,173 @@ test('an explicit uncertain controller state stays uncertain after a complete st
   await stopAndSnapshot(call, value); assert.equal((await call.close()).cleanupUncertain, true);
 });
 
+const retryableNativeFailure = { stage: 'cold-stage', code: 'APPLICATION_APP_NATIVE_REFUSED',
+  native: { stage: 'front-admission', reason: 'NATIVE_OPERATION_REFUSED', error: 13 } };
+const retryableCleanup = value => ({ ...stage(value), phase: 'cleanup-required', cleanupUncertain: true, cleanupRetryable: true,
+  failure: structuredClone(retryableNativeFailure), initialFailure: structuredClone(retryableNativeFailure), private: 'RETRYABLE_PRIVATE_SECRET' });
+
+test('a same-bound retryable operation permits cleanup recovery without restoring launch admission', async t => {
+  for (const kind of ['normal', 'prestage', 'preflight']) {
+    await t.test(kind, async subtest => {
+      const value = request(), clean = { ...cleanup(value, kind), initialFailure: structuredClone(retryableNativeFailure) };
+      const { call } = peer(subtest, [routed, retryableCleanup(value), clean, clean]);
+      await call('prepareRoute', route());
+      const failedPreparation = await call('prepareNotionApplication', value);
+      assert.deepEqual(failedPreparation.failure, retryableNativeFailure);
+      assert.equal(call.snapshot().cleanupUncertain, true);
+      assert.equal(call.snapshot().diagnostics.uncertaintyLatched, false);
+      await assert.rejects(call('resumeNotionApplication', { runId: value.runId, activationAuthorized: true }), { code: 'PF_HELPER_CLEANUP_UNCERTAIN' });
+      const result = await stopAndSnapshot(call, value);
+      assert.deepEqual(result.stopped.initialFailure, retryableNativeFailure);
+      assert.deepEqual(result.snapshot.initialFailure, retryableNativeFailure);
+      assert.equal(call.snapshot().cleanupKind, kind);
+      assert.equal(call.snapshot().cleanupUncertain, false);
+      await assert.rejects(call('resumeNotionApplication', { runId: value.runId, activationAuthorized: true }), { code: 'PF_HELPER_CLEANUP_UNCERTAIN' });
+      assert.equal((await call.close()).cleanupUncertain, false);
+      assert.equal(call.snapshot().diagnostics.uncertaintyLatched, false);
+      assert.equal(JSON.stringify(call.snapshot()).includes('RETRYABLE_PRIVATE_SECRET'), false);
+    });
+  }
+});
+
+test('a refused prepare RPC followed by selected same-bound retryable status can finish cleanup', async t => {
+  const value = request(), clean = { ...cleanup(value), initialFailure: structuredClone(retryableNativeFailure) };
+  const { call } = peer(t, [selectedStatus(value.runId), routed, stage(value),
+    selectedStatus(value.runId, { applications: [retryableCleanup(value)] }), clean, clean], { errorIndex: 2 });
+  await call('status', { runId: value.runId }); await call('prepareRoute', route());
+  await assert.rejects(call('prepareNotionApplication', value), { code: 'APPLICATION_ROUTING_NOT_READY' });
+  await assert.rejects(call('resumeNotionApplication', { runId: value.runId, activationAuthorized: true }), { code: 'PF_HELPER_CLEANUP_UNCERTAIN' });
+  await call('status', { runId: value.runId });
+  assert.equal(call.snapshot().diagnostics.uncertaintyLatched, false);
+  const result = await stopAndSnapshot(call, value);
+  assert.deepEqual(result.snapshot.initialFailure, retryableNativeFailure);
+  assert.equal((await call.close()).cleanupUncertain, false);
+});
+
+test('missing or false retryable operation markers keep the established hard uncertainty', async t => {
+  for (const marker of ['missing', false]) {
+    await t.test(String(marker), async subtest => {
+      const value = request(), result = retryableCleanup(value), clean = cleanup(value);
+      if (marker === 'missing') delete result.cleanupRetryable; else result.cleanupRetryable = marker;
+      const { call } = peer(subtest, [routed, result, clean, clean]);
+      await prepare(call, value); await stopAndSnapshot(call, value);
+      assert.equal(call.snapshot().diagnostics.uncertaintyLatched, true);
+      assert.equal((await call.close()).cleanupUncertain, true);
+    });
+  }
+});
+
+test('malformed retryable operation markers or a foreign binding cannot authorize recovery', async t => {
+  for (const variant of ['string', 'number', 'null', 'foreign-run', 'foreign-environment']) {
+    await t.test(variant, async subtest => {
+      const value = request(), result = retryableCleanup(value);
+      if (variant === 'string') result.cleanupRetryable = 'true';
+      if (variant === 'number') result.cleanupRetryable = 1;
+      if (variant === 'null') result.cleanupRetryable = null;
+      if (variant === 'foreign-run') result.runId = randomUUID();
+      if (variant === 'foreign-environment') result.environmentId = randomUUID();
+      const { call } = peer(subtest, [routed, result, cleanup(value), cleanup(value)]);
+      await call('prepareRoute', route());
+      await assert.rejects(call('prepareNotionApplication', value), { code: 'PF_HELPER_RESPONSE_INVALID' });
+      assert.equal(call.snapshot().diagnostics.uncertaintyLatched, true);
+      assert.equal((await call.close()).cleanupUncertain, true);
+    });
+  }
+});
+
+test('selected status only treats a strict same-bound retryable application as recoverable', async t => {
+  for (const variant of ['missing', 'false', 'malformed', 'foreign-run', 'foreign-environment', 'missing-state', 'malformed-failure', 'global-uncertainty']) {
+    await t.test(variant, async subtest => {
+      const value = request(), application = retryableCleanup(value), clean = cleanup(value);
+      if (variant === 'missing') delete application.cleanupRetryable;
+      if (variant === 'false') application.cleanupRetryable = false;
+      if (variant === 'malformed') application.cleanupRetryable = 'true';
+      if (variant === 'foreign-run') application.runId = randomUUID();
+      if (variant === 'foreign-environment') application.environmentId = randomUUID();
+      if (variant === 'missing-state') delete application.staged;
+      if (variant === 'malformed-failure') application.failure.native.error = true;
+      const current = selectedStatus(value.runId, { applications: [application], ...(variant === 'global-uncertainty' ? { cleanupUncertain: true } : {}) });
+      const { call } = peer(subtest, [selectedStatus(value.runId), routed, stage(value), current, clean, clean], { errorIndex: 2 });
+      await call('status', { runId: value.runId }); await call('prepareRoute', route());
+      await assert.rejects(call('prepareNotionApplication', value), { code: 'APPLICATION_ROUTING_NOT_READY' });
+      try { await call('status', { runId: value.runId }); }
+      catch (error) { assert.equal(error.code, 'PF_HELPER_RESPONSE_INVALID'); }
+      assert.equal(call.snapshot().diagnostics.uncertaintyLatched, true);
+      try { await stopAndSnapshot(call, value); }
+      catch (error) { assert.equal(error.code, 'PF_HELPER_CLEANUP_UNCERTAIN'); }
+      assert.equal((await call.close()).cleanupUncertain, true);
+    });
+  }
+});
+
+test('retryable cleanup still requires a complete new stop then matching fresh snapshot', async t => {
+  for (const variant of ['stop-only', 'snapshot-only', 'snapshot-before-stop', 'missing-fact', 'different-kind']) {
+    await t.test(variant, async subtest => {
+      const value = request(), clean = cleanup(value), final = structuredClone(clean);
+      if (variant === 'missing-fact') delete final.cleanupEvidence.originalListenerClosed;
+      if (variant === 'different-kind') Object.assign(final, cleanup(value, 'prestage'));
+      const { call } = peer(subtest, [routed, retryableCleanup(value), clean, final]);
+      await prepare(call, value);
+      if (variant === 'snapshot-only' || variant === 'snapshot-before-stop') await call('applicationSnapshot', { runId: value.runId });
+      if (variant !== 'snapshot-only') await call('stopNotionApplication', { runId: value.runId });
+      if (variant === 'missing-fact' || variant === 'different-kind') await call('applicationSnapshot', { runId: value.runId });
+      assert.equal(call.snapshot().cleanupKind, null);
+      assert.equal((await call.close()).cleanupUncertain, true);
+    });
+  }
+});
+
+test('a retryable status failure invalidates a stop receipt from before that failure', async t => {
+  const value = request(), clean = cleanup(value);
+  const { call } = peer(t, [routed, stage(value), clean,
+    selectedStatus(value.runId, { applications: [retryableCleanup(value)] }), clean, clean, clean]);
+  await prepare(call, value); await call('stopNotionApplication', { runId: value.runId });
+  await call('status', { runId: value.runId });
+  await call('applicationSnapshot', { runId: value.runId });
+  assert.equal(call.snapshot().diagnostics.uncertaintyLatched, false);
+  assert.equal(call.snapshot().cleanupKind, null, 'a snapshot cannot reuse the pre-failure stop');
+  assert.equal(call.snapshot().cleanupUncertain, true);
+  await stopAndSnapshot(call, value);
+  assert.equal((await call.close()).cleanupUncertain, false);
+});
+
+test('an inconsistent snapshot cannot reuse an older stop when a later clean snapshot arrives', async t => {
+  for (const variant of ['missing-fact', 'different-kind']) {
+    await t.test(variant, async subtest => {
+      const value = request(), clean = cleanup(value), inconsistent = variant === 'different-kind' ? cleanup(value, 'prestage') : structuredClone(clean);
+      if (variant === 'missing-fact') delete inconsistent.cleanupEvidence.originalListenerClosed;
+      const { call } = peer(subtest, [routed, retryableCleanup(value), clean, inconsistent, clean, clean, clean]);
+      await prepare(call, value); await call('stopNotionApplication', { runId: value.runId });
+      await call('applicationSnapshot', { runId: value.runId });
+      await call('applicationSnapshot', { runId: value.runId });
+      assert.equal(call.snapshot().cleanupKind, null);
+      assert.equal(call.snapshot().cleanupUncertain, true);
+      assert.equal(call.snapshot().diagnostics.uncertaintyLatched, false);
+      await stopAndSnapshot(call, value);
+      assert.equal((await call.close()).cleanupUncertain, false);
+    });
+  }
+});
+
+test('late retryable prepare replies cannot clear a deadline or abort with later cleanup receipts', async t => {
+  for (const variant of ['deadline', 'abort']) {
+    await t.test(variant, async subtest => {
+      const value = request(), clean = cleanup(value), controller = new AbortController();
+      const { call } = peer(subtest, [routed, retryableCleanup(value), clean, clean], { delayIndex: 1, delayMs: 60 });
+      await call('prepareRoute', route());
+      const preparing = call('prepareNotionApplication', value, variant === 'deadline' ? { timeoutMs: 10 } : { timeoutMs: 200, signal: controller.signal });
+      let abortTimer;
+      if (variant === 'abort') abortTimer = setTimeout(() => controller.abort(), 10);
+      try { await assert.rejects(preparing, { code: variant === 'deadline' ? 'PF_HELPER_DEADLINE' : 'PF_HELPER_ABORTED' }); }
+      finally { clearTimeout(abortTimer); }
+      await stopAndSnapshot(call, value);
+      assert.equal((await call.close()).cleanupUncertain, true);
+      assert.equal(call.snapshot().diagnostics.uncertaintyLatched, true);
+      assert.equal(call.snapshot().cleanupKind, 'normal', 'even complete receipts cannot erase the hard channel latch');
+    });
+  }
+});
+
 test('the 180 second channel cannot extend its active deadline or retry a run, while cleanup keeps its reserved budget', async t => {
   let current = 0; const value = request(), clean = cleanup(value);
   const { call } = peer(t, [routed, stage(value), clean, clean], { now: () => current }); await prepare(call, value);

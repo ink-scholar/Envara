@@ -83,9 +83,10 @@ const SNAPSHOT = `(() => {
 })()`;
 
 export class TerminalBrowserBroker {
-  constructor({ service, dataDir, nodeExecutable, onError = () => {} }) {
+  constructor({ service, dataDir, nodeExecutable, onError = () => {}, protectBrowserOperation = (_profileId, operation) => operation() }) {
     if (!service || !path.isAbsolute(dataDir ?? '') || !path.isAbsolute(nodeExecutable ?? '')) throw fail('Browser broker configuration is invalid.');
     this.service = service; this.dataDir = dataDir; this.nodeExecutable = nodeExecutable; this.onError = onError;
+    this.protectBrowserOperation = protectBrowserOperation;
     this.sessions = new Map(); this.pending = new Set(); this.closed = false;
   }
   async createSession({ sessionId, profileId, browserProfileId, context }) {
@@ -152,6 +153,12 @@ export class TerminalBrowserBroker {
   }
   async operate(session, name, args) {
     checkedTool(name, args);
+    const operation = () => this.operateBound(session, name, args);
+    // A tool can start the browser, then write its storage through REST or MCP.
+    // Hold one target-browser reservation across that entire operation.
+    return name === 'browser_status' ? operation() : this.protectBrowserOperation(session.browserProfileId, operation);
+  }
+  async operateBound(session, name, args) {
     const chosen = await this.validateBinding(session);
     if (name === 'browser_status') return text({ browser: session.browser, network: { proxyId: chosen.proxyId, timezone: session.browserContext.timezone, egress: session.browserContext.network?.ip ?? null }, binding: 'terminal-session', engine: 'Playwright' });
     // This service method validates its launch receipt for an already-running

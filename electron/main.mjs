@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage } from 'electron';
-import { execFile, execFile as execFileCallback } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -7,9 +7,9 @@ import { readFile, writeFile, mkdir, lstat, rm, cp, rename } from 'node:fs/promi
 import { promisify } from 'node:util';
 import { pfAttachEnvironmentId, pfApplicationRegistrationId } from '../native/macos-pf-routing/policy.mjs';
 import { eraseAttachedApplicationData, eraseEnvironmentData, attachedApplicationDataInventory } from './application-data.mjs';
-import { signInDataRows, SignInDataNames, runningSignInDataId } from './sign-in-data.mjs';
+import { signInDataRows, SignInDataNames, runningSignInDataId, signInDataInUse } from './sign-in-data.mjs';
 import { showManagedApplicationWindow } from './application-window.mjs';
-import { TerminalLinkChannel, LinkSocketServer, TERMINAL_LINK_SOCKET } from './terminal-link-channel.mjs';
+import { TerminalLinkChannel, LinkSocketServer } from './terminal-link-channel.mjs';
 import { LinkRouter } from './link-router.mjs';
 import { EnvaraService } from './service.mjs';
 import { BrowserRuntime } from './runtime.mjs';
@@ -22,16 +22,27 @@ import { resolveTerminalView, terminalViewSnapshot } from './terminal-view.mjs';
 import { ProxyCoreManager } from './proxy-core-manager.mjs';
 import { ApplicationService, inspectLocalApplication } from './application-service.mjs';
 import { LocalApplicationCatalog } from './local-application-catalog.mjs';
+import { inspectApplicationCompatibility } from './application-compatibility.mjs';
 import { createApplicationIcons, electronApplicationIcon } from './application-icons.mjs';
 import { NativeApplicationRouting } from './application-routing.mjs';
 import { MacOSApplicationRouting } from './macos-application-routing.mjs';
 import { MacOSPFApplicationRouting } from './macos-pf-application-routing.mjs';
-import { exportPFNotionTrialDiagnostics, PF_NOTION_TRIAL_CARRIER } from './macos-pf-notion-trial.mjs';
+import { exportPFNotionTrialDiagnostics } from './macos-pf-notion-trial.mjs';
+import { bundledPFRoutingPaths } from './macos-pf-resources.mjs';
 import { NotionDiagnosticsStore } from './notion-diagnostics-store.mjs';
+import { checkedExportPassword, isEnvironmentExport, readEnvironmentExport } from './environment-export.mjs';
+import { applyPendingApplicationData, assertEnvironmentIdle, checkedExportManifest, exportEnvironment, restoreEnvironment } from './environment-transfer.mjs';
+import { DesktopEnvironmentTransferLock, discardPendingEnvironmentImport, expirePendingEnvironmentImports, finishPendingEnvironmentImport, registerPendingEnvironmentImport,
+  releaseDeletedEnvironmentImportProfile, withPendingEnvironmentImport } from './environment-import-lifecycle.mjs';
 import { verifyPFInstallation } from '../native/macos-pf-routing/controller.mjs';
 import { applicationWorkspaceContext } from './workspace-context.mjs';
 import { ProxyNetworkProbe } from './proxy-network.mjs';
 import { parseGoogleMapsLocation } from '../shared/network-location.mjs';
+import { createWorkspaceWindowController, createOwnedQuitController } from './desktop-lifecycle.mjs';
+import { createStartupDiagnostics } from './startup-diagnostics.mjs';
+import { createDesktopStartup } from './desktop-startup.mjs';
+import { registerDesktopIPC } from './desktop-ipc.mjs';
+import { shutdownDesktopServices } from './desktop-services.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const isSmoke = process.env.ENVARA_SMOKE === '1' && !app.isPackaged;
@@ -49,6 +60,10 @@ if (!isSmoke && !app.isPackaged && process.env.ENVARA_DEV_DATA) {
 app.setName('Envara');
 const ownsLock = app.requestSingleInstanceLock();
 if (!ownsLock) app.quit();
+const startupDiagnostics = ownsLock ? createStartupDiagnostics({ directory: app.getPath('userData'), version: app.getVersion() }) : null;
+startupDiagnostics?.mark('main-entry');
+const startupStep = (name, operation) => startupDiagnostics ? startupDiagnostics.step(name, operation) : operation();
+let firstWorkspaceSnapshot = false;
 let window;
 let service;
 let sidecar;
@@ -70,9 +85,26 @@ const applicationIcon = createApplicationIcons({ render: electronApplicationIcon
 const views = new Map();
 const terminalWindows = new Map();
 let quitting = false;
+let requestEpoch = 0;
 let publishing = false;
 let needsPublish = false;
 const pendingImports = new Map();
+const environmentTransferLock = new DesktopEnvironmentTransferLock();
+const protectBrowserOperation = (profileId, operation) => environmentTransferLock.mutate('startProfile', { id: profileId }, operation, profileId);
+// Decrypted staging belongs to its pending import until completion or disposal.
+async function discardImport(importId, { completed = false } = {}) {
+  await discardPendingEnvironmentImport({ imports: pendingImports, importId, completed,
+    removeStaging: staging => rm(staging, { recursive: true, force: true }) });
+}
+function proxyMappingRequest(importId, data, scope = 'environment') {
+  const refs = [...new Set(data.profiles.map(profile => profile?.proxyId).filter(Boolean))];
+  if (!refs.length) return null;
+  return { needsProxyMapping: true, importId, scope, profileCount: data.profiles.length, proxyRefs: refs.map(id => {
+    const proxy = Array.isArray(data.proxies) ? data.proxies.find(item => item.id === id) : null;
+    return { id, name: typeof proxy?.name === 'string' ? proxy.name.slice(0, 100) : '原配置出口', protocol: typeof proxy?.protocol === 'string' ? proxy.protocol.slice(0, 16) : null,
+      host: typeof proxy?.host === 'string' ? proxy.host.slice(0, 253) : null };
+  }) };
+}
 
 function workspaceSnapshot(value) {
   if (!value || !Array.isArray(value.profiles) || !Array.isArray(value.proxies) || !value.system) return value;
@@ -95,14 +127,17 @@ async function fullWorkspaceSnapshot(value) {
         message: '应用网络组件尚未通过完整验证，软件暂不能启动。',
         status: 'incomplete',
       } : {}) };
-    /* Trials are per saved binding, whichever software was added. The fixed
-     * native carrier still decides whether a given bundle may launch. */
     applicationState.applications = await Promise.all(applicationState.applications.map(async item =>
       typeof item?.identity === 'string' && item.identity
-        ? { ...item, notionTrial: applications.routing.controlledNotionTrialSnapshot({ applicationId: item.id }),
+        ? { ...item, compatibility: await inspectApplicationCompatibility(item, { verifySignature: false }).catch(() => ({
+          supported: false, adapter: 'unsupported', reasonCode: 'APPLICATION_INVALID_PATH', dataScope: 'unavailable', verification: 'pending',
+        })),
+          notionTrial: applications.routing.controlledNotionTrialSnapshot({ applicationId: item.id }),
           notionTrialHistory: await notionDiagnostics?.read(item.id).catch(() => null) ?? null } : item));
   }
-  return workspaceSnapshot({ ...value, ...applicationState });
+  const snapshot = workspaceSnapshot({ ...value, ...applicationState });
+  if (!firstWorkspaceSnapshot) { firstWorkspaceSnapshot = true; startupDiagnostics?.mark('workspace-snapshot'); }
+  return snapshot;
 }
 
 async function getNotionTrialAvailability({ force = false } = {}) {
@@ -114,9 +149,7 @@ async function getNotionTrialAvailability({ force = false } = {}) {
   return notionTrialAvailabilityPending;
 }
 
-/* Any locally added application may be attached. The fixed native carrier and
- * sealed registry decide whether a given bundle can actually launch; this
- * lookup only resolves the saved binding the renderer referenced. */
+// Resolve only a saved binding; the native carrier separately authorizes launch.
 function findAttachmentApplication(args) {
   if (!args || Object.keys(args).length !== 1 || typeof args.id !== 'string' || !applications ||
       typeof applications.routing?.controlledNotionTrial !== 'function') throw Object.assign(new Error('当前桌面版本不支持软件附加。'), { code: 'PF_NOTION_TRIAL_NOT_ENABLED' });
@@ -131,51 +164,49 @@ function assertNotionTrialContextIdle({ allowReservation = false } = {}) {
   if ((!allowReservation && notionTrialReserved) || state?.active === true || state?.cleanupUncertain === true) throw Object.assign(new Error('请先停止附加软件并确认清理，再修改环境。'), { code: 'PF_OWNED_RUNTIME_NOT_EMPTY' });
 }
 
-/** Hands a link to the host's default browser, which is outside every
- *  environment. Only the reported fallback path uses this. */
+// Explicit fallback to the host browser, outside the environment.
 async function shellOpen(url, bundleId = null) {
   if (process.platform !== 'darwin') return;
   const args = bundleId && /^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$/.test(bundleId) ? ['-b', bundleId, url] : [url];
   await new Promise((resolve, reject) => execFile('/usr/bin/open', args, { timeout: 15000 }, error => error ? reject(error) : resolve()));
 }
-/* The host's own browser for a link that leaves the environment. While Envara's
- * link router is the default browser, asking the system would hand the link
- * straight back to the router, so it goes to the browser that was the default
- * before (Safari when that is unknown). */
+// Bypass our default-handler registration to avoid sending the link back here.
 async function openOutsideEnvironment(url) {
   const status = process.platform === 'darwin' ? await linkRouterStatus().catch(() => null) : null;
   if (status?.enabled) return shellOpen(url, status.previous && status.previous !== LINK_ROUTER_BUNDLE_ID ? status.previous : 'com.apple.Safari');
   return shellOpen(url);
 }
-async function shutdownOwnedServices() {
-  // Preserve the managed route if native cleanup remains uncertain.
-  try { await applications?.shutdown(); }
-  finally { await notionDiagnostics?.pending.catch(() => {}); }
-  await terminal?.shutdown().catch(() => {});
-  await terminalBrowserBroker?.shutdown().catch(() => {});
-  await linkChannel?.close().catch(() => {});
-  await routerChannel?.close().catch(() => {});
-  try {
-    if (service) await service.shutdown();
-    else await sidecar?.shutdown();
-  } finally { await proxyCore?.close(); }
-}
+const shutdownOwnedServices = () => shutdownDesktopServices({ applications, diagnostics: notionDiagnostics,
+  terminal, terminalBrowserBroker, linkChannel, routerChannel, service, sidecar, proxyCore });
 
 async function publish() {
-  if (!service || !views.size) return;
+  if (desktopStartup.phase !== 'ready' || quitting || !service || !views.size) return;
   if (publishing) { needsPublish = true; return; }
   publishing = true;
+  const publishEpoch = requestEpoch;
   try {
     const snapshot = await fullWorkspaceSnapshot(await service.snapshot());
+    if (quitting || publishEpoch !== requestEpoch) return;
     for (const { window: view, kind } of views.values()) if (!view.isDestroyed()) view.webContents.send('envara:snapshot', kind === 'terminal' ? terminalViewSnapshot(snapshot) : snapshot);
   } catch (error) { console.error('Unable to refresh workspace:', error.message); }
   finally { publishing = false; if (needsPublish) { needsPublish = false; void publish(); } }
 }
-const execFileAsync = promisify(execFileCallback);
-const allowedMethods = new Set(['snapshot','createProfile','updateProfile','cloneProfile','deleteProfile','clearProfile','startProfile','stopProfile','focusProfile','saveProxy','deleteProxy','checkProxy','saveSettings','installEngine','importProfiles','cancelImport','exportProfiles','openDataDirectory','openDocumentation','previewLegacyMigration','migrateLegacy','saveGroup','deleteGroup','clearGroupProxy','bulkProfiles','exportAutomationConfig','openTerminalWindow', ...TERMINAL_METHODS]);
-const applicationMethods = new Set(['saveApplication', 'startApplication', 'stopApplication', 'deleteApplication', 'getApplicationRoutingStatus', 'setupApplicationRouting', 'setApplicationLinkBrowser']);
-for (const method of [...applicationMethods, 'pickApplication', 'listLocalApplications', 'applicationIcon', 'showApplicationWindow', 'clearApplicationData', 'signInData', 'deleteSignInData', 'linkRouterStatus', 'setLinkRouter', 'previewProxyNetwork', 'checkEnvironmentNetwork', 'openNetworkLocationMap']) allowedMethods.add(method);
+const execFileAsync = promisify(execFile);
+const allowedMethods = new Set([
+  'snapshot', 'createProfile', 'updateProfile', 'cloneProfile', 'deleteProfile', 'clearProfile',
+  'startProfile', 'stopProfile', 'focusProfile', 'bulkProfiles',
+  'saveProxy', 'deleteProxy', 'checkProxy', 'saveGroup', 'deleteGroup', 'clearGroupProxy',
+  'saveSettings', 'installEngine', 'importProfiles', 'cancelImport', 'exportProfiles',
+  'openDataDirectory', 'openDocumentation', 'previewLegacyMigration', 'migrateLegacy',
+  'exportAutomationConfig', 'openTerminalWindow', ...TERMINAL_METHODS,
+]);
+const applicationMethods = new Set(['saveApplication', 'startApplication', 'stopApplication', 'deleteApplication',
+  'getApplicationRoutingStatus', 'setupApplicationRouting', 'setApplicationLinkBrowser']);
+for (const method of [...applicationMethods, 'pickApplication', 'listLocalApplications', 'applicationIcon',
+  'showApplicationWindow', 'clearApplicationData', 'signInData', 'deleteSignInData', 'linkRouterStatus', 'setLinkRouter',
+  'previewProxyNetwork', 'checkEnvironmentNetwork', 'openNetworkLocationMap']) allowedMethods.add(method);
 for (const method of ['runNotionTrial', 'stopNotionTrial', 'notionTrialSnapshot', 'exportNotionDiagnostics', 'applicationStorage', 'reclaimApplicationStorage']) allowedMethods.add(method);
+allowedMethods.add('exportEnvironment');
 
 async function protectApplicationMutation(method, args, operation) {
   if (!applications) return operation();
@@ -196,10 +227,7 @@ async function protectApplicationMutation(method, args, operation) {
   });
 }
 
-/* What attached applications keep on disk. Main alone decides what is still in
- * use: a copy whose original belongs to a currently attached application, and
- * data belonging to an environment that still exists. The renderer can only
- * confirm items from this list for removal, never name any other storage. */
+// The renderer may select these owned storage rows, never arbitrary paths.
 async function applicationStorageCandidates() {
   if (typeof applications?.routing?.applicationStorage !== 'function')
     throw Object.assign(new Error('此平台没有附加软件存储。'), { code: 'APPLICATION_ROUTING_UNAVAILABLE' });
@@ -212,19 +240,9 @@ async function applicationStorageCandidates() {
     environments: inventory.environments.map(item => ({ id: item.environmentId, bytes: item.bytes,
       environment: environments.get(item.environmentId) ?? null, inUse: environments.has(item.environmentId) })) };
 }
-/* A deleted environment's attached-application data is emptied at once: the
- * data directory is owned by the console user and its root-owned ancestors
- * cannot be swapped for a link, so no administrator step is needed. What
- * remains is the empty root-owned skeleton, removed by the storage cleanup.
- * Removal never follows a link. */
-/* The dockless router that makes macOS hand every web link to Envara first. It
- * is the only way an attached application's own links — Notion's Google sign-in,
- * for example — can leave through that environment. Enabling it changes the
- * system's default browser, so only macOS's own confirmation, accepted by the
- * user, may make that change, and it is reversible from here. */
+// macOS alone confirms changes to this system-wide default browser handler.
 const LINK_ROUTER_BUNDLE_ID = 'io.envara.link-router';
-/* The router asks over a unix socket, whose path macOS limits to 104 bytes, so
- * it lives under the shared temporary directory with the user's id. */
+// Keep the per-user Unix socket path within macOS's 104-byte limit.
 const LINK_ROUTER_SOCKET_PATH = `/private/tmp/io.envara.link-router.${process.getuid?.() ?? 0}.sock`;
 function linkRouterResources() {
   const base = app.isPackaged ? process.resourcesPath : path.join(root, 'build');
@@ -237,9 +255,7 @@ async function linkRouterRun(arguments_) {
   const { stdout } = await execFileAsync(linkRouterInstalled() + '/Contents/MacOS/EnvaraLinkRouter', arguments_, { timeout: 120000, maxBuffer: 1024 * 1024 });
   return stdout.trim();
 }
-/* The copy in the application's own data directory, refreshed only when the
- * shipped build differs. Keeping it outside the versioned app folder means
- * removing an old build never breaks the system's link handling. */
+// Keep the router outside versioned app bundles so removing an old build is safe.
 async function ensureLinkRouterInstalled() {
   if (process.platform !== 'darwin') throw Object.assign(new Error('链接路由需要 macOS。'), { code: 'LINK_ROUTER_UNAVAILABLE' });
   const source = linkRouterResources(), target = linkRouterInstalled();
@@ -264,9 +280,7 @@ async function ensureLinkRouterInstalled() {
   }
   return target;
 }
-/* Whether links from environments open in their browsers. On by default; off
- * means every link uses this Mac's own browser. A refusal in macOS's dialog is
- * remembered so the request is not repeated at every launch. */
+// Remember a refused system prompt instead of asking again at every launch.
 let linkPreferences = { openInEnvironment: true, declinedAt: null };
 const linkPreferencesFile = () => path.join(app.getPath('userData'), 'link-preferences.json');
 async function loadLinkPreferences() {
@@ -289,8 +303,6 @@ async function linkRouterStatus() {
       previous: typeof status.previous === 'string' && status.previous ? status.previous : null, ...preference };
   } catch (error) { return { available: false, enabled: false, handler: null, previous: null, ...preference, errorCode: error.code ?? 'LINK_ROUTER_UNAVAILABLE' }; }
 }
-/* Asks macOS to let Envara's link router handle web links. Only the system's
- * own confirmation dialog can make that change, and the user decides there. */
 async function requestLinkRouter() {
   await ensureLinkRouterInstalled();
   try {
@@ -302,15 +314,12 @@ async function requestLinkRouter() {
     return { granted: false, output: String(error?.stdout || error?.message || '').trim().slice(0, 200) };
   }
 }
-/* On by default: the first launch asks once, after the window is up. */
 async function offerLinkRouting() {
   if (process.platform !== 'darwin' || !linkPreferences.openInEnvironment || linkPreferences.declinedAt) return;
   const status = await linkRouterStatus();
   if (status.available && !status.enabled) await requestLinkRouter();
 }
 
-/* Sign-in data on disk, one row per environment and application. The user's
- * own folders are read directly, so listing it needs no administrator step. */
 let signInNames = null;
 let linkChannel = null;
 let routerChannel = null;
@@ -324,7 +333,7 @@ async function signInDataSnapshot() {
     const id = runningSignInDataId(attached.applications.find(item => item.id === trial.applicationId));
     if (id) running.add(id);
   }
-  for (const item of attached.applications) if (['starting', 'running', 'stopping'].includes(item.status)) { const id = runningSignInDataId(item); if (id) running.add(id); }
+  for (const item of attached.applications) if (signInDataInUse(item)) { const id = runningSignInDataId(item); if (id) running.add(id); }
   const items = signInDataRows({ applications: attached.applications, profiles: workspace.profiles, names, inventory, running });
   return { items, totalBytes: items.reduce((sum, item) => sum + item.bytes, 0) };
 }
@@ -350,7 +359,7 @@ async function handleCall(method, args = {}, caller = window) {
       const report = exportPFNotionTrialDiagnostics(current) ?? await notionDiagnostics?.read(application.id);
       if (!report) throw Object.assign(new Error('尚无可导出的附加软件诊断。'), { code: 'PF_NOTION_DIAGNOSTICS_UNAVAILABLE' });
       const choice = await dialog.showSaveDialog(caller, { title: '导出附加软件诊断',
-        defaultPath: `Envara-Notion-${report.runId}.json`, filters: [{ name: 'JSON', extensions: ['json'] }] });
+        defaultPath: `Envara-Application-${report.runId}.json`, filters: [{ name: 'JSON', extensions: ['json'] }] });
       if (choice.canceled || !choice.filePath) return { canceled: true };
       await writeFile(choice.filePath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
       return { exported: true };
@@ -362,6 +371,8 @@ async function handleCall(method, args = {}, caller = window) {
     return applications.serialized(async () => {
       const application = findAttachmentApplication(args);
       assertNotionTrialContextIdle({ allowReservation: true });
+      const compatibility = await inspectApplicationCompatibility(application);
+      if (!compatibility.supported) throw Object.assign(new Error('暂不支持此软件的网络隔离。'), { code: 'APPLICATION_ADAPTER_UNSUPPORTED' });
       await applications.checkProfile(application.profileId);
       applications.assertProfileIdle(application.profileId);
       const available = await getNotionTrialAvailability({ force: true });
@@ -388,13 +399,19 @@ async function handleCall(method, args = {}, caller = window) {
      * it), and never while this application is starting, running or awaiting
      * cleanup. Another application's attachment uses its own data folder. */
     if (!applications || typeof args.id !== 'string') throw Object.assign(new Error('未找到此附加软件。'), { code: 'APPLICATION_NOT_FOUND' });
-    const item = (await applications.snapshot()).applications.find(entry => entry.id === args.id);
-    if (!item?.path || !item.profileId) throw Object.assign(new Error('未找到此附加软件。'), { code: 'APPLICATION_NOT_FOUND' });
-    const trial = applications.routing?.controlledNotionTrialSnapshot?.() ?? null;
-    if (notionTrialReserved || ['starting', 'running', 'stopping'].includes(item.status) ||
-      trial?.applicationId === item.id && (trial.active === true || trial.cleanupUncertain === true)) throw Object.assign(new Error('请先停止此软件。'), { code: 'APPLICATION_RUNNING' });
-    const erased = await eraseAttachedApplicationData(item.profileId, { registrationId: pfApplicationRegistrationId(item.path) });
-    return { cleared: true, erased: erased.length };
+    // A live trial owns the queue until it ends. Refuse now instead of leaving
+    // a destructive request queued to run after the user later stops the app.
+    if (notionTrialReserved) throw Object.assign(new Error('请先停止此软件。'), { code: 'APPLICATION_RUNNING' });
+    return applications.serialized(async () => {
+      const item = (await applications.snapshot()).applications.find(entry => entry.id === args.id);
+      if (!item?.path || !item.profileId) throw Object.assign(new Error('未找到此附加软件。'), { code: 'APPLICATION_NOT_FOUND' });
+      const trial = applications.routing?.controlledNotionTrialSnapshot?.() ?? null;
+      if (notionTrialReserved || signInDataInUse(item) ||
+        trial?.applicationId === item.id && (trial.active === true || trial.cleanupUncertain === true)) throw Object.assign(new Error('请先停止此软件。'), { code: 'APPLICATION_RUNNING' });
+      const erased = await eraseAttachedApplicationData(item.profileId, { registrationId: pfApplicationRegistrationId(item.path) });
+      if (!erased.length) throw Object.assign(new Error('此软件尚未生成境舱应用数据。'), { code: 'APPLICATION_DATA_NOT_FOUND' });
+      return { cleared: true, erased: erased.length };
+    });
   }
   if (method === 'linkRouterStatus') return linkRouterStatus();
   if (method === 'setLinkRouter') {
@@ -410,12 +427,18 @@ async function handleCall(method, args = {}, caller = window) {
   if (method === 'signInData') return signInDataSnapshot();
   if (method === 'deleteSignInData') {
     if (typeof args.id !== 'string' || args.id.length > 80) throw Object.assign(new Error('未找到这份登录数据。'), { code: 'SIGN_IN_DATA_NOT_FOUND' });
-    // Only a row main itself reports can be removed, and never while it is in use.
-    const item = (await signInDataSnapshot()).items.find(entry => entry.id === args.id);
-    if (!item) throw Object.assign(new Error('未找到这份登录数据。'), { code: 'SIGN_IN_DATA_NOT_FOUND' });
-    if (notionTrialReserved || item.running) throw Object.assign(new Error('请先停止此软件。'), { code: 'APPLICATION_RUNNING' });
-    const erased = await eraseEnvironmentData(item.environmentId, { registrationId: item.registrationId });
-    return { cleared: true, erased: erased.length };
+    if (!applications) throw Object.assign(new Error('未找到这份登录数据。'), { code: 'SIGN_IN_DATA_NOT_FOUND' });
+    if (notionTrialReserved) throw Object.assign(new Error('请先停止此软件。'), { code: 'APPLICATION_RUNNING' });
+    return applications.serialized(async () => {
+      // Only a row main itself reports can be removed, and never while it is in use.
+      const item = (await signInDataSnapshot()).items.find(entry => entry.id === args.id);
+      if (!item) throw Object.assign(new Error('未找到这份登录数据。'), { code: 'SIGN_IN_DATA_NOT_FOUND' });
+      if (item.dataScope !== 'environment') throw Object.assign(new Error('此软件尚未生成境舱应用数据。'), { code: 'APPLICATION_DATA_NOT_FOUND' });
+      if (notionTrialReserved || item.running) throw Object.assign(new Error('请先停止此软件。'), { code: 'APPLICATION_RUNNING' });
+      const erased = await eraseEnvironmentData(item.environmentId, { registrationId: item.registrationId });
+      if (!erased.length) throw Object.assign(new Error('此软件尚未生成境舱应用数据。'), { code: 'APPLICATION_DATA_NOT_FOUND' });
+      return { cleared: true, erased: erased.length };
+    });
   }
   if (method === 'showApplicationWindow') {
     if (process.platform !== 'darwin' || !applications || typeof args.id !== 'string') throw Object.assign(new Error('软件没有在境舱中运行。'), { code: 'APPLICATION_WINDOW_UNAVAILABLE' });
@@ -436,12 +459,12 @@ async function handleCall(method, args = {}, caller = window) {
   if (applicationMethods.has(method)) {
     if (!applications) throw new Error('附加软件需要完整桌面应用。');
     if (['saveApplication', 'deleteApplication', 'setupApplicationRouting'].includes(method)) assertNotionTrialContextIdle();
+    if (method === 'saveApplication' && process.platform === 'darwin') {
+      const compatibility = await inspectApplicationCompatibility(args.application?.path);
+      if (!compatibility.supported) throw Object.assign(new Error('暂不支持此软件的网络隔离。'), { code: 'APPLICATION_ADAPTER_UNSUPPORTED' });
+    }
     if (method !== 'setupApplicationRouting') return applications[method](args);
-    /* The upgrade button is driven by the cached trial availability. Without a
-     * fresh read after installing, the stale "component outdated" answer kept
-     * the button visible for up to 30 seconds and the update looked like it
-     * needed a second click. Wait out any read already in flight, then force a
-     * new one, whatever the installation's outcome. */
+    // Refresh availability after installation, even when the installation fails.
     try { return await applications[method](args); }
     finally {
       await notionTrialAvailabilityPending?.catch(() => {});
@@ -456,7 +479,8 @@ async function handleCall(method, args = {}, caller = window) {
     // A bundle the user chose in the system dialog may show its own icon too.
     if (pickedApplicationPaths.size >= 64) pickedApplicationPaths.delete(pickedApplicationPaths.values().next().value);
     pickedApplicationPaths.add(selected.path);
-    return { path: selected.path, name: selected.name };
+    return { path: selected.path, name: selected.name,
+      ...(process.platform === 'darwin' ? { compatibility: await inspectApplicationCompatibility(selected, { verifySignature: false }) } : {}) };
   }
   if (method === 'checkEnvironmentNetwork') {
     if (!service.resolveWorkspaceContext) throw new Error('当前后端不支持统一网络环境。');
@@ -489,6 +513,34 @@ async function handleCall(method, args = {}, caller = window) {
     await writeFile(choice.filePath, JSON.stringify(sidecar.connectionConfig(), null, 2), { mode: 0o600 });
     return { canceled: false };
   }
+  if (method === 'exportEnvironment') {
+    const password = checkedExportPassword(args?.password);
+    const scope = args?.scope;
+    if (!['browser', 'terminal', 'application'].includes(scope)) throw Object.assign(new Error('请选择要导出的浏览器、终端或软件。'), { code: 'EXPORT_SCOPE_INVALID' });
+    const profile = (await service.snapshot()).profiles.find(item => item.id === args?.id);
+    if (!profile) throw new Error('环境不存在。');
+    await assertEnvironmentIdle({ profile, terminal, applications, scope, applicationId: args.applicationId });
+    const name = String(profile.name ?? '').replace(/[\/\\:*?"<>|\x00-\x1f]/g, '_').slice(0, 60) || 'environment';
+    const choice = await dialog.showSaveDialog(window, { title: '导出数据', defaultPath: `Envara-${scope}-${name}.envara`, filters: [{ name: 'Envara 数据', extensions: ['envara'] }] });
+    if (choice.canceled || !choice.filePath) return { canceled: true };
+    return environmentTransferLock.transfer(async () => {
+      // The save dialog may have stayed open while another IPC started a
+      // consumer. Reserve first, then wait for already-stopped application data
+      // housekeeping and re-read the browser's actual current desktop status.
+      for (;;) {
+        const housekeeping = applications?.routing?.notionTrial?.housekeeping;
+        if (!housekeeping) break;
+        await housekeeping;
+        if (applications?.routing?.notionTrial?.housekeeping === housekeeping) break;
+      }
+      const current = (await service.snapshot()).profiles.find(item => item.id === args?.id);
+      if (!current) throw new Error('环境不存在。');
+      await assertEnvironmentIdle({ profile: current, terminal, applications, scope, applicationId: args.applicationId });
+      const result = await exportEnvironment({ profile: current, password, file: choice.filePath, service, terminal, applications,
+        appVersion: app.getVersion(), dataDir: app.getPath('userData'), scope, accountId: args.accountId, applicationId: args.applicationId });
+      return { canceled: false, ...result };
+    }, args.id);
+  }
   if (method === 'exportProfiles') {
     const data = await service.call(method, args);
     const choice = await dialog.showSaveDialog(window, { title: '导出环境配置', defaultPath: 'envara-profiles.json', filters: [{ name: 'Envara JSON', extensions: ['json'] }] });
@@ -496,18 +548,38 @@ async function handleCall(method, args = {}, caller = window) {
     await writeFile(choice.filePath, JSON.stringify(data, null, 2), { mode: 0o600 });
     return { canceled: false, count: data.profiles.length };
   }
-  if (method === 'cancelImport') { pendingImports.delete(args.importId); return { canceled: true }; }
+  if (method === 'cancelImport') { await discardImport(args.importId); return { canceled: true }; }
   if (method === 'importProfiles') {
-    for (const [id, item] of pendingImports) if (Date.now() - item.createdAt > 15 * 60 * 1000) pendingImports.delete(id);
+    await expirePendingEnvironmentImports({ imports: pendingImports, discard: discardImport });
     if (args.importId) {
       const pending = pendingImports.get(args.importId);
       if (!pending) throw new Error('待导入配置已过期，请重新选择文件');
-      const result = await service.call(method, { document: pending.document, proxyMap: args.proxyMap ?? {} });
-      pendingImports.delete(args.importId);
-      return result;
+      return withPendingEnvironmentImport(pending, async () => {
+        if (pending.file && !pending.bundle) {
+          if (!sidecar) throw new Error('多内核后端尚未就绪');
+          const staging = path.join(app.getPath('userData'), 'imports', `staging-${randomUUID()}`);
+          await mkdir(path.dirname(staging), { recursive: true, mode: 0o700 });
+          const manifest = await readEnvironmentExport({ file: pending.file, password: args.password, staging });
+          pending.bundle = { staging, manifest };
+          try { checkedExportManifest(manifest); } catch (error) { await discardImport(args.importId, { completed: true }); throw error; }
+          pending.document = manifest.profile;
+          const mapping = proxyMappingRequest(args.importId, pending.document, manifest.scope ?? 'environment');
+          if (mapping) return mapping;
+        }
+        return environmentTransferLock.transfer(() => finishPendingEnvironmentImport({ pending, service, proxyMap: args.proxyMap ?? {},
+          restore: profileId => restoreEnvironment({ ...pending.bundle, profileId, service, terminal, applications,
+            dataDir: app.getPath('userData') }), discard: () => discardImport(args.importId, { completed: true }) }));
+      });
     }
-    const choice = await dialog.showOpenDialog(window, { title: '导入环境配置', properties: ['openFile'], filters: [{ name: 'Envara JSON', extensions: ['json'] }] });
+    const choice = await dialog.showOpenDialog(window, { title: '导入环境', properties: ['openFile'], filters: [{ name: 'Envara 环境', extensions: ['envara', 'json'] }] });
     if (choice.canceled || !choice.filePaths[0]) return { canceled: true };
+    if (await isEnvironmentExport(choice.filePaths[0])) {
+      const importId = randomUUID();
+      await registerPendingEnvironmentImport({ imports: pendingImports, importId,
+        pending: { file: choice.filePaths[0], createdAt: Date.now() }, discard: discardImport,
+        removeStaging: staging => rm(staging, { recursive: true, force: true }) });
+      return { needsPassword: true, importId, fileName: path.basename(choice.filePaths[0]) };
+    }
     const text = await readFile(choice.filePaths[0], 'utf8');
     if (Buffer.byteLength(text) > 5 * 1024 * 1024) throw new Error('配置文件不能超过 5 MB');
     let data;
@@ -518,25 +590,31 @@ async function handleCall(method, args = {}, caller = window) {
       const refs = [...new Set(data.profiles.map(profile => profile?.proxyId).filter(Boolean))];
       if (refs.length) {
         const importId = randomUUID();
-        if (pendingImports.size >= 3) pendingImports.delete(pendingImports.keys().next().value);
-        pendingImports.set(importId, { document: data, createdAt: Date.now() });
+        await registerPendingEnvironmentImport({ imports: pendingImports, importId,
+          pending: { document: data, createdAt: Date.now() }, discard: discardImport,
+          removeStaging: staging => rm(staging, { recursive: true, force: true }) });
         return { needsProxyMapping: true, importId, profileCount: data.profiles.length, proxyRefs: refs.map(id => {
           const proxy = Array.isArray(data.proxies) ? data.proxies.find(item => item.id === id) : null;
           return { id, name: typeof proxy?.name === 'string' ? proxy.name.slice(0, 100) : '原配置出口', protocol: typeof proxy?.protocol === 'string' ? proxy.protocol.slice(0, 16) : null, host: typeof proxy?.host === 'string' ? proxy.host.slice(0, 253) : null, port: Number.isInteger(proxy?.port) ? proxy.port : null, requiresCredentials: !!proxy?.requiresCredentials };
         }) };
       }
     }
-    return service.call(method, sidecar ? { document: data, proxyMap: args.proxyMap ?? {} } : { profiles: data.profiles });
+    return environmentTransferLock.transfer(() => service.call(method,
+      sidecar ? { document: data, proxyMap: args.proxyMap ?? {} } : { profiles: data.profiles }));
   }
   const result = await protectApplicationMutation(method, args, () => terminalController ? terminalController.protectMutation(method, args, () => service.call(method, args)) : service.call(method, args));
-  if (applications && method === 'deleteProfile') {
-    for (const item of (await applications.snapshot()).applications.filter(item => item.profileId === args.id)) await applications.deleteApplication({ id: item.id });
-    await eraseAttachedApplicationData(args.id).catch(() => {});
+  if (method === 'deleteProfile') {
+    if (applications) for (const item of (await applications.snapshot()).applications.filter(item => item.profileId === args.id)) await applications.deleteApplication({ id: item.id });
+    const cleaned = await eraseAttachedApplicationData(args.id).then(() => true, () => false);
+    if (cleaned) releaseDeletedEnvironmentImportProfile({ imports: pendingImports, profileId: args.id });
   }
-  if (applications && method === 'bulkProfiles' && args.action === 'delete') {
+  if (method === 'bulkProfiles' && args.action === 'delete') {
     const deleted = new Set((result?.actionResult?.results ?? result?.results ?? []).filter(item => item.ok).map(item => item.id));
-    for (const item of (await applications.snapshot()).applications.filter(item => deleted.has(item.profileId))) await applications.deleteApplication({ id: item.id });
-    for (const id of deleted) await eraseAttachedApplicationData(id).catch(() => {});
+    if (applications) for (const item of (await applications.snapshot()).applications.filter(item => deleted.has(item.profileId))) await applications.deleteApplication({ id: item.id });
+    for (const id of deleted) {
+      const cleaned = await eraseAttachedApplicationData(id).then(() => true, () => false);
+      if (cleaned) releaseDeletedEnvironmentImportProfile({ imports: pendingImports, profileId: id });
+    }
   }
   return result;
 }
@@ -599,23 +677,31 @@ async function openTerminalWindow(args) {
 }
 
 async function createWindow() {
-  window = new BrowserWindow({ ...viewOptions(), width: 1500, height: 940, minWidth: 1120, minHeight: 720, title: 'Envara · 境舱' });
-  registerView(window, 'workspace');
-  await loadView(window);
+  startupDiagnostics?.mark('window-create-start');
+  const view = new BrowserWindow({ ...viewOptions(), width: 1500, height: 940, minWidth: 1120, minHeight: 720, title: 'Envara · 境舱' });
+  startupDiagnostics?.mark('window-created');
+  window = view;
+  registerView(view, 'workspace');
+  view.webContents.once('dom-ready', () => startupDiagnostics?.mark('renderer-dom-ready'));
+  try { await startupStep('window-load', () => loadView(view)); }
+  catch (error) { if (!view.isDestroyed()) view.close(); throw error; }
   if (isSmoke) {
+    await desktopStartup.ready;
     const { runSmoke } = await import('./smoke.mjs');
     await runSmoke({ app, window, service, runtime: service.runtime });
   }
   if (isWorkspaceSmoke) {
+    await desktopStartup.ready;
     const { runWorkspaceSmoke } = await import('./workspace-smoke.mjs');
     await runWorkspaceSmoke({ app, window, service, terminal, applications, shutdown: shutdownOwnedServices });
   }
+  return view;
 }
 
-app.on('second-instance', () => {
-  if (window && !window.isDestroyed()) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); }
-  else if (!quitting) void createWindow();
-});
+const workspaceWindow = createWorkspaceWindowController({ current: () => window, create: createWindow,
+  canOpen: () => ownsLock && !quitting });
+const showWorkspaceWindow = () => { void workspaceWindow.open().catch(error => console.error('Unable to open workspace:', error.message)); };
+app.on('second-instance', showWorkspaceWindow);
 async function quitWhenIdle() {
   if (quitting || views.size) return;
   const trial = applications?.routing?.controlledNotionTrialSnapshot?.();
@@ -626,27 +712,35 @@ async function quitWhenIdle() {
   if (!views.size) app.quit();
 }
 app.on('window-all-closed', () => { void quitWhenIdle().catch(() => {}); });
-app.on('activate', () => { if (!quitting && (!window || window.isDestroyed())) void createWindow(); });
-app.on('before-quit', event => {
-  if (quitting || (!service && !sidecar && !terminal && !proxyCore)) return;
-  event.preventDefault();
-  quitting = true;
-  void shutdownOwnedServices().then(() => app.quit()).catch(() => {
-    quitting = false;
-    if (window && !window.isDestroyed()) { window.show(); window.focus(); }
-    else void createWindow();
+app.on('activate', showWorkspaceWindow);
+const desktopStartup = createDesktopStartup({ initialize: initializeDesktopServices });
+const ownedQuit = createOwnedQuitController({
+  hasResources: () => desktopStartup.phase === 'starting' || !!(service || sidecar || terminal || proxyCore), startup: () => desktopStartup.settled,
+  shutdown: shutdownOwnedServices, quit: () => app.quit(), onStateChange: value => {
+    quitting = value;
+    if (value) requestEpoch++;
+    if (value && ['idle', 'starting'].includes(desktopStartup.phase)) void desktopStartup.close();
+  },
+  onFailure: () => {
+    showWorkspaceWindow();
     dialog.showErrorBox('附加软件清理未确认', '网络会话仍保留。请先停止附加软件并完成清理，再退出境舱。');
-  });
+  },
 });
-// Electron waits for the entry module to settle before emitting ready.
-// Waiting for ready with top-level await would deadlock app startup.
-if (ownsLock) void app.whenReady().then(async () => {
+app.on('before-quit', event => { void ownedQuit.handle(event).catch(error => console.error('Unable to complete shutdown:', error.message)); });
+async function initializeDesktopServices({ checkOpen }) {
+  const initializeStep = async (name, operation) => {
+    checkOpen();
+    const value = await startupStep(name, operation);
+    checkOpen();
+    return value;
+  };
   const dataDir = app.getPath('userData');
-  await mkdir(dataDir, { recursive: true, mode: 0o700 });
+  await initializeStep('data-directory', () => mkdir(dataDir, { recursive: true, mode: 0o700 }));
   signInNames = new SignInDataNames({ dataDir });
   if (isSmoke || process.env.ENVARA_BACKEND === 'legacy') {
     const runtime = new BrowserRuntime({ cacheDir: isSmoke && process.env.ENVARA_SMOKE_ENGINE_DIR ? process.env.ENVARA_SMOKE_ENGINE_DIR : path.join(dataDir, 'engines'), onChange: publish });
     service = new EnvaraService(dataDir, runtime, { platform: process.platform, appVersion: app.getVersion() }, publish);
+    await initializeStep('workspace-store', () => service.ready);
   } else {
     proxyCore = new ProxyCoreManager({ dataDir, resourcesDir: app.isPackaged ? path.join(process.resourcesPath, 'proxy-core') : path.join(root, 'build/proxy-core'), onChange: event => {
       if (event?.id && event.status === 'failed') {
@@ -657,9 +751,9 @@ if (ownsLock) void app.whenReady().then(async () => {
       }
       return publish();
     } });
-    await proxyCore.initialize().catch(() => {});
-    sidecar = new SidecarManager({ dataDir, resourcesDir: app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.join(root, 'build/backend'), onChange: publish });
-    await sidecar.initialize();
+    await initializeStep('proxy-initialize', () => proxyCore.initialize().catch(() => {}));
+    sidecar = new SidecarManager({ dataDir, resourcesDir: app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.join(root, 'build/backend'), onChange: publish, startupStep: initializeStep });
+    await initializeStep('sidecar-initialize', () => sidecar.initialize());
     service = new BrowseForgeService(dataDir, sidecar.client, { platform: process.platform, appVersion: app.getVersion(), backend: 'BrowseForge (Envara desktop)', upstreamVersion: '2.1.15', localApi: sidecar.baseUrl }, publish, {
       profilesDir: path.join(sidecar.baseDir, 'profiles'), getEngineStates: () => sidecar.getEngineStates(), proxyCore,
       ...(isWorkspaceSmoke ? { networkProbe: new ProxyNetworkProbe({ transport: async () => ({ success: true, ip: '8.8.8.8', country: 'Philippines', country_code: 'PH', city: 'Manila', latitude: 14.6, longitude: 121, timezone: { id: 'Asia/Manila' } }) }) } : {}),
@@ -668,18 +762,17 @@ if (ownsLock) void app.whenReady().then(async () => {
       cancelInstall: () => sidecar.cancelInstall(),
       assertLegacyStopped: () => sidecar.assertLegacyStopped(), shutdown: () => sidecar.shutdown(),
     });
-    /* Two doors into the same decision: the environment's own open shim for
-     * terminals, and the system-wide link router for everything macOS hands to
-     * a browser, including links an attached application raises itself. */
+    await initializeStep('workspace-store', () => service.ready);
+    // Terminal shims and macOS link handling share the same routing decision.
     const reportLink = (request, source) => linkRouter.openFromProfile({ profileId: request.profileId, url: request.url, source });
     linkChannel = new TerminalLinkChannel({ root: dataDir, onLink: request => reportLink(request, '终端'),
       log: message => console.info(`Envara link channel: ${message}`) });
-    await linkChannel.listen().catch(error => { console.error(`Envara link channel unavailable: ${error.message}`); linkChannel = null; });
+    await initializeStep('terminal-link-listen', () => linkChannel.listen().catch(error => { console.error(`Envara link channel unavailable: ${error.message}`); linkChannel = null; }));
     routerChannel = new LinkSocketServer({ root: dataDir, socketPath: LINK_ROUTER_SOCKET_PATH, sender: 'owner',
       onLink: request => linkRouter.openFromProcess(request),
       log: message => console.info(`Envara link router: ${message}`) });
-    await routerChannel.listen().catch(error => { console.error(`Envara link router unavailable: ${error.message}`); routerChannel = null; });
-    terminalBrowserBroker = new TerminalBrowserBroker({ service, dataDir,
+    await initializeStep('system-link-listen', () => routerChannel.listen().catch(error => { console.error(`Envara link router unavailable: ${error.message}`); routerChannel = null; }));
+    terminalBrowserBroker = new TerminalBrowserBroker({ service, dataDir, protectBrowserOperation,
       nodeExecutable: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'backend', 'playwright-driver', process.platform === 'win32' ? 'node.exe' : 'node'),
       onError: event => { for (const { window: view, kind } of views.values()) if (!view.isDestroyed() && kind === 'workspace') view.webContents.send('envara:link-event', { ...event, type: 'error' }); } });
     terminal = new TerminalService({
@@ -693,10 +786,10 @@ if (ownsLock) void app.whenReady().then(async () => {
         if (event.type === 'exit' && !views.size) void quitWhenIdle().catch(() => app.quit());
       },
     });
-    await loadLinkPreferences();
-    /* The application service starts after the router; it is read when a link
-     * arrives, never captured here as the empty value it has at this point. */
-    linkRouter = new LinkRouter({ service, terminal, applications: { snapshot: async () => applications ? applications.snapshot() : { applications: [] } },
+    await initializeStep('terminal-store', () => terminal.ready);
+    await initializeStep('link-preferences', loadLinkPreferences);
+    // Resolve applications lazily: the router is constructed before their service.
+    linkRouter = new LinkRouter({ service, terminal, protectBrowserOperation, applications: { snapshot: async () => applications ? applications.snapshot() : { applications: [] } },
       enabled: () => linkPreferences.openInEnvironment,
       registrationRoot: '/Library/PrivilegedHelperTools/io.envara.pf-apps',
       openDefault: async url => { await openOutsideEnvironment(url); },
@@ -718,10 +811,11 @@ if (ownsLock) void app.whenReady().then(async () => {
     const helperPath = process.platform === 'darwin'
       ? path.join(routingRoot, 'macos/EnvaraAppRouting.app/Contents/MacOS/EnvaraAppRoutingHelper')
       : process.platform === 'win32' ? path.join(routingRoot, 'win32', process.arch, 'EnvaraAppRouting.exe') : null;
-    let pfHelperPath = path.join(routingRoot, 'macos-pf/EnvaraPFHelper');
+    const bundledPF = bundledPFRoutingPaths(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), { packaged: app.isPackaged });
+    let pfHelperPath = bundledPF.helperPath;
     if (process.platform === 'darwin') {
       const installedPFHelper = '/Library/PrivilegedHelperTools/io.envara.pf-routing/EnvaraPFHelper';
-      const installedPF = await verifyPFInstallation();
+      const installedPF = await initializeStep('pf-installation-verify', verifyPFInstallation);
       if (installedPF.verified === true && installedPF.manifestVerified === true) pfHelperPath = installedPFHelper;
     }
     const applicationRouting = process.platform === 'darwin'
@@ -730,50 +824,62 @@ if (ownsLock) void app.whenReady().then(async () => {
         helperPath,
         peerVerifierPath: path.join(routingRoot, 'macos-local/EnvaraPeerVerifier'),
         bundledAppPath: path.join(routingRoot, 'macos-local/Resources/Mitmproxy Redirector.app'),
-      }) : new MacOSPFApplicationRouting({ helperPath: pfHelperPath, installerPath: path.join(routingRoot, 'macos-pf/EnvaraPFInstall'),
-        notionAuthorizerPath: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), PF_NOTION_TRIAL_CARRIER),
-        onNotionTrialEvent: event => { console.info('Envara Notion trial', JSON.stringify(event)); void publish(); },
+      }) : new MacOSPFApplicationRouting({ helperPath: pfHelperPath, installerPath: bundledPF.installerPath,
+        notionAuthorizerPath: bundledPF.authorizerPath,
+        onNotionTrialEvent: event => { console.info('Envara attached application', JSON.stringify(event)); void publish(); },
         onNotionTrialDiagnostics: report => notionDiagnostics.save(report),
+        onApplicationHousekeeping: async ({ applicationId }) => {
+          const application = (await applications.snapshot()).applications.find(item => item.id === applicationId);
+          if (!application) return;
+          try { if ((await applyPendingApplicationData({ application, dataDir })).applied) void publish(); }
+          catch (error) {
+            const code = ['IMPORT_TARGET_UNSAFE', 'IMPORT_TARGET_NOT_EMPTY', 'IMPORT_RESTORE_FAILED'].includes(error?.code)
+              ? error.code : 'IMPORT_APPLICATION_RESTORE_FAILED';
+            console.error('Envara imported application data restore failed', code);
+            throw Object.assign(new Error('附加软件的导入资料尚未恢复，请停止软件后重试。'), { code });
+          }
+        },
       })
       : new NativeApplicationRouting({ helperPath });
     applications = new ApplicationService({ dataDir, routing: applicationRouting,
       resolveContext: id => applicationWorkspaceContext(id, { service, terminal }),
       profileExists: async id => (await service.snapshot()).profiles.some(profile => profile.id === id), onEvent: publish });
-    await applications.ready;
-    await applications.getApplicationRoutingStatus();
+    await initializeStep('applications-store', () => applications.ready);
+    await initializeStep('application-routing-status', () => applications.getApplicationRoutingStatus());
   }
-  ipcMain.handle('envara:call', async (event, request) => {
-    try {
-      const source = views.get(event.sender);
-      if (!source || source.window.isDestroyed() || event.senderFrame !== event.sender.mainFrame) throw new Error('不允许的请求来源');
-      if (!request || typeof request.method !== 'string') throw new Error('无效请求');
-      if (source.kind === 'terminal' && !TERMINAL_METHODS.has(request.method) && !['snapshot', 'openTerminalWindow'].includes(request.method)) throw new Error('此窗口仅支持终端操作。');
-      if (source.kind === 'terminal') {
-        if (request.method === 'terminalSnapshot') request.args = { ...request.args, id: source.profileId };
-        if (['chooseWorkspaceDirectory', 'pickTerminalDirectory', 'setTerminalLinkBrowser', 'openTerminal', 'openTerminalWindow', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'claudeInstallationStatus'].includes(request.method) && request.args?.id !== source.profileId) throw new Error('此窗口仅操作当前环境。');
-        if (['duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal'].includes(request.method)) {
-          const current = await terminal.snapshot({ id: source.profileId });
-          if (!current.profiles?.some(profile => profile.sessions?.some(session => session.sessionId === request.args?.sessionId))) throw new Error('该会话不属于此终端窗口。');
-        }
-      }
-      const value = await fullWorkspaceSnapshot(await handleCall(request.method, request.args, source.window));
-      return { ok: true, value: source.kind === 'terminal' ? terminalViewSnapshot(value) : value };
-    } catch (error) { return { ok: false, error: { message: error.message, code: error.code || 'ACTION_FAILED' } }; }
-  });
+}
+
+function reportStartupFailure(error) {
+  if (quitting || error?.code === 'APP_CLOSING') return;
+  startupDiagnostics?.fail(error?.code);
+  console.error(error);
+  if (isSmoke || isWorkspaceSmoke) process.exitCode = 1;
+  dialog.showErrorBox('境舱无法启动', error.message);
+  app.quit();
+}
+// Loading the first window must not depend on backend startup or the renderer's
+// initial snapshot. IPC is installed first; only bootstrap reads wait for ready.
+// Electron waits for this entry module before emitting ready: no top-level await.
+if (ownsLock) void startupStep('electron-ready', () => app.whenReady()).then(() => {
+  if (quitting) return;
+  registerDesktopIPC({ ipcMain, views, startup: desktopStartup,
+    lifecycle: () => ({ quitting, requestEpoch }), services: () => ({ applications, terminal }),
+    transferLock: environmentTransferLock, handleCall, fullWorkspaceSnapshot,
+    onReady: () => startupDiagnostics?.mark('ipc-ready') });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: 'Envara', submenu: [{ label: '关于境舱', role: 'about' }, { type: 'separator' }, { label: '退出境舱', role: 'quit' }] },
     { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
     { label: '窗口', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'front' }] },
   ]));
   if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(path.join(root, 'build/icon.png')));
-  await createWindow();
-  if (!isSmoke && !isWorkspaceSmoke) setTimeout(() => { void offerLinkRouting().catch(error => console.error(`Envara link routing: ${error.message}`)); }, 1500).unref?.();
-  const refreshTimer = setInterval(() => { void publish(); }, 4000);
-  refreshTimer.unref();
-}).catch(async error => {
-  await shutdownOwnedServices().catch(() => {});
-  console.error(error);
-  if (isSmoke) process.exitCode = 1;
-  dialog.showErrorBox('境舱无法启动', error.message);
-  app.quit();
-});
+  workspaceWindow.markReady();
+  void workspaceWindow.open().catch(reportStartupFailure);
+  void desktopStartup.start().then(() => {
+    startupDiagnostics?.mark('startup-complete');
+    if (quitting) return;
+    void publish();
+    if (!isSmoke && !isWorkspaceSmoke) setTimeout(() => { if (!quitting) void offerLinkRouting().catch(error => console.error(`Envara link routing: ${error.message}`)); }, 1500).unref?.();
+    const refreshTimer = setInterval(() => { void publish(); }, 4000);
+    refreshTimer.unref();
+  }).catch(reportStartupFailure);
+}).catch(reportStartupFailure);

@@ -1,6 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sidecarConfig, mergeEngineStates, macSystemProxyEnvironment } from '../electron/sidecar-manager.mjs';
+import path from 'node:path';
+import { SidecarManager, sidecarConfig, mergeEngineStates, macSystemProxyEnvironment } from '../electron/sidecar-manager.mjs';
+
+test('desktop sidecar explicitly selects the prepared bundled driver without installing on startup', () => {
+  const manager = new SidecarManager({ dataDir: path.resolve('unused-data'), resourcesDir: path.resolve('unused-resources') });
+  const environment = manager.env();
+  assert.equal(environment.ENVARA_DESKTOP_BUNDLED_DRIVER, '1');
+  assert.equal(environment.PLAYWRIGHT_DRIVER_PATH, manager.driver);
+  assert.equal(environment.PLAYWRIGHT_CLI_PATH, path.join(manager.driver, 'package/cli.js'));
+  assert.equal(environment.PLAYWRIGHT_NODEJS_PATH, path.join(manager.driver, process.platform === 'win32' ? 'node.exe' : 'node'));
+  assert.equal(environment.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD, '1');
+});
 
 test('empty workspace stays loopback-only and disables browser auto downloads', () => {
   const cfg = sidecarConfig('/private/envara', 19234, {}, 'darwin');

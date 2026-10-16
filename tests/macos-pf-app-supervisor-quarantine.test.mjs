@@ -15,8 +15,38 @@ const helper = `static void quarantine_refusal_delay(void) {
     while (nanosleep(&delay, &delay) < 0 && errno == EINTR) {}
 }
 `;
+/* The later staging validation scope and diagnostic step marks are removed
+ * first, so the reconstruction is still exactly the frozen 14b87 source. */
+const stagingScope = [
+  ['    int output, prepared, output_failed, stopped_before_exec, validation_scope_open;\n', '    int output, prepared, output_failed, stopped_before_exec;\n'],
+  [`/* Staging, from claim to the exact stopped child, is one native operation.
+ * Custody is not: the guardian holds the child for the run's whole lifetime,
+ * and resume re-verifies in its own operation. */
+static void staging_scope_end(struct keeper *k) {
+    if (k->validation_scope_open) { envara_gui_validation_scope_end(); k->validation_scope_open = 0; }
+}
+`, ''],
+  ['    struct keeper *k = context; staging_scope_end(k);\n    k->ticket = *ticket;', '    struct keeper *k = context; k->ticket = *ticket;'],
+  ['    envara_gui_step(ENVARA_GUI_STEP_TICKET_CLAIM);\n', ''],
+  ['    envara_gui_step(ENVARA_GUI_STEP_STAGE_FRESH);\n', ''],
+  ['    envara_gui_step(ENVARA_GUI_STEP_STAGE_ADOPT);\n', ''],
+  [`    /* Its first check of each bundle is a full signed inspection; later
+     * staging boundaries re-prove that exact state's identity. adopt ends it. */
+    if (!envara_gui_validation_scope_begin()) { result = -1; errno = EOVERFLOW; goto done; }
+    k.validation_scope_open = 1;
+`, ''],
+  ['done:\n    { int saved = errno; staging_scope_end(&k); errno = saved; }\n', 'done:\n'],
+];
+function withoutStagingScope(current) {
+  let source = current;
+  for (const [added, original] of stagingScope) {
+    assert.equal(source.split(added).length, 2, 'each later staging edit appears exactly once');
+    source = source.replace(added, original);
+  }
+  return source;
+}
 function frozenOldSource(current) {
-  return current.replace(helper, '').replace('if (result < 0 || (item.revents & (POLLHUP | POLLERR | POLLNVAL))) { quarantine_refusal_delay(); }',
+  return withoutStagingScope(current).replace(helper, '').replace('if (result < 0 || (item.revents & (POLLHUP | POLLERR | POLLNVAL))) { quarantine_refusal_delay(); }',
     'if (result < 0 || (item.revents & (POLLHUP | POLLERR | POLLNVAL))) { struct timespec delay = {0, 50000000}; nanosleep(&delay, NULL); }')
     .replace('if (amount <= 0) { quarantine_refusal_delay(); continue; }', 'if (amount <= 0) continue;')
     .replace('        quarantine_refusal_delay();\n    }\n}\nstatic int adopt', '    }\n}\nstatic int adopt');

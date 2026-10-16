@@ -53,6 +53,14 @@ typedef struct { const char *manifest_sha256; const EnvaraPFInstallFile *files; 
 #include "installer-upgrade-2059a0.h"
 #include "installer-upgrade-127e83.h"
 #include "installer-upgrade-010117.h"
+#include "installer-upgrade-9b51cf.h"
+#include "installer-upgrade-91b62a.h"
+#include "installer-upgrade-7c91a1.h"
+#include "installer-upgrade-af79b1.h"
+#include "installer-upgrade-dceba9.h"
+#include "installer-upgrade-fa70a2.h"
+#include "installer-upgrade-32811e.h"
+#include "installer-upgrade-22a6f3.h"
 static const InstallSnapshot *const known_prior_snapshots[] = {
     &ENVARA_PF_UPGRADE_F8_SNAPSHOT, &ENVARA_PF_UPGRADE_E940_SNAPSHOT,
     &ENVARA_PF_UPGRADE_518_SNAPSHOT, &ENVARA_PF_UPGRADE_2A7_SNAPSHOT,
@@ -67,7 +75,10 @@ static const InstallSnapshot *const known_prior_snapshots[] = {
     &ENVARA_PF_UPGRADE_F39101_SNAPSHOT, &ENVARA_PF_UPGRADE_A8BD00_SNAPSHOT,
     &ENVARA_PF_UPGRADE_DA6E7C_SNAPSHOT, &ENVARA_PF_UPGRADE_03245359_SNAPSHOT,
     &ENVARA_PF_UPGRADE_2059A0_SNAPSHOT, &ENVARA_PF_UPGRADE_127E83_SNAPSHOT,
-    &ENVARA_PF_UPGRADE_010117_SNAPSHOT
+    &ENVARA_PF_UPGRADE_010117_SNAPSHOT, &ENVARA_PF_UPGRADE_9B51CF_SNAPSHOT, &ENVARA_PF_UPGRADE_91B62A_SNAPSHOT,
+    &ENVARA_PF_UPGRADE_7C91A1_SNAPSHOT, &ENVARA_PF_UPGRADE_AF79B1_SNAPSHOT,
+    &ENVARA_PF_UPGRADE_DCEBA9_SNAPSHOT, &ENVARA_PF_UPGRADE_FA70A2_SNAPSHOT, &ENVARA_PF_UPGRADE_32811E_SNAPSHOT,
+    &ENVARA_PF_UPGRADE_22A6F3_SNAPSHOT
 };
 #define KNOWN_PRIOR_COUNT (sizeof(known_prior_snapshots) / sizeof(known_prior_snapshots[0]))
 
@@ -653,7 +664,7 @@ static int plan(const char *source_path) {
     bool idle = inspection == RUNTIME_VERIFIED_ABSENT, private_inspection = inspection == RUNTIME_PRIVATE_INSPECTION;
     bool can_request = verified && existing >= 0 && !needs_manual_review && inspection != RUNTIME_REFUSED;
     printf("{\"schema\":\"%s\",\"action\":\"installedResourcesOnly\",\"readOnly\":true,\"ready\":false,\"productionReady\":false,\"systemInstallation\":false,\"activation\":false,\"requiresAdministrator\":true,\"requiresAppleDeveloperIdentity\":false,\"deprecatedAuthorizationAPI\":true,\"bootstrapIdentityBound\":false,\"sourceVerified\":%s,\"canRequestInstall\":%s,\"canRequestAuthorizationForInspection\":%s,\"privateRuntimeInspectionRequired\":%s,\"source\":", SCHEMA, verified ? "true" : "false", can_request ? "true" : "false", can_request && private_inspection ? "true" : "false", private_inspection ? "true" : "false");
-    json_string(source_path); printf(",\"compiledSource\":"); json_string(ENVARA_PF_INSTALL_SOURCE);
+    json_string(source_path);
     printf(",\"target\":\"%s\",\"manifestSHA256\":", INSTALL_TARGET); json_string(ENVARA_PF_INSTALL_MANIFEST_SHA256);
     printf(",\"totalBytes\":%llu,\"existingInstallation\":\"%s\",\"needsManualReview\":%s,\"requiresUpgradeApproval\":%s,\"controlledRuntimeAbsent\":%s", (unsigned long long)bytes, existing == 1 ? "exact" : prior ? "known-prior" : existing == 0 ? "absent" : "unknown-or-conflict", needs_manual_review ? "true" : "false", prior ? "true" : "false", idle ? "true" : "false");
     if (prior) { printf(",\"priorManifestSHA256\":"); json_string(prior->manifest_sha256); }

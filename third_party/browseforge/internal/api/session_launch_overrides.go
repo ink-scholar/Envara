@@ -150,17 +150,16 @@ func profileForSessionLaunch(stored *profile.Profile, overrides *sessionLaunchOv
 	if err := json.Unmarshal(data, &launch); err != nil {
 		return nil, fmt.Errorf("copy stored profile: %w", err)
 	}
-	if overrides != nil && overrides.Timezone != "" {
+	if overrides != nil && (overrides.Timezone != "" || overrides.Locale != "") {
 		if launch.LaunchOverrides == nil {
 			launch.LaunchOverrides = &profile.LaunchOverrides{}
 		}
-		launch.LaunchOverrides.Timezone = overrides.Timezone
-	}
-	if overrides != nil && overrides.Locale != "" {
-		if launch.LaunchOverrides == nil {
-			launch.LaunchOverrides = &profile.LaunchOverrides{}
+		if overrides.Timezone != "" {
+			launch.LaunchOverrides.Timezone = overrides.Timezone
 		}
-		launch.LaunchOverrides.Locale = overrides.Locale
+		if overrides.Locale != "" {
+			launch.LaunchOverrides.Locale = overrides.Locale
+		}
 	}
 	if overrides != nil && overrides.Proxy != nil {
 		proxy := *overrides.Proxy

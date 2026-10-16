@@ -5,9 +5,9 @@ import { PassThrough, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { MacOSPFController } from '../native/macos-pf-routing/controller.mjs';
 import { servePFHelper, projectPFHelperError } from '../native/macos-pf-routing/helper.mjs';
-import { createPersistentPFNotionSessionClient, validatePFNotionCleanupReceipt, validatePFNotionPreflightCleanupReceipt } from '../electron/macos-pf-notion-session.mjs';
+import { createPersistentPFNotionSessionClient, validatePFNotionCleanupReceipt, validatePFNotionPreflightCleanupReceipt, projectPFNotionResponseDiagnostic, validatePFNotionResponseDiagnostic, safePFNativeStageTimings } from '../electron/macos-pf-notion-session.mjs';
 import { MacOSPFNotionTrial, exportPFNotionTrialDiagnostics } from '../electron/macos-pf-notion-trial.mjs';
-import { safeNotionTrial, notionTrialFailureLine, notionTrialControls, notionTrialLocksConfiguration } from '../src/notion-trial-state.mjs';
+import { safeNotionTrial, notionTrialFailureLine, notionTrialControls, notionTrialLocksConfiguration, notionTrialTimingLine } from '../src/notion-trial-state.mjs';
 
 const flags = { ready: false, protected: false, productionReady: false, genericApplicationRouting: false, udpSupported: false };
 const original = { stage: 'transport', code: 'APPLICATION_APP_NATIVE_REFUSED',
@@ -150,6 +150,39 @@ test('safe export reconstructs the first native error from an older same-bound c
   assert.deepEqual(exportPFNotionTrialDiagnostics(value).initialFailure, original);
   value.applicationSnapshotDiagnostic.runId = randomUUID();
   assert.equal(exportPFNotionTrialDiagnostics(value).initialFailure, null);
+});
+
+test('native step timings cross the snapshot diagnostic, export and renderer only as fixed bounded rows', () => {
+  const runId = randomUUID(), environmentId = randomUUID();
+  const timings = [{ step: 'ticket-prepare', stepMs: 2889, totalMs: 3301, fullChecks: 2, identityChecks: 12, receivedMs: 3302 },
+    { step: 'ticket-claim', stepMs: 2768, totalMs: 6069, fullChecks: 2, identityChecks: 8, receivedMs: 6070 }];
+  const result = { ...flags, runId, environmentId, profile: 'seatbelt-front-only', phase: 'cleaned', staged: false, resumed: false,
+    cleanupComplete: true, cleanupUncertain: false, failure: { stage: 'cold-stage', code: 'APPLICATION_APP_STAGE_TIMEOUT' }, nativeStageTimings: timings };
+  const diagnostic = projectPFNotionResponseDiagnostic('applicationSnapshot', result, runId, environmentId);
+  assert.deepEqual(diagnostic.nativeStageTimings, timings);
+  assert.equal(validatePFNotionResponseDiagnostic(diagnostic, 'applicationSnapshot', runId, environmentId), true);
+  assert.equal(projectPFNotionResponseDiagnostic('prepareNotionApplication', result, runId, environmentId).nativeStageTimings, undefined,
+    'timings belong only to the snapshot diagnostic');
+  for (const bad of [[{ ...timings[0], step: privateText }], [{ ...timings[0], stepMs: 9999, totalMs: 1 }], [{ ...timings[0], path: '/tmp' }],
+    [{ ...timings[0], receivedMs: -1 }], Array.from({ length: 17 }, () => timings[0]), 'ticket-prepare']) {
+    assert.equal(safePFNativeStageTimings(bad), null);
+    const projected = projectPFNotionResponseDiagnostic('applicationSnapshot', { ...result, nativeStageTimings: bad }, runId, environmentId);
+    assert.ok(projected, 'a malformed diagnostic list is dropped, never a failed snapshot');
+    assert.equal(Object.hasOwn(projected, 'nativeStageTimings'), false);
+    assert.equal(validatePFNotionResponseDiagnostic({ ...projected, nativeStageTimings: bad }, 'applicationSnapshot', runId, environmentId), false);
+  }
+  const value = { applicationId: 'notion_bound', runId, environmentId, phase: 'failed', events: [{ sequence: 1, stage: 'failed', code: 'APPLICATION_APP_STAGE_TIMEOUT' }],
+    applicationSnapshotDiagnostic: diagnostic, sessionDiagnostics: { lastApplicationSnapshot: diagnostic } };
+  const exported = exportPFNotionTrialDiagnostics(value);
+  assert.deepEqual(exported.sessionDiagnostics.lastApplicationSnapshot.nativeStageTimings, timings);
+  const live = safeNotionTrial({ id: 'notion_bound', notionTrial: value });
+  assert.deepEqual(live.nativeTimings, timings);
+  assert.equal(notionTrialTimingLine(live.nativeTimings[0]), 'ticket-prepare · 2889 ms · Σ 3301 ms · fullChecks=2 · identityChecks=12');
+  const history = { ...exported, applicationId: 'notion_bound' };
+  assert.deepEqual(notionTrialControls({ id: 'notion_bound', identity: 'bundle:com.microsoft.VSCode', notionTrialHistory: history }, {}, true).history.nativeTimings, timings);
+  const foreign = { ...value, applicationSnapshotDiagnostic: { ...diagnostic, runId: randomUUID() }, sessionDiagnostics: {} };
+  assert.deepEqual(safeNotionTrial({ id: 'notion_bound', notionTrial: foreign }).nativeTimings, []);
+  assert.equal(JSON.stringify(exported).includes(privateText), false);
 });
 
 test('host PF, route and DNS changes are reported observations, while every owned-resource fact stays mandatory', () => {

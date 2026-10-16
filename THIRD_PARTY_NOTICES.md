@@ -1,6 +1,6 @@
 # Third-party notices
 
-Envara's original application code is licensed under the MIT License. Third-party software retains its own copyright and license. JavaScript versions are recorded in `package-lock.json`; the vendored Go backend and its dependencies are pinned in `third_party/browseforge/ENVARA_UPSTREAM.md`, `go.mod`, and `go.sum`. This document describes local development candidates. GitHub upload is authorized after macOS implementation and native acceptance are complete; automatic releases remain disabled.
+Envara's original application code is licensed under the MIT License. Third-party software retains its own copyright and license. JavaScript versions are recorded in `package-lock.json`; the vendored Go backend and its dependencies are pinned in `third_party/browseforge/ENVARA_UPSTREAM.md`, `go.mod`, and `go.sum`.
 
 ## Main dependencies
 
@@ -37,15 +37,15 @@ The prepared backend resources include a compiled Go sidecar, the official Playw
 
 ## Separately managed Mihomo proxy core
 
-Envara 0.4.0 prepares the unmodified official Mihomo v1.19.32 executable at commit `88dcbf7f1614a67c3b36b848ee3592dfa92ada36`, launched as an independent owned process. Its GPLv3 license and the licenses of its dependencies are retained; Envara's original application MIT notice does not replace them.
+Envara prepares the unmodified official Mihomo v1.19.32 executable at commit `88dcbf7f1614a67c3b36b848ee3592dfa92ada36`, launched as an independent owned process. Its GPLv3 license and the licenses of its dependencies are retained; Envara's original application MIT notice does not replace them.
 
-`build/proxy-core/` contains the executable, complete `LICENSE`, `SOURCE.md`, `provenance.json` and `mihomo-corresponding-source.tar.gz`. The latter contains the fixed full upstream source, original build scripts/copyright notices, checksum-verified Go `vendor/` dependencies and the release CA input. Its SHA-256 is `6859f30fa7ef47eea24a535e52711d91026adeac905768443aaf1d6f5955dddb`. An Envara helper has successfully built those sources with `GOPROXY=off` and `-mod=vendor`; it does not promise byte-identical release reproduction. Distribution retains this complete directory beside the core under `proxy-core/`; the actual local 0.4.0 package copy is verified separately in the verification record.
+`build/proxy-core/` contains the executable, complete `LICENSE`, `SOURCE.md`, `provenance.json` and `mihomo-corresponding-source.tar.gz`. The latter contains the fixed full upstream source, original build scripts/copyright notices, checksum-verified Go `vendor/` dependencies and the release CA input. Its SHA-256 is `6859f30fa7ef47eea24a535e52711d91026adeac905768443aaf1d6f5955dddb`. The source archive supports offline building with `GOPROXY=off` and `-mod=vendor`; byte-identical reproduction of the upstream binary is not promised. Distribution retains this complete directory beside the core under `proxy-core/`.
 
 The source baseline, official archive/executable checksums and build details are recorded in [third_party/proxy-core/SOURCE.md](third_party/proxy-core/SOURCE.md) and generated provenance. No upstream source patches are applied to the supplied executable. These records describe component attribution and prepared distribution contents, not a legal conclusion about the combined application.
 
 ## Terminal and proxy dependency notices
 
-The Windows routing component build preserves WinDivert's unmodified x64 DLL and signed driver at commit `1789526ecfb9ff5397c94f9f54c1a3dc2fb60440`, the complete pinned corresponding source archive, original license and artifact hashes. It dynamically loads the DLL without changing the driver signature. Envara's user-mode capture source and Go guard service are separate components; ProxyBridge's MIT address-swap technique retains its attribution. See [Windows source and acceptance boundary](native/windows-app-routing/README.md). No routing component has been installed or accepted on Windows during this Mac-hosted build. The ARM64 helper does not include or claim an ARM64 driver.
+The Windows routing component build preserves WinDivert's unmodified x64 DLL and signed driver at commit `1789526ecfb9ff5397c94f9f54c1a3dc2fb60440`, the complete pinned corresponding source archive, original license and artifact hashes. It dynamically loads the DLL without changing the driver signature. Envara's user-mode capture source and Go guard service are separate components; ProxyBridge's MIT address-swap technique retains its attribution. See [Windows source and acceptance boundary](native/windows-app-routing/README.md). Windows native acceptance remains unverified in this release. The ARM64 helper does not include or claim an ARM64 driver.
 
 The native preparation step retains complete notices for the terminal renderer, node-pty and proxy dependencies in `build/native/licenses/`, with a manifest; application resources include them under `licenses/npm/`. The whole node-pty package is unpacked to preserve native modules and platform helpers. winpty and Microsoft Terminal ConPTY notices are retained separately. Development-only @electron/rebuild 4.2.1 is MIT and is not installed by the running application.
 

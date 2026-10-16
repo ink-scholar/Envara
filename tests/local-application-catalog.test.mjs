@@ -29,7 +29,8 @@ test('Mac discovery includes shallow application folders, deduplicates identitie
   const output = await f.catalog().list();
   assert.equal(output.available, true); assert.equal(output.scanComplete, true); assert.equal(output.truncated, false);
   assert.equal(output.applications.length, 2); assert.equal(output.applications[0].path, alpha);
-  assert.deepEqual(Object.keys(output.applications[0]).sort(), ['executablePath', 'identity', 'name', 'path']);
+  assert.deepEqual(Object.keys(output.applications[0]).sort(), ['compatibility', 'executablePath', 'identity', 'name', 'path']);
+  assert.deepEqual(output.applications[0].compatibility, { supported: false, adapter: 'unsupported', reasonCode: 'APPLICATION_ADAPTER_UNSUPPORTED', dataScope: 'unavailable', verification: 'pending' });
   assert.equal(output.applications.some(item => item.identity === 'bundle:io.envara.internal'), false);
   assert.equal(await readFile(path.join(alpha, 'Contents/MacOS/fixture'), 'utf8'), '#!/bin/sh\nexit 99\n');
 });
@@ -61,8 +62,24 @@ test('search, response limits and defensive copies do not rescan or alter the ca
   const [first, second] = await Promise.all([catalog.list({ limit: 1 }), catalog.list({ query: 'ＡＬＰＨＡ' })]);
   assert.equal(inspections, 2); assert.equal(first.truncated, true); assert.equal(second.truncated, false);
   assert.equal(second.applications[0].name, 'Alpha'); second.applications[0].name = 'Changed';
+  second.applications[0].compatibility.supported = true;
   assert.equal((await catalog.list({ query: 'alpha.app' })).applications[0].name, 'Alpha');
+  assert.equal((await catalog.list({ query: 'alpha.app' })).applications[0].compatibility.supported, false);
   assert.deepEqual((await catalog.list({ query: 'not installed' })).applications, []);
+});
+
+test('catalog attaches metadata eligibility without codesign or changing application identity', async t => {
+  const f = await fixture(t), target = await bundle(f.system, 'Candidate.app', { identity: 'io.envara.candidate' });
+  const calls = [];
+  const catalog = f.catalog({ inspectCompatibility: async (descriptor, options) => {
+    calls.push({ descriptor, options });
+    return { supported: true, adapter: 'chromium-front', reasonCode: null, dataScope: 'environment', verification: 'pending', privateDiagnostic: 'not exposed' };
+  } });
+  const output = await catalog.list();
+  assert.equal(calls.length, 1); assert.equal(calls[0].descriptor.path, target);
+  assert.deepEqual(calls[0].options, { platform: 'darwin', verifySignature: false });
+  assert.equal(output.applications[0].identity, 'bundle:io.envara.candidate');
+  assert.deepEqual(output.applications[0].compatibility, { supported: true, adapter: 'chromium-front', reasonCode: null, dataScope: 'environment', verification: 'pending' });
 });
 
 test('budget exhaustion is explicit and nesting is bounded without entering bundles', async t => {

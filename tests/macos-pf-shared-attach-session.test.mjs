@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { MacOSPFNotionTrial } from '../electron/macos-pf-notion-trial.mjs';
+import { MacOSPFApplicationRouting } from '../electron/macos-pf-application-routing.mjs';
 import { createPFAuthorizedChannelMux } from '../electron/macos-pf-channel-mux.mjs';
 import { createPersistentPFNotionSessionClient } from '../electron/macos-pf-notion-session.mjs';
 import { servePFHelper } from '../native/macos-pf-routing/helper.mjs';
@@ -35,20 +36,27 @@ const refusalFrame = { protocol: 'envara.application-routing', version: 1, id: n
 
 /** One root session: a scripted controller behind the real helper envelope,
  *  answering status with the root controller's own logic. */
-function rootSession({ canCreate, onPrepareRoute, hangStatus = false, refusePrepare = () => false, refusePrepareRoute = () => false, leaveRoute = () => false, answerUnstaged = () => false }) {
-  const calls = [], prepared = [], reclaimed = []; let bound = null, shutdowns = 0;
+function rootSession({ canCreate, onPrepareRoute, hangStatus = false, refusePrepare = () => false, refusePrepareRoute = () => false, leaveRoute = () => false, answerUnstaged = () => false,
+  stageTimeout = false, cleanupReady = () => true, invalidCleanupReceipt = () => false }) {
+  const calls = [], prepared = [], reclaimed = []; let bound = null, shutdowns = 0, cleaned = false, cleanupFailed = false;
   const statusController = new MacOSPFController({ inspectInstallation: async () => ({ verified: true, runtimeVerified: true }),
     identity: { uid: 0, euid: 0, callerUID: 501, controlledSession: true }, executor: { readOnlyStatus: async ({ runId } = {}) => ({ consoleUID: 501,
       pf: { priorAnchorsCompatible: true, lo0FilteringVerified: true }, ownedRootHook: { canCreateOwnedHook: Boolean(runId) && canCreate(),
         pfDisabled: true, pinsVerified: true, originalRootCompatible: true } }) } });
   const state = phase => ({ ...flags, ...bound, profile: 'seatbelt-front-only', phase, staged: true, resumed: phase === 'running', cleanupComplete: false, cleanupUncertain: false });
+  const initialFailure = { stage: 'cold-stage', code: 'APPLICATION_APP_STAGE_TIMEOUT' };
+  const cleanupFailure = { stage: 'cleanup', code: 'APPLICATION_APP_STOP_TIMEOUT' };
+  const failedState = () => ({ ...state('cleanup-required'), staged: false, cleanupUncertain: true, cleanupRetryable: true,
+    failure: initialFailure, initialFailure, cleanupFailure: cleanupFailed ? cleanupFailure : null });
   const cleanup = () => ({ ...state('cleaned'), cleanupComplete: true, cleanupEvidence: { schema: 'envara.macos-pf-notion-cleanup/v1',
     source: 'native-notion-controller', ...bound, profile: 'seatbelt-front-only', complete: true, cleanupUncertain: false,
     ...Object.fromEntries(facts.map(key => [key, true])) } });
   const controller = { closed: false,
     status: async params => { calls.push('status'); if (hangStatus) return new Promise(() => {});
       // A controller that kept a refused attempt's route would still list it.
-      const result = await statusController.status(params); return leaveRoute() ? { ...result, routes: [{ routeId: 'route_owned' }] } : result; },
+      const result = await statusController.status(params);
+      if (stageTimeout && bound && !cleaned) return { ...result, applications: [failedState()], routes: [{ routeId: 'route_owned' }] };
+      return leaveRoute() ? { ...result, routes: [{ routeId: 'route_owned' }] } : result; },
     prepareRoute: async value => { calls.push('prepareRoute');
       if (refusePrepareRoute()) throw Object.assign(new Error('refused'), { code: 'APPLICATION_PROXY_UNAVAILABLE' });
       if (onPrepareRoute) return onPrepareRoute();
@@ -57,6 +65,8 @@ function rootSession({ canCreate, onPrepareRoute, hangStatus = false, refusePrep
       // Refused before the controller created the run: nothing is listed for it.
       if (refusePrepare()) throw Object.assign(new Error('refused'), { code: 'APPLICATION_ROUTING_NOT_READY' });
       bound = { runId: value.runId, environmentId: value.environmentId };
+      if (stageTimeout) throw Object.assign(new Error('private stage timeout detail'), { code: initialFailure.code,
+        failureStage: initialFailure.stage, initialFailure });
       // Answered with a run that is not staged, by a controller that then lists nothing.
       if (answerUnstaged()) { const answered = { ...state('preparing'), staged: false }; bound = null; return answered; }
       return state('staged'); },
@@ -68,8 +78,13 @@ function rootSession({ canCreate, onPrepareRoute, hangStatus = false, refusePrep
       return { ...flags, profile: 'seatbelt-front-only', registrations: value.registrationIds.map(registrationId => ({ registrationId, outcome: 'deleted' })),
         environments: value.environmentIds.map(environmentId => ({ environmentId, outcome: 'deleted' })) }; },
     resumeNotionApplication: async () => { calls.push('resume'); return state('running'); },
-    stopNotionApplication: async () => { calls.push('stop'); return cleanup(); },
-    applicationSnapshot: async () => { calls.push('snapshot'); return cleanup(); },
+    stopNotionApplication: async () => { calls.push('stop');
+      if (stageTimeout && !cleanupReady()) { cleanupFailed = true;
+        throw Object.assign(new Error('private cleanup wait detail'), { code: cleanupFailure.code, failureStage: 'cleanup', initialFailure, cleanupFailure }); }
+      cleaned = true; return cleanup(); },
+    applicationSnapshot: async () => { calls.push('snapshot');
+      if (stageTimeout && !cleaned) return failedState();
+      const result = cleanup(); if (invalidCleanupReceipt()) delete result.cleanupEvidence.originalListenerClosed; return result; },
     shutdown: async () => { shutdowns++; calls.push('shutdown'); return { closed: true, cleanupRequired: false }; } };
   return { controller, calls, prepared, reclaimed, shutdowns: () => shutdowns };
 }
@@ -77,7 +92,7 @@ const storageIds = { registration: randomUUID(), environment: randomUUID() };
 
 /** Stands in for the authorization carrier: each spawn is one root session. */
 function carrierFactory({ canCreate = () => true, refuseFirst = false, refusalStage = 'AuthorizationCopyRights', dieOnPrepareRoute = false, hangStatus = false,
-  refusePrepare, refusePrepareRoute, leaveRoute, answerUnstaged } = {}) {
+  refusePrepare, refusePrepareRoute, leaveRoute, answerUnstaged, stageTimeout, cleanupReady, invalidCleanupReceipt } = {}) {
   const sessions = [];
   const spawnCarrier = () => {
     const input = new PassThrough(), child = new EventEmitter();
@@ -92,7 +107,7 @@ function carrierFactory({ canCreate = () => true, refuseFirst = false, refusalSt
       setImmediate(() => { child.stdout.write(`${JSON.stringify(frame)}\n`); child.stdout.end(); exit(1); });
       return child;
     }
-    session.root = rootSession({ canCreate, hangStatus, refusePrepare, refusePrepareRoute, leaveRoute, answerUnstaged,
+    session.root = rootSession({ canCreate, hangStatus, refusePrepare, refusePrepareRoute, leaveRoute, answerUnstaged, stageTimeout, cleanupReady, invalidCleanupReceipt,
       onPrepareRoute: dieOnPrepareRoute ? () => { exit(1); return new Promise(() => {}); } : null });
     servePFHelper({ controller: session.root.controller, input, output: child.stdout, signalSource: null })
       .then(() => { child.stdout.end(); exit(0); });
@@ -103,13 +118,15 @@ function carrierFactory({ canCreate = () => true, refuseFirst = false, refusalSt
 
 function attachFixture(options = {}) {
   let canCreate = options.canCreate ?? true;
-  const carrier = carrierFactory({ ...options, canCreate: () => canCreate });
+  let cleanupReady = options.cleanupReady ?? true, invalidCleanupReceipt = options.invalidCleanupReceipt ?? false;
+  const carrier = carrierFactory({ ...options, canCreate: () => canCreate, cleanupReady: () => cleanupReady, invalidCleanupReceipt: () => invalidCleanupReceipt });
   // No createClient: this is the default the packaged app uses.
   const pruned = [];
   const trial = new MacOSPFNotionTrial({ authorizerPath: '/fixture/EnvaraPFInstall', verifyCandidate: async () => true,
     verifyNotion: async () => true, watchMs: 0, spawnCarrier: carrier.spawnCarrier,
     pruneApplicationData: async value => { pruned.push(value); return 1024; } });
   return { trial, carrier, pruned, setCanCreate: value => { canCreate = value; },
+    setCleanupReady: value => { cleanupReady = value; }, setInvalidCleanupReceipt: value => { invalidCleanupReceipt = value; },
     attach: () => trial.run({ request: request(), applicationId: 'notion_bound', activationAuthorized: true }) };
 }
 
@@ -149,6 +166,108 @@ test('the default shared channel runs two attachments in one launch over one car
   await f.trial.shutdownAll(); await until(() => session.exited);
   assert.equal(session.root.shutdowns(), 1); assert.equal(f.carrier.sessions.length, 1, 'quitting opens no new session');
   assert.equal(JSON.stringify({ first, second }).includes('PRIVATE_SHARED_'), false);
+});
+
+test('a pending late stage keeps its exact cleanup endpoint for a later Stop without authorizing or launching again', async t => {
+  const f = attachFixture({ stageTimeout: true, cleanupReady: false });
+  t.after(async () => { f.setCleanupReady(true); await f.trial.stop('notion_bound'); await f.trial.disposeShared(); });
+  const first = await f.attach(), root = f.carrier.sessions[0].root;
+  assert.equal(first.active, false); assert.equal(first.phase, 'cleanup-required'); assert.equal(first.cleanupRetryable, true);
+  assert.equal(first.cleanupUncertain, true); assert.equal(first.cleanupComplete, false);
+  assert.equal(f.carrier.sessions.length, 1); assert.equal(f.carrier.sessions[0].exited, false); assert.equal(root.shutdowns(), 0);
+  assert.equal(f.trial.mux.snapshot().targets, 1, 'the original bound virtual endpoint remains attached');
+  assert.deepEqual(Object.keys(f.trial.cleanupEndpoint.application).sort(), ['executablePath', 'id', 'profileId']);
+  assert.equal(JSON.stringify({ first, endpoint: f.trial.cleanupEndpoint.application }).includes('PRIVATE_SHARED_PASSWORD'), false);
+  await assert.rejects(f.trial.closeRunChannel(), { code: 'APPLICATION_ROUTING_CLEANUP_UNCONFIRMED' });
+  await assert.rejects(f.trial.disposeShared(), { code: 'APPLICATION_ROUTING_CLEANUP_UNCONFIRMED' });
+  assert.equal(f.trial.stop('foreign').phase, 'idle'); assert.equal(root.calls.filter(item => item === 'stop').length, 1);
+  await assert.rejects(f.attach(), { code: 'PF_OWNED_RUNTIME_NOT_EMPTY' });
+  f.setCleanupReady(true);
+  const final = await f.trial.stop('notion_bound');
+  assert.equal(final.phase, 'cleaned'); assert.equal(final.cleanupComplete, true); assert.equal(final.cleanupUncertain, false);
+  assert.equal(final.cleanupRetryable, false); assert.equal(final.resumed, false); assert.equal(final.lifecyclePassed, false);
+  assert.equal(final.initialFailure.code, 'APPLICATION_APP_STAGE_TIMEOUT');
+  assert.equal(f.trial.cleanupEndpoint, null); assert.equal(f.trial.mux.snapshot().targets, 0);
+  assert.equal(root.calls.filter(item => item === 'prepare').length, 1); assert.equal(root.calls.includes('resume'), false);
+  assert.equal(root.calls.filter(item => item === 'stop').length, 2); assert.equal(root.calls.filter(item => item === 'snapshot').length, 2);
+  assert.equal(f.carrier.sessions.length, 1); assert.equal(root.shutdowns(), 0, 'successful run detach still leaves the shared session open');
+  await f.trial.housekeeping;
+});
+
+test('retrying Stop with an incomplete fresh receipt cannot claim cleanup or run housekeeping', async t => {
+  const f = attachFixture({ stageTimeout: true, cleanupReady: false });
+  t.after(async () => { f.setCleanupReady(true); f.setInvalidCleanupReceipt(false); await f.trial.stop('notion_bound'); await f.trial.disposeShared(); });
+  await f.attach(); f.setCleanupReady(true); f.setInvalidCleanupReceipt(true);
+  const final = await f.trial.stop('notion_bound');
+  assert.equal(final.cleanupComplete, false); assert.equal(final.cleanupUncertain, true); assert.equal(final.lifecyclePassed, false);
+  assert.equal(final.cleanupRetryable, false, 'an incomplete proof is not a live keeper retry marker');
+  assert.deepEqual(f.pruned, []); assert.equal(f.carrier.sessions[0].root.calls.includes('resume'), false);
+});
+
+test('quit retries a retained endpoint once and preserves its shared session and managed route while cleanup remains pending', async t => {
+  const f = attachFixture({ stageTimeout: true, cleanupReady: false });
+  let nativeShutdowns = 0, reclaims = 0;
+  const adapter = new MacOSPFApplicationRouting({ notionTrial: f.trial, rootSessionAlive: async () => true,
+    native: { shutdown: async () => { nativeShutdowns++; } } });
+  adapter.routes.set('held_route', {}); adapter.reclaim = async id => { reclaims++; adapter.routes.delete(id); };
+  t.after(async () => { f.setCleanupReady(true); await f.trial.stop('notion_bound'); await f.trial.disposeShared(); });
+  await f.attach(); const root = f.carrier.sessions[0].root;
+  await assert.rejects(adapter.shutdown(), { code: 'APPLICATION_ROUTING_CLEANUP_UNCONFIRMED' });
+  assert.equal(root.calls.filter(item => item === 'stop').length, 2); assert.equal(root.shutdowns(), 0);
+  assert.equal(f.trial.state.cleanupRetryable, true); assert.equal(f.carrier.sessions[0].exited, false);
+  assert.equal(adapter.routes.has('held_route'), true); assert.equal(reclaims, 0); assert.equal(nativeShutdowns, 0); assert.equal(adapter.closed, false);
+  f.setCleanupReady(true); await adapter.shutdown();
+  assert.equal(f.trial.state.cleanupComplete, true); assert.equal(reclaims, 1); assert.equal(nativeShutdowns, 1); assert.equal(adapter.closed, true);
+  await until(() => f.carrier.sessions[0].exited); assert.equal(root.shutdowns(), 1);
+  assert.equal(f.carrier.sessions.length, 1); assert.equal(root.calls.filter(item => item === 'prepare').length, 1); assert.equal(root.calls.includes('resume'), false);
+});
+
+test('shutdownAll also retains a recoverable endpoint instead of ending the original session', async t => {
+  const f = attachFixture({ stageTimeout: true, cleanupReady: false });
+  t.after(async () => { f.setCleanupReady(true); await f.trial.stop('notion_bound'); await f.trial.disposeShared(); });
+  await f.attach(); const root = f.carrier.sessions[0].root;
+  const progress = [], pending = await f.trial.shutdownAll({ onProgress: value => progress.push(value) });
+  assert.equal(pending.cleanupRetryable, true); assert.equal(pending.cleanupUncertain, true); assert.equal(root.shutdowns(), 0);
+  assert.deepEqual(progress, [{ closed: false, cleanupUncertain: true }]);
+  assert.equal(f.carrier.sessions[0].exited, false); assert.equal(f.trial.mux.snapshot().targets, 1);
+  f.setCleanupReady(true); const final = await f.trial.stop('notion_bound');
+  assert.equal(final.cleanupComplete, true); assert.equal(final.cleanupRetryable, false); assert.equal(root.calls.includes('resume'), false);
+});
+
+test('simultaneous Stop and quit share one cleanup attempt and never reopen an authorizer', async t => {
+  const f = attachFixture({ stageTimeout: true, cleanupReady: false });
+  t.after(async () => { f.setCleanupReady(true); await f.trial.stop('notion_bound'); await f.trial.disposeShared(); });
+  await f.attach(); const root = f.carrier.sessions[0].root;
+  f.setCleanupReady(true);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; }), originalStop = root.controller.stopNotionApplication;
+  root.controller.stopNotionApplication = async (...args) => { await gate; return originalStop(...args); };
+  const retrying = f.trial.stop('notion_bound');
+  await until(() => f.trial.state.phase === 'stopping');
+  f.trial.stop('notion_bound');
+  const adapter = new MacOSPFApplicationRouting({ notionTrial: f.trial, rootSessionAlive: async () => true, native: { shutdown: async () => {} } });
+  const quitting = adapter.shutdown();
+  release(); await Promise.all([retrying, quitting]);
+  assert.equal(root.calls.filter(item => item === 'stop').length, 2, 'one initial failed Stop and exactly one retry');
+  assert.equal(root.calls.filter(item => item === 'prepare').length, 1); assert.equal(root.calls.includes('resume'), false);
+  assert.equal(f.carrier.sessions.length, 1); assert.equal(f.trial.state.cleanupComplete, true); assert.equal(adapter.closed, true);
+});
+
+test('an asynchronous retained-channel failure cannot be recovered by retrying Stop or opening another channel', async t => {
+  for (const variant of ['error', 'close']) await t.test(variant, async subtest => {
+    const f = attachFixture({ stageTimeout: true, cleanupReady: false });
+    subtest.after(async () => { f.setCleanupReady(true); await f.trial.disposeShared(); });
+    await f.attach(); const root = f.carrier.sessions[0].root, target = f.trial.activeTarget;
+    if (variant === 'error') target.emit('error', new Error('private channel fault'));
+    else target.emit('close', null, null);
+    f.setCleanupReady(true);
+    const final = await f.trial.stop('notion_bound');
+    assert.equal(final.cleanupRetryable, false); assert.equal(final.cleanupUncertain, true); assert.equal(final.cleanupComplete, false);
+    assert.equal(final.sessionDiagnostics.uncertaintyLatched, true); assert.equal(f.trial.cleanupEndpoint, null);
+    assert.equal(root.calls.filter(item => item === 'stop').length, 1, 'the poisoned client cannot send another Stop');
+    assert.equal(f.carrier.sessions.length, 1); assert.equal(root.calls.filter(item => item === 'prepare').length, 1); assert.equal(root.calls.includes('resume'), false);
+    assert.equal(JSON.stringify(final).includes('private channel fault'), false);
+  });
 });
 
 test('quitting after a channel was acquired but before any request was sent opens no session', async () => {

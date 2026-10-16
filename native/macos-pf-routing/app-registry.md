@@ -28,8 +28,10 @@ relative internal framework symlink text. They seal directories to `0555` and
 regular files to `0444` plus original execution bits. External, absolute,
 dangling or cyclic links; regular-file hardlinks; setid bits; extended ACLs;
 special nodes; and unknown extended attributes refuse. macOS-generated
-`com.apple.provenance` of at most 256 bytes is permitted outside the content
-manifest and is never removed or rewritten. Other metadata-dependent bundles
+`com.apple.provenance` and `com.apple.macl` (the system's TCC access list, which
+it attaches to a bundle launched directly) of at most 256 bytes each are
+permitted outside the content manifest, are not copied, and are never removed or
+rewritten. Other metadata-dependent bundles
 need an explicitly reviewed preservation policy; refusal is intentional.
 
 Updates require the exact previous current version and the pinned original

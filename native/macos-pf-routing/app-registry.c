@@ -49,13 +49,20 @@ static int acl_value_empty(acl_t acl) {
     acl_free(acl); return result == -1 && error == EINVAL;
 }
 static int acl_empty(int fd) { return acl_value_empty(acl_get_fd_np(fd, ACL_TYPE_EXTENDED)); }
+/* Extended attributes macOS itself maintains, never app content and never
+ * copied: provenance, and the TCC access list (com.apple.macl) the system
+ * attaches to a bundle after it has been launched directly. Each is bounded.
+ * Every other attribute still refuses. */
+static int os_attribute(const char *name) {
+    return !strcmp(name, "com.apple.provenance") || !strcmp(name, "com.apple.macl");
+}
 static int attrs_supported(int fd) {
     char names[4096]; ssize_t size = flistxattr(fd, names, sizeof(names), 0);
     if (size < 0 || size > (ssize_t)sizeof(names)) return 0;
     size_t offset = 0;
     while (offset < (size_t)size) {
         size_t length = strnlen(names + offset, (size_t)size - offset);
-        if (!length || length == (size_t)size - offset || strcmp(names + offset, "com.apple.provenance")) return 0;
+        if (!length || length == (size_t)size - offset || !os_attribute(names + offset)) return 0;
         ssize_t bytes = fgetxattr(fd, names + offset, NULL, 0, 0, 0);
         if (bytes < 0 || bytes > 256) return 0; offset += length + 1;
     }
@@ -354,7 +361,7 @@ static int internal_link(int parent, const char *name, const char *bundle, char 
     size_t offset = 0;
     while (offset < (size_t)attr_size) {
         size_t size = strnlen(attrs + offset, (size_t)attr_size - offset);
-        if (!size || size == (size_t)attr_size - offset || strcmp(attrs + offset, "com.apple.provenance")) return refuse(EACCES);
+        if (!size || size == (size_t)attr_size - offset || !os_attribute(attrs + offset)) return refuse(EACCES);
         ssize_t bytes = getxattr(path, attrs + offset, NULL, 0, 0, XATTR_NOFOLLOW); if (bytes < 0 || bytes > 256) return refuse(EACCES);
         offset += size + 1;
     }
@@ -529,7 +536,15 @@ int envara_app_registry_resolve(struct envara_app_registry *registry, const char
     if (exact_version(object_version)) { error = errno; goto done; }
     snapshot = open_dir(object_version, "Snapshot.app", registry->owner, 0555); if (snapshot < 0) { error = errno; goto done; }
     struct copy_limits limits = {0}; strcpy(limits.bundle, expected);
-    if (validate_tree(snapshot, registry, &limits, 0) || envara_gui_manifest_unchanged(&current.original) ||
+    /* Inside one native operation, a fully inspected witness of this exact
+     * sealed snapshot proved it equal to its registered physical digest (every
+     * entry's identity and bytes), which registration bound to a tree that this
+     * same validation accepted. The identity re-proof below then shows no owner,
+     * mode, ACL, xattr, link or byte change since: each of those stamps a new
+     * status-change time. Repeating the walk adds nothing; the first resolve of
+     * every operation still validates the tree. */
+    int sealed_witnessed = envara_gui_validation_witnessed(&current.snapshot);
+    if ((!sealed_witnessed && validate_tree(snapshot, registry, &limits, 0)) || envara_gui_manifest_unchanged(&current.original) ||
         envara_gui_manifest_unchanged(&current.snapshot) || !content_matches(&current.original, &current.snapshot) ||
         version_inventory(reg, registry, id, &final_highest, &final) || highest != final_highest || memcmp(&current, &final, sizeof(current)) ||
         object_inventory(object_reg, reg, registry, id, highest) || exact_version(object_version) ||
@@ -678,6 +693,32 @@ done:
     if (reg >= 0) close(reg); if (objects >= 0) close(objects); if (records >= 0) close(records);
     flock(registry->fd, LOCK_UN); return error ? refuse(error) : 0;
 }
+/* Unlinks the short root-owned aliases (gui-launch.h) of this environment's
+ * scoped directories before the directories go. Only verified root-owned
+ * symlinks are removed and none is followed; a missing alias is not an error,
+ * and a remaining one names a directory that no longer exists. */
+static void remove_scoped_aliases(int root, const char *environment_id) {
+    int environment = openat(root, environment_id, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (environment < 0) return;
+    struct stat info; int aliases = open(ENVARA_GUI_ALIAS_ROOT, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (aliases < 0 || fstat(aliases, &info) || !S_ISDIR(info.st_mode) || info.st_uid || (info.st_mode & 0022)) {
+        if (aliases >= 0) close(aliases); close(environment); return;
+    }
+    struct names registrations; int removed = 0;
+    if (!list(environment, &registrations, 256)) {
+        for (size_t i = 0; i < registrations.count; i++) {
+            char id[17], name[24];
+            if (!uuid(registrations.items[i]) || envara_gui_scoped_alias_id(environment_id, registrations.items[i], id)) continue;
+            for (const char *suffix = "ut"; *suffix; suffix++) {
+                snprintf(name, sizeof(name), "%s%c", id, *suffix);
+                if (!fstatat(aliases, name, &info, AT_SYMLINK_NOFOLLOW) && S_ISLNK(info.st_mode) && !info.st_uid && !unlinkat(aliases, name, 0)) removed = 1;
+            }
+        }
+        free_names(&registrations);
+    }
+    if (removed) (void)fsync(aliases);
+    close(aliases); close(environment);
+}
 int envara_app_data_delete(const char *fixture_root, const char *fixture_registry_root, int fixture_only, const char *environment_id) {
     if ((fixture_only != 0 && fixture_only != 1) || !uuid(environment_id) ||
         (fixture_only ? getuid() == 0 || geteuid() != getuid() || !fixture_root || !fixture_registry_root :
@@ -693,7 +734,10 @@ int envara_app_data_delete(const char *fixture_root, const char *fixture_registr
     if (fstat(fd, &info) || !S_ISDIR(info.st_mode) || info.st_uid != owner || (info.st_mode & 0022)) error = EACCES;
     else if (fstatat(fd, environment_id, &info, AT_SYMLINK_NOFOLLOW)) error = errno;
     else if (!S_ISDIR(info.st_mode) || info.st_uid != owner) error = EACCES;
-    else if (remove_entry(fd, environment_id, 0, &budget) || fsync(fd)) error = errno;
+    else {
+        if (!fixture_only) remove_scoped_aliases(fd, environment_id);
+        if (remove_entry(fd, environment_id, 0, &budget) || fsync(fd)) error = errno;
+    }
     close(fd); return error ? refuse(error) : 0;
 }
 

@@ -18,6 +18,7 @@ import { PF_INSTALLATION_SCHEMA, PF_MANIFEST_FILES, inspectPFBundledComponent } 
 import { driverArtifacts, NODE_VERSION } from './prepare-playwright-driver.mjs';
 import { PROXY_CORE_VERSION, PROXY_CORE_COMMIT, proxyCoreArtifacts } from './prepare-proxy-core.mjs';
 import { PF_RUNTIME_MODULE_FILES } from './build-macos-pf-routing.mjs';
+import { bundledPFRoutingPaths } from '../electron/macos-pf-resources.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const posix = value => value.split(path.sep).join('/');
@@ -123,6 +124,15 @@ function resourceFilter(patterns = ['**/*']) {
   return relative => !relative || ((!positive.length || positive.some(pattern => minimatch(relative, pattern, { dot: true }))) && !negative.some(pattern => minimatch(relative, pattern, { dot: true })));
 }
 
+export function packagedResourceEntries(build, platform, arch) {
+  const platformKey = { darwin: 'mac', win32: 'win', linux: 'linux' }[platform];
+  assert.ok(platformKey && ['arm64', 'x64', 'ia32'].includes(arch), 'Unsupported resource target');
+  const expand = value => value.replaceAll('${arch}', arch);
+  return [...(build.extraResources ?? []), ...(build[platformKey]?.extraResources ?? [])].map(entry => ({
+    ...entry, from: expand(entry.from), to: expand(entry.to), filter: entry.filter?.map(expand),
+  }));
+}
+
 /** Resource integrity only: never installs, activates, or executes the PF payload. */
 export async function inspectPFRoutingResources({ resourceRoot, arch = process.arch, sourceRoot = projectRoot } = {}) {
   assert.ok(path.isAbsolute(resourceRoot ?? ''), 'PF resource root must be absolute');
@@ -182,7 +192,7 @@ export async function inspectPFRoutingResources({ resourceRoot, arch = process.a
       'installer-upgrade-dbcf.h', 'known-installations/dbcf.manifest.json',
       'installer-upgrade-43b.h', 'known-installations/43b.manifest.json',
       'installer-upgrade-acfc.h', 'known-installations/acfc.manifest.json',
-      'installer-upgrade-c34.h', 'known-installations/c34.manifest.json', 'installer-upgrade-4b9f85.h', 'known-installations/4b9f85.manifest.json', 'installer-upgrade-43392e.h', 'known-installations/43392e.manifest.json', 'installer-upgrade-03245359.h', 'known-installations/03245359.manifest.json', 'installer-upgrade-2059a0.h', 'known-installations/2059a0.manifest.json', 'installer-upgrade-127e83.h', 'known-installations/127e83.manifest.json', 'installer-upgrade-010117.h', 'known-installations/010117.manifest.json', 'installer-upgrade-f0b99f.h', 'known-installations/f0b99f.manifest.json', 'installer-upgrade-f39101.h', 'known-installations/f39101.manifest.json', 'installer-upgrade-a8bd00.h', 'known-installations/a8bd00.manifest.json', 'installer-upgrade-da6e7c.h', 'known-installations/da6e7c.manifest.json', 'pf-hook.c', 'pf-hook.h', 'pf-hook-abi.h', 'pf-run-ledger.c', 'pf-run-ledger.h',
+      'installer-upgrade-c34.h', 'known-installations/c34.manifest.json', 'installer-upgrade-4b9f85.h', 'known-installations/4b9f85.manifest.json', 'installer-upgrade-43392e.h', 'known-installations/43392e.manifest.json', 'installer-upgrade-03245359.h', 'known-installations/03245359.manifest.json', 'installer-upgrade-2059a0.h', 'known-installations/2059a0.manifest.json', 'installer-upgrade-127e83.h', 'known-installations/127e83.manifest.json', 'installer-upgrade-010117.h', 'known-installations/010117.manifest.json', 'installer-upgrade-9b51cf.h', 'known-installations/9b51cf.manifest.json', 'installer-upgrade-91b62a.h', 'known-installations/91b62a.manifest.json', 'installer-upgrade-7c91a1.h', 'known-installations/7c91a1.manifest.json', 'installer-upgrade-af79b1.h', 'known-installations/af79b1.manifest.json', 'installer-upgrade-dceba9.h', 'known-installations/dceba9.manifest.json', 'installer-upgrade-fa70a2.h', 'known-installations/fa70a2.manifest.json', 'installer-upgrade-32811e.h', 'known-installations/32811e.manifest.json', 'installer-upgrade-22a6f3.h', 'known-installations/22a6f3.manifest.json', 'installer-upgrade-f0b99f.h', 'known-installations/f0b99f.manifest.json', 'installer-upgrade-f39101.h', 'known-installations/f39101.manifest.json', 'installer-upgrade-a8bd00.h', 'known-installations/a8bd00.manifest.json', 'installer-upgrade-da6e7c.h', 'known-installations/da6e7c.manifest.json', 'pf-hook.c', 'pf-hook.h', 'pf-hook-abi.h', 'pf-run-ledger.c', 'pf-run-ledger.h',
       'pf-filter-command.c', 'pf-filter-command.h',
       'pf-filter-transaction.c', 'pf-filter-transaction.h',
       'app-command.c', 'app-command.h',
@@ -320,7 +330,7 @@ async function verify(options) {
     report.checks.push('All owned Electron production modules, shared language catalog, macOS local-routing modules, explicitly packaged macOS PF .mjs modules and all generated dist/client files compared by SHA-256; development smoke files excluded');
 
     assert.ok(Array.isArray(sourcePackage.build?.extraResources) && sourcePackage.build.extraResources.length, 'No configured extraResources');
-    for (const configured of sourcePackage.build.extraResources) {
+    for (const configured of packagedResourceEntries(sourcePackage.build, target.platform, target.arch)) {
       assert.ok(configured && typeof configured.from === 'string' && typeof configured.to === 'string', 'extraResources must explicitly name from/to');
       const source = path.resolve(projectRoot, configured.from), destination = path.resolve(target.resources, configured.to);
       assert.ok(within(projectRoot, source) && within(target.resources, destination), 'Resource configuration escapes allowed root');
@@ -362,7 +372,7 @@ async function verify(options) {
     report.checks.push('Every configured extraResources inventory, file SHA-256, permission mode and symlink compared; .swift-build excluded');
     await check('resources/app-routing/macos-pf-manifest', async () => {
       if (target.platform !== 'darwin') return;
-      report.pfResources = await inspectPFRoutingResources({ resourceRoot: path.join(target.resources, 'app-routing/macos-pf'), arch: target.arch });
+      report.pfResources = await inspectPFRoutingResources({ resourceRoot: bundledPFRoutingPaths(target.resources).directory, arch: target.arch });
       report.checks.push('PF fixed-file manifest, native/Node/installer targets, dependency pins, licenses, corresponding source and source-build hashes verified read-only; bundled does not imply installed, authorized or ready');
     });
     /* The app pins one exact trial candidate and derives the carrier it loads
@@ -381,9 +391,12 @@ async function verify(options) {
       const payload = path.join(target.resources, 'local-authorization', expected, 'Contents/Resources/app-routing/macos-pf');
       assert.equal(await sha256File(path.join(payload, 'manifest.json')), manifestSHA256, 'Bundled carrier manifest differs from the pinned candidate');
       assert.equal(await sha256File(path.join(payload, 'EnvaraPFInstall')), authorizerSHA256, 'Bundled carrier installer differs from the pinned candidate');
-      assert.equal(await sha256File(path.join(target.resources, 'app-routing/macos-pf/manifest.json')), manifestSHA256,
-        'The bundled routing component and the pinned trial candidate are different builds');
-      report.checks.push('Pinned trial candidate, the single bundled carrier, its installer and the bundled routing component are one build');
+      assert.equal(bundledPFRoutingPaths(target.resources).directory, payload, 'Production routing must use the pinned carrier payload');
+      assert.equal(await lstat(path.join(target.resources, 'app-routing/macos-pf')).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; }), false,
+        'A redundant second PF payload must not be packaged');
+      assert.equal(await lstat(path.join(target.resources, 'app-routing/win32')).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; }), false,
+        'Windows routing binaries must not be packaged in the Mac app');
+      report.checks.push('Pinned trial candidate, its single complete carrier and production routing share one payload; duplicate PF and foreign Windows resources are absent');
     });
     await check('resources/app-routing/original-macos-dependency', async () => {
       if (target.platform !== 'darwin' || process.platform !== 'darwin') return;
@@ -413,7 +426,7 @@ async function verify(options) {
         report.nativeRouting = { tested: false, ready: null, expectedReady: false, reason: 'Packaged native helper cannot be executed on this host/architecture' }; return;
       }
       const helperPath = target.platform === 'darwin'
-        ? path.join(target.resources, 'app-routing/macos-pf/EnvaraPFHelper')
+        ? bundledPFRoutingPaths(target.resources).helperPath
         : path.join(target.resources, 'app-routing/win32', target.arch, 'EnvaraAppRouting.exe');
       if (target.platform === 'darwin') assert.equal(report.pfResources?.verified, true, 'Refuse to execute an unverified packaged PF helper');
       const adapter = new NativeApplicationRouting({ helperPath, platform: target.platform, timeoutMs: 5000 });
@@ -433,7 +446,7 @@ async function verify(options) {
     if (target.platform === 'darwin' && process.platform === 'darwin' && target.arch === process.arch) {
       await check('resources/app-routing/mac-production-status', async () => {
         assert.equal(report.pfResources?.verified, true, 'Refuse to execute an unverified packaged PF helper');
-        const adapter = new MacOSPFApplicationRouting({ helperPath: path.join(target.resources, 'app-routing/macos-pf/EnvaraPFHelper') });
+        const adapter = new MacOSPFApplicationRouting({ helperPath: bundledPFRoutingPaths(target.resources).helperPath });
         try {
           const raw = await adapter.status();
           report.macProductionRouting = { tested: true, ...raw };

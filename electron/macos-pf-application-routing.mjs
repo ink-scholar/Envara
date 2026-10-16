@@ -143,7 +143,7 @@ async function ownedRootSessionAlive() {
 export class MacOSPFApplicationRouting {
   constructor({ helperPath, installerPath, native, spawn = spawnChild, executeInstaller,
     installationTimeoutMs = 130000, inspectApplication = inspectLocalApplication, notionTrial, notionAuthorizerPath, onNotionTrialEvent, onNotionTrialDiagnostics,
-    rootSessionAlive = ownedRootSessionAlive } = {}) {
+    onApplicationHousekeeping, rootSessionAlive = ownedRootSessionAlive } = {}) {
     if (typeof rootSessionAlive !== 'function') reject('APPLICATION_ROUTING_PROTOCOL_ERROR');
     this.rootSessionAlive = rootSessionAlive;
     if (installerPath != null && (typeof installerPath !== 'string' || !path.isAbsolute(installerPath) ||
@@ -154,11 +154,13 @@ export class MacOSPFApplicationRouting {
     this.nativeInjected = native != null; this.installerPath = installerPath;
     this.executeInstaller = executeInstaller ?? (file => executeInstallation(file, { spawn, timeoutMs: installationTimeoutMs }));
     this.installationPending = false;
-    this.inspectApplication = inspectApplication; this.closed = false; this.routes = new Map();
+    this.inspectApplication = inspectApplication; this.closed = false; this.closing = false; this.routes = new Map();
     this.notionTrial = notionTrial ?? new MacOSPFNotionTrial({ authorizerPath: notionAuthorizerPath, ...(onNotionTrialEvent ? { onEvent: onNotionTrialEvent } : {}),
       ...(onNotionTrialDiagnostics ? { persistDiagnostics: onNotionTrialDiagnostics } : {}) });
+    if (typeof onApplicationHousekeeping === 'function') this.notionTrial.afterHousekeeping = onApplicationHousekeeping;
   }
   assertOpen() { if (this.closed) reject('APPLICATION_ROUTING_CLOSED'); }
+  assertCanStart() { if (this.closed || this.closing) reject('APPLICATION_ROUTING_CLOSED'); }
   async nativeStatus() {
     this.assertOpen();
     try { return await this.native.status(); }
@@ -181,7 +183,9 @@ export class MacOSPFApplicationRouting {
       sessions: pf ? sessions(value.sessions) : [], reason };
   }
   async requireReady() {
+    this.assertCanStart();
     const state = await this.status();
+    this.assertCanStart();
     if (!macOSPFApplicationRoutingReady(state)) reject(state.installed !== true ? 'APPLICATION_ROUTING_UNAVAILABLE' : state.authorized !== true ? 'APPLICATION_ROUTING_AUTHORIZATION_REQUIRED' : 'APPLICATION_ROUTING_NOT_READY');
     return state;
   }
@@ -283,6 +287,7 @@ export class MacOSPFApplicationRouting {
   async prepareRoute(params) {
     await this.requireReady();
     const validated = await this.validate(params);
+    this.assertCanStart();
     let result;
     try { result = await this.native.prepareRoute({ ...validated, backend: MACOS_PF_ROUTING_BACKEND }); }
     catch (error) { throw applicationRoutingError(error); }
@@ -319,6 +324,7 @@ export class MacOSPFApplicationRouting {
       await access(cwd, constants.R_OK | constants.X_OK);
     } catch { reject('APPLICATION_ROUTING_NOT_READY'); }
     const launchArgs = args(params.args ?? []), env = environment(params.env);
+    this.assertCanStart();
     if ((env.TZ != null && env.TZ !== prepared.workspace.timezone) || (env.ENVARA_PROFILE_ID != null && env.ENVARA_PROFILE_ID !== prepared.application.profileId) ||
         (env.ENVARA_ROUTE_ID != null && env.ENVARA_ROUTE_ID !== params.routeId)) reject('APPLICATION_ROUTING_NOT_READY');
     let result;
@@ -350,12 +356,12 @@ export class MacOSPFApplicationRouting {
     this.assertOpen(); return this.notionTrial.stop(applicationId);
   }
   /* What attached applications keep on disk, and its removal. */
-  applicationStorage() { this.assertOpen(); return this.notionTrial.applicationStorage(); }
+  applicationStorage() { this.assertCanStart(); return this.notionTrial.applicationStorage(); }
   reclaimApplicationStorage({ registrationIds, environmentIds } = {}) {
-    this.assertOpen(); return this.notionTrial.reclaimApplicationStorage({ registrationIds, environmentIds });
+    this.assertCanStart(); return this.notionTrial.reclaimApplicationStorage({ registrationIds, environmentIds });
   }
   async controlledNotionTrial({ application, context, activationAuthorized } = {}) {
-    this.assertOpen();
+    this.assertCanStart();
     /* Any locally added application whose bundle this process can inspect and
      * seal may be attached. The request still carries a real bundle path; the
      * renderer never supplies a route, credential or activation intent. */
@@ -364,11 +370,13 @@ export class MacOSPFApplicationRouting {
       reject('PF_NOTION_TRIAL_REQUEST_INVALID');
     // Recheck before using a private route. Main also checks before resolving it.
     const availability = await this.notionTrial.available();
+    this.assertCanStart();
     if (!availability.controlledNotionTrialAvailable) reject(availability.errorCode);
     if (context?.profileId !== application.profileId || context.network?.ok !== true || !isIP(context.network.ip ?? '') || !context.managedRoute)
       reject('PF_NOTION_TRIAL_CONTEXT_REQUIRED');
     const validated = await this.validate({ application, workspace: context,
       route: { ...context.proxyEndpoint, udpPolicy: 'block' }, managedRoute: context.managedRoute });
+    this.assertCanStart();
     return this.notionTrial.run({ applicationId: application.id, activationAuthorized: true, request: {
       application: { id: application.id, profileId: application.profileId, executablePath: validated.application.executablePath },
       workspace: { cwd: validated.workspace.cwd, timezone: validated.workspace.timezone, locale: validated.workspace.locale,
@@ -384,12 +392,27 @@ export class MacOSPFApplicationRouting {
     try { const result = await this.native.revoke({ routeId: params.routeId }); if (result?.revoked === true) this.routes.delete(params.routeId); return { revoked: result?.revoked === true }; }
     catch (error) { throw applicationRoutingError(error); }
   }
+  /* Requests the running application's stop without waiting for it. */
+  beginShutdown() {
+    this.closing = true;
+    if (!this.closed && this.notionTrial.pending) this.notionTrial.stop(this.notionTrial.state.applicationId);
+  }
   async shutdown() {
     this.assertOpen();
+    this.closing = true;
     if (this.notionTrial.pending) {
       this.notionTrial.stop(this.notionTrial.state.applicationId);
       await this.notionTrial.pending;
     }
+    // A bounded wait for a late stage outcome may leave the original keeper
+    // available solely for cleanup. Retry that exact endpoint before closing
+    // the shared session; EOF would otherwise discard a recoverable channel.
+    if (this.notionTrial.state?.cleanupRetryable === true) {
+      await this.notionTrial.stop(this.notionTrial.state.applicationId);
+      if (this.notionTrial.pending) await this.notionTrial.pending;
+      if (this.notionTrial.state?.cleanupRetryable === true) reject('APPLICATION_ROUTING_CLEANUP_UNCONFIRMED');
+    }
+    try { await this.notionTrial.housekeeping; } catch { /* housekeeping reports its own outcome */ }
     /* Quitting Envara ends every attached application and the one shared
      * authorized root session the launch opened. The session is closed here so
      * the root controller cleans up and exits; no privileged daemon is left

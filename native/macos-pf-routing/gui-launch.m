@@ -83,11 +83,19 @@ static int file_hash(const char *path, char out[65]) {
     CC_SHA256_Final(digest, &context); hex(digest, sizeof(digest), out); return 0;
 }
 static int fts_order(const FTSENT **a, const FTSENT **b) { return strcmp((*a)->fts_name, (*b)->fts_name); }
-static int tree_hash(const char *bundle, int fixture, char out[65], char content_out[65]) {
+/* One walk serves the full content inspection and the later identity re-proof,
+ * so both share their order, entry policy and bound fields. With content, the
+ * physical and content digests hash every regular file's bytes as before. The
+ * identity digest binds each entry's relative path, device, inode, size,
+ * modification and status-change times, owner, group, mode, link count and
+ * symlink target, and reads no file bytes. Any non-root write, truncate, chmod,
+ * chown, ACL, xattr, link or rename changes at least one bound field: the
+ * kernel stamps the status-change time and user space cannot set it back. */
+static int tree_walk(const char *bundle, int fixture, int content, char out[65], char content_out[65], char identity_out[65]) {
     char *roots[] = {(char *)bundle, NULL};
     FTS *tree = fts_open(roots, FTS_PHYSICAL | FTS_NOCHDIR, fts_order);
     if (!tree) return -1;
-    CC_SHA256_CTX context, contents; CC_SHA256_Init(&context); CC_SHA256_Init(&contents);
+    CC_SHA256_CTX context, contents, identities; CC_SHA256_Init(&context); CC_SHA256_Init(&contents); CC_SHA256_Init(&identities);
     FTSENT *entry; size_t count = 0; int error = 0;
     errno = 0;
     while ((entry = fts_read(tree))) {
@@ -102,6 +110,7 @@ static int tree_hash(const char *bundle, int fixture, char out[65], char content
         uint64_t length = strlen(relative);
         hash_bytes(&context, &length, sizeof(length)); hash_bytes(&context, relative, (size_t)length);
         hash_bytes(&contents, &length, sizeof(length)); hash_bytes(&contents, relative, (size_t)length);
+        hash_bytes(&identities, &length, sizeof(length)); hash_bytes(&identities, relative, (size_t)length);
         uint64_t content_mode = info->st_mode & (S_IFMT | 0111);
         hash_bytes(&contents, &content_mode, sizeof(content_mode));
         struct envara_gui_file_identity record = identity(info);
@@ -109,8 +118,10 @@ static int tree_hash(const char *bundle, int fixture, char out[65], char content
         uint64_t values[] = {record.device, record.inode, record.size, (uint64_t)record.modified_seconds,
             (uint64_t)record.modified_nanoseconds, (uint64_t)record.changed_seconds,
             (uint64_t)record.changed_nanoseconds, record.owner, record.group, record.mode};
+        uint64_t links = (uint64_t)info->st_nlink;
         hash_bytes(&context, values, sizeof(values));
-        if (S_ISREG(info->st_mode)) {
+        hash_bytes(&identities, values, sizeof(values)); hash_bytes(&identities, &links, sizeof(links));
+        if (S_ISREG(info->st_mode) && content) {
             char digest[65]; struct stat now;
             if (file_hash(entry->fts_path, digest) || lstat(entry->fts_path, &now)) { error = errno; break; }
             struct envara_gui_file_identity actual = identity(&now);
@@ -125,16 +136,20 @@ static int tree_hash(const char *bundle, int fixture, char out[65], char content
             target[length] = 0;
             hash_bytes(&context, target, (size_t)length + 1);
             hash_bytes(&contents, target, (size_t)length + 1);
+            hash_bytes(&identities, target, (size_t)length + 1);
         }
         errno = 0;
     }
     if (!error && errno) error = errno;
     if (fts_close(tree) && !error) error = errno;
     if (error) return denied(error);
-    unsigned char digest[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(digest, &context);
-    hex(digest, sizeof(digest), out);
-    CC_SHA256_Final(digest, &contents); hex(digest, sizeof(digest), content_out); return 0;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(digest, &context); if (out) hex(digest, sizeof(digest), out);
+    CC_SHA256_Final(digest, &contents); if (content_out) hex(digest, sizeof(digest), content_out);
+    CC_SHA256_Final(digest, &identities); if (identity_out) hex(digest, sizeof(digest), identity_out);
+    return 0;
 }
+static _Thread_local struct envara_gui_validation_counts validation_counts;
 static int copy_string(NSString *value, char *out, size_t capacity) {
     if (![value isKindOfClass:[NSString class]] || ![value length] ||
         ![value getCString:out maxLength:capacity encoding:NSUTF8StringEncoding] || !bounded(out, capacity) ||
@@ -176,9 +191,13 @@ static int manifest_valid(const struct envara_gui_manifest *manifest) {
         !bounded(manifest->requirement, sizeof(manifest->requirement)))) return 0;
     return 1;
 }
-int envara_gui_manifest_inspect(const char *bundle, int fixture, struct envara_gui_manifest *out) {
+/* Full signed inspection. The identity digest is taken from the second walk,
+ * whose physical digest (every entry's identity plus content hash) equals the
+ * first, so it names exactly the state whose bytes and signature were proven. */
+static int manifest_inspect_bound(const char *bundle, int fixture, struct envara_gui_manifest *out, char identity_out[65]) {
     @autoreleasepool {
-        char canonical[PATH_MAX], plist[PATH_MAX], executable[PATH_MAX], second_digest[65], second_content[65]; struct stat b, e;
+        char canonical[PATH_MAX], plist[PATH_MAX], executable[PATH_MAX], second_digest[65], second_content[65];
+        char first_identity[65], second_identity[65]; struct stat b, e;
         if (!out || (fixture != 0 && fixture != 1) || !bounded(bundle, PATH_MAX) || bundle[0] != '/' ||
             !realpath(bundle, canonical) || strcmp(bundle, canonical) || strlen(bundle) < 5 ||
             strcmp(bundle + strlen(bundle) - 4, ".app") || lstat(bundle, &b) || !S_ISDIR(b.st_mode) ||
@@ -216,30 +235,161 @@ int envara_gui_manifest_inspect(const char *bundle, int fixture, struct envara_g
         result.schema = ENVARA_GUI_SCHEMA; result.fixture_only = fixture;
         strcpy(result.bundle, bundle); strcpy(result.executable, executable);
         result.bundle_identity = identity(&b); result.executable_identity = identity(&e);
-        if (tree_hash(bundle, fixture, result.bundle_digest, result.content_digest) || file_hash(executable, result.executable_digest) ||
-            (!fixture && sign_info(bundle, &result)) || tree_hash(bundle, fixture, second_digest, second_content) ||
-            strcmp(second_digest, result.bundle_digest) || strcmp(second_content, result.content_digest)) return denied(errno ? errno : ESTALE);
+        if (tree_walk(bundle, fixture, 1, result.bundle_digest, result.content_digest, first_identity) || file_hash(executable, result.executable_digest) ||
+            (!fixture && sign_info(bundle, &result)) || tree_walk(bundle, fixture, 1, second_digest, second_content, second_identity) ||
+            strcmp(second_digest, result.bundle_digest) || strcmp(second_content, result.content_digest) ||
+            strcmp(first_identity, second_identity)) return denied(errno ? errno : ESTALE);
         struct stat after_b, after_e, after_plist;
         if (lstat(bundle, &after_b) || lstat(executable, &after_e) || lstat(plist, &after_plist)) return -1;
         struct envara_gui_file_identity actual_b = identity(&after_b), actual_e = identity(&after_e);
         struct envara_gui_file_identity actual_plist = identity(&after_plist);
         if (!identical(&result.bundle_identity, &actual_b) || !identical(&result.executable_identity, &actual_e) ||
             !identical(&plist_identity, &actual_plist)) return denied(ESTALE);
-        *out = result; return 0;
+        *out = result; if (identity_out) strcpy(identity_out, second_identity);
+        validation_counts.full_inspections++; return 0;
     }
 }
+int envara_gui_manifest_inspect(const char *bundle, int fixture, struct envara_gui_manifest *out) {
+    return manifest_inspect_bound(bundle, fixture, out, NULL);
+}
+static _Thread_local struct {
+    uint64_t generation;
+    unsigned depth, count;
+    pid_t owner;
+    struct { struct envara_gui_manifest manifest; char identity[65]; } verified[8];
+} validation_scope;
+uint64_t envara_gui_validation_scope_begin(void) {
+    if(validation_scope.owner!=getpid()) {memset(&validation_scope,0,sizeof(validation_scope));validation_scope.owner=getpid();}
+    if(validation_scope.depth>=32) { errno=EOVERFLOW;return 0; }
+    if(!validation_scope.depth) {
+        if(!++validation_scope.generation) validation_scope.generation=1;
+        validation_scope.count=0;
+    }
+    validation_scope.depth++;return validation_scope.generation;
+}
+void envara_gui_validation_scope_end(void) {
+    if(validation_scope.owner!=getpid()) {memset(&validation_scope,0,sizeof(validation_scope));return;}
+    if(validation_scope.depth && !--validation_scope.depth) {
+        validation_scope.count=0;memset(validation_scope.verified,0,sizeof(validation_scope.verified));
+    }
+}
+uint64_t envara_gui_validation_scope_current(void) { return validation_scope.owner==getpid() && validation_scope.depth?validation_scope.generation:0; }
+static int witness_index(const struct envara_gui_manifest *expected) {
+    if(!envara_gui_validation_scope_current()) return -1;
+    for(unsigned i=0;i<validation_scope.count;i++)
+        if(!memcmp(expected,&validation_scope.verified[i].manifest,sizeof(*expected))) return (int)i;
+    return -1;
+}
+int envara_gui_validation_witnessed(const struct envara_gui_manifest *expected) {
+    return manifest_valid(expected) && witness_index(expected) >= 0;
+}
+void envara_gui_validation_counts(struct envara_gui_validation_counts *out) {
+    if(out) *out=validation_counts;
+}
+/* A later boundary in the same native operation re-proves, without reading
+ * bytes, that every entry still has the exact identity of the state the first
+ * boundary fully hashed and signature-checked: the same walk with the same
+ * policy, compared with that state's identity digest. Never an mtime-only or
+ * time-based shortcut, and never carried across operations, threads or PIDs. */
+static int manifest_identity_current(const struct envara_gui_manifest *expected, const char witness[65]) {
+    char canonical[PATH_MAX],current[65];struct stat bundle,program;
+    if(!realpath(expected->bundle,canonical) || strcmp(canonical,expected->bundle) ||
+        !realpath(expected->executable,canonical) || strcmp(canonical,expected->executable) ||
+        lstat(expected->bundle,&bundle) || lstat(expected->executable,&program)) return denied(ESTALE);
+    struct envara_gui_file_identity b=identity(&bundle),p=identity(&program);
+    if(!identical(&b,&expected->bundle_identity) || !identical(&p,&expected->executable_identity) ||
+        tree_walk(expected->bundle,expected->fixture_only,0,NULL,NULL,current) || strcmp(current,witness) ||
+        lstat(expected->bundle,&bundle) || lstat(expected->executable,&program)) return denied(ESTALE);
+    b=identity(&bundle);p=identity(&program);
+    if(!identical(&b,&expected->bundle_identity) || !identical(&p,&expected->executable_identity)) return denied(ESTALE);
+    validation_counts.identity_checks++; return 0;
+}
 int envara_gui_manifest_unchanged(const struct envara_gui_manifest *expected) {
-    struct envara_gui_manifest now;
+    struct envara_gui_manifest now; char current[65];
     if (!manifest_valid(expected)) return denied(EINVAL);
-    if (
-        envara_gui_manifest_inspect(expected->bundle, expected->fixture_only, &now)) return -1;
+    int witnessed = witness_index(expected);
+    if (witnessed >= 0) return manifest_identity_current(expected, validation_scope.verified[witnessed].identity);
+    if (manifest_inspect_bound(expected->bundle, expected->fixture_only, &now, current)) return -1;
     if (strcmp(expected->executable, now.executable) || strcmp(expected->identifier, now.identifier) ||
         strcmp(expected->bundle_digest, now.bundle_digest) || strcmp(expected->executable_digest, now.executable_digest) ||
         strcmp(expected->content_digest, now.content_digest) ||
         strcmp(expected->cdhash, now.cdhash) || strcmp(expected->requirement, now.requirement) ||
         !identical(&expected->bundle_identity, &now.bundle_identity) ||
         !identical(&expected->executable_identity, &now.executable_identity)) return denied(ESTALE);
+    if(envara_gui_validation_scope_current() && validation_scope.count<8) {
+        unsigned at=validation_scope.count++;validation_scope.verified[at].manifest=*expected;strcpy(validation_scope.verified[at].identity,current);
+    }
     return 0;
+}
+static struct {
+    int fd, active; pid_t owner; unsigned emitted; uint64_t started, previous;
+    struct envara_gui_validation_counts counts; char schema[48], run[37], environment[37];
+} steps = {.fd = -1};
+static uint64_t step_clock(void) {
+    struct timespec t; if (clock_gettime(CLOCK_MONOTONIC, &t)) return 0;
+    return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000;
+}
+const char *envara_gui_step_name(enum envara_gui_step step) {
+    static const char *const names[ENVARA_GUI_STEP_COUNT] = {"front-commit", "front-admission", "ticket-prepare",
+        "relay-fork", "ticket-claim", "stage-fresh", "data-prepare", "stage-plan", "stage-recheck",
+        "stage-spawn", "stage-stopped", "stage-adopt", "resume-verify"};
+    return step >= 0 && step < ENVARA_GUI_STEP_COUNT ? names[step] : NULL;
+}
+int envara_gui_steps_begin(int fd, const char *schema, const char *run_id, const char *environment_id) {
+    memset(&steps, 0, sizeof(steps)); steps.fd = -1;
+    uint64_t now = step_clock();
+    if (fd < 0 || !now || !bounded(schema, sizeof(steps.schema)) || !uuid(run_id) || !uuid(environment_id)) return denied(EINVAL);
+    for (const char *c = schema; *c; c++) if (!strchr("abcdefghijklmnopqrstuvwxyz0123456789.-/", *c)) return denied(EINVAL);
+    steps.fd = fd; steps.owner = getpid(); steps.started = steps.previous = now; steps.active = 1;
+    strcpy(steps.schema, schema); strcpy(steps.run, run_id); strcpy(steps.environment, environment_id);
+    envara_gui_validation_counts(&steps.counts); return 0;
+}
+void envara_gui_steps_end(void) { memset(&steps, 0, sizeof(steps)); steps.fd = -1; }
+void envara_gui_step(enum envara_gui_step step) {
+    const char *name = envara_gui_step_name(step);
+    if (!steps.active || steps.owner != getpid() || !name || steps.emitted >= ENVARA_GUI_STEP_FRAME_LIMIT) return;
+    int saved = errno; uint64_t now = step_clock();
+    if (!now || now < steps.previous) { errno = saved; return; }
+    struct envara_gui_validation_counts counts; envara_gui_validation_counts(&counts);
+    const uint64_t cap = 86400000;
+    uint64_t step_ms = now - steps.previous, total_ms = now - steps.started;
+    char frame[512]; int length = snprintf(frame, sizeof(frame),
+        "{\"schema\":\"%s\",\"event\":\"stage-progress\",\"runId\":\"%s\",\"environmentId\":\"%s\","
+        "\"step\":\"%s\",\"stepMs\":%llu,\"totalMs\":%llu,\"fullChecks\":%u,\"identityChecks\":%u,"
+        "\"ready\":false,\"protected\":false}\n",
+        steps.schema, steps.run, steps.environment, name,
+        (unsigned long long)(step_ms > cap ? cap : step_ms), (unsigned long long)(total_ms > cap ? cap : total_ms),
+        (unsigned)((counts.full_inspections - steps.counts.full_inspections) & 0xffff),
+        (unsigned)((counts.identity_checks - steps.counts.identity_checks) & 0xffff));
+    steps.previous = now; steps.counts = counts;
+    /* Writable now means the peer can take at least its low-water mark, more
+     * than this frame, so the write is whole. A short write is completed within
+     * a small bound so the line framing is never left broken. */
+    struct pollfd ready = {steps.fd, POLLOUT, 0};
+    if (length <= 0 || length >= (int)sizeof(frame) || poll(&ready, 1, 0) != 1 ||
+        (ready.revents & (POLLERR | POLLHUP | POLLNVAL)) || !(ready.revents & POLLOUT)) { errno = saved; return; }
+    int flags = fcntl(steps.fd, F_GETFL);
+    if (flags < 0 || (!(flags & O_NONBLOCK) && fcntl(steps.fd, F_SETFL, flags | O_NONBLOCK))) { errno = saved; return; }
+    size_t done = 0; uint64_t deadline = now + 1000;
+    while (done < (size_t)length) {
+        ssize_t count = write(steps.fd, frame + done, (size_t)length - done);
+        if (count > 0) { done += (size_t)count; continue; }
+        if (count < 0 && errno == EINTR) continue;
+        if (!done || count == 0 || errno != EAGAIN) break;
+        uint64_t current = step_clock(); if (!current || current >= deadline) break;
+        struct pollfd more = {steps.fd, POLLOUT, 0}; (void)poll(&more, 1, (int)(deadline - current));
+    }
+    if (!(flags & O_NONBLOCK)) (void)fcntl(steps.fd, F_SETFL, flags);
+    if (done == (size_t)length) steps.emitted++;
+    errno = saved;
+}
+int envara_gui_scoped_alias_id(const char *environment_id, const char *registration_id, char out[17]) {
+    if (!out || !uuid(environment_id) || !uuid(registration_id)) return denied(EINVAL);
+    CC_SHA256_CTX context; CC_SHA256_Init(&context); unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    static const char label[] = "envara.pf-s/v1\n";
+    hash_bytes(&context, label, sizeof(label) - 1); hash_bytes(&context, environment_id, 36); hash_bytes(&context, "\n", 1);
+    hash_bytes(&context, registration_id, 36); hash_bytes(&context, "\n", 1); CC_SHA256_Final(digest, &context);
+    hex(digest, 8, out); return 0;
 }
 static int locale_valid(const char *value) {
     if (!bounded(value, 64)) return 0;

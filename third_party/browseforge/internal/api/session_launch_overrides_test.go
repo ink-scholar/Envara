@@ -119,6 +119,28 @@ func TestSessionLaunchWithoutOverridesKeepsLegacyBehavior(t *testing.T) {
 	}
 }
 
+func TestSessionNonPersonaOverridesKeepAutomaticLaunchFieldsUnset(t *testing.T) {
+	for _, raw := range []string{`{"privacy":{"mode":"strict"}}`, `{"geolocation":{"latitude":14.6,"longitude":121,"accuracy":50000}}`} {
+		t.Run(raw, func(t *testing.T) {
+			overrides, err := decodeSessionLaunchOverrides(json.RawMessage(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored := &profile.Profile{FingerprintSeed: 425179}
+			launch, err := profileForSessionLaunch(stored, overrides)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if launch.LaunchOverrides != nil || stored.LaunchOverrides != nil || launch.FingerprintSeed != stored.FingerprintSeed {
+				t.Fatal("non-persona override changed automatic launch fields or seed")
+			}
+			if stored.SessionPrivacy != nil || stored.SessionGeolocation != nil {
+				t.Fatal("runtime override changed the stored profile")
+			}
+		})
+	}
+}
+
 func TestSessionManagedProxyIsEphemeralAndPreservesStoredProxyAndPersona(t *testing.T) {
 	for _, timezone := range []string{"", "Asia/Singapore"} {
 		t.Run("timezone="+timezone, func(t *testing.T) {

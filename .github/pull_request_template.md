@@ -14,5 +14,5 @@ List the checks, platform and source/packaged path; distinguish fixtures from na
 - [ ] 不包含密码、订阅链接、Cookie、API keys 或个人浏览资料。 / No credentials or personal browser data.
 - [ ] 保留相关第三方源码、归属与许可。 / Relevant third-party source, attribution and licenses are preserved.
 
-macOS 实现与实机验收完成后可上传 GitHub；自动发行保持禁用。合入源码不代表安装包发布或平台接管已完成验收。
-GitHub upload is authorized after macOS implementation and native acceptance are complete; automatic releases remain disabled. A source change does not establish package release or platform-routing readiness.
+发布按维护者显式请求和手动验证流程进行；自动编译与发行保持禁用。源码改动不代表所有平台路由已完成验收。
+Publication follows an explicit maintainer request and manual verification. Automatic builds and releases remain disabled; a source change does not establish platform-routing acceptance.

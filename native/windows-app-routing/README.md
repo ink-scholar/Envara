@@ -4,7 +4,7 @@ The default Windows capture source uses the unmodified, officially signed **WinD
 
 ## Current acceptance boundary
 
-**Application routing is not ready for arbitrary software.** `ready`, `dns`, `failClosed` and `verification.passed` remain false. `prepareRoute` and `launch` refuse to run. There is no command, RPC, environment variable or editable acceptance file that overrides this gate. Status/setup inspect protected files and hashes; they do not load a DLL, install a service or open a driver. Cross-compilation on this Mac is source/build evidence only.
+**Application routing is not ready for arbitrary software.** `ready`, `dns`, `failClosed` and `verification.passed` remain false. `prepareRoute` and `launch` refuse to run. There is no command, RPC, environment variable or editable acceptance file that overrides this gate. Status/setup inspect protected files and hashes; they do not load a DLL, install a service or open a driver. Cross-compilation is source/build evidence only.
 
 ## Implemented source
 
@@ -22,7 +22,7 @@ The default Windows capture source uses the unmodified, officially signed **WinD
 1. Attribute and intercept arbitrary Win32 `DnsQuery`/`getaddrinfo` calls sent through the shared DNS Client service, without routing unrelated `svchost.exe` traffic. A packet PID, ETW event or controller's own `DnsSetApplicationSettings` call cannot by itself do this. Per-route DoH is not the missing resolver adapter.
 2. Preserve blocking if the whole guard process or driver fails. The stock WinDivert driver removes its filters on handle cleanup and may reinject pending original packets. Job kill-on-close and worker cancellation do not prove there is no direct-connection window. A persistent protection or stronger OS isolation boundary is required.
 3. Native Windows acceptance for PID/socket reuse, actual child processes, IPv4/IPv6 TCP, UDP/DNS blocking, both environments concurrently, unchanged unrelated applications, resource exhaustion, abrupt guard/core failures, Windows firewall/VPN coexistence and cleanup. Windows x64 is the first capture target. ARM64 has only a helper cross-build, because this pinned release has no ARM64 driver.
-4. Privileged per-machine installation with protected ACLs, user consent, service lifecycle and native Authenticode/Secure Boot/HVCI verification. No component was installed or activated on this Mac. A controller must not silently reuse a user's existing WinDivert/mitmproxy installation.
+4. Privileged per-machine installation with protected ACLs, user consent, service lifecycle and native Authenticode/Secure Boot/HVCI verification. Native Windows acceptance remains unverified. A controller must not silently reuse a user's existing WinDivert/mitmproxy installation.
 
 A [candidate PowerShell component installer](installer/README.md) now implements read-only Validate/Plan, explicit protected per-machine installation, manual SCM registration and service-only uninstall with files retained. Its grammar/schema have been checked on macOS; UAC, ACLs, driver trust and SCM operations still require Windows testing. It never activates capture or changes the launch gate. Build output includes the exact `install-manifest.json` and prints its review digest.
 

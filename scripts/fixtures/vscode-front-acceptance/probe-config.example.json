@@ -1,0 +1,6 @@
+{
+  "runId": "replace-with-fresh-run-id",
+  "frontPort": 0,
+  "expectedEgressIp": "",
+  "deniedLoopbackPort": 0
+}

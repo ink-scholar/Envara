@@ -149,6 +149,7 @@ func sanitizeExtraChromiumArgs(args []string) []string {
 		return nil
 	}
 	blockedPrefixes := []string{
+		"--user-agent",
 		"--user-data-dir",
 		"--remote-debugging-pipe",
 		"--remote-debugging-port",
@@ -166,6 +167,8 @@ func sanitizeExtraChromiumArgs(args []string) []string {
 		"--fingerprint-webrtc-ip",
 		"--fingerprint-accept-language",
 		"--fingerprint-user-agent",
+		"--fingerprint-brand-version",
+		"--fingerprint-platform-version",
 		"--fingerprint-ua-full-version",
 		"--fingerprint-ua-platform",
 		"--fingerprint-ua-platform-version",

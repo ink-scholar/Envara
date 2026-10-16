@@ -66,6 +66,16 @@ test('active terminal configuration is protected while unrelated proxies remain 
   assert.equal(mutations, 2);
 });
 
+test('bulk deletion removes terminal data only for successful ids in real sidecar and legacy replies', async () => {
+  for (const wrapped of [true, false]) {
+    const f = fixture();
+    const results = [{ id: 'prof_a', ok: true }, { id: 'prof_failed', ok: false }];
+    const reply = wrapped ? { profiles: [], actionResult: { results } } : { results };
+    assert.equal(await f.controller.protectMutation('bulkProfiles', { action: 'delete', ids: ['prof_a', 'prof_failed'] }, async () => reply), reply);
+    assert.deepEqual(f.calls, [['removeOwnedConfiguration', 'prof_a']]);
+  }
+});
+
 test('proxy edit cannot race past a terminal launch using the old proxy configuration', async () => {
   const { controller, terminal, state } = fixture();
   state.profiles[0].cwd = '/selected/workspace';

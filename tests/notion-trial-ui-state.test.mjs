@@ -40,6 +40,19 @@ test('trial log projection rejects another binding and never renders raw message
   assert.equal(JSON.stringify(trial).includes('/private'), false);
 });
 
+test('a live cleanup-only endpoint permits Stop without reopening launch or replaying history authority', () => {
+  const trial = { applicationId: application.id, active: false, phase: 'cleanup-required', cleanupUncertain: true, cleanupRetryable: true };
+  const controls = notionTrialControls({ ...application, notionTrial: trial }, routing, true);
+  assert.equal(controls.canRun, false);
+  assert.equal(controls.canStop, true);
+  assert.equal(attachedApplicationStatus(controls), 'error');
+  for (const change of [{ cleanupRetryable: 'true' }, { cleanupRetryable: false }, { cleanupUncertain: false }, { phase: 'failed' }]) {
+    assert.equal(notionTrialControls({ ...application, notionTrial: { ...trial, ...change } }, routing, true).canStop, false);
+  }
+  assert.equal(notionTrialControls({ ...application, notionTrial: trial }, routing, true, { 'stopNotionTrial:bound-notion': true }).canStop, false);
+  assert.equal(notionTrialControls({ ...application, notionTrialHistory: trial }, routing, true).canStop, false);
+});
+
 test('a refused PF baseline explains the restart and VPN causes without changing trial controls', () => {
   const hint = notionTrialErrorHint('PF_OWNED_RUNTIME_NOT_EMPTY');
   assert.match(hint, /重启电脑/); assert.match(hint, /VPN/);

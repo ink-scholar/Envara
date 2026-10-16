@@ -31,3 +31,13 @@ test('ALPN text becomes an ordered list and rejects values outside the runtime l
     assert.match(proxyFormError({ ...form, alpn }), /^ALPN 最多 8 项/);
   }
 });
+
+test('editing or renaming AnyTLS keeps every supported saved TLS client fingerprint', () => {
+  for (const clientFingerprint of ['chrome', 'firefox', 'safari', 'ios', 'android', 'edge', 'random', 'randomized']) {
+    const form = initialProxyForm({ id: 'saved', name: 'Original', protocol: 'anytls', host: 'node.example.test', port: 443, password: 'fixture-only', clientFingerprint });
+    const result = proxyConfig({ ...form, name: 'Renamed' });
+    assert.equal(result.name, 'Renamed');
+    assert.equal(result.clientFingerprint, clientFingerprint);
+    assert.equal(proxyFormError(form), '');
+  }
+});

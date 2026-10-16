@@ -245,18 +245,16 @@ static NSData *serialize_hook(NSDictionary *hook) {
     /* The exact native scalar lease parser intentionally refuses JSON escapes. */
     return [NSJSONSerialization dataWithJSONObject:hook options:NSJSONWritingWithoutEscapingSlashes error:NULL];
 }
-/* Records the fixed profile from the registered snapshot and refuses anything
- * that is neither the exact supported Notion front target nor a sealed
- * registered snapshot. Notion keeps its own supported-version and signature
- * inspection; every other app must be a sealed registered snapshot, so a caller
- * cannot substitute an arbitrary path, an unsigned bundle or a modified copy.
- * The probe result selects the profile only; it is never a readiness or
- * protection claim. */
+/* Production applications require a verified engine adapter, re-derived from
+ * the signed sealed snapshot. A valid signature alone does not establish
+ * isolated storage or proxy/DNS support, so an unknown application must not
+ * fall back to the unfenced cold-launch primitive. That primitive remains for
+ * owned native fixtures and future separately verified adapters. */
 static int application_prepared(struct envara_app_native_factory *f) {
     if(envara_gui_request_validate(&f->app.snapshot,&f->request,0))return 0;
     if(envara_notion_supported(&f->app.snapshot)==0){f->notion_front=1;return 1;}
     f->notion_front=0;
-    return envara_gui_sealed_snapshot_validate(&f->app.snapshot)?0:1;
+    return 0;
 }
 static int load_bound(struct envara_app_native_factory *f,const char *run,const char *env) {
     if(getuid()||geteuid()||!uuid(run)||!uuid(env))return refuse(EACCES);
@@ -588,7 +586,7 @@ static int exact_staged_child(struct envara_app_native_factory *f,const struct e
         (uint64_t)p.kp_proc.p_starttime.tv_sec!=child->identity.birth_seconds||(uint64_t)p.kp_proc.p_starttime.tv_usec!=child->identity.birth_microseconds||
         p.kp_eproc.e_ucred.cr_ngroups!=1||p.kp_eproc.e_ucred.cr_groups[0]!=f->plan.realm_gid||!envara_same_process(&child->identity))return 0;return 1;
 }
-static int verify_resume(const struct envara_child *child,void *opaque) {
+static int verify_resume_in_scope(const struct envara_child *child,void *opaque) {
     struct envara_app_native_factory *f=opaque;@autoreleasepool {
         struct envara_gui_session graphics;char path[PROC_PIDPATHINFO_MAXSIZE];struct envara_notion_context c={.front_port=f->config.tcp_front_port};struct envara_notion_plan plan;strcpy(c.registration_id,f->plan.registration_id);
         if(!exact_staged_child(f,child,1)||!verify_mode(f,live_mode(f),1)||!registered_app(f)||
@@ -602,6 +600,11 @@ static int verify_resume(const struct envara_child *child,void *opaque) {
         if(f->notion_front&&envara_notion_plan(&f->app,&f->request,&c,&plan))return 0;
         return exact_staged_child(f,child,1);
     }
+}
+static int verify_resume(const struct envara_child *child,void *opaque) {
+    if(!envara_gui_validation_scope_begin()) return 0;
+    int result=verify_resume_in_scope(child,opaque),error=errno;
+    envara_gui_validation_scope_end();if(result==1)envara_gui_step(ENVARA_GUI_STEP_RESUME_VERIFY);errno=error;return result;
 }
 static int running_signature(pid_t pid,const struct envara_gui_manifest *manifest) {
     SecCodeRef code=NULL;CFDictionaryRef info=NULL;SecRequirementRef requirement=NULL;int ok=0;
@@ -686,12 +689,13 @@ static const char *notion_suboperation_reason(const char *fallback) {
         default: return fallback;
     }
 }
-static int notion_stage(const struct envara_app_registration *app,const struct envara_gui_request *request,const struct envara_gui_stage_authority *authority,struct envara_gui_lifecycle *out,void *opaque) {
+static int notion_stage_in_scope(const struct envara_app_registration *app,const struct envara_gui_request *request,const struct envara_gui_stage_authority *authority,struct envara_gui_lifecycle *out,void *opaque) {
     struct envara_app_native_factory *f=opaque;struct envara_notion_context c={.front_port=f->config.tcp_front_port};strcpy(c.registration_id,f->plan.registration_id);
     /* Each instrumented call resets the latch so a refusal is never attributed
      * to a sub-operation observed during a previous, separate invocation. */
     envara_notion_suboperation_begin();
     if(envara_notion_data_prepare(app,request,&c,authority)){int error=errno;return operation_refuse(notion_suboperation_reason("NATIVE_NOTION_DATA_PREPARE_REFUSED"),error);}
+    envara_gui_step(ENVARA_GUI_STEP_DATA_PREPARE);
     int result=envara_notion_stage(app,request,&c,authority,out),error=errno;
     if(out&&out->child.identity.pid>1){f->stage_child=out->child;f->staged=1;}
     /* A refused stage keeps its own first attribution. A failure with an owned
@@ -699,6 +703,11 @@ static int notion_stage(const struct envara_app_registration *app,const struct e
      * pre-fork refusal, because that child still needs exact cleanup. */
     if(result)return operation_refuse(notion_suboperation_reason(out&&out->child.identity.pid>1?"NATIVE_NOTION_STAGE_CHILD_REFUSED":"NATIVE_NOTION_STAGE_REFUSED"),error);
     return 0;
+}
+static int notion_stage(const struct envara_app_registration *app,const struct envara_gui_request *request,const struct envara_gui_stage_authority *authority,struct envara_gui_lifecycle *out,void *opaque) {
+    if(!envara_gui_validation_scope_begin()) return operation_refuse("NATIVE_NOTION_STAGE_REFUSED",EOVERFLOW);
+    int result=notion_stage_in_scope(app,request,authority,out,opaque),error=errno;
+    envara_gui_validation_scope_end();errno=error;return result;
 }
 static int ticket_never_adopt(const struct envara_app_ticket *ticket,struct envara_gui_lifecycle *child,void *opaque) {
     (void)ticket;(void)child;(void)opaque;

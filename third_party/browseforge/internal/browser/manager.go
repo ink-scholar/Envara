@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,14 +66,30 @@ func InstallPlaywrightDriver() error {
 	return playwright.Install(&playwright.RunOptions{SkipInstallBrowsers: true})
 }
 
-func NewManager(cfg *config.Config, groupStores ...*groups.Store) (*Manager, error) {
-	if err := InstallPlaywrightDriver(); err != nil {
-		return nil, fmt.Errorf("playwright.Install: %w", err)
+func startPlaywrightDriver(install func() error, run func() (*playwright.Playwright, error)) (*playwright.Playwright, error) {
+	// Envara prepares and verifies its read-only driver bundle when packaging.
+	// Run still checks the installed version before starting the driver and
+	// refuses missing or incompatible resources without downloading replacements.
+	// Standalone BrowseForge keeps its existing install-on-start behavior.
+	if os.Getenv("ENVARA_DESKTOP_BUNDLED_DRIVER") != "1" {
+		if err := install(); err != nil {
+			return nil, fmt.Errorf("playwright.Install: %w", err)
+		}
 	}
 
-	pw, err := playwright.Run()
+	pw, err := run()
 	if err != nil {
 		return nil, fmt.Errorf("playwright.Run: %w", err)
+	}
+	return pw, nil
+}
+
+func NewManager(cfg *config.Config, groupStores ...*groups.Store) (*Manager, error) {
+	pw, err := startPlaywrightDriver(InstallPlaywrightDriver, func() (*playwright.Playwright, error) {
+		return playwright.Run()
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	var groupStore *groups.Store
@@ -87,7 +104,7 @@ func NewManager(cfg *config.Config, groupStores ...*groups.Store) (*Manager, err
 		sessions:                make(map[string]*Session),
 		endpointHealthTimeoutMS: defaultEndpointHealthTimeoutMS,
 	}
-	m.recoverOrphanSessions()
+	slog.Info("session recovery: starting clean")
 	return m, nil
 }
 
@@ -101,13 +118,6 @@ func (m *Manager) Playwright() *playwright.Playwright {
 
 func (m *Manager) RuntimeRegistry() *bfruntime.Registry {
 	return m.runtimes
-}
-
-// recoverOrphanSessions cleans up stale session state on startup
-func (m *Manager) recoverOrphanSessions() {
-	// On startup, all previous sessions are dead (processes gone)
-	// Just ensure clean state
-	slog.Info("session recovery: starting clean")
 }
 
 func (m *Manager) LaunchSession(p *profile.Profile) (*Session, error) {

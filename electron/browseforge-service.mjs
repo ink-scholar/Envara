@@ -11,7 +11,7 @@ import { isInterfaceLanguage } from '../shared/interface-languages.mjs';
 import { browseForgeRegionFor } from '../shared/engine-choice.mjs';
 import { assertNetworkLocationMatchesEgress, confirmNetworkLocation, networkLocationGeolocation, normalizeNetworkLocation, recommendNetworkLocation } from '../shared/network-location.mjs';
 import { browserContextSignature } from './terminal-browser-broker.mjs';
-import { PROVIDER_DEFAULT_DEVICE_PROFILE_ID, defaultBrowserDeviceProfileId, deviceProfileFingerprint, getBrowserDeviceProfile, supportsBrowserDeviceProfiles, validateBrowserDeviceProfileInput } from '../shared/browser-device-profile.mjs';
+import { PROVIDER_DEFAULT_DEVICE_PROFILE_ID, deviceProfileFingerprint, getBrowserDeviceProfile, validateBrowserDeviceProfileInput } from '../shared/browser-device-profile.mjs';
 
 /** A link an environment's browser will load: web only, never credentials. */
 function linkURL(value) {
@@ -103,6 +103,8 @@ function proxyConfig(input) {
 }
 const upstreamProxy = (proxy) => { if (!proxy) return null; const region = browseForgeRegionFor(proxy); return { type: proxy.protocol, host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password, ...(region ? { region } : {}) }; };
 const sameProxy = (a, b) => JSON.stringify(proxyConfig(a)) === JSON.stringify(proxyConfig(b));
+// Explicit IDs keep saved nodes distinct even when their endpoint fields match.
+const proxyMatchesBinding = (proxy, boundId, inline) => boundId ? boundId === proxy.id : inline && sameProxy(inline, proxy);
 const rawProxyFingerprint = (proxy) => proxy?.protocol === 'anytls' ? createHash('sha256').update(JSON.stringify(proxyConfig(proxy))).digest('hex') : proxyFingerprint(proxy);
 function event(workspace, type, message, profileId) { workspace.events.unshift({ id: randomUUID(), time: now(), type, message, ...(profileId ? { profileId } : {}) }); workspace.events.length = Math.min(200, workspace.events.length); }
 function isClosed(errorValue) { return /(?:target|page|browser|context|connection).*(?:has been closed|is closed)|TargetClosed|session not found/i.test(errorValue?.message ?? ''); }
@@ -292,22 +294,16 @@ export class BrowseForgeService {
     const session = remote.sessions.find((item) => item.profile_id === profileId);
     if (session) { if ((await this.health(session)).alive !== false) throw error('请先停止环境。', 'PROFILE_RUNNING'); await this.request('DELETE', `/api/sessions/${encoded(session.session_id)}`); }
   }
-  deviceProfileInput(input, descriptor, { existing, preserve = false } = {}) {
+  deviceProfileInput(input, descriptor, { existing } = {}) {
     object(input, '环境配置');
     if (Object.hasOwn(input, 'deviceProfileId')) {
       getBrowserDeviceProfile(input.deviceProfileId);
       return { ...input };
     }
-    // An unlabelled old profile or imported configuration keeps exactly its
-    // existing fields. New drafts use the host/explicit platform only when no
-    // custom device fields would be overwritten by that default.
-    let deviceProfileId = existing?.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID;
-    if (!existing && !preserve && supportsBrowserDeviceProfiles(descriptor)) {
-      const candidate = getBrowserDeviceProfile(defaultBrowserDeviceProfileId(input.platform ?? this.system.platform));
-      if (candidate && candidate.id === defaultBrowserDeviceProfileId(this.system.platform) && input.fingerprint == null
-        && ['width', 'height'].every(key => input[key] == null || input[key] === candidate[key])) deviceProfileId = candidate.id;
-    }
-    return { ...input, deviceProfileId };
+    // A new environment delegates its device defaults to its selected provider.
+    // Existing labels and custom/imported fields stay unchanged; only an explicit
+    // selection applies one of Envara's fixed device specifications.
+    return { ...input, deviceProfileId: existing?.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID };
   }
   normalize(input, descriptor, workspace, remote, existing = null) {
     object(input, '环境配置');
@@ -331,6 +327,17 @@ export class BrowseForgeService {
       // this catalog promises to control.
       delete fingerprint['screen.availWidth'];
       delete fingerprint['screen.availHeight'];
+    }
+    // Null explicitly restores provider-managed geometry; an omitted field is
+    // an unrelated edit and must retain the user's existing configuration.
+    // A fixed specification continues to own its dimensions even for null.
+    if (!deviceProfile) {
+      if (Object.hasOwn(input, 'width') && input.width === null) {
+        delete fingerprint['screen.width']; delete fingerprint['screen.availWidth'];
+      }
+      if (Object.hasOwn(input, 'height') && input.height === null) {
+        delete fingerprint['screen.height']; delete fingerprint['screen.availHeight'];
+      }
     }
     if (input.locale === '') {
       launchOverrides.locale = '';
@@ -419,13 +426,11 @@ export class BrowseForgeService {
   }
   async deleteProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); await this.assertStopped(remote, profileId); await this.checkedDirectory(profile); await this.request('DELETE', `/api/profiles/${encoded(profileId)}`); await this.store.transaction((next) => { next.profiles = next.profiles.filter((item) => item.id !== profileId); event(next, 'profile', `删除环境「${profile.name}」`, profileId); }); this.lastErrors.delete(profileId); this.workspaceContexts.delete(profileId); this.resetPreview(profileId); }
   async clearProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); await this.assertStopped(remote, profileId); const directory = await this.checkedDirectory(profile); await rm(path.join(directory, 'browser-data'), { recursive: true, force: true }); await rm(path.join(directory, 'cookies-backup.json'), { force: true }); await mkdir(path.join(directory, 'browser-data'), { recursive: true, mode: 0o700 }); await this.store.transaction((next) => event(next, 'profile', `清理环境「${profile.name}」的完整浏览资料，保留下载文件`, profileId)); this.lastErrors.delete(profileId); this.resetPreview(profileId); }
-  /* Opens a link in this environment's browser: a new tab when the session is
-   * already running, otherwise a start that loads it. A session that cannot
-   * take a new tab is never used as a silent navigation of the page the user
-   * is on; the caller decides what a refusal means. */
+  // A new tab preserves the user's current page. If it fails, leave that page
+  // intact and let the caller handle the refusal instead of navigating it.
   async openProfileLink({ id: profileId, url }) {
     const target = linkURL(url);
-    const [remote, workspace] = await Promise.all([this.remote(), this.store.read()]);
+    const remote = await this.remote();
     const profile = this.find(remote, profileId);
     const session = remote.sessions.find(item => item.profile_id === profileId);
     if (!session || (await this.health(session)).alive !== true) {
@@ -435,8 +440,6 @@ export class BrowseForgeService {
       await this.request('POST', `/api/sessions/${encoded(started.session_id)}/navigate`, { url: target, wait_until: 'domcontentloaded' });
       return { profileId, profile: profile.name, opened: 'loaded', url: target };
     }
-    /* A tab, not a navigation: the environment's browser keeps whatever the user
-     * had open. A blocked popup reports itself and is not reported as opened. */
     const script = `(() => { const opened = window.open(${JSON.stringify(target)}, '_blank'); const handle = opened && opened !== window ? opened : null; if (handle) { try { handle.opener = null; } catch {} } return handle ? 'tab' : 'blocked'; })()`;
     let opened = null;
     try { const result = await this.request('POST', `/api/sessions/${encoded(session.session_id)}/eval`, { script }, { timeoutMs: 15000 });
@@ -580,8 +583,8 @@ export class BrowseForgeService {
     } else if (requestedLocation === null) config.location = null;
     else if (requestedLocation || previousLocation) config.location = requestedLocation ?? previousLocation;
     const savedId = workspace.proxies.some((item) => item.id === proxy.id) ? proxy.id : randomUUID();
-    const users = existing ? remote.profiles.filter((profile) => { const boundId = workspace.profiles.find((item) => item.id === profile.id)?.proxyId; return boundId ? boundId === existing.id : profile.proxy && sameProxy(profile.proxy, existing); }) : [];
-    const groups = existing ? this.groups(workspace, remote.groups).filter((group) => group.proxy && (group.proxy.id ? group.proxy.id === existing.id : sameProxy(group.proxy, existing))) : [];
+    const users = existing ? remote.profiles.filter(profile => proxyMatchesBinding(existing, workspace.profiles.find(item => item.id === profile.id)?.proxyId, profile.proxy)) : [];
+    const groups = existing ? this.groups(workspace, remote.groups).filter(group => proxyMatchesBinding(existing, group.proxy?.id, group.proxy)) : [];
     const affected = remote.profiles.filter((profile) => users.includes(profile) || groups.some((group) => group.name === profile.group));
     for (const profile of affected) await this.assertStopped(remote, profile.id);
     for (const profile of affected) if (profile.runtime_id === 'browseforge-chromium' && !browseForgeRegionFor(config)) throw error('BrowseForge Chromium 只支持美国纽约、加州、得州和加拿大安大略、不列颠哥伦比亚的网络；这个网络请用 CloakBrowser。', 'INVALID_PROXY_REGION');
@@ -630,7 +633,7 @@ export class BrowseForgeService {
     const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
     const proxy = this.proxies(workspace, remote).find((item) => item.id === proxyId);
     if (!proxy) throw error('网络出口不存在。');
-    if (remote.profiles.some((profile) => { const boundId = workspace.profiles.find((item) => item.id === profile.id)?.proxyId; return boundId ? boundId === proxyId : profile.proxy && sameProxy(profile.proxy, proxy); }) || this.groups(workspace, remote.groups).some((group) => group.proxy && (group.proxy.id ? group.proxy.id === proxyId : sameProxy(group.proxy, proxy)))) throw error('请先解除环境和分组对该代理的引用。', 'PROXY_IN_USE');
+    if (remote.profiles.some(profile => proxyMatchesBinding(proxy, workspace.profiles.find(item => item.id === profile.id)?.proxyId, profile.proxy)) || this.groups(workspace, remote.groups).some(group => proxyMatchesBinding(proxy, group.proxy?.id, group.proxy))) throw error('请先解除环境和分组对该代理的引用。', 'PROXY_IN_USE');
     await this.store.transaction((next) => { next.proxies = next.proxies.filter((item) => item.id !== proxyId); event(next, 'proxy', `删除网络出口「${proxy.name}」`); });
     await this.releaseProxy(proxy);
   }

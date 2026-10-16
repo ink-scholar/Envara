@@ -2,6 +2,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { lstat, opendir, realpath } from 'node:fs/promises';
 import { inspectLocalApplication } from './application-service.mjs';
+import { inspectApplicationCompatibility } from './application-compatibility.mjs';
 
 const supported = platform => ['darwin', 'win32'].includes(platform);
 const invalid = () => Object.assign(new Error('本地软件列表的查询参数无效。'), { code: 'APPLICATION_CATALOG_INVALID_QUERY' });
@@ -41,11 +42,12 @@ async function bundleIsBounded(bundle) {
 /** Read-only, bounded discovery. Selection is re-inspected by ApplicationService before binding/launch. */
 export class LocalApplicationCatalog {
   constructor({ platform = process.platform, roots = localApplicationRoots({ platform }), inspectApplication = inspectLocalApplication,
+    inspectCompatibility = inspectApplicationCompatibility,
     cacheMs = 15000, timeoutMs = 4000, maxEntries = 4096, maxDirectories = 256, maxCandidates = 750, now = Date.now } = {}) {
-    if (!Array.isArray(roots) || roots.length > 8 || roots.some(root => !validPath(root)) || typeof inspectApplication !== 'function' || typeof now !== 'function' ||
+    if (!Array.isArray(roots) || roots.length > 8 || roots.some(root => !validPath(root)) || typeof inspectApplication !== 'function' || typeof inspectCompatibility !== 'function' || typeof now !== 'function' ||
         ![cacheMs, timeoutMs, maxEntries, maxDirectories, maxCandidates].every(value => Number.isSafeInteger(value) && value > 0) ||
         cacheMs > 60000 || timeoutMs > 10000 || maxEntries > 8192 || maxDirectories > 512 || maxCandidates > 1000) throw invalid();
-    this.platform = platform; this.roots = [...new Set(roots)]; this.inspectApplication = inspectApplication;
+    this.platform = platform; this.roots = [...new Set(roots)]; this.inspectApplication = inspectApplication; this.inspectCompatibility = inspectCompatibility;
     this.cacheMs = cacheMs; this.timeoutMs = timeoutMs; this.maxEntries = maxEntries; this.maxDirectories = maxDirectories;
     this.maxCandidates = maxCandidates; this.now = now; this.cached = null; this.pending = null;
   }
@@ -58,7 +60,7 @@ export class LocalApplicationCatalog {
       await this.pending;
     }
     const matches = this.cached.applications.filter(item => !query || `${item.name}\n${path.basename(item.path)}`.normalize('NFKC').toLowerCase().includes(query));
-    return { applications: matches.slice(0, limit).map(item => ({ ...item })), platform: this.platform, available: true,
+    return { applications: matches.slice(0, limit).map(item => ({ ...item, compatibility: { ...item.compatibility } })), platform: this.platform, available: true,
       scanComplete: this.cached.scanComplete, truncated: !this.cached.scanComplete || matches.length > limit };
   }
 
@@ -109,8 +111,13 @@ export class LocalApplicationCatalog {
                   typeof inspected.name !== 'string' || !inspected.name.trim() || inspected.name.length > 128 || /[\0\r\n]/.test(inspected.name) ||
                   typeof inspected.identity !== 'string' || inspected.identity.length > 300 || !/^(bundle:[A-Za-z0-9._-]+|path:[a-f0-9]{64})$/.test(inspected.identity)) continue;
               if (identities.has(inspected.identity) || paths.has(inspected.path)) continue;
+              // Eligibility is a bounded metadata hint, never a routing or
+              // signature acceptance. Launch rechecks the selected application.
+              const compatibility = await this.inspectCompatibility(inspected, { platform: this.platform, verifySignature: false });
               identities.add(inspected.identity); paths.add(inspected.path);
-              applications.push({ path: inspected.path, executablePath: inspected.executablePath, name: inspected.name, identity: inspected.identity });
+              applications.push({ path: inspected.path, executablePath: inspected.executablePath, name: inspected.name, identity: inspected.identity,
+                compatibility: { supported: compatibility.supported === true, adapter: compatibility.supported === true ? 'chromium-front' : 'unsupported',
+                  reasonCode: compatibility.supported === true ? null : 'APPLICATION_ADAPTER_UNSUPPORTED', dataScope: compatibility.supported === true ? 'environment' : 'unavailable', verification: 'pending' } });
             } else if (item.isDirectory() && depth < maxDepth) queue.push({ root, directory: filename, depth: depth + 1 });
           } catch { /* Broken or changing bundles are omitted; no file contents or paths are logged. */ }
         }

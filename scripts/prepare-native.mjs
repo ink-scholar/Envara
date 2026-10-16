@@ -1,13 +1,48 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import os from 'node:os';
+import { spawn, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { promisify } from 'node:util';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const requireApp = createRequire(path.join(root, 'package.json'));
+const execute = promisify(execFile);
 const nativePackages = ['node-pty', 'socks', 'https-proxy-agent', 'socks-proxy-agent', 'ipaddr.js'];
 const rendererPackages = ['@xterm/xterm', '@xterm/addon-fit'];
+
+/** Compiler flags belong only to the rebuild child, never the user's process. */
+export async function nativeRebuildEnvironment({ env = process.env, platform = process.platform, checkoutRoot = root, homeDirectory = os.homedir() } = {}) {
+  const result = { ...env };
+  if (platform !== 'darwin') return result;
+  const checkout = path.resolve(checkoutRoot);
+  let physical = checkout;
+  try { physical = await fs.realpath(checkout); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const prefixes = [...new Map([[homeDirectory, '/envara/build-home'], [checkout, '/envara/src'], [physical, '/envara/src']])];
+  const quote = value => `'${value.replaceAll("'", "'\"'\"'")}'`;
+  const flags = [...prefixes.flatMap(([prefix, replacement]) => [
+    `-ffile-prefix-map=${prefix}=${replacement}`, `-fdebug-prefix-map=${prefix}=${replacement}`,
+  ]), '-fdebug-compilation-dir=/envara/src/node_modules/node-pty', '-g0'].map(quote).join(' ');
+  for (const key of ['CFLAGS', 'CXXFLAGS']) result[key] = [env[key], flags].filter(Boolean).join(' ');
+  // Remove N_SO/N_OSO debug-map entries at link time, before the linker's ad-hoc
+  // signature is written; keep all runtime and undefined binding symbols.
+  result.LDFLAGS = [env.LDFLAGS, '-Wl,-S'].filter(Boolean).join(' ');
+  return result;
+}
+
+export async function verifyNativeBuildPaths(directory, { platform = process.platform, checkoutRoot = root, homeDirectory = os.homedir() } = {}) {
+  if (platform !== 'darwin') return;
+  // Also refuse a cached/prebuilt artifact from another build user's checkout.
+  const prefixes = new Set([path.resolve(checkoutRoot), homeDirectory, '/Users/', '/home/', '/private/var/folders/', '/var/folders/']);
+  try { prefixes.add(await fs.realpath(checkoutRoot)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  for (const name of ['pty.node', 'spawn-helper']) {
+    const bytes = await fs.readFile(path.join(directory, 'build/Release', name));
+    if ([...prefixes].some(prefix => prefix && bytes.includes(Buffer.from(prefix)))) {
+      throw new Error('node-pty still contains a local source or build path. Rebuild from source.');
+    }
+  }
+}
 
 async function packageDirectory(name, from = root) {
   let current = from;
@@ -116,14 +151,17 @@ export async function prepareNative({ forceRebuild = false } = {}) {
   await executableHelpers(nodePty.directory);
   let verification;
   if (!forceRebuild) {
-    try { verification = await verifyNativePty(); }
+    try { await verifyNativeBuildPaths(nodePty.directory); verification = await verifyNativePty(); }
     catch { console.info('Preparing node-pty from source for the pinned Electron runtime.'); }
   }
   if (!verification) {
-    const { rebuild } = await import('@electron/rebuild');
-    await rebuild({ buildPath: root, electronVersion: installedElectron, arch: process.arch,
-      platform: process.platform, onlyModules: ['node-pty'], force: true, buildFromSource: true });
+    const rebuildCLI = path.join(path.dirname(requireApp.resolve('@electron/rebuild')), 'cli.js');
+    await execute(process.execPath, [rebuildCLI, '--module-dir', root, '--version', installedElectron,
+      '--arch', process.arch, '--platform', process.platform, '--only', 'node-pty', '--force', '--build-from-source', '--jobs', '2'], {
+      cwd: root, env: await nativeRebuildEnvironment(), timeout: 180000, maxBuffer: 2 * 1024 * 1024,
+    });
     await executableHelpers(nodePty.directory);
+    await verifyNativeBuildPaths(nodePty.directory);
     verification = await verifyNativePty();
   }
   const packages = await copyDependencyLicenses();

@@ -133,9 +133,17 @@ func (sp *SessionPool) CreateSession(profileID string) (*WebSession, error) {
 	if err != nil {
 		return nil, err
 	}
+	return sp.createSession(pool, profileID)
+}
 
+func (sp *SessionPool) createSession(pool *ProfileSessionPool, profileID string) (*WebSession, error) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
+	// The pool can be removed/closed after ensureProfilePool returns but before
+	// this lock is acquired. Never dereference a retired browser handle.
+	if pool.browser == nil {
+		return nil, fmt.Errorf("browser session pool is closed for profile %s", profileID)
+	}
 	if len(pool.sessions) >= sp.maxPerProfile {
 		return nil, fmt.Errorf("max sessions (%d) reached for profile %s", sp.maxPerProfile, profileID)
 	}
@@ -373,6 +381,12 @@ func (pool *ProfileSessionPool) closeAllPages(reason string) int {
 	return len(sessions)
 }
 
+func (pool *ProfileSessionPool) connectedTo(endpoint string) bool {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	return pool.connectURL == endpoint && pool.browser != nil
+}
+
 func (sp *SessionPool) ensureProfilePool(profileID string) (*profile.Profile, *ProfileSessionPool, error) {
 	p, err := sp.store.Get(profileID)
 	if err != nil {
@@ -402,7 +416,7 @@ func (sp *SessionPool) ensureProfilePool(profileID string) (*profile.Profile, *P
 
 	sp.mu.RLock()
 	pool, ok := sp.pools[profileID]
-	if ok && pool.connectURL == browserSession.ConnectURL && pool.browser != nil {
+	if ok && pool.connectedTo(browserSession.ConnectURL) {
 		sp.mu.RUnlock()
 		return p, pool, nil
 	}
@@ -410,7 +424,7 @@ func (sp *SessionPool) ensureProfilePool(profileID string) (*profile.Profile, *P
 
 	sp.mu.Lock()
 	pool, ok = sp.pools[profileID]
-	if ok && pool.connectURL == browserSession.ConnectURL && pool.browser != nil {
+	if ok && pool.connectedTo(browserSession.ConnectURL) {
 		sp.mu.Unlock()
 		return p, pool, nil
 	}

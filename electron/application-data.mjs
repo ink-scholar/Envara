@@ -5,18 +5,41 @@ import { pfAttachEnvironmentId } from '../native/macos-pf-routing/policy.mjs';
 export const ATTACHED_APPLICATION_DATA_ROOT = '/Library/PrivilegedHelperTools/io.envara.pf-app-data';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const defaultFs = { readdir, lstat, rm };
-/* Chromium and Electron rebuild these on demand. Sign-in state lives elsewhere
- * (Cookies, Local Storage, IndexedDB, the application's own databases), so
- * removing them keeps the user signed in and only costs a slower first load. */
+export const APPLICATION_DATA_DIRECTORIES = Object.freeze(['UserData', 'Home', 'Cache', 'Temp', 'Extensions']);
+/* These named Chromium caches are regenerable. Service Worker and blob_storage
+ * may hold offline documents, so they are deliberately not in this list. */
 export const REGENERABLE_CACHE_ENTRIES = Object.freeze(['Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'DawnGraphiteCache', 'DawnWebGPUCache',
-  'GraphiteDawnCache', 'GrShaderCache', 'ShaderCache', 'Service Worker', 'blob_storage', 'Crashpad', 'component_crx_cache',
+  'GraphiteDawnCache', 'GrShaderCache', 'ShaderCache', 'Crashpad', 'component_crx_cache',
   'extensions_crx_cache', 'Shared Dictionary']);
 
 const owned = (info, uid) => info.isDirectory() && !info.isSymbolicLink() && info.uid === uid;
-async function userDataLeaf(environmentId, registrationId, { root, uid, fs }) {
-  if (!UUID.test(environmentId ?? '') || !UUID.test(registrationId ?? '')) return null;
-  const leaf = path.join(root, environmentId, registrationId, 'UserData');
-  try { return owned(await fs.lstat(leaf), uid) ? leaf : null; } catch { return null; }
+// The production layout is root-owned; fixture layouts belong to the user.
+// Check every layout component before reading descendants, not just the leaf.
+async function safeLayout(root, components, { uid, fs }) {
+  let target = root;
+  for (const component of ['', ...components]) {
+    if (component) target = path.join(target, component);
+    try {
+      const info = await fs.lstat(target);
+      if (!info.isDirectory() || info.isSymbolicLink() || (info.uid !== 0 && info.uid !== uid)) return null;
+    } catch { return null; }
+  }
+  return target;
+}
+async function applicationDataLeaves(environmentId, registrationId, options) {
+  if (!UUID.test(environmentId ?? '') || !UUID.test(registrationId ?? '')) return { leaves: [], unsafe: false };
+  const registration = await safeLayout(options.root, [environmentId, registrationId], options);
+  if (!registration) return { leaves: [], unsafe: true };
+  const leaves = [];
+  let unsafe = false;
+  for (const name of APPLICATION_DATA_DIRECTORIES) {
+    const leaf = path.join(registration, name);
+    try {
+      if (owned(await options.fs.lstat(leaf), options.uid)) leaves.push({ name, path: leaf });
+      else unsafe = true;
+    } catch (error) { if (error.code !== 'ENOENT') unsafe = true; }
+  }
+  return { leaves, unsafe };
 }
 /* Allocated size of a tree, never following a link; bounded so a huge or
  * hostile tree cannot stall the caller. */
@@ -30,10 +53,10 @@ async function treeBytes(target, fs, budget = { entries: 200000 }) {
   return total;
 }
 
-/** Empties the sign-in data an environment keeps for its attached
+/** Empties the application data an environment keeps for its attached
  * applications: every application when the environment is deleted, or one
- * registration when the user clears that application's sign-in data. Only the
- * user-owned UserData directories are touched; the root-owned layout above
+ * registration when the user explicitly clears that application's data. Only
+ * the five fixed user-owned directories are touched; the root-owned layout above
  * them stays. A folder that is not empty afterwards is reported, not cleared. */
 export async function eraseAttachedApplicationData(profileId, { registrationId = null, root = ATTACHED_APPLICATION_DATA_ROOT,
   uid = process.getuid?.(), platform = process.platform, fs = defaultFs } = {}) {
@@ -43,17 +66,29 @@ export async function eraseAttachedApplicationData(profileId, { registrationId =
 export async function eraseEnvironmentData(environmentId, { registrationId = null, root = ATTACHED_APPLICATION_DATA_ROOT,
   uid = process.getuid?.(), platform = process.platform, fs = defaultFs } = {}) {
   if (platform !== 'darwin' || !UUID.test(environmentId ?? '')) return [];
-  const environment = path.join(root, environmentId), erased = [], incomplete = [];
+  const options = { root, uid, fs }, erased = [], incomplete = [];
+  const environment = await safeLayout(root, [environmentId], options);
+  if (!environment) return erased;
   let registrations; try { registrations = await fs.readdir(environment); } catch { return erased; }
   for (const registration of registrations) {
     if (registrationId && registration !== registrationId) continue;
-    const leaf = await userDataLeaf(environmentId, registration, { root, uid, fs });
-    if (!leaf) continue;
-    for (const entry of await fs.readdir(leaf).catch(() => [])) await fs.rm(path.join(leaf, entry), { recursive: true, force: true }).catch(() => {});
-    const left = await fs.readdir(leaf).catch(() => null);
-    (left?.length === 0 ? erased : incomplete).push(registration);
+    if (!UUID.test(registration)) continue;
+    const { leaves, unsafe } = await applicationDataLeaves(environmentId, registration, options);
+    // A known but inaccessible directory is not an empty application. Refuse
+    // the whole registration before mutating any of its other directories.
+    if (unsafe) { incomplete.push(registration); continue; }
+    if (!leaves.length) continue;
+    let complete = true;
+    for (const { path: leaf } of leaves) {
+      const entries = await fs.readdir(leaf).catch(() => null);
+      if (!entries) { complete = false; continue; }
+      for (const entry of entries) await fs.rm(path.join(leaf, entry), { recursive: true, force: true }).catch(() => { complete = false; });
+      const left = await fs.readdir(leaf).catch(() => null);
+      if (!left || left.length) complete = false;
+    }
+    (complete ? erased : incomplete).push(registration);
   }
-  if (incomplete.length) throw Object.assign(new Error('登录数据没有全部清除，请退出这个软件后重试。'), { code: 'APPLICATION_DATA_NOT_CLEARED', erased, incomplete });
+  if (incomplete.length) throw Object.assign(new Error('应用数据没有全部清除，请退出这个软件后重试。'), { code: 'APPLICATION_DATA_NOT_CLEARED', erased, incomplete });
   return erased;
 }
 
@@ -63,10 +98,13 @@ export async function eraseEnvironmentData(environmentId, { registrationId = nul
 export async function pruneAttachedApplicationCache({ environmentId, registrationId, root = ATTACHED_APPLICATION_DATA_ROOT,
   uid = process.getuid?.(), platform = process.platform, fs = defaultFs } = {}) {
   if (platform !== 'darwin') return 0;
-  const leaf = await userDataLeaf(environmentId, registrationId, { root, uid, fs });
-  if (!leaf) return 0;
-  const containers = [leaf];
+  const { leaves, unsafe } = await applicationDataLeaves(environmentId, registrationId, { root, uid, fs });
+  if (unsafe) return 0;
+  const leaf = leaves.find(item => item.name === 'UserData')?.path;
+  // Never prune Home, Temp or Extensions, nor unknown entries in Cache.
+  const containers = leaves.filter(item => ['UserData', 'Cache'].includes(item.name)).map(item => item.path);
   for (const nested of ['Default', 'Partitions']) {
+    if (!leaf) break;
     const target = path.join(leaf, nested);
     let info; try { info = await fs.lstat(target); } catch { continue; }
     if (!owned(info, uid)) continue;
@@ -87,21 +125,30 @@ export async function pruneAttachedApplicationCache({ environmentId, registratio
   return freed;
 }
 
-/** Every user-owned sign-in data folder, with its allocated size and the last
+/** Every application's existing user-owned data directories, with their total
+ * allocated size and the last
  * time anything at its top level changed. Read-only. */
 export async function attachedApplicationDataInventory({ root = ATTACHED_APPLICATION_DATA_ROOT, uid = process.getuid?.(),
   platform = process.platform, fs = defaultFs } = {}) {
   if (platform !== 'darwin') return [];
   const items = [];
+  const options = { root, uid, fs };
+  if (!await safeLayout(root, [], options)) return items;
   for (const environmentId of (await fs.readdir(root).catch(() => [])).filter(name => UUID.test(name)).sort()) {
-    for (const registrationId of (await fs.readdir(path.join(root, environmentId)).catch(() => [])).filter(name => UUID.test(name)).sort()) {
-      const leaf = await userDataLeaf(environmentId, registrationId, { root, uid, fs });
-      if (!leaf) continue;
-      let modified = 0;
-      for (const name of await fs.readdir(leaf).catch(() => [])) {
-        try { modified = Math.max(modified, (await fs.lstat(path.join(leaf, name))).mtimeMs ?? 0); } catch {}
+    const environment = await safeLayout(root, [environmentId], options);
+    if (!environment) continue;
+    for (const registrationId of (await fs.readdir(environment).catch(() => [])).filter(name => UUID.test(name)).sort()) {
+      const { leaves } = await applicationDataLeaves(environmentId, registrationId, options);
+      if (!leaves.length) continue;
+      let modified = 0, bytes = 0;
+      for (const { path: leaf } of leaves) {
+        for (const name of await fs.readdir(leaf).catch(() => [])) {
+          try { modified = Math.max(modified, (await fs.lstat(path.join(leaf, name))).mtimeMs ?? 0); } catch {}
+        }
+        bytes += await treeBytes(leaf, fs);
       }
-      items.push({ environmentId, registrationId, bytes: await treeBytes(leaf, fs), modifiedAt: modified ? new Date(modified).toISOString() : null });
+      items.push({ environmentId, registrationId, dataScope: 'environment', hasDataDirectory: true, bytes,
+        modifiedAt: modified ? new Date(modified).toISOString() : null });
     }
   }
   return items;

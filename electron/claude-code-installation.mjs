@@ -154,6 +154,8 @@ async function ensureInstallation({ home, findHostExecutable, downloadContext, o
   if (!downloadContext && source === 'download') throw Object.assign(new Error('请选择可用的境舱网络后下载 Claude Code。'), { code: 'CLAUDE_CODE_DOWNLOAD_ROUTE_REQUIRED' });
   if (!canonical && !downloadContext) throw hostError ?? unsupported();
   const staged = path.join(installation.versionsDirectory, `.envara-bootstrap-${randomUUID()}`);
+  const cleanup = () => rm(staged, { force: true });
+  let failure;
   try {
     if (canonical) {
       // COPYFILE_FICLONE is an independent-inode COW copy where supported, and
@@ -198,9 +200,20 @@ async function ensureInstallation({ home, findHostExecutable, downloadContext, o
   } catch (error) {
     // A complete version may already be in use by a racing updater. Never
     // delete persistent versions or rewrite an entry as failure recovery.
-    if (error.code?.startsWith('CLAUDE_CODE_')) throw error;
-    throw invalid();
-  } finally { await rm(staged, { force: true }); }
+    failure = error.code?.startsWith('CLAUDE_CODE_') ? error : invalid();
+    throw failure;
+  } finally {
+    try { await cleanup(); }
+    catch {
+      const message = 'Claude 安装临时文件清理未完成，请重试关闭会话。';
+      failure ??= Object.assign(new Error(message), { code: 'CLAUDE_CODE_INSTALLATION_CLEANUP_FAILED' });
+      failure.cleanupError = message;
+      // A failed preparation has no returned launch object. Keep its existing
+      // staging cleanup private so the service can retry the same operation.
+      Object.defineProperty(failure, 'claudeCleanup', { value: cleanup, configurable: true });
+      throw failure;
+    }
+  }
 }
 
 /** Bootstrap once per environment; login/settings data are never accessed. */

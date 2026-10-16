@@ -167,7 +167,7 @@ func (m *Manager) launchChromium(p *profile.Profile) (*Session, error) {
 		if persona.PluginsPDF != "" {
 			args = append(args, "--fingerprint-plugins-pdf="+persona.PluginsPDF)
 		}
-		args = appendProfileFingerprintArgs(args, p.Fingerprint, persona.Native.Browser.UserAgent, persona.NavigatorPlatform, persona.Native.Locale.AcceptLanguage)
+		args = appendCloakBrowserFingerprintArgs(args, p.Fingerprint, persona.Native.Locale.AcceptLanguage)
 		// The free macOS v145 Cloak build ignores fingerprint-locale for
 		// navigator.language, but honors Chromium's native accept-lang path.
 		args = append(args, "--accept-lang="+chromiumAcceptLanguageSwitchValue(persona.Native.Locale.AcceptLanguage))
@@ -275,11 +275,12 @@ func (m *Manager) launchChromium(p *profile.Profile) (*Session, error) {
 				if err != nil {
 					return nil, nil, fmt.Errorf("socks5 relay: %w", err)
 				}
-				opts.Proxy = &playwright.Proxy{Server: "socks5://" + localAddr}
+				opts.Proxy = &playwright.Proxy{Server: "socks5://" + localAddr, Bypass: playwright.String(loopbackProxyBypass)}
 			} else {
 				server := fmt.Sprintf("%s://%s:%d", proxy.Type, proxy.Host, proxy.Port)
 				opts.Proxy = &playwright.Proxy{
 					Server:   server,
+					Bypass:   playwright.String(loopbackProxyBypass),
 					Username: playwright.String(proxy.Username),
 					Password: playwright.String(proxy.Password),
 				}
@@ -669,12 +670,28 @@ func buildChromiumLaunchPersona(p *profile.Profile, runtimeID bfruntime.ID, plat
 		proxyRegion = strings.TrimSpace(proxyRegion)
 	}
 	fp := p.Fingerprint
-	userAgent := effectiveChromiumUserAgent(fp, platform)
 	acceptLanguage := effectiveChromiumAcceptLanguage(fp, locale)
 	navigatorLanguages := navigatorLanguagesFromAcceptLanguage(acceptLanguage)
-	fullVersion := chromiumVersionFromUserAgent(userAgent)
-	brandVersions := chromiumBrandVersions(fullVersion)
-	clientHints := chromiumClientHints(userAgent, nativePlatform, brandVersions)
+	// CloakBrowser owns its native UA and Client Hints together. Its versioned
+	// provider flags differ from BrowseForge's native persona contract. Chromium's
+	// --user-agent without native metadata leaves UA-CH versions empty on macOS
+	// v145, while synthetic HTTP headers would disagree with the page's JS.
+	browserIdentity := browseForgeNativeBrowserIdentity{Family: "chromium"}
+	if runtimeID == bfruntime.BrowseForgeChromium {
+		userAgent := effectiveChromiumUserAgent(fp, platform)
+		fullVersion := chromiumVersionFromUserAgent(userAgent)
+		brandVersions := chromiumBrandVersions(fullVersion)
+		browserIdentity = browseForgeNativeBrowserIdentity{
+			Family:          "chromium",
+			Major:           chromiumMajorVersion(fullVersion),
+			FullVersion:     fullVersion,
+			Brands:          []string{"Chromium"},
+			BrandVersions:   brandVersions,
+			FullVersionList: chromiumFullVersionList(brandVersions, fullVersion),
+			UserAgent:       userAgent,
+			ClientHints:     chromiumClientHints(userAgent, nativePlatform, brandVersions),
+		}
+	}
 	vendor, hasWebGLVendor := fingerprintString(fp, "webGl:vendor")
 	renderer, hasWebGLRenderer := fingerprintString(fp, "webGl:renderer")
 	gpuMode := "native"
@@ -737,17 +754,8 @@ func buildChromiumLaunchPersona(p *profile.Profile, runtimeID bfruntime.ID, plat
 			SchemaVersion: "1.0",
 			RuntimeID:     string(runtimeID),
 			Seed:          browseForgePersonaSeed(p),
-			Browser: browseForgeNativeBrowserIdentity{
-				Family:          "chromium",
-				Major:           chromiumMajorVersion(fullVersion),
-				FullVersion:     fullVersion,
-				Brands:          []string{"Chromium"},
-				BrandVersions:   brandVersions,
-				FullVersionList: chromiumFullVersionList(brandVersions, fullVersion),
-				UserAgent:       userAgent,
-				ClientHints:     clientHints,
-			},
-			Platform: nativePlatform,
+			Browser:       browserIdentity,
+			Platform:      nativePlatform,
 			Locale: browseForgeNativeLocale{
 				Timezone:             timezone,
 				TimezoneOffsetMins:   timezoneOffsetMinutes(timezone),
@@ -1138,11 +1146,16 @@ func chromiumClientHints(userAgent string, platform browseForgeNativePlatform, b
 func browseForgeChromiumHTTPHeaders(persona chromiumLaunchPersona) map[string]string {
 	native := persona.Native
 	headers := make(map[string]string, 12)
-	if native.Browser.UserAgent != "" {
-		headers["User-Agent"] = native.Browser.UserAgent
-	}
 	if native.Locale.AcceptLanguage != "" {
 		headers["Accept-Language"] = native.Locale.AcceptLanguage
+	}
+	// Other providers generate UA/UA-CH natively, including Chromium's normal
+	// secure-context and Accept-CH negotiation for high-entropy hints.
+	if native.RuntimeID != string(bfruntime.BrowseForgeChromium) {
+		return headers
+	}
+	if native.Browser.UserAgent != "" {
+		headers["User-Agent"] = native.Browser.UserAgent
 	}
 	hints := native.Browser.ClientHints
 	if hints.SecCHUA != "" {
@@ -2634,23 +2647,7 @@ func chromiumAcceptLanguageSwitchValue(acceptLanguage string) string {
 	return strings.Join(cleaned, ",")
 }
 
-func appendProfileFingerprintArgs(args []string, fp map[string]any, userAgent, platform, acceptLanguage string) []string {
-	if userAgent != "" {
-		args = append(args, "--user-agent="+userAgent, "--fingerprint-user-agent="+userAgent)
-		if fullVersion := chromiumVersionFromUserAgent(userAgent); fullVersion != "" {
-			args = append(args, "--fingerprint-ua-full-version="+fullVersion)
-		}
-	}
-	if platform != "" {
-		nativePlatform, err := nativePersonaPlatform(platform, runtime.GOARCH)
-		if err == nil {
-			args = append(args,
-				"--fingerprint-ua-platform="+nativePlatform.PlatformCH,
-				"--fingerprint-ua-architecture="+nativePlatform.Arch,
-				"--fingerprint-ua-bitness="+nativePlatform.Bitness,
-			)
-		}
-	}
+func appendCloakBrowserFingerprintArgs(args []string, fp map[string]any, acceptLanguage string) []string {
 	if acceptLanguage := chromiumAcceptLanguageSwitchValue(acceptLanguage); acceptLanguage != "" {
 		args = append(args, "--fingerprint-accept-language="+acceptLanguage)
 	}

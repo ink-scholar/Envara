@@ -34,6 +34,7 @@ struct stage_evidence {
     int calls, after_claim, after_guard, after_fresh;
     struct envara_identity child;
     int verify_resume_calls, verify_executed_calls, resume_sent, resumed;
+    int supervisor_error, blocked_reason;
 };
 static struct stage_evidence stage_evidence;
 static int resumed_ack, stopping_ack, cancel_sent, profile_ack_count;
@@ -195,14 +196,16 @@ static int emit(const char *mode, int okay, int has_claim, int stopped, int rele
     printf("{\"ok\":%s,\"mode\":\"%s\",\"ready\":false,\"protected\":false,\"activatesSystem\":false,\"fixtureOnly\":true,"
            "\"claimed\":%s,\"stoppedACK\":%s,\"releasedACK\":%s,\"childGone\":%s,\"replayRefused\":%s,"
            "\"stageCalls\":%d,\"stageAfterClaim\":%s,\"stageAfterGuard\":%s,\"stageAfterFreshVerify\":%s,\"childPID\":%d,"
-           "\"verifyResumeCalls\":%d,\"verifyExecutedCalls\":%d,\"resumeSent\":%s,\"resumed\":%s,\"resumedACK\":%s,\"stoppingACK\":%s,\"cancelSent\":%s,\"profileACKs\":%d}\n",
+           "\"verifyResumeCalls\":%d,\"verifyExecutedCalls\":%d,\"resumeSent\":%s,\"resumed\":%s,\"resumedACK\":%s,\"stoppingACK\":%s,\"cancelSent\":%s,\"profileACKs\":%d,"
+           "\"supervisorError\":%d,\"blockedReason\":\"%s\"}\n",
            okay ? "true" : "false", mode, has_claim ? "true" : "false", stopped ? "true" : "false",
            released ? "true" : "false", gone ? "true" : "false", replay ? "true" : "false", stage_evidence.calls,
            stage_evidence.after_claim ? "true" : "false", stage_evidence.after_guard ? "true" : "false",
            stage_evidence.after_fresh ? "true" : "false", stage_evidence.child.pid,
            stage_evidence.verify_resume_calls, stage_evidence.verify_executed_calls,
            stage_evidence.resume_sent ? "true" : "false", stage_evidence.resumed ? "true" : "false",
-           resumed_ack ? "true" : "false", stopping_ack ? "true" : "false", cancel_sent ? "true" : "false", profile_ack_count);
+           resumed_ack ? "true" : "false", stopping_ack ? "true" : "false", cancel_sent ? "true" : "false", profile_ack_count,
+           stage_evidence.supervisor_error, envara_gui_precondition_name(stage_evidence.blocked_reason));
     return okay ? 0 : 1;
 }
 int main(int argc, char **argv) {
@@ -276,6 +279,8 @@ int main(int argc, char **argv) {
         close(output[0]); close(f.lease[1]); close(f.recovery[1]); close(f.custody[1]);
         close(evidence[0]);
         int result = envara_app_supervisor_run(&context, Ticket, output[1], &report);
+        stage_evidence.supervisor_error = result ? errno : 0;
+        stage_evidence.blocked_reason = report.child.blocked_reason;
         stage_evidence.child = report.child.child.identity;
         stage_evidence.resume_sent = report.guardian.resume_sent; stage_evidence.resumed = report.resumed;
         if (write(evidence[1], &stage_evidence, sizeof(stage_evidence)) != (ssize_t)sizeof(stage_evidence)) _exit(100);

@@ -21,6 +21,7 @@ export const KNOWN_LOCAL_PROXY_PORTS = Object.freeze([53, 853, 1053, 1080, 1081,
 // Notion launch profile denies the same set.
 const DNSSD_SOCKETS = Object.freeze(['/private/var/run/mDNSResponder', '/var/run/mDNSResponder', '/private/var/tmp/mDNSResponder', '/var/tmp/mDNSResponder']);
 const fail = message => Object.assign(new Error(message), { code: 'TERMINAL_NETWORK_FENCE_UNAVAILABLE' });
+const deviceRestrictionFailure = () => Object.assign(new Error('设备标识读取限制不可用，未启动终端。'), { code: 'TERMINAL_DEVICE_IDENTIFIERS_UNAVAILABLE' });
 const validPort = value => { const number = Number(value); return Number.isInteger(number) && number >= 1 && number <= 65535 ? number : null; };
 const loopback = host => ['localhost', '::1', '[::1]'].includes(host) || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 
@@ -61,7 +62,8 @@ export function environmentProxyPorts(environment = {}) {
   return ports;
 }
 
-export function terminalFenceProfile({ deniedLoopbackPorts = [] } = {}) {
+export function terminalFenceProfile({ deniedLoopbackPorts = [], restrictDeviceIdentifiers = false } = {}) {
+  if (typeof restrictDeviceIdentifiers !== 'boolean') throw deviceRestrictionFailure();
   const denied = [...new Set([...KNOWN_LOCAL_PROXY_PORTS, ...deniedLoopbackPorts].map(validPort).filter(Boolean))].sort((a, b) => a - b);
   // Later Seatbelt rules take precedence, so each refusal follows its allowance.
   return ['(version 1)', '(allow default)',
@@ -71,7 +73,15 @@ export function terminalFenceProfile({ deniedLoopbackPorts = [] } = {}) {
     `(deny network-outbound ${denied.map(port => `(remote ip "localhost:${port}")`).join(' ')})`,
     '(deny mach-lookup (global-name "com.apple.dnssd.service"))',
     `(deny file-read* file-write* ${DNSSD_SOCKETS.map(socket => `(literal "${socket}")`).join(' ')})`,
-    `(deny network-outbound ${DNSSD_SOCKETS.map(socket => `(remote unix-socket (literal "${socket}"))`).join(' ')})`].join('\n');
+    `(deny network-outbound ${DNSSD_SOCKETS.map(socket => `(remote unix-socket (literal "${socket}"))`).join(' ')})`,
+    // Restrict the named reads, including batch/recursive IOKit queries. These
+    // rules do not return simulated values or replace the machine's hardware.
+    ...(restrictDeviceIdentifiers ? [
+      '(deny iokit-get-properties (iokit-property "IOPlatformSerialNumber" "IOPlatformUUID"))',
+      '(deny syscall-unix (syscall-number SYS_gethostuuid))',
+      '(deny sysctl-read (sysctl-name "kern.uuid"))',
+    ] : []),
+  ].join('\n');
 }
 
 export class TerminalNetworkFence {
@@ -79,7 +89,8 @@ export class TerminalNetworkFence {
     this.platform = platform; this.execute = execute; this.inspect = inspect; this.environment = environment;
   }
   /** Wraps a shell launch; refuses rather than starting an unfenced shell. */
-  async wrap(shell, { routePort } = {}) {
+  async wrap(shell, { routePort, restrictDeviceIdentifiers = false } = {}) {
+    if (typeof restrictDeviceIdentifiers !== 'boolean') throw deviceRestrictionFailure();
     if (this.platform !== 'darwin') throw fail('此系统没有终端网络围栏，未启动终端。');
     const allowed = validPort(routePort);
     if (!allowed || !shell?.executable || !Array.isArray(shell.args)) throw fail('终端网络通道无效，未启动终端。');
@@ -91,7 +102,17 @@ export class TerminalNetworkFence {
     catch { throw fail('无法读取系统代理设置，未启动终端。'); }
     const denied = new Set([...KNOWN_LOCAL_PROXY_PORTS, ...systemProxyPorts(text), ...environmentProxyPorts(this.environment)]);
     if (denied.has(allowed)) throw fail('终端网络通道与本机代理端口冲突，未启动终端。');
-    return { executable: TERMINAL_FENCE_EXECUTABLE, args: ['-p', terminalFenceProfile({ deniedLoopbackPorts: [...denied] }), shell.executable, ...shell.args],
-      environment: shell.environment, deniedLoopbackPorts: [...denied].sort((a, b) => a - b) };
+    const profile = terminalFenceProfile({ deniedLoopbackPorts: [...denied], restrictDeviceIdentifiers });
+    if (restrictDeviceIdentifiers) {
+      // Validate this OS's interpreter before returning launch authority. This
+      // disposable child is separate from the shell; the shell gets one fence.
+      try {
+        await this.execute(TERMINAL_FENCE_EXECUTABLE, ['-p', profile, '/usr/bin/true'], {
+          timeout: 5000, maxBuffer: 4096, env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C' },
+        });
+      } catch { throw deviceRestrictionFailure(); }
+    }
+    return { executable: TERMINAL_FENCE_EXECUTABLE, args: ['-p', profile, shell.executable, ...shell.args],
+      environment: shell.environment, deniedLoopbackPorts: [...denied].sort((a, b) => a - b), deviceIdentifierRestrictions: restrictDeviceIdentifiers };
   }
 }

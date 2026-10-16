@@ -105,7 +105,6 @@ before(async () => {
   if (process.platform !== 'darwin') return;
   directory = await realpath(await mkdtemp(path.join(tmpdir(), 'envara-terminal-inert-')));
   await writeFile(path.join(directory, 'installer-manifest.h'),
-    `#define ENVARA_PF_INSTALL_SOURCE ${JSON.stringify(directory)}\n` +
     '#define ENVARA_PF_INSTALL_MANIFEST_SHA256 "' + '0'.repeat(64) + '"\n' +
     'typedef struct {const char *name;const char *sha256;unsigned int mode;} EnvaraPFInstallFile;\n' +
     'static const EnvaraPFInstallFile ENVARA_PF_INSTALL_FILES[]={{"EnvaraPFHelper","' + '0'.repeat(64) + '",0755}};\n' +

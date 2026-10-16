@@ -891,6 +891,7 @@ static int run(const struct envara_app_native_preflight *plan) {
         if(stopped)RUN_FAULT(ECANCELED,"NATIVE_OPERATION_REFUSED");
         if(!fault&&(!envara_same_process(&session.core)||!envara_same_process(&front)||!envara_same_process(&plan->controller)))RUN_FAULT(ESTALE,"NATIVE_OPERATION_REFUSED");
         if(fault){
+            envara_gui_steps_end();
             if(!diagnosed){
                 refused_event_reason(plan->run_id,plan->environment_id,fault_stage,fault_reason,fault_error);diagnosed=1;
                 if(!transport_acked&&envara_app_native_factory_cleanup_binding(factory)&&envara_same_process(&session.core)&&envara_same_process(&front)&&
@@ -919,6 +920,9 @@ static int run(const struct envara_app_native_preflight *plan) {
         }
         if(fault||stage_used||strncmp(command,"L ",2)||!uuid(command+2)){RUN_FAULT(EINVAL,"NATIVE_OPERATION_REFUSED");continue;}
         stage_used=1;abort.launch_accepted=1;
+        /* Diagnostic-only step timing for this one accepted launch; it can
+         * never affect what the launch may do or what any frame proves. */
+        (void)envara_gui_steps_begin(1,ENVARA_APP_TRANSPORT_PROTOCOL,plan->run_id,plan->environment_id);
         const struct envara_app_supervisor_provider *provider=envara_app_native_factory_provider(factory);
         /* A NULL adapter is the generic cold profile, which the supervisor runs
          * through envara_app_ticket_stage/envara_gui_stage. An absent provider
@@ -928,14 +932,22 @@ static int run(const struct envara_app_native_preflight *plan) {
         if(!mode_is_live_mode(live)){RUN_FAULT(ENOTSUP,"NATIVE_OPERATION_REFUSED");continue;}
         deny_confirmed=0;deny_attempted=0;stage="front-commit";
         if(envara_app_native_factory_apply(factory,live,&filter)){int e=errno;RUN_FAULT(e,envara_app_native_failure_reason());continue;}
+        envara_gui_step(ENVARA_GUI_STEP_FRONT_COMMIT);
         stage="front-admission";if(admission(factory,front_input)){int e=errno;RUN_FAULT(e,envara_app_native_failure_reason());continue;}
+        envara_gui_step(ENVARA_GUI_STEP_FRONT_ADMISSION);
         stage="ticket-prepare";
+        /* Ticket preparation is one native operation: its first check of each
+         * bundle is a full signed inspection; its later boundaries re-prove
+         * that exact state's identity instead of re-hashing every byte. */
+        if(!envara_gui_validation_scope_begin()){RUN_FAULT(EOVERFLOW,"NATIVE_OPERATION_REFUSED");continue;}
         struct envara_app_registry registry={.fd=-1};struct envara_app_ticket_store tickets={.fd=-1};struct envara_app_ticket prepared;
         int failed=envara_app_registry_open(&registry,NULL,0,0)||envara_app_ticket_store_open(&tickets,NULL,0,1)||
             envara_app_ticket_prepare(&tickets,&registry,command+2,plan->registration_id,plan->version_id,plan->environment_id,plan->run_id,&provider->ticket,&prepared);
         int prepare_error=errno;const char *prepare_reason=envara_app_native_failure_reason();
         envara_app_ticket_store_close(&tickets);envara_app_registry_close(&registry);
+        envara_gui_validation_scope_end();
         if(failed){RUN_FAULT(prepare_error,prepare_reason);continue;}
+        envara_gui_step(ENVARA_GUI_STEP_TICKET_PREPARE);
         stage="relay-fork";pid_t parent=getpid();relay=fork();
         if(relay<0){int e=errno;RUN_FAULT(e,"NATIVE_OPERATION_REFUSED");continue;}
         if(!relay){
@@ -944,10 +956,12 @@ static int run(const struct envara_app_native_preflight *plan) {
             (void)envara_app_transport_relay(0,lease[1],recovery[1],parent);_exit(0);
         }
         close(lease[1]);close(recovery[1]);lease[1]=recovery[1]=-1;
+        envara_gui_step(ENVARA_GUI_STEP_RELAY_FORK);
         struct envara_app_supervisor_context supervisor={.provider=provider};struct envara_app_supervisor_report report;
         stage="guardian";abort.cold_attempted=1;envara_app_native_failure_begin();
         int status=envara_app_supervisor_run(&supervisor,command+2,1,&report);
         int supervisor_error=envara_app_native_failure_error(errno);const char *supervisor_reason=envara_app_native_failure_reason();
+        envara_gui_steps_end();errno=supervisor_error;
         child_absent=report.child.phase==ENVARA_GUI_EMPTY;child_reaped=report.guardian.child_reaped;scope_quiescent=report.guardian.scope_quiescent_observed;
         /* Save the supervisor's first refusal BEFORE terminate/wait/query. */
         if(status||!report.released)RUN_FAULT(supervisor_error,supervisor_reason);

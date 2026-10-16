@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestAppendProfileFingerprintArgsDevicePixelRatio(t *testing.T) {
+func TestAppendCloakBrowserFingerprintArgsDevicePixelRatio(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		value any
@@ -23,10 +23,10 @@ func TestAppendProfileFingerprintArgsDevicePixelRatio(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := []string{"--no-first-run"}
-			args := appendProfileFingerprintArgs(base, map[string]any{
+			args := appendCloakBrowserFingerprintArgs(base, map[string]any{
 				"screen.width":            1440,
 				"screen.devicePixelRatio": tc.value,
-			}, "", "", "")
+			}, "")
 			want := []string{
 				"--no-first-run",
 				"--fingerprint-screen-width=1440",
@@ -40,7 +40,7 @@ func TestAppendProfileFingerprintArgsDevicePixelRatio(t *testing.T) {
 	}
 }
 
-func TestAppendProfileFingerprintArgsIgnoresMissingOrInvalidDevicePixelRatio(t *testing.T) {
+func TestAppendCloakBrowserFingerprintArgsIgnoresMissingOrInvalidDevicePixelRatio(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		fingerprint map[string]any
@@ -63,7 +63,7 @@ func TestAppendProfileFingerprintArgsIgnoresMissingOrInvalidDevicePixelRatio(t *
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := []string{"--no-first-run"}
-			args := appendProfileFingerprintArgs(base, tc.fingerprint, "", "", "")
+			args := appendCloakBrowserFingerprintArgs(base, tc.fingerprint, "")
 			if !reflect.DeepEqual(args, base) {
 				t.Fatalf("launch args changed without a valid DPR: %#v", args)
 			}

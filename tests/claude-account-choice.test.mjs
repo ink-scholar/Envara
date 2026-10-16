@@ -64,3 +64,16 @@ test('installer progress follows ordered events and cannot regress to a stale sn
   assert.equal(store.getSession('install').claudeInstall, null);
   assert.equal(store.getSession('install').status, 'running');
 });
+
+test('Claude cleanup failures have fixed actionable copy in all nine interface languages', () => {
+  const installation = 'Claude 安装临时文件清理未完成，请重试关闭会话。';
+  assert.equal(claudeErrorMessage('CLAUDE_CODE_INSTALLATION_CLEANUP_FAILED'), installation);
+  assert.equal(claudeErrorMessage('internal cleanup detail', 'CLAUDE_CODE_INSTALLATION_CLEANUP_FAILED'), installation);
+  for (const [language, catalog] of Object.entries(translationCatalog)) {
+    for (const key of [installation, 'Claude 会话临时文件清理未完成，请重试关闭会话。']) {
+      assert.equal(typeof catalog[key], 'string', `${language}: ${key}`);
+      assert(catalog[key].trim());
+      if (language !== 'zh-CN') assert.notEqual(catalog[key], key, language);
+    }
+  }
+});

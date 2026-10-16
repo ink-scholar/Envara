@@ -2,7 +2,7 @@
   <img src="../../build/icon.png" width="88" alt="Envara 境舱" />
 </p>
 <h1 align="center">Envara · 境舱</h1>
-<p align="center"><strong>Many environments. One workspace.</strong><br />A local workspace for browsers, terminals and network contexts.</p>
+<p align="center"><strong>Give each workflow a place of its own.</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="MIT license for original code" /></a>
   <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.23-475569" alt="Envara 0.5.23" /></a>
@@ -15,29 +15,77 @@
   <a href="https://github.com/ink-scholar/Envara/releases/latest">Download for macOS</a> · <a href="../capability-matrix.md">Capabilities and limits</a> · <a href="../../CONTRIBUTING.md">Contribute</a> · <a href="../SUPPORT.md">Support the project</a>
 </p>
 
+**Browse, run commands and connect desktop apps with one working context from start to finish.**
+
+Envara is an open-source local desktop workspace that brings network egress, browser profiles, terminal tools and supported desktop applications together. Each environment keeps its own settings and data. Create separate contexts for projects, accounts or regions, and manage them in one place.
+
 ![Envara native workspace in Chinese](../media/workspace-zh-CN.png)
 
 <p align="center"><sub>Native Electron workspace, shown with synthetic example data.</sub></p>
 
-## One environment, one working context
+## Bring the whole workflow together
 
-Envara brings browsers, network egress, working directories and command-line tools into one local workspace. Each environment keeps its own browser data, tool configuration and history; different environments can use different networks.
+Research in the browser, write code in the terminal, finish a task in a desktop app: these often belong to the same project. Envara lets them reuse one confirmed network context while keeping the browser data, tool settings and application data you need for next time.
 
-| Workspace | Capabilities |
+**Choose your network once, connect the tools you need, and pick up where you left off.** Envara makes separate environments part of everyday work.
+
+### 🌐 A browser of its own, in every environment
+
+Choose **CloakBrowser / Chromium, Camoufox / Firefox** or experimental **BrowseForge Chromium**. Separate browser data, persistent sessions, environment groups, search and configuration cloning keep your work organized. Cloning a configuration creates a new environment; existing sign-in data stays in the original.
+
+The selected engine manages fingerprint configuration by default, with advanced device, language and timezone settings available. Auditable tracker-blocking rules make the privacy controls inspectable. Support varies by engine. [Browser and device settings](../browser-device-profiles.md)
+
+### 🧭 Set the network once, use the context throughout
+
+Use **HTTP, HTTPS, SOCKS5 or AnyTLS**. AnyTLS runs through Envara's bundled, app-managed proxy core, with no separate Clash configuration needed.
+
+When creating a network environment, Envara checks the **actual egress using an authenticated request**, then lets you confirm the region and timezone. Browsers, terminals and supported attached applications reuse that context. For a simulated location, use Google Maps to choose coordinates; measured egress and simulated location are displayed separately. Environment settings do not change the host system's timezone. [Network contexts](../network-context.md)
+
+### ⌨️ A working environment for your terminal, too
+
+Choose the **network, link browser and project folder** when starting a session. Configuration and history stay with the environment. Real PTYs, multiple sessions, a panel with draggable height, workspace expansion and independent windows keep the command line close at hand.
+
+Duplicating a terminal opens a new idle process in the same context. Close the panel and return to the session later. Supported macOS managed loopback routes use a network fence: tools that cannot use the proxy fail to connect, preventing a silent fallback to direct traffic. Your project folder stays where it is, so you can keep using your existing toolchain.
+
+### 🧩 Bring desktop apps into the workflow
+
+Choose an environment and link browser for supported **Chromium / Electron applications**, then manage their launch, stop and application data in one place. Envara checks the target's identity, compatibility, existing instances and native routing components before allowing it to start.
+
+Stopping an app, removing its binding or quitting Envara preserves sign-in and offline data for next time. Delete that data explicitly when you need to clear it. Native routing requires system authorization; support for an engine does not mean that every application has passed acceptance testing. [Attached application support](../application-routing-options.md)
+
+### 🔗 Keep context from the command line to the sign-in page
+
+Assign a link browser to an environment so pages opened from its terminal reach the corresponding environment. On macOS, system link routing can also handle links that managed applications hand to the system. Unrelated links still go to the previous default browser.
+
+System link routing requires your confirmation in a macOS dialog and can be turned off at any time. When you explicitly choose the system browser, Envara explains that the link will leave the environment.
+
+### 🤖 A workspace for AI and automation tools
+
+The browser backend provides **REST, MCP and Playwright** interfaces for tasks such as page operations, forms, cookies and screenshots. See the [capability matrix](../capability-matrix.md) for interface coverage.
+
+Claude Code is one integration: each environment has its own installation of the **unchanged official CLI**, named login profiles and a session-scoped MCP broker bound to the selected environment browser. Start at a shell prompt, then enter `claude` yourself. You choose the model, session-resume and permission options. [Claude Code sessions](../claude-code-sessions.md)
+
+### 📦 Take the data you choose when it's time to move
+
+Browsers, terminals and attached applications each offer **password-encrypted exports**, so you can choose the data you need. Terminal exports include the selected Claude login profile plus shared shell configuration and history. Imports create a new environment, preserving your existing workspace.
+
+Application executables, caches, temporary files and Keychain are excluded. Some accounts may still need a fresh sign-in on another machine.
+
+### 🗂️ Keep everyday work close at hand
+
+The dark three-column workspace gives environments, networks, browsers, terminals, attached applications and runtime status a clear place. Common actions are within reach; detailed settings stay under Advanced. Nine interface languages let you start in a language you know.
+
+## What can you do with Envara?
+
+| Use case | What Envara helps you organize |
 | --- | --- |
-| Environments | Create, clone, group and search; save working directories and network contexts |
-| Network egress | HTTP, HTTPS, SOCKS5 and built-in AnyTLS; detect actual egress, approximate region and timezone |
-| Browsers | CloakBrowser / Chromium, Camoufox / Firefox and experimental BrowseForge Chromium; automatic configuration and advanced settings |
-| Terminals | Real PTYs, directory selection, multiple sessions, resizable panels and independent windows |
-| Claude Code | A separate official CLI installation per environment, named login profiles and MCP tools bound to the environment's browser |
-| Attached applications | Bind supported Chromium/Electron applications to an environment; manage their running instances and separate application data |
-| Data transfer | Export browser data, a selected terminal login profile or attached-application data separately, encrypted with a password |
+| Development across projects | Project folders, terminal configuration and history, browser data and the chosen network |
+| Work across accounts | Browser and application data kept separately by environment, reducing context mix-ups |
+| Regional web checks | Choose a network, verify actual egress, then configure the browser's region, language and timezone |
+| AI-assisted development and browser automation | Run tools in the selected environment, connect to browser interfaces and use dedicated Claude sessions |
+| Workspace backup and migration | Export encrypted data for a browser, terminal profile or individual application, then restore it in a new environment |
 
-Envara manages its built-in AnyTLS core, so no separate Clash configuration is needed. Browsers, terminals and attached applications reuse the confirmed network location and timezone. Location settings do not change the system timezone; IP geolocation only estimates a region.
-
-Duplicating a terminal creates a new independent process without replaying commands. A Claude Code session opens a shell where you enter `claude`; you can download a separate official installation or initialize it from an existing local native executable. Envara does not modify the official CLI, copy the host account or enable permission bypass by default. [About Claude Code sessions](../claude-code-sessions.md).
-
-Before launching an attached application, Envara checks compatibility, existing instances and the routing component's status. It refuses to launch if the requirements are not met. Stopping an application, removing its binding or quitting Envara preserves login data; that data is cleared only when you explicitly delete it or its environment. See [attached applications](../application-routing-options.md).
+**A local desktop, one working context, and a choice of tools.** Focus on your work; Envara helps keep the environment organized.
 
 ## Download and install
 
@@ -63,7 +111,9 @@ The interface supports **简体中文、繁體中文、English、日本語、한
 
 Interface language is separate from browser locale. Changing the menu language does not change existing networks, timezones or working directories.
 
-## Capability boundaries
+## About isolation and privacy
+
+Envara focuses on controlled networks, separate data and auditable privacy mechanisms. These boundaries help you use it according to its actual capabilities:
 
 - Configuration and data isolation do not provide a separate OS user, Keychain or virtual hardware. Browser fingerprint settings do not change native applications' hardware identity.
 - Supported macOS terminal routes use a network fence. Platforms and routes without that boundary must not be treated as forcibly isolated. See the [capability matrix](../capability-matrix.md).

@@ -2,7 +2,7 @@
   <img src="../../build/icon.png" width="88" alt="Envara 境舱" />
 </p>
 <h1 align="center">Envara · 境舱</h1>
-<p align="center"><strong>Plusieurs environnements, un seul espace de travail.</strong><br />Un espace local pour vos navigateurs, terminaux et contextes réseau.</p>
+<p align="center"><strong>Un environnement dédié à chaque contexte de travail.</strong><br />Votre navigateur, votre terminal et vos applications, dans un même environnement.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licence du code original : MIT" /></a>
   <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.23-475569" alt="Envara 0.5.23" /></a>
@@ -15,29 +15,77 @@
   <a href="https://github.com/ink-scholar/Envara/releases/latest">Télécharger pour macOS</a> · <a href="../capability-matrix.md">Fonctionnalités et limites</a> · <a href="../../CONTRIBUTING.md">Contribuer</a> · <a href="../SUPPORT.md">Soutenir le projet</a>
 </p>
 
+**Naviguez, exécutez vos commandes et utilisez vos applications de bureau au sein d’un même environnement de travail.**
+
+Envara est un espace de travail local et open source qui réunit sortie réseau, profils de navigateur, outils de terminal et applications de bureau prises en charge. Chaque environnement conserve ses propres réglages et données. Vous pouvez ainsi organiser vos projets, comptes ou activités par région, depuis une seule interface.
+
 ![Espace de travail natif Envara en chinois](../media/workspace-zh-CN.png)
 
 <p align="center"><sub>Espace de travail Electron natif avec des données d’exemple synthétiques.</sub></p>
 
-## Un environnement, un contexte de travail commun
+## Ce qui fait la différence : relier tout votre flux de travail
 
-Envara réunit navigateur, sortie réseau, dossier de travail et outils en ligne de commande dans un même espace local. Chaque environnement conserve ses propres données de navigation, configurations et historiques d’outils ; les environnements peuvent utiliser des réseaux différents.
+Faire une recherche dans le navigateur, écrire du code dans le terminal, poursuivre dans une application de bureau : ces activités font souvent partie du même projet. Envara leur permet de réutiliser un contexte réseau confirmé, tout en conservant les données de navigation, configurations d’outils et données applicatives dont vous aurez besoin à votre retour.
 
-| Espace | Fonctionnalités |
+**Choisissez votre réseau une fois, ajoutez vos outils et retrouvez votre travail la prochaine fois.** C’est le principe d’Envara : faire des environnements distincts une façon simple de travailler au quotidien.
+
+### 🌐 À chaque environnement son navigateur
+
+Choisissez entre **CloakBrowser / Chromium, Camoufox / Firefox** et **BrowseForge Chromium**, proposé à titre expérimental. Données de navigation distinctes, sessions persistantes, groupes, recherche et clonage des configurations vous aident à garder vos contextes bien organisés. Cloner une configuration crée un nouvel environnement ; les données de connexion restent dans l’original.
+
+L’empreinte du navigateur est gérée par défaut par le moteur choisi. Des réglages avancés d’appareil, de langue et de fuseau horaire complètent les règles de blocage du suivi, qui peuvent être auditées. Les possibilités varient selon le moteur. [Navigateurs et paramètres d’appareil](../browser-device-profiles.md)
+
+### 🧭 Réseau, localisation et fuseau horaire : un réglage commun
+
+Envara prend en charge **HTTP, HTTPS, SOCKS5 et AnyTLS**. Le cœur de proxy AnyTLS est fourni avec l’application et géré par Envara ; aucune configuration séparée de Clash n’est nécessaire.
+
+Lors de la création d’un environnement réseau, Envara détecte la **sortie réelle via le proxy authentifié**, puis vous laisse confirmer la région et le fuseau horaire. Le navigateur, le terminal et les applications associées prises en charge réutilisent ce contexte. Pour simuler une position, vous pouvez choisir des coordonnées avec Google Maps ; la sortie mesurée et la position simulée sont présentées séparément. Ces réglages ne modifient pas le fuseau horaire du système hôte. [Environnements réseau](../network-context.md)
+
+### ⌨️ Un vrai environnement de travail pour le terminal
+
+À la création d’une session, choisissez **le réseau, le navigateur pour les liens et le dossier du projet**. Configurations et historique sont conservés par environnement. Vrais PTY, sessions multiples, hauteur réglable, agrandissement dans l’espace principal et fenêtres indépendantes rendent la ligne de commande facile à intégrer à votre travail.
+
+Dupliquer un terminal ouvre un nouveau processus au repos dans le même contexte. Fermer le panneau laisse la session disponible pour y revenir. Les routes gérées via un relais local prises en charge sur macOS utilisent une barrière réseau : les programmes incompatibles avec le proxy échouent à se connecter plutôt que de passer silencieusement en connexion directe. Vos dossiers de projet restent à leur emplacement d’origine, avec votre chaîne d’outils habituelle.
+
+### 🧩 Intégrer les applications de bureau au même flux de travail
+
+Pour les **applications Chromium / Electron prises en charge**, choisissez l’environnement et le navigateur pour les liens, puis gérez leur lancement, leur arrêt et leurs données applicatives. Envara vérifie l’identité de la cible, sa compatibilité, les instances déjà présentes et les composants natifs de routage avant d’autoriser le lancement.
+
+Arrêter une application, supprimer son association ou quitter Envara conserve ses données de connexion et son contenu hors ligne pour la prochaine session. Vous choisissez explicitement quand les effacer. Le routage natif nécessite une autorisation du système ; la prise en charge d’un moteur ne signifie pas que toutes ses applications ont été validées. [Périmètre des applications associées](../application-routing-options.md)
+
+### 🔗 Du terminal à la page de connexion, gardez le même contexte
+
+Attribuez un navigateur à l’environnement pour y ouvrir les liens du terminal. Le routage des liens système de macOS peut également prendre en charge les liens que les applications gérées transmettent au système. Les liens sans rapport avec un environnement continuent de s’ouvrir dans le navigateur par défaut précédent.
+
+Le routage système requiert votre confirmation dans une boîte de dialogue macOS et peut être désactivé à tout moment. Si vous choisissez le navigateur du système, l’interface précise que le lien quittera l’environnement.
+
+### 🤖 Un espace organisé pour l’IA et l’automatisation
+
+Le service du navigateur propose des interfaces **REST, MCP et Playwright** pour automatiser les pages, formulaires, cookies et captures d’écran, entre autres. Leur périmètre est précisé dans la [matrice des fonctionnalités](../capability-matrix.md).
+
+Claude Code est l’une de ces intégrations : chaque environnement dispose d’une installation distincte de la **CLI officielle, sans modification**, de profils de connexion nommés et d’un broker MCP propre à la session qui lie les outils au navigateur choisi. Vous entrez d’abord dans le shell, puis lancez `claude` vous-même. Le modèle, la reprise d’une session et les options d’autorisation restent à votre choix. [Sessions Claude Code](../claude-code-sessions.md)
+
+### 📦 Emporter uniquement les données dont vous avez besoin
+
+Navigateurs, terminaux et applications associées disposent chacun de leur propre fonction d’**export chiffré par mot de passe**. L’export d’un terminal comprend le profil de connexion Claude sélectionné ainsi que la configuration et l’historique shell partagés. L’import crée un nouvel environnement et conserve votre espace de travail existant.
+
+Les programmes eux-mêmes, caches, fichiers temporaires et données du trousseau ne sont pas exportés. Certains comptes nécessitent donc une nouvelle connexion après un changement d’ordinateur.
+
+### 🗂️ Moins d’interruptions dans la gestion quotidienne
+
+L’interface sombre à trois colonnes donne une place claire aux environnements, réseaux, navigateurs, terminaux, applications associées et états d’exécution. Les actions courantes sont directement accessibles, les réglages détaillés se trouvent dans les options avancées et neuf langues d’interface vous permettent de commencer dans la vôtre.
+
+## Que pouvez-vous faire avec Envara ?
+
+| Usage | Ce qu’Envara vous aide à organiser |
 | --- | --- |
-| Environnements | Création, clonage, regroupement et recherche ; conservation du dossier de travail et du contexte réseau |
-| Sortie réseau | HTTP, HTTPS, SOCKS5 et AnyTLS intégré ; détection de la sortie réelle, de la région approximative et du fuseau horaire |
-| Navigateurs | CloakBrowser / Chromium, Camoufox / Firefox et BrowseForge Chromium expérimental ; configuration automatique et paramètres avancés |
-| Terminal | Vrais PTY, choix du dossier, sessions multiples, panneau redimensionnable et fenêtres indépendantes |
-| Claude Code | Installation distincte de la CLI officielle par environnement, profils de connexion nommés et outils MCP associés au navigateur de l’environnement |
-| Applications associées | Association d’un environnement aux applications Chromium/Electron prises en charge, gestion des instances en cours et de données applicatives distinctes |
-| Migration des données | Export séparé des données d’un navigateur, du profil de connexion de terminal choisi ou d’une application associée, avec chiffrement par mot de passe |
+| Développer plusieurs projets | Dossiers de projet, configuration et historique du terminal, données de navigation et réseau choisi |
+| Travailler avec plusieurs comptes | Données de navigation et données applicatives distinctes par environnement pour limiter les mélanges de contextes |
+| Tester des sites pour différentes régions | Choix et vérification de la sortie réseau, puis réglage de la région, de la langue et du fuseau horaire du navigateur |
+| Développer avec l’IA et automatiser le navigateur | Outils exécutés dans l’environnement choisi, accès aux interfaces du navigateur et sessions Claude dédiées |
+| Sauvegarder et transférer un environnement de travail | Export chiffré d’un navigateur, d’un profil de terminal ou d’une application, puis restauration dans un nouvel environnement |
 
-Le cœur AnyTLS intégré est géré par Envara, sans configuration séparée de Clash. Navigateurs, terminaux et applications associées réutilisent la localisation réseau et le fuseau horaire confirmés. La localisation choisie ne modifie pas le fuseau horaire du système ; la géolocalisation IP indique seulement une région approximative.
-
-Dupliquer un terminal crée un nouveau processus indépendant, sans rejouer les commandes. Une session Claude Code commence à l’invite du shell : vous saisissez vous-même `claude`. Vous pouvez télécharger une installation officielle distincte ou l’initialiser à partir d’un programme natif déjà présent sur votre ordinateur. Envara ne modifie pas la CLI officielle, ne copie pas les données de compte de l’hôte et n’active pas par défaut de contournement des autorisations. [En savoir plus sur les sessions Claude Code](../claude-code-sessions.md).
-
-Avant de lancer une application associée, Envara vérifie sa compatibilité, les instances existantes et l’état des composants de routage. Si les conditions ne sont pas remplies, le lancement est explicitement refusé. Arrêter l’application, supprimer son association ou quitter Envara conserve les données de connexion ; elles ne sont effacées que si vous supprimez explicitement ces données ou l’environnement. Voir [Applications associées](../application-routing-options.md).
+**Un bureau local, un contexte de travail commun, plusieurs façons d’utiliser vos outils.** Vous avancez dans votre travail ; Envara vous aide à en organiser l’environnement.
 
 ## Téléchargement et installation
 
@@ -63,7 +111,9 @@ L’interface prend en charge **简体中文、繁體中文、English、日本�
 
 La langue de l’interface est distincte de celle de l’environnement de navigation. Changer la langue des menus ne modifie ni les réseaux existants, ni les fuseaux horaires, ni les dossiers de travail.
 
-## Limites des fonctionnalités
+## Isolation et vie privée
+
+Envara privilégie un réseau maîtrisé, des données distinctes et des mécanismes de confidentialité auditables. Ces quelques limites vous aident à l’utiliser en fonction de ses capacités réelles :
 
 - La séparation des configurations et des données ne crée ni utilisateur distinct du système d’exploitation, ni trousseau séparé, ni matériel virtuel. Les réglages d’empreinte du navigateur ne modifient pas l’identité matérielle des applications natives.
 - Les routes de terminal prises en charge sur macOS utilisent une barrière réseau. Les plateformes et routes dépourvues de cette frontière ne doivent pas être considérées comme soumises à une isolation forcée. Voir la [matrice des fonctionnalités](../capability-matrix.md) pour le périmètre détaillé.

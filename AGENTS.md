@@ -4,6 +4,8 @@
 
 Envara is a lightweight desktop workspace for browser environments, terminals and attached applications. Preserve existing configuration and application data.
 
+- Present Envara as a complete environment workspace for browsers, terminals and supported desktop applications. Product writing should be distinctive, benefit-led and approachable; Claude Code is one integration, not the product's primary identity. Describe implemented privacy mechanisms accurately without promising immunity from account restrictions or unsupported market exclusivity.
+
 - Read the implementation and existing tests before changing behavior. Prefer focused changes and shared rules over broad rewrites.
 - Keep UI in `src/`. Preserve `.openai/hosting.json`, `worker/index.js`, `scripts/prepare-sites-build.mjs` and `tests/sites-worker.test.mjs`. Start previews yourself when needed.
 - Run relevant checks and verify real desktop/browser behavior. A successful build or unit test does not establish routing, authentication or release acceptance. Distinguish measured behavior, known failures and untested coverage.

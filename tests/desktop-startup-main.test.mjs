@@ -162,10 +162,16 @@ test('an independent terminal window cannot dispatch workspace actions or anothe
   await f.startup.start();
   await assert.rejects(f.api.call('createProfile'), /此窗口仅支持终端操作/);
   await assert.rejects(f.api.call('openTerminal', { id: 'other-profile' }), /此窗口仅操作当前环境/);
+  await assert.rejects(f.api.call('deleteClaudeAccount', { id: 'other-profile', accountId: 'selected', confirmed: true }), /此窗口仅操作当前环境/);
   await assert.rejects(f.api.call('closeTerminal', { sessionId: 'other-session' }), /该会话不属于此终端窗口/);
   assert.equal(f.calls.length, 0);
   await f.api.call('writeTerminal', { sessionId: 'owned-session', data: 'fixture' });
   assert.deepEqual(f.calls.map(item => item.method), ['writeTerminal']);
+  await f.api.call('deleteClaudeAccount', { id: 'prof_fixture', accountId: 'selected', confirmed: true });
+  assert.equal(f.calls.at(-1).method, 'deleteClaudeAccount');
+  f.event.senderFrame = {};
+  await assert.rejects(f.api.call('deleteClaudeAccount', { id: 'prof_fixture', accountId: 'selected', confirmed: true }), /不允许的请求来源/);
+  assert.equal(f.calls.length, 2);
 });
 
 test('terminal bootstrap uses its bound environment and workspace snapshots omit proxy credentials', async () => {

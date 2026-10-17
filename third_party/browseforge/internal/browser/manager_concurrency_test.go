@@ -9,7 +9,7 @@ import (
 
 	"browseforge/internal/profile"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 func newConcurrentSession(profileID string) (*Session, *desktopTestContext) {

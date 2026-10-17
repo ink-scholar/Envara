@@ -8,7 +8,7 @@ import { PassThrough } from 'node:stream';
 import { mkdtemp, mkdir, readdir, stat, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
-import { anyTlsSettings, anyTlsCoreConfig, ProxyCoreManager, probeCoreListener, PROXY_CORE_VERSION, PROXY_CORE_BOOTSTRAP_DNS,
+import { anyTlsSettings, anyTlsCoreConfig, managedProxySettings, proxyCoreConfig, ProxyCoreManager, probeCoreListener, PROXY_CORE_VERSION, PROXY_CORE_BOOTSTRAP_DNS,
   physicalInterfaceFromRoute, detectMacPhysicalInterface, bootstrapLocalAddress } from '../electron/proxy-core-manager.mjs';
 
 const node = (extra = {}) => ({ id: 'fixture-node', protocol: 'anytls', host: 'node.example.test', port: 443,
@@ -120,6 +120,47 @@ test('one owned core supplies private authenticated loopback transport with no e
   await manager.release(node().id);
   assert.equal(manager.snapshot().activeCount, 0); assert.deepEqual(await dirs(manager), []);
   assert.deepEqual(calls[0].child.kills, ['SIGTERM']);
+});
+
+test('ordinary upstreams retain authentication and TLS identity with a single mandatory outbound', () => {
+  const local = { port: 40000, username: 'owned', password: 'local' };
+  for (const protocol of ['http', 'https', 'socks5']) {
+    const settings = managedProxySettings({ protocol, host: 'Proxy.Example.test', port: 8443, username: 'fixture-user', password: 'fixture-password', skipCertVerify: true });
+    const config = proxyCoreConfig(settings, local, { resolvedServer: '93.184.215.14', interfaceName: 'en0' });
+    assert.deepEqual(config.rules, ['MATCH,ENVARA_UPSTREAM']);
+    assert.deepEqual(config['proxy-groups'], []); assert.equal(config.proxies.length, 1);
+    assert.equal(config.tun.enable, false); assert.equal(config.dns.listen, '');
+    const outbound = config.proxies[0];
+    assert.equal(outbound.server, '93.184.215.14'); assert.equal(outbound['interface-name'], 'en0');
+    assert.equal(outbound.type, protocol === 'https' ? 'http' : protocol);
+    if (protocol === 'socks5') {
+      assert.equal(outbound.username, 'fixture-user'); assert.equal(outbound.password, 'fixture-password'); assert.equal(outbound.udp, true);
+    } else {
+      assert.equal(outbound.headers['Proxy-Authorization'], `Basic ${Buffer.from('fixture-user:fixture-password').toString('base64')}`);
+      assert.equal(outbound.tls, protocol === 'https'); assert.equal(outbound['skip-cert-verify'], false);
+      assert.equal(outbound.sni, 'proxy.example.test'); assert.equal(settings.udp, false);
+    }
+  }
+  const passwordOnly = proxyCoreConfig(managedProxySettings({ protocol: 'http', host: 'localhost', port: 8080, password: 'fixture-password' }), local);
+  assert.equal(passwordOnly.proxies[0].headers['Proxy-Authorization'], `Basic ${Buffer.from(':fixture-password').toString('base64')}`);
+  for (const patch of [{ protocol: 'direct' }, { host: 'bad/path' }, { port: 0 }, { username: 'bad\n' }, { udp: 'yes' },
+    { protocol: 'socks5', username: '界'.repeat(86) }, { protocol: 'socks5', username: '', password: 'password-only' }]) {
+    assert.throws(() => managedProxySettings({ protocol: 'http', host: 'localhost', port: 8080, ...patch }), code('INVALID_MANAGED_PROXY'));
+  }
+});
+
+test('ordinary core ownership keeps node type and retires credentials and identity on replacement', async t => {
+  const { manager, calls } = await fixture(t);
+  for (const protocol of ['http', 'https', 'socks5']) {
+    const proxy = { id: 'ordinary-node', protocol, host: '127.0.0.1', port: 8080, username: 'upstream-user', password: 'upstream-secret' };
+    const wire = await manager.ensure(proxy), identity = manager.routingIdentity(proxy);
+    assert.equal(identity.nodeType, protocol); assert.equal(identity.corePid, calls.at(-1).child.pid);
+    assert.equal(wire.host, '127.0.0.1'); assert.notEqual(wire.password, proxy.password);
+    assert.equal(JSON.stringify(identity).includes(proxy.password), false);
+  }
+  assert.equal(calls.length, 3); assert.deepEqual(calls[0].child.kills, ['SIGTERM']); assert.deepEqual(calls[1].child.kills, ['SIGTERM']);
+  await manager.release({ id: 'ordinary-node', protocol: 'socks5', host: '127.0.0.1', port: 8080 });
+  assert.equal(manager.routingIdentity('ordinary-node'), null); assert.deepEqual(await dirs(manager), []);
 });
 
 test('concurrent requests reuse the route but changed credentials replace only their owned process', async t => {

@@ -9,6 +9,7 @@ import { access, chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'n
 import { setTimeout as delay } from 'node:timers/promises';
 import { resolveProxyBootstrapHost } from './proxy-bootstrap-dns.mjs';
 import { isPublicIP } from './proxy-network.mjs';
+import { assertHttpProxyUsername } from '../shared/proxy-auth.mjs';
 
 export const PROXY_CORE_VERSION = 'v1.19.32';
 // IP-addressed DoH bootstraps the node without consulting host VPN fake-IP DNS.
@@ -73,9 +74,49 @@ export function anyTlsSettings(input) {
 }
 
 export function anyTlsCoreConfig(settings, local, { interfaceName, resolvedServer } = {}) {
+  return proxyCoreConfig({ ...settings, protocol: 'anytls' }, local, { interfaceName, resolvedServer });
+}
+
+/** Normalize upstreams without accepting arbitrary core options or a direct route. */
+export function managedProxySettings(input) {
+  const settings = normalizeManagedProxySettings(input);
+  assertHttpProxyUsername(settings.protocol, settings.username);
+  return settings;
+}
+
+function normalizeManagedProxySettings(input) {
+  if (input?.protocol === 'anytls') return { ...anyTlsSettings(input), protocol: 'anytls' };
+  let host = input?.host;
+  if (typeof host === 'string' && host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+  const port = Number(input?.port), username = input?.username ?? '', password = input?.password ?? '';
+  if (!['http', 'https', 'socks5'].includes(input?.protocol) || !safeField(host, 253) || /[\s/@?#\\]/.test(host) ||
+      (host.includes(':') && net.isIP(host) !== 6) || !Number.isInteger(port) || port < 1 || port > 65535 ||
+      !safeField(username, 2048, true) || !safeField(password, 2048, true) ||
+      (input.id != null && !safeField(input.id, 160)) || (input.udp != null && typeof input.udp !== 'boolean') ||
+      (input.protocol === 'socks5' && (Buffer.byteLength(username) > 255 || Buffer.byteLength(password) > 255 || (!username && password)))) {
+    throw fail('INVALID_MANAGED_PROXY', '代理节点的协议、地址、端口或认证信息无效。');
+  }
+  return { protocol: input.protocol, host: host.toLowerCase(), port, username, password,
+    udp: input.protocol === 'socks5' && input.udp !== false };
+}
+
+export function proxyCoreConfig(settings, local, { interfaceName, resolvedServer } = {}) {
+  assertHttpProxyUsername(settings.protocol, settings.username);
   if (interfaceName != null && !physicalInterfacePattern.test(interfaceName)) throw fail('PROXY_CORE_INTERFACE_UNAVAILABLE', '默认物理网络接口无效。');
   if (resolvedServer != null && (net.isIP(resolvedServer) !== 4 || !isPublicIP(resolvedServer))) throw fail('PROXY_CORE_BOOTSTRAP_UNAVAILABLE', '节点解析未返回有效的公开 IPv4 地址。');
   const resolvers = PROXY_CORE_BOOTSTRAP_DNS.map(url => interfaceName ? `${url}#${interfaceName}` : url);
+  const anytls = settings.protocol === 'anytls';
+  const outbound = { name: anytls ? 'ENVARA_ANYTLS' : 'ENVARA_UPSTREAM',
+    type: settings.protocol === 'https' ? 'http' : settings.protocol, server: resolvedServer ?? settings.host, port: settings.port,
+    ...(interfaceName ? { 'interface-name': interfaceName } : {}) };
+  if (anytls) Object.assign(outbound, { password: settings.password, sni: settings.serverName,
+    'skip-cert-verify': settings.skipCertVerify, 'client-fingerprint': settings.clientFingerprint,
+    'client-metadata': '', udp: settings.udp, ...(settings.alpn.length ? { alpn: [...settings.alpn] } : {}), 'min-idle-session': 0 });
+  else if (settings.protocol === 'socks5') Object.assign(outbound, { username: settings.username, password: settings.password, udp: settings.udp });
+  else Object.assign(outbound, { tls: settings.protocol === 'https', sni: settings.host, 'skip-cert-verify': false,
+    // Mihomo's username/password shortcut omits Basic auth when either field
+    // is empty. Explicit headers preserve existing HTTP credential semantics.
+    ...(settings.username || settings.password ? { headers: { 'Proxy-Authorization': `Basic ${Buffer.from(`${settings.username}:${settings.password}`).toString('base64')}` } } : {}) });
   return {
     'mixed-port': local.port,
     'bind-address': '127.0.0.1', 'allow-lan': false,
@@ -95,12 +136,8 @@ export function anyTlsCoreConfig(settings, local, { interfaceName, resolvedServe
     ntp: { enable: false, 'write-to-system': false },
     profile: { 'store-selected': false, 'store-fake-ip': false },
     'proxy-providers': {}, 'rule-providers': {}, 'proxy-groups': [], listeners: [], tunnels: [],
-    proxies: [{ name: 'ENVARA_ANYTLS', type: 'anytls', server: resolvedServer ?? settings.host, port: settings.port,
-      password: settings.password, sni: settings.serverName,
-      ...(interfaceName ? { 'interface-name': interfaceName } : {}),
-      'skip-cert-verify': settings.skipCertVerify, 'client-fingerprint': settings.clientFingerprint,
-      'client-metadata': '', udp: settings.udp, ...(settings.alpn.length ? { alpn: [...settings.alpn] } : {}), 'min-idle-session': 0 }],
-    rules: ['MATCH,ENVARA_ANYTLS'],
+    proxies: [outbound],
+    rules: [`MATCH,${outbound.name}`],
   };
 }
 
@@ -159,7 +196,7 @@ export function probeCoreListener(local, { timeoutMs = 400, signal } = {}) {
   });
 }
 
-/** Owns only app-created AnyTLS child processes and their private loopback ports. */
+/** Owns only app-created proxy child processes and their private loopback ports. */
 export class ProxyCoreManager {
   constructor({ dataDir, resourcesDir, resolveBinary, spawn = spawnChild, choosePort = freePort, verifyRecoveryPort = checkRecoveryPort,
     probeListener = probeCoreListener, onChange = () => {}, startupTimeoutMs = 8000,
@@ -190,23 +227,23 @@ export class ProxyCoreManager {
       if (await binaryDigest(binary) !== provenance.sha256.binary) throw new Error();
       return binary;
     } catch {
-      throw fail('PROXY_CORE_UNAVAILABLE', '内置 AnyTLS 内核缺失或校验失败，请使用完整的 Envara 安装包。');
+      throw fail('PROXY_CORE_UNAVAILABLE', '内置代理内核缺失或校验失败，请使用完整的 Envara 安装包。');
     }
   }
   async initialize() {
     if (this.closed) throw cancelled();
     if (!this.binaryPromise) this.binaryPromise = Promise.resolve().then(this.resolveBinary).then(async result => {
-      if (!path.isAbsolute(result ?? '')) throw fail('PROXY_CORE_UNAVAILABLE', '内置 AnyTLS 内核不可用。');
+      if (!path.isAbsolute(result ?? '')) throw fail('PROXY_CORE_UNAVAILABLE', '内置代理内核不可用。');
       await access(result, process.platform === 'win32' ? constants.F_OK : constants.X_OK);
       this.binary = result; this.resourceError = null; this._changed(); return result;
     }).catch(() => {
       this.binaryPromise = null; this.resourceError = 'PROXY_CORE_UNAVAILABLE'; this._changed();
-      throw fail('PROXY_CORE_UNAVAILABLE', '内置 AnyTLS 内核缺失或校验失败，请使用完整的 Envara 安装包。');
+      throw fail('PROXY_CORE_UNAVAILABLE', '内置代理内核缺失或校验失败，请使用完整的 Envara 安装包。');
     });
     await this.binaryPromise; return this.snapshot();
   }
   snapshot() {
-    return { core: 'mihomo', version: PROXY_CORE_VERSION, protocols: ['anytls'],
+    return { core: 'mihomo', version: PROXY_CORE_VERSION, protocols: ['http', 'https', 'socks5', 'anytls'],
       available: !!this.binary && !this.resourceError, activeCount: [...this.routes.values()].filter(route => route.status === 'running').length,
       error: this.resourceError, networkScope: 'app-owned-loopback', systemProxy: false, tun: false };
   }
@@ -234,7 +271,7 @@ export class ProxyCoreManager {
   }
   _assertLive(route) { if (this.closed || route.controller.signal.aborted) throw cancelled(); }
   async ensure(proxy, { signal } = {}) {
-    const settings = anyTlsSettings(proxy); const key = this._key(proxy, settings);
+    const settings = managedProxySettings(proxy); const key = this._key(proxy, settings);
     const digest = createHash('sha256').update(JSON.stringify(settings)).digest('hex');
     const generation = this.generations.get(key) ?? 0;
     if (this.closed || signal?.aborted) throw cancelled();
@@ -252,7 +289,7 @@ export class ProxyCoreManager {
         existing.status === 'running' && existing.wire ? { ...existing.wire } : null) : null;
       if (existing) await this._stop(existing);
       const route = { key, digest, routeIdentity: randomUUID(), coreGeneration: null, controller: new AbortController(), status: 'starting', child: null, directory: null, exited: false,
-        recoveryWire, interfaceName };
+        recoveryWire, interfaceName, nodeType: settings.protocol };
       this.routes.set(key, route);
       const onAbort = () => route.controller.abort();
       signal?.addEventListener('abort', onAbort, { once: true });
@@ -280,7 +317,7 @@ export class ProxyCoreManager {
           route.wire = recoveryWire ? { ...recoveryWire } : { protocol: 'http', host: '127.0.0.1', port,
             username: randomBytes(16).toString('hex'), password: randomBytes(32).toString('hex') };
           const config = path.join(route.directory, 'config.json');
-          await writeFile(config, JSON.stringify(anyTlsCoreConfig(settings, route.wire, { interfaceName, resolvedServer })), { mode: 0o600, flag: 'wx' });
+          await writeFile(config, JSON.stringify(proxyCoreConfig(settings, route.wire, { interfaceName, resolvedServer })), { mode: 0o600, flag: 'wx' });
           await chmod(config, 0o600); this._assertLive(route);
           route.exited = false; route.bindCollision = false;
           route.coreGeneration = randomUUID();
@@ -323,9 +360,9 @@ export class ProxyCoreManager {
           await this._stopChild(route); await this._discard(route);
           if (recoveryWire) throw fail('PROXY_CORE_RECOVERY_FAILED', '原代理入口暂时无法恢复，请关闭相关浏览器和终端会话后重试。');
           if (!retry) throw fail(startupExited ? 'PROXY_CORE_START_FAILED' : 'PROXY_CORE_START_TIMEOUT',
-            '内置 AnyTLS 内核未能启动，请重试或检查完整安装包。');
+            '内置代理内核未能启动，请重试或检查完整安装包。');
         }
-        throw fail('PROXY_CORE_START_FAILED', '内置 AnyTLS 内核未能启动。');
+        throw fail('PROXY_CORE_START_FAILED', '内置代理内核未能启动。');
       } catch (error) {
         if (recoveryWire && error.code !== 'PROXY_CORE_CANCELLED' && !this.closed && !route.controller.signal.aborted) {
           await this._stopChild(route); await this._discard(route);
@@ -336,7 +373,7 @@ export class ProxyCoreManager {
         await this._stop(route);
         if (error.code === 'PROXY_CORE_CANCELLED') throw error;
         if (['PROXY_CORE_UNAVAILABLE', 'PROXY_CORE_START_FAILED', 'PROXY_CORE_START_TIMEOUT', 'PROXY_CORE_STORAGE_FAILED', 'PROXY_CORE_INTERFACE_UNAVAILABLE', 'PROXY_CORE_BOOTSTRAP_UNAVAILABLE'].includes(error.code)) throw error;
-        throw fail('PROXY_CORE_START_FAILED', '内置 AnyTLS 内核未能启动，请重试或检查完整安装包。');
+        throw fail('PROXY_CORE_START_FAILED', '内置代理内核未能启动，请重试或检查完整安装包。');
       } finally { signal?.removeEventListener('abort', onAbort); }
     });
   }
@@ -361,15 +398,15 @@ export class ProxyCoreManager {
   }
   /** Private lifecycle evidence, never credentials or a renderer readiness receipt. */
   routingIdentity(proxyOrId) {
-    const key = typeof proxyOrId === 'string' ? proxyOrId : this._key(proxyOrId, anyTlsSettings(proxyOrId));
+    const key = typeof proxyOrId === 'string' ? proxyOrId : this._key(proxyOrId, normalizeManagedProxySettings(proxyOrId));
     const route = this.routes.get(key);
     if (this.closed || route?.status !== 'running' || route.exited || route.controller.signal.aborted || !route.wire ||
         !Number.isSafeInteger(route.child?.pid) || route.child.pid < 1 || !route.coreGeneration) return null;
-    return { proxyId: key, nodeType: 'anytls', routeIdentity: route.routeIdentity,
+    return { proxyId: key, nodeType: route.nodeType, routeIdentity: route.routeIdentity,
       coreGeneration: route.coreGeneration, corePid: route.child.pid, coreVersion: PROXY_CORE_VERSION };
   }
   async release(proxyOrId) {
-    const key = typeof proxyOrId === 'string' ? proxyOrId : this._key(proxyOrId, anyTlsSettings(proxyOrId));
+    const key = typeof proxyOrId === 'string' ? proxyOrId : this._key(proxyOrId, normalizeManagedProxySettings(proxyOrId));
     this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
     this.routes.get(key)?.controller.abort();
     return this._queue(key, async () => { const route = this.routes.get(key); if (route) await this._stop(route); });

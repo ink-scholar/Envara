@@ -5,14 +5,16 @@ import net from 'node:net';
 import path from 'node:path';
 import { EnvaraStore } from './store.mjs';
 import { ProxyNetworkProbe, proxyFingerprint } from './proxy-network.mjs';
+import { AddressGeocoder, addressQuery } from './address-geocoder.mjs';
 import { normalizePrivacy } from './privacy-policy.mjs';
 import { localeForCountry } from './workspace-context.mjs';
 import { isInterfaceLanguage } from '../shared/interface-languages.mjs';
 import { isAppearancePreference } from '../shared/appearance.mjs';
 import { browseForgeRegionFor } from '../shared/engine-choice.mjs';
+import { assertHttpProxyUsername } from '../shared/proxy-auth.mjs';
 import { assertNetworkLocationMatchesEgress, confirmNetworkLocation, networkLocationGeolocation, normalizeNetworkLocation, recommendNetworkLocation } from '../shared/network-location.mjs';
 import { browserContextSignature } from './terminal-browser-broker.mjs';
-import { PROVIDER_DEFAULT_DEVICE_PROFILE_ID, deviceProfileFingerprint, getBrowserDeviceProfile, validateBrowserDeviceProfileInput } from '../shared/browser-device-profile.mjs';
+import { PROVIDER_DEFAULT_DEVICE_PROFILE_ID, applyBrowserDeviceProfile, deviceProfileFingerprint, deviceProfileReplacedFields, getBrowserDeviceProfile, validateBrowserDeviceProfileIdentity, validateBrowserDeviceProfileInput } from '../shared/browser-device-profile.mjs';
 
 /** A link an environment's browser will load: web only, never credentials. */
 function linkURL(value) {
@@ -119,7 +121,7 @@ function proxyConfig(input) {
   }
   return config;
 }
-const upstreamProxy = (proxy) => { if (!proxy) return null; const region = browseForgeRegionFor(proxy); return { type: proxy.protocol, host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password, ...(region ? { region } : {}) }; };
+const upstreamProxy = (proxy) => { if (!proxy) return null; assertHttpProxyUsername(proxy.protocol, proxy.username); const region = browseForgeRegionFor(proxy); return { type: proxy.protocol, host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password, ...(region ? { region } : {}) }; };
 const sameProxy = (a, b) => JSON.stringify(proxyConfig(a)) === JSON.stringify(proxyConfig(b));
 // Explicit IDs keep saved nodes distinct even when their endpoint fields match.
 const proxyMatchesBinding = (proxy, boundId, inline) => boundId ? boundId === proxy.id : inline && sameProxy(inline, proxy);
@@ -159,6 +161,7 @@ export class BrowseForgeService {
     this.system = { platform: process.platform, appVersion: '0.2.0', ...system, dataDir: this.dataDir };
     this.options = options;
     this.networkProbe = options.networkProbe ?? new ProxyNetworkProbe();
+    this.addressGeocoder = options.addressGeocoder ?? new AddressGeocoder();
     this.workspaceContexts = new Map();
     this.browserLaunchReceipts = new Map();
     this.proxyWires = new Map();
@@ -330,7 +333,10 @@ export class BrowseForgeService {
     const name = text(input.name ?? existing?.name, '环境名称');
     const group = text(input.group ?? existing?.group ?? '', '分组', 100, true);
     if (!descriptor || !descriptor.platform_supported) throw error('当前平台不支持所选浏览器内核。', 'UNSUPPORTED_ENGINE');
-    const deviceProfile = validateBrowserDeviceProfileInput(input, descriptor, this.system.platform);
+    const deviceProfile = validateBrowserDeviceProfileInput(input, descriptor, this.system.platform, { requireComplete: preserveIdentity });
+    const previousDeviceProfileId = workspace.profiles.find(item => item.id === existing?.id)?.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID;
+    const applyDeviceProfile = deviceProfile && !preserveIdentity && (!existing || input.deviceProfileId !== previousDeviceProfileId);
+    if (applyDeviceProfile && existing) validateBrowserDeviceProfileIdentity(deviceProfile.id, descriptor, existing, { requireKnownOrigin: true });
     const payload = { name, group, runtime_id: descriptor.id };
     let generation = Object.hasOwn(input, 'fingerprintGeneration')
       ? fingerprintGenerationConfig(input.fingerprintGeneration, descriptor.id)
@@ -339,16 +345,11 @@ export class BrowseForgeService {
     if (input.tags != null) { if (!Array.isArray(input.tags) || input.tags.length > 30) throw error('标签格式无效。'); payload.tags = input.tags.map((tag) => text(tag, '标签', 60)); }
     const platform = deviceProfile?.platform ?? input.platform ?? existing?.identity?.target_os;
     if (platform != null) { if (!['macos', 'windows', 'linux'].includes(platform)) throw error('指纹平台无效。'); payload.identity = { ...(existing?.identity ?? {}), target_os: platform }; launchOverrides.target_os = platform; }
-    const fingerprint = { ...(existing?.fingerprint ?? {}) };
+    let fingerprint = { ...(existing?.fingerprint ?? {}) };
     if (input.fingerprint != null) Object.assign(fingerprint, fingerprintConfig(input.fingerprint));
-    if (deviceProfile) {
-      Object.assign(fingerprint, deviceProfileFingerprint(deviceProfile.id));
-      // Available desktop area belongs to the native window manager. An old
-      // custom value can exceed the new fixed screen size and is not a setting
-      // this catalog promises to control.
-      delete fingerprint['screen.availWidth'];
-      delete fingerprint['screen.availHeight'];
-    }
+    // Imports and ordinary edits retain their complete saved identity. Only a
+    // newly selected fixed specification replaces provider-specific geometry.
+    if (applyDeviceProfile) fingerprint = applyBrowserDeviceProfile(fingerprint, deviceProfile.id, descriptor);
     // Null explicitly restores provider-managed geometry; an omitted field is
     // an unrelated edit and must retain the user's existing configuration.
     // A fixed specification continues to own its dimensions even for null.
@@ -374,7 +375,7 @@ export class BrowseForgeService {
       // An explicit selection owns even a value equal to the generated value.
       // Cloning must keep that choice instead of mistaking it for an automatic one.
       const owned = new Set(Object.keys(input.fingerprint ?? {}));
-      if (deviceProfile) for (const key of Object.keys(deviceProfileFingerprint(deviceProfile.id))) owned.add(key);
+      if (applyDeviceProfile) for (const key of [...Object.keys(deviceProfileFingerprint(deviceProfile.id, descriptor)), ...deviceProfileReplacedFields(descriptor)]) owned.add(key);
       if (Object.hasOwn(input, 'width') && input.width !== (existing.fingerprint?.['screen.width'] ?? null)) { owned.add('screen.width'); owned.add('screen.availWidth'); }
       if (Object.hasOwn(input, 'height') && input.height !== (existing.fingerprint?.['screen.height'] ?? null)) { owned.add('screen.height'); owned.add('screen.availHeight'); }
       for (const key of owned) delete generation.generated_fields[key];
@@ -386,7 +387,7 @@ export class BrowseForgeService {
     let proxy = existing?.proxy ?? null;
     if (Object.hasOwn(input, 'proxyId')) { if (input.proxyId === null || input.proxyId === '') proxy = null; else { const selected = this.proxies(workspace, remote).find((item) => item.id === input.proxyId); if (!selected) throw error('指定代理不存在，不能自动切换为直接连接。', 'PROXY_NOT_FOUND'); proxy = selected.protocol === 'anytls' ? null : upstreamProxy(selected); } payload.proxy = proxy; }
     const effective = this.effectiveProxy({ ...existing, ...payload, proxy }, remote.groups, workspace, Object.hasOwn(input, 'proxyId') ? input.proxyId : undefined);
-    if (descriptor.id === 'browseforge-chromium' && effective.proxy && !browseForgeRegionFor(effective.proxy)) throw error('BrowseForge Chromium 只支持美国纽约、加州、得州和加拿大安大略、不列颠哥伦比亚的网络；这个网络请用 CloakBrowser。', 'INVALID_PROXY_REGION');
+    if (descriptor.id === 'browseforge-chromium' && effective.proxy && !browseForgeRegionFor(effective.proxy)) throw error('BrowseForge Chromium 需要有效的地区预设。请先检测并确认网络出口位置，或在高级设置中填写支持的地区代码。', 'INVALID_PROXY_REGION');
     payload.managed_proxy_required = effective.proxy?.protocol === 'anytls';
     return payload;
   }
@@ -400,7 +401,7 @@ export class BrowseForgeService {
     if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
     object(args, '操作参数');
     if (['snapshot', 'getSnapshot'].includes(method)) return this.snapshot();
-    const direct = new Set(['checkProxy', 'previewProxyNetwork', 'exportProfiles', 'previewLegacyMigration']);
+    const direct = new Set(['checkProxy', 'previewProxyNetwork', 'searchNetworkAddress', 'exportProfiles', 'previewLegacyMigration']);
     const mutations = new Set(['createProfile', 'updateProfile', 'cloneProfile', 'deleteProfile', 'clearProfile', 'startProfile', 'stopProfile', 'focusProfile', 'saveProxy', 'deleteProxy', 'saveGroup', 'deleteGroup', 'clearGroupProxy', 'bulkProfiles', 'importProfiles', 'migrateLegacy', 'saveSettings', 'installEngine']);
     if (!direct.has(method) && !mutations.has(method)) throw error('不支持的操作。', 'UNKNOWN_METHOD');
     if (direct.has(method)) return this[method](args);
@@ -511,9 +512,8 @@ export class BrowseForgeService {
     const remote = await this.remote(); const profile = this.find(remote, profileId); const previous = remote.sessions.find((item) => item.profile_id === profileId);
     const metadata = (await this.store.read()).profiles.find(item => item.id === profileId) ?? {};
     const deviceProfileId = metadata.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID;
-    validateBrowserDeviceProfileInput({ deviceProfileId, platform: profile.launch_overrides?.target_os ?? profile.identity?.target_os,
-      fingerprint: Object.fromEntries(Object.keys(deviceProfileFingerprint(deviceProfileId)).map(key => [key, profile.fingerprint?.[key]])) },
-    profile.runtime_id, this.system.platform);
+    validateBrowserDeviceProfileInput({ ...profile, deviceProfileId, platform: profile.launch_overrides?.target_os ?? profile.identity?.target_os },
+    profile.runtime_id, this.system.platform, { requireComplete: true });
     if (previous && (await this.health(previous)).alive === true) return { profile, focus: true };
     const engine = (await this.engines(remote.descriptors)).find((item) => item.id === profile.runtime_id);
     if (!engine?.installed || !engine.enabled) throw error('请先安装并启用该环境的浏览器内核。', 'ENGINE_NOT_INSTALLED');
@@ -634,6 +634,7 @@ export class BrowseForgeService {
   }
   async saveProxy({ proxy, locationPreviewToken }) {
     const config = { ...proxyConfig(proxy), name: text(proxy.name, '代理名称') };
+    assertHttpProxyUsername(config.protocol, config.username);
     const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
     const existing = proxy.id ? this.proxies(workspace, remote).find((item) => item.id === proxy.id) : null;
     if (proxy.id && !existing) throw error('网络出口不存在。', 'PROXY_NOT_FOUND');
@@ -646,7 +647,7 @@ export class BrowseForgeService {
     if (requestedLocation && (!unchangedLocation || locationPreviewToken != null)) {
       const preview = this.locationPreviews.get(locationPreviewToken);
       if (!preview || preview.expiresAt <= Date.now() || preview.fingerprint !== rawProxyFingerprint(config)) throw error('请先检测当前代理，再确认这个网络环境的位置。', 'NETWORK_LOCATION_NOT_VERIFIED');
-      config.location = confirmNetworkLocation(proxy.location, preview.network);
+      config.location = confirmNetworkLocation(proxy.location, preview.network, undefined, preview.referenceLocation);
     } else if (requestedLocation === null) config.location = null;
     else if (requestedLocation || previousLocation) config.location = requestedLocation ?? previousLocation;
     const savedId = workspace.proxies.some((item) => item.id === proxy.id) ? proxy.id : randomUUID();
@@ -654,7 +655,7 @@ export class BrowseForgeService {
     const groups = existing ? this.groups(workspace, remote.groups).filter(group => proxyMatchesBinding(existing, group.proxy?.id, group.proxy)) : [];
     const affected = remote.profiles.filter((profile) => users.includes(profile) || groups.some((group) => group.name === profile.group));
     for (const profile of affected) await this.assertStopped(remote, profile.id);
-    for (const profile of affected) if (profile.runtime_id === 'browseforge-chromium' && !browseForgeRegionFor(config)) throw error('BrowseForge Chromium 只支持美国纽约、加州、得州和加拿大安大略、不列颠哥伦比亚的网络；这个网络请用 CloakBrowser。', 'INVALID_PROXY_REGION');
+    for (const profile of affected) if (profile.runtime_id === 'browseforge-chromium' && !browseForgeRegionFor(config)) throw error('BrowseForge Chromium 需要有效的地区预设。请先检测并确认网络出口位置，或在高级设置中填写支持的地区代码。', 'INVALID_PROXY_REGION');
     if (groups.length && config.protocol === 'https') throw error('BrowseForge 分组代理仅支持 HTTP、SOCKS5 或托管 AnyTLS。', 'UNSUPPORTED_GROUP_PROXY');
     const staged = structuredClone(workspace);
     staged.proxies = staged.proxies.filter((item) => item.id !== savedId);
@@ -704,19 +705,22 @@ export class BrowseForgeService {
     await this.store.transaction((next) => { next.proxies = next.proxies.filter((item) => item.id !== proxyId); event(next, 'proxy', `删除网络出口「${proxy.name}」`); });
     await this.releaseProxy(proxy);
   }
-  async prepareProxy(proxy) {
-    if (!proxy || proxy.protocol !== 'anytls') return { wire: proxy ? proxyConfig(proxy) : null, managed: false };
-    if (!this.options.proxyCore?.ensure) throw error('内置 AnyTLS 网络内核尚未就绪。', 'PROXY_CORE_UNAVAILABLE');
+  async prepareProxy(proxy, { requireManagedRoute = false } = {}) {
+    if (!proxy && requireManagedRoute) throw error('托管网络出口绑定缺失，请先选择代理节点。', 'MANAGED_PROXY_BINDING_MISSING');
+    if (!proxy) return { wire: null, managed: false };
+    assertHttpProxyUsername(proxy.protocol ?? proxy.type, proxy.username);
+    if (proxy.protocol !== 'anytls' && !requireManagedRoute) return { wire: { ...proxyConfig(proxy), region: browseForgeRegionFor(proxy) ?? '' }, managed: false };
+    if (!this.options.proxyCore?.ensure) throw error('内置代理网络内核尚未就绪。', 'PROXY_CORE_UNAVAILABLE');
     let candidate;
     try { candidate = await this.options.proxyCore.ensure({ ...proxyConfig(proxy), id: identifier(proxy.id) }); }
     catch (value) {
       this.invalidateManagedProxy(proxy.id);
       let message = String(value?.message ?? '未知错误');
       for (const secret of [proxy.password, proxy.username]) if (secret) message = message.split(secret).join('[redacted]');
-      throw error(`AnyTLS 网络内核启动失败：${message}`, value?.code ?? 'PROXY_CORE_FAILED');
+      throw error(`代理网络内核启动失败：${message}`, value?.code ?? 'PROXY_CORE_FAILED');
     }
     const wire = proxyConfig(candidate);
-    if (wire.protocol !== 'http' || wire.host !== '127.0.0.1' || !wire.username || !wire.password) throw error('内置 AnyTLS 网络入口无效，已阻止直接连接。', 'INVALID_PROXY_CORE');
+    if (wire.protocol !== 'http' || wire.host !== '127.0.0.1' || !wire.username || !wire.password) throw error('内置代理网络入口无效，已阻止直接连接。', 'INVALID_PROXY_CORE');
     wire.region = browseForgeRegionFor(proxy) ?? '';
     if (this.closed) { await this.options.proxyCore.release?.(proxy.id); throw error('应用正在退出。', 'APP_CLOSING'); }
     this.proxyWires.set(proxy.id, wire);
@@ -731,19 +735,19 @@ export class BrowseForgeService {
     for (const context of this.workspaceContexts.values()) if (context.managedProxyId === proxyId) {
       context.timezone = null; context.timezoneSource = null;
       context.geolocation = null; context.locale = null;
-      context.networkLastError = 'AnyTLS 网络内核已停止，请重试以恢复连接。';
+      context.networkLastError = '代理网络内核已停止，请重试以恢复连接。';
       context.network = { ok: false, scope: 'egress', ip: null, timezone: null, errorCode: 'PROXY_CORE_STOPPED', message: context.networkLastError, checkedAt: now() };
     }
     this.changed();
   }
   async releaseProxy(proxy) {
-    if (proxy.protocol !== 'anytls') { this.networkProbe.invalidate(proxy); return; }
+    if (proxy.protocol !== 'anytls') this.networkProbe.invalidate(proxy);
     const wire = this.proxyWires.get(proxy.id);
     if (wire) this.networkProbe.invalidate(wire);
     this.proxyWires.delete(proxy.id);
     await this.options.proxyCore?.release?.(proxy.id);
   }
-  async checkProxy({ id: proxyId, proxy: draft } = {}) {
+  async checkProxy({ id: proxyId, proxy: draft } = {}, afterProbe) {
     const prepare = async () => {
       if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
       let proxy;
@@ -757,27 +761,50 @@ export class BrowseForgeService {
     try {
       const result = await this.networkProbe.probe(wire, { force: true });
       if (proxy.protocol === 'anytls' && revision !== (this.managedProxyRevisions.get(proxy.id) ?? 0)) throw error('AnyTLS 网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
+      // Main-only callback keeps optional map context on the exact verified
+      // wire until the owned draft is released. IPC cannot supply this callback.
+      if (afterProbe) await afterProbe(result, wire);
+      if (proxy.protocol === 'anytls' && revision !== (this.managedProxyRevisions.get(proxy.id) ?? 0)) throw error('AnyTLS 网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
       if (draft == null) this.changed();
       return result;
     } finally { if (draft != null && proxy.protocol === 'anytls') await this.releaseProxy(proxy); }
   }
-  async previewProxyNetwork({ proxy }) {
+  async previewProxyNetwork({ proxy, language = 'en' }) {
     await this.ready;
     const config = proxyConfig(proxy);
-    const network = await this.checkProxy({ proxy: config });
+    let referenceLocation = null;
+    const network = await this.checkProxy({ proxy: config }, async (network, wire) => {
+      if (recommendNetworkLocation(network)?.latitude != null) try {
+        referenceLocation = await this.addressGeocoder.reverse({ coordinates: network.geolocation, proxy: wire, language, routeKey: rawProxyFingerprint(config) });
+      } catch { /* Nearby map context is optional; the measured egress stays intact. */ }
+    });
     const locationRecommendation = recommendNetworkLocation(network);
+    if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
     let locationPreviewToken = null;
     if (locationRecommendation) {
       for (const [token, preview] of this.locationPreviews) if (preview.expiresAt <= Date.now()) this.locationPreviews.delete(token);
       if (this.locationPreviews.size >= 128) this.locationPreviews.delete(this.locationPreviews.keys().next().value);
       locationPreviewToken = randomUUID();
-      this.locationPreviews.set(locationPreviewToken, { fingerprint: rawProxyFingerprint(config), network: structuredClone(network), expiresAt: Date.now() + 15 * 60 * 1000 });
+      this.locationPreviews.set(locationPreviewToken, { fingerprint: rawProxyFingerprint(config), network: structuredClone(network), referenceLocation: structuredClone(referenceLocation), expiresAt: Date.now() + 15 * 60 * 1000 });
     }
-    return { network, locationRecommendation, locationPreviewToken };
+    return { network, locationRecommendation, referenceLocation, locationPreviewToken };
+  }
+  async searchNetworkAddress({ proxy, locationPreviewToken, query, language }) {
+    await this.ready;
+    if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
+    const config = proxyConfig(proxy);
+    const preview = this.locationPreviews.get(locationPreviewToken);
+    if (!preview || preview.expiresAt <= Date.now() || preview.fingerprint !== rawProxyFingerprint(config)) throw error('请先检测当前代理，再查询地址。', 'ADDRESS_NETWORK_NOT_VERIFIED');
+    addressQuery(query);
+    const draft = { ...config, id: `draft_${randomUUID()}` };
+    try {
+      const { wire } = await this.prepareProxy(draft);
+      return await this.addressGeocoder.search({ query, language, proxy: wire, routeKey: rawProxyFingerprint(config), bias: preview.network.geolocation });
+    } finally { if (draft.protocol === 'anytls') await this.releaseProxy(draft); }
   }
   contextSignature(profile, effective) { return `${profile.id}:${JSON.stringify(profile.launch_overrides ?? {})}:${JSON.stringify({ timezone: profileGeoField(profile, 'timezone'), locale: profileGeoField(profile, 'locale') })}:${rawProxyFingerprint(effective.proxy)}:${JSON.stringify(effective.proxy?.location ?? null)}`; }
   /** Main-process only: this returns proxy credentials and is deliberately absent from call()/IPC. */
-  async resolveWorkspaceContext(profileId, { remote: providedRemote, force = false } = {}) {
+  async resolveWorkspaceContext(profileId, { remote: providedRemote, force = false, requireManagedRoute = false } = {}) {
     await this.ready;
     if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
     const remote = providedRemote ?? await this.remote(), profile = this.find(remote, profileId);
@@ -786,14 +813,14 @@ export class BrowseForgeService {
     if (profile.managed_proxy_required && effective.proxy?.protocol !== 'anytls') throw error('托管网络出口绑定缺失，请重新选择 AnyTLS 节点后再启动。', 'MANAGED_PROXY_BINDING_MISSING');
     if (effective.proxy?.protocol === 'anytls' && !profile.managed_proxy_required) await this.request('PUT', `/api/profiles/${encoded(profileId)}`, { managed_proxy_required: true });
     const revision = this.managedProxyRevisions.get(effective.proxy?.id) ?? 0;
-    const { wire, managed } = await this.prepareProxy(effective.proxy);
+    const { wire, managed } = await this.prepareProxy(effective.proxy, { requireManagedRoute });
     const signature = this.contextSignature(profile, effective);
     const selectedLocation = effective.proxy?.location?.confirmed === true ? normalizeNetworkLocation(effective.proxy.location) : null;
     const confirmedTimezone = selectedLocation?.timezone ?? selectedLocation?.egressTimezone ?? null;
     const fixedTimezone = confirmedTimezone ? null : manualTimezone(profileGeoField(profile, 'timezone'));
     let resolvedTimezone, timezoneSource, networkLastError = null;
     const network = await this.networkProbe.probe(wire, { force: force || !!selectedLocation });
-    if (managed && revision !== (this.managedProxyRevisions.get(effective.proxy.id) ?? 0)) throw error('AnyTLS 网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
+    if (managed && revision !== (this.managedProxyRevisions.get(effective.proxy.id) ?? 0)) throw error('代理网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
     if (selectedLocation) {
       try { assertNetworkLocationMatchesEgress(selectedLocation, network); }
       catch (value) {
@@ -819,8 +846,10 @@ export class BrowseForgeService {
     const locale = configured(fixedLocale) ? fixedLocale : network.ok ? localeForCountry(network.countryCode) : null;
     const metadata = workspace.profiles.find(item => item.id === profileId) ?? {};
     const privacy = normalizePrivacy(metadata.privacy);
-    const applicationRoute = managed ? { ...wire, protocol: 'socks5', udp: effective.proxy.udp !== false, udpPolicy: effective.proxy.udp === false ? 'block' : 'proxy' } : null;
+    const udp = ['anytls', 'socks5'].includes(effective.proxy?.protocol) && effective.proxy.udp !== false;
+    const applicationRoute = managed ? { ...wire, protocol: 'socks5', udp, udpPolicy: udp ? 'proxy' : 'block' } : null;
     const ownedRoute = managed ? this.options.proxyCore?.routingIdentity?.(effective.proxy.id) : null;
+    if (requireManagedRoute && !ownedRoute) throw error('内置代理网络身份无效，已阻止启动软件。', 'INVALID_PROXY_CORE');
     const managedRoute = ownedRoute ? { ...ownedRoute, profileId } : null;
     const timezoneOrigin = confirmedTimezone ? 'network-environment' : null;
     this.workspaceContexts.set(profileId, { signature, managedProxyId: managed ? effective.proxy.id : null, timezone: resolvedTimezone, timezoneSource, timezoneOrigin, locale, geolocation, selectedLocation, locationSource: selectedLocation?.source ?? network.locationSource ?? null, privacy, network, networkLastError });
@@ -831,7 +860,7 @@ export class BrowseForgeService {
   async stoppedGroup(name) { const remote = await this.remote(); for (const profile of remote.profiles.filter((item) => item.group === name)) await this.assertStopped(remote, profile.id); }
   async applyGroupProxy(name, proxy, proxyMode = 'default') {
     if ((proxy.protocol ?? proxy.type) === 'anytls') return this.request('DELETE', `/api/groups/${encodeURIComponent(name)}/proxy`);
-    return this.request('PUT', `/api/groups/${encodeURIComponent(name)}`, { proxy_mode: proxyMode, proxy: upstreamProxy(proxyConfig(proxy)) });
+    return this.request('PUT', `/api/groups/${encodeURIComponent(name)}`, { proxy_mode: proxyMode, proxy: upstreamProxy({ ...proxy, ...proxyConfig(proxy) }) });
   }
   async saveGroup({ name, proxyId, proxyMode = 'default' }) {
     name = text(name, '分组名称');
@@ -841,7 +870,7 @@ export class BrowseForgeService {
     if (!proxy) throw error('请选择分组代理。');
     if (proxy.protocol === 'https') throw error('BrowseForge 的分组代理仅支持 HTTP、SOCKS5 或托管 AnyTLS，请使用环境专属 HTTPS 代理。', 'UNSUPPORTED_GROUP_PROXY');
     const members = remote.profiles.filter((item) => item.group === name);
-    for (const profile of members) { await this.assertStopped(remote, profile.id); if (profile.runtime_id === 'browseforge-chromium' && !browseForgeRegionFor(proxy)) throw error('BrowseForge Chromium 只支持美国纽约、加州、得州和加拿大安大略、不列颠哥伦比亚的网络；这个网络请用 CloakBrowser。', 'INVALID_PROXY_REGION'); }
+    for (const profile of members) { await this.assertStopped(remote, profile.id); if (profile.runtime_id === 'browseforge-chromium' && !browseForgeRegionFor(proxy)) throw error('BrowseForge Chromium 需要有效的地区预设。请先检测并确认网络出口位置，或在高级设置中填写支持的地区代码。', 'INVALID_PROXY_REGION'); }
     const staged = { ...workspace, groups: [...(workspace.groups ?? []).filter((item) => item.name !== name), { name, proxyId, proxyMode }] };
     const markers = new Map(members.map((profile) => [profile.id, this.effectiveProxy(profile, remote.groups, staged).proxy?.protocol === 'anytls']));
     const previous = remote.groups.find((item) => item.name === name), applied = [];
@@ -997,7 +1026,7 @@ export class BrowseForgeService {
     } catch (value) { const failures = []; for (const item of created) { try { await this.request('DELETE', `/api/profiles/${encoded(item.profile.id)}`); } catch { failures.push(item.profile.id); } } value.message += `；原资料未修改，备份位于 ${backupDir}${failures.length ? `；新环境回滚未完成：${failures.join(', ')}` : ''}`; throw value; }
     return { migratedCount: created.length, backupDir, createdIds: created.map((item) => item.profile.id) };
   }
-  async shutdown() { await this.ready; this.closed = true; this.locationPreviews.clear(); this.networkProbe.close?.(); await this.options.cancelInstall?.(); await Promise.allSettled([this.queue, ...this.profileQueues.values(), ...(this.pendingInstall ? [this.pendingInstall] : [])]); try { if (this.options.shutdown) await this.options.shutdown(); else await this.request('POST', '/api/shutdown'); } finally { await this.options.proxyCore?.close?.(); this.proxyWires.clear(); } }
+  async shutdown() { await this.ready; this.closed = true; this.locationPreviews.clear(); this.networkProbe.close?.(); this.addressGeocoder.close?.(); await this.options.cancelInstall?.(); await Promise.allSettled([this.queue, ...this.profileQueues.values(), ...(this.pendingInstall ? [this.pendingInstall] : [])]); try { if (this.options.shutdown) await this.options.shutdown(); else await this.request('POST', '/api/shutdown'); } finally { await this.options.proxyCore?.close?.(); this.proxyWires.clear(); } }
 }
 
 export default BrowseForgeService;

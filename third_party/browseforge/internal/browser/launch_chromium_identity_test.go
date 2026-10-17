@@ -14,7 +14,7 @@ import (
 	"browseforge/internal/profile"
 	bfruntime "browseforge/internal/runtime"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 const staleMacChromiumUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.101 Safari/537.36"

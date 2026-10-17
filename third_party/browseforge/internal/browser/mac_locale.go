@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 func posixShellQuote(value string) string {

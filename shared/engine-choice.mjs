@@ -1,26 +1,52 @@
 /* Which browser engine a new environment uses, and the proxy region presets the
  * BrowseForge Chromium engine accepts. Shared by the page and the main process
  * so both name the same engine and the same region. */
+import { BROWSEFORGE_CHROMIUM_REGION_PRESETS } from './browseforge-regions.mjs';
 
-/** The proxy regions BrowseForge Chromium can serve. It refuses any other label. */
-export const BROWSEFORGE_CHROMIUM_REGIONS = Object.freeze({
-  US: Object.freeze({ 'new york': 'us-ny', california: 'us-ca', texas: 'us-tx' }),
-  CA: Object.freeze({ ontario: 'ca-on', 'british columbia': 'ca-bc' }),
-});
+const supportedRegions = new Set(BROWSEFORGE_CHROMIUM_REGION_PRESETS.map(({ value }) => value));
+const countryPresets = new Map(BROWSEFORGE_CHROMIUM_REGION_PRESETS.filter(({ value }) => !value.includes('-')).map(({ value }) => [value.toUpperCase(), value]));
+const placeName = value => typeof value === 'string' ? value.trim().normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/[\s_-]+/g, ' ') : '';
+const countryCode = value => typeof value === 'string' ? value.trim().toUpperCase() : '';
 
-/** The region label BrowseForge Chromium needs for this network: the saved one,
- *  or the preset that matches the network's confirmed location. Null when the
- *  location is outside every preset, because no label can make it work. */
+/** Exact region/city names and canonical code suffixes, taken from the engine's
+ * supported presets. Country-only fallbacks are kept separate from place names. */
+export const BROWSEFORGE_CHROMIUM_REGIONS = Object.freeze(Object.fromEntries([...countryPresets.keys()].map(country => {
+  const names = BROWSEFORGE_CHROMIUM_REGION_PRESETS.filter(({ value }) => value.startsWith(`${country.toLowerCase()}-`)).flatMap(({ value, label }) => [
+    [placeName(label.split(' — ')[1]), value],
+    [placeName(value.slice(3)), value],
+  ]);
+  return [country, Object.freeze(Object.fromEntries(names))];
+})));
+
+function regionAt(location, country) {
+  const names = BROWSEFORGE_CHROMIUM_REGIONS[country];
+  if (!names) return null;
+  // Structured region wins over city (for example a city named New York in
+  // Texas). Saved locations normally carry a comma-separated display label.
+  for (const value of [location?.region, location?.city]) {
+    const match = Object.hasOwn(names, placeName(value)) ? names[placeName(value)] : null;
+    if (match) return match;
+  }
+  const components = typeof location?.label === 'string' ? location.label.split(/[,，;；|—]/) : [];
+  const matches = new Set(components.map(placeName).filter(name => Object.hasOwn(names, name)).map(name => names[name]));
+  // Ambiguous labels and street text never invent a city or use preset order
+  // to break a tie. A supported country value needs no guessed local detail.
+  return matches.size === 1 ? [...matches][0] : countryPresets.get(country) ?? null;
+}
+
+/** Resolve only supported labels, without changing saved identity or location.
+ * Explicit choices win; an invalid explicit choice must be fixed deliberately.
+ * Confirmed location is one source, never blended with another measured city. */
 export function browseForgeRegionFor(proxy) {
-  if (typeof proxy?.region === 'string' && proxy.region.trim()) return proxy.region.trim();
+  if (proxy?.region != null && proxy.region !== '') {
+    if (typeof proxy.region !== 'string') return null;
+    const explicit = proxy.region.trim().toLowerCase();
+    if (explicit) return supportedRegions.has(explicit) ? explicit : null;
+  }
   const location = proxy?.location?.confirmed === true ? proxy.location : null;
-  const network = proxy?.network?.ok ? proxy.network : null;
-  const country = String(location?.countryCode || network?.countryCode || '').toUpperCase();
-  const table = BROWSEFORGE_CHROMIUM_REGIONS[country];
-  if (!table) return null;
-  const names = [location?.region, location?.label, network?.region].filter(Boolean).map(value => String(value).toLowerCase());
-  for (const [name, preset] of Object.entries(table)) if (names.some(value => value.includes(name))) return preset;
-  return null;
+  const network = proxy?.network?.ok === true && proxy.network.scope === 'egress' && proxy.network.ip && proxy.network.timezone ? proxy.network : null;
+  if (location) return regionAt(location, countryCode(location.countryCode) || countryCode(network?.countryCode));
+  return network ? regionAt(network, countryCode(network.countryCode)) : null;
 }
 
 /** The engine a new environment starts with: the saved default, else CloakBrowser,

@@ -5,7 +5,7 @@ const identifier = (value) => {
   return value;
 };
 
-export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'claudeInstallationStatus']);
+export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'deleteClaudeAccount', 'claudeInstallationStatus']);
 const PROFILE_CONFIGURATION = new Set(['updateProfile', 'deleteProfile']);
 const PROXY_CONFIGURATION = new Set(['saveProxy', 'deleteProxy']);
 const GROUP_CONFIGURATION = new Set(['saveGroup', 'deleteGroup', 'clearGroupProxy']);
@@ -92,6 +92,15 @@ export class TerminalController {
       await this.profile(args.id);
       return this.terminal[method]({ id: args.id });
     }
+    // Refuse immediately when an account has a queued/installing session, even
+    // when that launch is holding the controller's global queue.
+    if (method === 'deleteClaudeAccount') {
+      await this.profile(args.id);
+      return this.terminal.deleteClaudeAccount({ id: args.id, accountId: args.accountId, confirmed: args.confirmed === true });
+    }
+    const releaseAccount = method === 'openTerminal' && args.kind === 'claude-code'
+      ? this.terminal.reserveClaudeAccountStart(args.id, args.claudeAccountId ?? undefined)
+      : method === 'duplicateTerminal' ? this.terminal.reserveClaudeAccountDuplicateStart(args.sessionId) : null;
     return this.serialize(async () => {
       if (method === 'duplicateTerminal') {
         const state = await this.terminal.snapshot();
@@ -124,7 +133,7 @@ export class TerminalController {
         }
       }
       return this.terminal.create(request);
-    });
+    }).finally(() => releaseAccount?.());
   }
 
   async setLinkBrowser(args) {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { NEW_CLAUDE_ACCOUNT, validClaudeAccountChoice, claudeSessionForRequest, claudeInstallPresentation, claudeErrorMessage, validClaudeInstallationChoice, claudeInstallationOptions } from '../src/claude-account-choice.mjs';
+import { NEW_CLAUDE_ACCOUNT, validClaudeAccountChoice, claudeAccountLabel, reconcileClaudeAccountChoice, claudeSessionForRequest, claudeInstallPresentation, claudeErrorMessage, validClaudeInstallationChoice, claudeInstallationOptions } from '../src/claude-account-choice.mjs';
 import { terminalSessionOptions } from '../src/terminal-session-choice.mjs';
 import { TerminalStreamStore } from '../src/terminal-state.mjs';
 import { translationCatalog } from '../src/i18n.mjs';
@@ -36,6 +36,18 @@ test('account choices remain bound to the loaded environment and require a real 
   assert.deepEqual(terminalSessionOptions('claude-code', 'browser_ph', 'work'), { kind: 'claude-code', browserProfileId: 'browser_ph', claudeAccountId: 'work' });
   assert.throws(() => terminalSessionOptions('claude-code', 'browser_ph', '../other'));
   assert.deepEqual(terminalSessionOptions('shell', 'browser_ph', 'work'), {});
+});
+
+test('renamed defaults are displayed literally and account reload only replaces a missing selection', () => {
+  const items = [{ id: 'default', name: 'Primary', default: true }, { id: 'work', name: 'Work' }];
+  const t = key => ({ 默认档案: 'Default profile' })[key];
+  assert.equal(claudeAccountLabel(items[0], t), 'Primary');
+  assert.equal(claudeAccountLabel({ ...items[0], name: '默认' }, t), 'Default profile');
+  assert.equal(claudeAccountLabel({ id: 'work', name: '默认' }, t), '默认');
+  assert.equal(reconcileClaudeAccountChoice(items, 'work'), 'work');
+  assert.equal(reconcileClaudeAccountChoice(items, NEW_CLAUDE_ACCOUNT), NEW_CLAUDE_ACCOUNT);
+  assert.equal(reconcileClaudeAccountChoice(items, 'deleted'), 'default');
+  assert.equal(reconcileClaudeAccountChoice([], 'deleted'), NEW_CLAUDE_ACCOUNT);
 });
 
 test('only the exact Claude request may drive cancellation and download progress', () => {

@@ -37,7 +37,7 @@ export async function copyModuleLicenses(cache, output) {
   await mkdir(output, { recursive: true });
   const dependencies = [
     ['github.com/go-chi/chi/v5@v5.1.0', 'go-chi'],
-    ['github.com/mxschmitt/playwright-go@v0.6100.0', 'playwright-go'],
+    ['github.com/playwright-community/playwright-go@v0.6000.0', 'playwright-go'],
     ['golang.org/x/net@v0.53.0', 'golang-x-net'],
     ['gopkg.in/yaml.v3@v3.0.1', 'yaml-v3'],
     ['github.com/deckarep/golang-set/v2@v2.8.0', 'golang-set'],

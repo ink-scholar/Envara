@@ -78,6 +78,7 @@ export class TerminalStreamStore {
   }
   applyEvent(event) {
     const writes = [];
+    if (event?.type === 'workspace' && typeof event.profileId === 'string' && event.profileId) return { writes, refreshNeeded: true };
     if (!event || typeof event.sessionId !== 'string' || typeof event.profileId !== 'string' || !validSequence(event.sequence) || !['data', 'exit', 'status'].includes(event.type)) return { writes, refreshNeeded: false };
     if (this.retired.has(event.sessionId)) return { writes, refreshNeeded: false };
     const entry = this.sessions.get(event.sessionId);

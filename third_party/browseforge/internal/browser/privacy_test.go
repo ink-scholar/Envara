@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 func TestTrackerHostRulesDoNotBreakLoginOrFirstParty(t *testing.T) {
@@ -162,5 +162,75 @@ func TestExpandedTrackerTiersMatchDesktopPolicy(t *testing.T) {
 	}
 	if shouldBlockTracker("https://bat.bing.com/bat.js", "https://www.bing.com/", "standard") {
 		t.Fatal("a service's own site keeps its first-party analytics")
+	}
+}
+
+type privacyPageStub struct {
+	playwright.Page
+	url string
+}
+
+func (p *privacyPageStub) URL() string { return p.url }
+
+type privacySocketStub struct {
+	playwright.WebSocketRoute
+	url       string
+	connected bool
+	closeCode int
+}
+
+func (s *privacySocketStub) URL() string { return s.url }
+func (s *privacySocketStub) ConnectToServer() (playwright.WebSocketRoute, error) {
+	s.connected = true
+	return s, nil
+}
+func (s *privacySocketStub) Close(options ...playwright.WebSocketRouteCloseOptions) {
+	s.closeCode = *options[0].Code
+}
+
+func TestPrivacyWebSocketsKeepFirstPartyTiersAndLoopbackFence(t *testing.T) {
+	for _, check := range []struct {
+		target, first, mode string
+		blocked             bool
+	}{
+		{"ws://api.segment.io/live", "https://example.test", "standard", true},
+		{"wss://api.segment.io/live", "https://app.segment.com", "standard", false},
+		{"wss://api.segment.io/live", "https://app.segment.com.evil.test", "standard", true},
+		{"wss://api.segment.io/live", "", "standard", true},
+		{"wss://api.segment.io/live", "https://example.test", "off", false},
+		{"wss://api.mixpanel.com/live", "https://example.test", "standard", false},
+		{"wss://api.mixpanel.com/live", "https://example.test", "strict", true},
+		{"wss://chat.example.test/live", "https://example.test", "strict", false},
+		{"ws://127.0.0.1:9000/live", "https://example.test", "off", true},
+		{"ws://127.0.0.1:9000/live", "http://localhost:9000", "standard", false},
+		{"ws://127.0.0.1:9000/live", "", "off", true},
+	} {
+		state := &PrivacyState{Mode: check.mode}
+		var page playwright.Page
+		if check.first != "" {
+			page = &privacyPageStub{url: check.first}
+		}
+		socket := &privacySocketStub{url: check.target}
+		privacyWebSocketHandler(state, page)(socket)
+		if socket.connected == check.blocked || (check.blocked && socket.closeCode != 1008) {
+			t.Fatalf("%+v: connected=%t close=%d", check, socket.connected, socket.closeCode)
+		}
+	}
+}
+
+func TestEasyPrivacyWebsocketKindAndAllowlist(t *testing.T) {
+	// These exact bundled rules were previously parsed but never reached by a
+	// WebSocket interception hook. The allowlist is restricted to heise.de.
+	if !blockTrackerRequest("wss://miner.duckdns.org/connect", "https://example.test", "standard", kindWebsocket) {
+		t.Fatal("websocket-only mining rule was ignored")
+	}
+	if blockTrackerRequest("https://miner.duckdns.org/connect", "https://example.test", "standard", kindXHR) {
+		t.Fatal("websocket-only rule blocked an XHR")
+	}
+	if blockTrackerRequest("wss://liveapi.cleverpush.com/websocket", "https://www.heise.de", "strict", kindWebsocket) {
+		t.Fatal("WebSocket allowlist exception was ignored")
+	}
+	if !blockTrackerRequest("wss://liveapi.cleverpush.com/websocket", "https://example.test", "strict", kindWebsocket) {
+		t.Fatal("WebSocket exception escaped its first-party scope")
 	}
 }

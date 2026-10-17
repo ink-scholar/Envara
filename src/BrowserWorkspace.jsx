@@ -12,6 +12,7 @@ import {
   Stop,
   WarningCircle,
 } from '@phosphor-icons/react';
+import { browserSessionControls } from './browser-session-state.mjs';
 
 const statusLabels = {
   stopped: '已停止',
@@ -137,30 +138,18 @@ export function BrowserWorkspace({
               const runtime = runtimeById.get(profile.engine);
               const proxy = proxyById.get(profile.proxyId);
               const busy = isBusy(profile.id);
-              const active = isActive(profile);
-              const supported = Boolean(runtime) && runtime.supported !== false;
-              const installing = runtime && installationBusy(runtime);
+              const controls = browserSessionControls(profile, runtime, { pending, busy });
               const networkName = proxy?.name || translate(profile.proxyId ? '出口不可用' : '直接连接');
               const status = statusLabels[profile.status] || '未知状态';
-              const actionLabel = profile.status === 'running'
-                ? translate('打开')
-                : profile.status === 'starting' || pending[`startProfile:${profile.id}`]
-                  ? translate('启动中…')
-                  : !supported
-                    ? translate('不可用')
-                    : !runtime.installed
-                      ? translate(installing ? '安装中…' : '安装内核')
-                      : translate('启动');
-              const ActionIcon = profile.status === 'running'
+              const ActionIcon = controls.action === 'focus'
                 ? ArrowSquareOut
-                : supported && !runtime.installed
+                : controls.action === 'install'
                   ? DownloadSimple
                   : Play;
+              const actionHandler = { focus: onFocus, install: onInstall, start: onStart }[controls.action];
               const launch = () => {
                 onSelect?.(profile.id);
-                if (profile.status === 'running') onFocus?.(profile);
-                else if (supported && !runtime.installed) onInstall?.(runtime);
-                else if (supported) onStart?.(profile);
+                actionHandler?.(controls.action === 'install' ? runtime : profile);
               };
 
               return (
@@ -194,22 +183,19 @@ export function BrowserWorkspace({
                     <div className="browser-row-actions" onClick={(event) => event.stopPropagation()}>
                       <button
                         type="button"
-                        className={`button ${active ? '' : 'primary'}`}
-                        disabled={busy || profile.status === 'starting'
-                          || (profile.status === 'running'
-                            ? !onFocus
-                            : Boolean(installing) || !supported || (runtime?.installed ? !onStart : !onInstall))}
+                        className="button"
+                        disabled={controls.primaryDisabled || !actionHandler}
                         onClick={launch}
                       >
-                        <ActionIcon size={16} aria-hidden="true" />{actionLabel}
+                        <ActionIcon size={16} aria-hidden="true" />{translate(controls.label)}
                       </button>
-                      {active && (
+                      {controls.active && (
                         <button
                           type="button"
                           className="icon-button"
                           aria-label={translate('停止浏览器')}
                           title={translate('停止浏览器')}
-                          disabled={busy || !onStop}
+                          disabled={controls.stopDisabled || !onStop}
                           onClick={() => onStop?.(profile)}
                         >
                           <Stop size={17} aria-hidden="true" />
@@ -220,7 +206,7 @@ export function BrowserWorkspace({
                         className="icon-button"
                         aria-label={translate('编辑环境')}
                         title={translate('编辑环境')}
-                        disabled={busy || active || cannotEdit(profile.id) || !onEdit}
+                        disabled={busy || controls.active || cannotEdit(profile.id) || !onEdit}
                         onClick={() => onEdit?.(profile)}
                       >
                         <PencilSimple size={17} aria-hidden="true" />
@@ -236,11 +222,6 @@ export function BrowserWorkspace({
         <div className="browser-empty">
           <Browsers size={34} weight="duotone" aria-hidden="true" />
           <h2>{translate(profiles.length ? '没有匹配的环境' : '添加第一个浏览器环境')}</h2>
-          {profiles.length === 0 && (
-            <button type="button" className="button primary" onClick={() => onCreate?.()} disabled={!onCreate}>
-              <Plus size={17} aria-hidden="true" />{translate('新建环境')}
-            </button>
-          )}
           {profiles.length > 0 && (
             <button type="button" className="button" onClick={() => { setQuery(''); setFilter('all'); }}>
               {translate('显示全部')}

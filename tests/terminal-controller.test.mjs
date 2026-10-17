@@ -7,6 +7,8 @@ function fixture(pickDirectory = async () => ({ canceled: false, path: '/selecte
   const state = { profiles: [{ profileId: 'prof_a', cwd: null, sessions: [] }] };
   const calls = [];
   const terminal = {
+    reserveClaudeAccountStart: () => () => {},
+    reserveClaudeAccountDuplicateStart: () => () => {},
     snapshot: async () => structuredClone(state),
     setDirectory: async ({ id, path }) => { calls.push(['directory', id, path]); state.profiles[0].cwd = path; },
     create: async (args) => { calls.push(['create', args.id]); const session = { sessionId: 'session_a', profileId: args.id, status: 'running' }; state.profiles[0].sessions = [session]; return session; },
@@ -146,6 +148,7 @@ test('Claude account IPC validates the environment and forwards only account met
   f.terminal.listClaudeAccounts = async args => { seen.push(['list', args]); return { accounts: [] }; };
   f.terminal.createClaudeAccount = async args => { seen.push(['createAccount', args]); return { account: { id: 'default', name: args.name } }; };
   f.terminal.renameClaudeAccount = async args => { seen.push(['renameAccount', args]); return { account: args }; };
+  f.terminal.deleteClaudeAccount = async args => { seen.push(['deleteAccount', args]); return { deleted: true }; };
   f.terminal.create = async args => { seen.push(['launch', args]); return { sessionId: 'test_session' }; };
   assert.deepEqual(await f.controller.dispatch('listClaudeAccounts', { id: 'prof_a', path: '/private/not-accepted' }), { accounts: [] });
   await f.controller.dispatch('createClaudeAccount', { id: 'prof_a', name: '工作', path: '/private/not-accepted', token: 'not-accepted' });
@@ -156,6 +159,10 @@ test('Claude account IPC validates the environment and forwards only account met
     ['list', { id: 'prof_a' }], ['createAccount', { id: 'prof_a', name: '工作' }], ['renameAccount', { id: 'prof_a', accountId: 'default', name: '个人' }],
   ]);
   assert.equal(seen[3][1].claudeAccountId, 'default'); assert.equal(seen[3][1].requestId, 'request_a');
+  await f.controller.dispatch('deleteClaudeAccount', { id: 'prof_a', accountId: 'selected', confirmed: true, path: '/private/not-accepted', token: 'not-accepted' });
+  assert.deepEqual(seen.at(-1), ['deleteAccount', { id: 'prof_a', accountId: 'selected', confirmed: true }]);
+  await f.controller.dispatch('deleteClaudeAccount', { id: 'prof_a', accountId: 'selected', confirmed: 'true' });
+  assert.equal(seen.at(-1)[1].confirmed, false);
 });
 
 test('Close bypasses a pending launch queue so an installation can be cancelled', async () => {
@@ -173,6 +180,14 @@ test('Close bypasses a pending launch queue so an installation can be cancelled'
   await entered;
   assert.deepEqual(await f.controller.dispatch('closeTerminal', { sessionId: 'installing_session' }), { sessionId: 'installing_session', status: 'closed' });
   await refused;
+});
+
+test('an explicit null account keeps the existing default-account launch contract', async () => {
+  const f = fixture(); f.state.profiles[0].cwd = '/selected/workspace';
+  const reservations = [];
+  f.terminal.reserveClaudeAccountStart = (id, accountId = 'default') => { reservations.push([id, accountId]); return () => reservations.push('released'); };
+  await f.controller.dispatch('openTerminal', { id: 'prof_a', kind: 'claude-code', claudeAccountId: null });
+  assert.deepEqual(reservations, [['prof_a', 'default'], 'released']);
 });
 
 test('Claude install source and read-only status are explicitly scoped to the selected environment', async () => {

@@ -29,8 +29,23 @@ test('IPC mutation scopes for applications and terminals come from main-owned bi
   assert.equal(environmentMutationProfile('runNotionTrial', { applicationId: 'app_1', id: 'forged' }, owned), 'prof_app');
   assert.equal(environmentMutationProfile('writeTerminal', { sessionId: 'session_1', id: 'forged' }, owned), 'prof_terminal');
   assert.equal(environmentMutationProfile('openTerminal', { id: 'prof_selected' }, owned), 'prof_selected');
+  assert.equal(environmentMutationProfile('deleteClaudeAccount', { id: 'prof_selected', profileId: 'forged' }, owned), 'prof_selected');
   assert.equal(environmentMutationProfile('saveProxy', { id: 'prof_selected' }, owned), null);
   assert.equal(environmentMutationProfile('startApplication', { id: 'unknown', profileId: 'forged' }, owned), null);
+});
+
+test('account deletion excludes a same-environment export or import while other environments remain available', async () => {
+  const lock = new DesktopEnvironmentTransferLock(), gate = deferred();
+  assert.equal(isEnvironmentDataMutation('deleteClaudeAccount'), true);
+  const transfer = lock.transfer(() => gate.promise, 'env_one');
+  await assert.rejects(lock.mutate('deleteClaudeAccount', {}, async () => assert.fail('must not delete during transfer'), 'env_one'), { code: 'ENVIRONMENT_TRANSFER_BUSY' });
+  assert.equal(await lock.mutate('deleteClaudeAccount', {}, async () => 'other allowed', 'env_two'), 'other allowed');
+  gate.resolve(); await transfer;
+  const deletionGate = deferred();
+  const deletion = lock.mutate('deleteClaudeAccount', {}, () => deletionGate.promise, 'env_one');
+  await assert.rejects(lock.transfer(async () => assert.fail('must not copy during deletion'), 'env_one'), { code: 'ENVIRONMENT_TRANSFER_BUSY' });
+  deletionGate.resolve(); await deletion;
+  assert.equal(await lock.transfer(async () => 'ready', 'env_one'), 'ready');
 });
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'envara-import-lifecycle-'));

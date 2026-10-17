@@ -4,6 +4,7 @@ import net from 'node:net';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import ipaddr from 'ipaddr.js';
+import { assertHttpProxyUsername } from '../shared/proxy-auth.mjs';
 
 // This allowlist belongs to the main process. IPC never accepts a lookup URL.
 export const GEO_ENDPOINTS = Object.freeze([
@@ -75,8 +76,10 @@ export function parseGeoResponse(data, endpoint, proxy) {
     ...(geolocation ? { geolocation, locationSource: 'ip-estimate' } : {}) };
 }
 
-function agentFor(proxy, timeoutMs, tlsOptions, signal) {
+export function createProxyAgent(input, timeoutMs, tlsOptions = {}, signal) {
+  const proxy = proxyValues(input);
   if (!proxy) return false; // Explicit direct mode, never environment-derived routing.
+  assertHttpProxyUsername(proxy.protocol, proxy.username);
   const host = net.isIP(proxy.host) === 6 ? `[${proxy.host}]` : proxy.host;
   const url = new URL(`${proxy.protocol === 'socks5' ? 'socks5h' : proxy.protocol}://${host}:${proxy.port}`);
   if (proxy.protocol === 'socks5') {
@@ -95,7 +98,7 @@ function agentFor(proxy, timeoutMs, tlsOptions, signal) {
 }
 
 /** No redirects, absolute deadline (including proxy handshake), and bounded JSON. */
-export function requestGeoJSON({ url, agent, timeoutMs, maxBodyBytes, tlsOptions = {}, controller = new AbortController() }) {
+export function requestGeoJSON({ url, agent, timeoutMs, maxBodyBytes, tlsOptions = {}, controller = new AbortController(), headers = {} }) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let request;
@@ -108,7 +111,7 @@ export function requestGeoJSON({ url, agent, timeoutMs, maxBodyBytes, tlsOptions
     const timer = setTimeout(() => finish(failure('NETWORK_TIMEOUT')), timeoutMs);
     try {
       request = https.request(url, { method: 'GET', agent, ...tlsOptions, signal: controller.signal,
-        headers: { Accept: 'application/json', 'User-Agent': 'Envara/0.2 (egress verification)' } }, (response) => {
+        headers: { Accept: 'application/json', 'User-Agent': 'Envara/0.2 (egress verification)', ...headers } }, (response) => {
         if (response.statusCode !== 200) { response.destroy(); finish(failure(response.statusCode === 407 ? 'PROXY_AUTH_FAILED' : 'GEO_HTTP_ERROR')); return; }
         if (Number(response.headers['content-length']) > maxBodyBytes) { response.destroy(); finish(failure('GEO_BODY_TOO_LARGE')); return; }
         const chunks = []; let length = 0;
@@ -149,7 +152,9 @@ export class ProxyNetworkProbe {
   close() { this.closed = true; for (const controller of this.controllers) controller.abort(); }
   async probe(input, { force = false } = {}) {
     if (this.closed) throw failure('APP_CLOSING');
-    const proxy = proxyValues(input), key = proxyFingerprint(proxy);
+    const proxy = proxyValues(input);
+    assertHttpProxyUsername(proxy?.protocol, proxy?.username);
+    const key = proxyFingerprint(proxy);
     const pending = this.inflight.get(key);
     if (pending) return structuredClone(await pending);
     const entry = this.cache.get(key);
@@ -172,7 +177,7 @@ export class ProxyNetworkProbe {
       source = endpoint.source;
       let agent; const controller = new AbortController(); this.controllers.add(controller);
       try {
-        agent = agentFor(proxy, this.timeoutMs, this.tlsOptions, controller.signal);
+        agent = createProxyAgent(proxy, this.timeoutMs, this.tlsOptions, controller.signal);
         const data = await this.transport({ url: endpoint.url, agent, timeoutMs: this.timeoutMs, maxBodyBytes: this.maxBodyBytes, tlsOptions: this.tlsOptions, controller });
         const geo = parseGeoResponse(data, endpoint, proxy);
         return { ok: true, scope: 'egress', ...geo, source, checkedAt: new Date(this.nowMs()).toISOString(), latencyMs: Math.max(0, Math.round(this.nowMs() - started)), message: '已通过 HTTPS 验证实际网络出口；位置为 IP 地理估算。' };

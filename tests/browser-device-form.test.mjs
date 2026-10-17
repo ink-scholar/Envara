@@ -63,8 +63,8 @@ test('returning from a preset restores the custom fields it temporarily replaced
 
 test('choosing a provider without verified device mappings stops applying fixed presets', () => {
   const form = selectBrowserDeviceProfile({ engine: 'cloakbrowser', seed: 42 }, 'mac-standard-v1');
-  const other = changeBrowserDeviceEngine(form, 'camoufox');
-  assert.equal(other.engine, 'camoufox'); assert.equal(other.deviceProfileId, 'provider-default');
+  const other = changeBrowserDeviceEngine(form, 'unmapped-provider');
+  assert.equal(other.engine, 'unmapped-provider'); assert.equal(other.deviceProfileId, 'provider-default');
   assert.equal(browserDimensionValue(other.width), null); assert.equal(browserDimensionValue(other.height), null);
   assert.equal(changeBrowserDeviceEngine(other, 'cloakbrowser').deviceProfileId, 'provider-default', 'returning to CloakBrowser does not silently replace custom settings');
 });
@@ -74,7 +74,7 @@ test('leaving a saved fixed preset clears only dimensions still supplied by that
   const automatic = selectBrowserDeviceProfile(fixed, 'provider-default');
   assert.equal(browserDimensionValue(automatic.width), null); assert.equal(browserDimensionValue(automatic.height), null);
   assert.equal(automatic.platform, 'macos'); assert.equal(automatic.seed, 42);
-  const edited = changeBrowserDeviceEngine({ ...fixed, width: 1366 }, 'camoufox');
+  const edited = changeBrowserDeviceEngine({ ...fixed, width: 1366 }, 'unmapped-provider');
   assert.equal(edited.width, 1366, 'an independently edited dimension is not discarded');
   assert.equal(browserDimensionValue(edited.height), null);
   const custom = { ...fixed, deviceProfileId: 'provider-default' };
@@ -88,8 +88,20 @@ test('preset switching retains the original custom baseline across ordinary form
   const second = selectBrowserDeviceProfile({ ...first, name: 'Renamed' }, 'windows-standard-v1');
   const automatic = selectBrowserDeviceProfile(second, 'provider-default');
   assert.deepEqual(automatic, { ...original, name: 'Renamed' });
-  assert.deepEqual(changeBrowserDeviceEngine(second, 'browseforge-chromium'), { ...original, name: 'Renamed', engine: 'browseforge-chromium' });
+  assert.deepEqual(changeBrowserDeviceEngine(second, 'unmapped-provider'), { ...original, name: 'Renamed', engine: 'unmapped-provider' });
   assert.equal(JSON.stringify(second).includes('Baseline'), false, 'transient preset provenance never enters serialized configuration');
+});
+
+test('switching supported providers keeps the explicitly chosen draft template and custom baseline', () => {
+  for (const engine of ['cloakbrowser', 'camoufox', 'browseforge-chromium']) {
+    const original = { engine: 'cloakbrowser', deviceProfileId: 'provider-default', platform: '', width: '', height: '', seed: 42 };
+    const selected = selectBrowserDeviceProfile(original, 'mac-standard-v1');
+    const changed = changeBrowserDeviceEngine(selected, engine);
+    assert.equal(changed.deviceProfileId, 'mac-standard-v1');
+    assert.equal(changed.width, 1440); assert.equal(changed.height, 900);
+    assert.equal(changed.seed, 42);
+    assert.deepEqual(selectBrowserDeviceProfile(changed, 'provider-default'), { ...original, engine });
+  }
 });
 
 test('the actual edit form and save payload preserve an automatic platform', async () => {
@@ -159,6 +171,9 @@ test('device form wires explicit changes, readonly fixed summaries and persisted
   assert.match(profileForm, /seed: Number\(form\.seed\)/);
   assert.match(pane, /selectedDevice\.hardwareConcurrency/);
   assert.match(pane, /selectedDevice\.deviceMemory/);
+  assert.match(profileForm, /form\.engine !== "camoufox" && <div><dt>\{t\("内存规格"\)\}/);
+  assert.match(profileForm, /selectedDevice && form\.engine === "camoufox"/);
+  assert.match(profileForm, /Camoufox 自动管理设备指纹，无需设置内存。固定模板会固定外层窗口尺寸。/);
   assert.match(pane, /浏览器语言与 Envara 界面语言独立；网站可能自行选择语言。/);
   assert.match(profileForm, /standard: "拦截已知第三方追踪；个别网站可能需要调整防护设置。"/);
   assert.doesNotMatch(profileForm, /不影响登录和网站功能/);
@@ -168,8 +183,10 @@ test('device form wires explicit changes, readonly fixed summaries and persisted
 });
 
 test('device and effective-language copy is available in all nine languages', () => {
-  const keys = ['设备档案', '自定义（保留当前配置）', '选择档案会填写平台与屏幕；切换网络不改变设备。', '平台', '屏幕', '逻辑处理器', '浏览器内存', '浏览器语言与 Envara 界面语言独立；网站可能自行选择语言。', '当前内核暂不支持固定设备档案。', '有效语言', '{requested} → {effective}（系统未提供所选语言）', ...BROWSER_DEVICE_PROFILES.map(item => item.label), '内核自动生成', '保留当前配置', '自动（由内核决定）', '未填写的设备参数由内核处理；已填写的自定义值会保留。', '固定设备或自定义参数（可选）'];
+  const keys = ['设备档案', '自定义（保留当前配置）', '选择档案会填写平台与屏幕；切换网络不改变设备。', '平台', '屏幕', '逻辑处理器', '内存规格', '浏览器语言与 Envara 界面语言独立；网站可能自行选择语言。', '当前内核暂不支持固定设备档案。', '有效语言', '{requested} → {effective}（系统未提供所选语言）', ...BROWSER_DEVICE_PROFILES.map(item => item.label), '内核自动生成', '保留当前配置', '自动（由内核决定）', '未填写的设备参数由内核处理；已填写的自定义值会保留。', '设备模板（可选）'];
   for (const [language, catalog] of Object.entries(translationCatalog)) {
+    assert.equal(typeof catalog['Camoufox 自动管理设备指纹，无需设置内存。固定模板会固定外层窗口尺寸。'], 'string', language);
+    assert.equal(typeof catalog['现有 Camoufox 身份与所选模板的平台不一致或无法确认。请保留自定义配置，或新建环境后选择模板。'], 'string', language);
     assert.equal(typeof catalog['拦截已知第三方追踪；个别网站可能需要调整防护设置。'], 'string', language);
     assert.equal(Object.hasOwn(catalog, '拦截已知的第三方追踪：内置规则加 EasyPrivacy 名单，不影响登录和网站功能。'), false, language);
     for (const key of keys) assert.equal(typeof catalog[key], 'string', `${language}: ${key}`);

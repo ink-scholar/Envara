@@ -84,7 +84,7 @@ export function privacyLaunchArgs(value) {
   return ['--deny-permission-prompts', '--disable-domain-reliability', '--disable-breakpad', '--disable-sync', '--metrics-recording-only', '--no-pings'];
 }
 const checkedURL = value => {
-  try { const parsed = new URL(value); return ['http:', 'https:'].includes(parsed.protocol) ? parsed : null; } catch { return null; }
+  try { const parsed = new URL(value); return ['http:', 'https:', 'ws:', 'wss:'].includes(parsed.protocol) ? parsed : null; } catch { return null; }
 };
 const matchesDomain = (host, domain) => host === domain || host.endsWith(`.${domain}`);
 export function shouldBlockTracker(url, { mode = 'standard', firstPartyUrl } = {}) {
@@ -114,10 +114,55 @@ function firstPartyURL(request) {
   } catch {}
   return undefined;
 }
-export async function applyBrowserPrivacy(context, { privacy, geolocation } = {}) {
+// Cloak's pinned native build suppresses Playwright's page-to-host binding.
+// Keep this provider adapter entirely synchronous: rejected connections never
+// call the native constructor; allowed connections retain native routing and
+// events. This is page/frame protection, not worker/network-wide filtering.
+function installConstructorWebSocketPolicy({ mode, domains, serviceRoots, blockLoopback = false }) {
+  const NativeWebSocket = globalThis.WebSocket;
+  if (typeof NativeWebSocket !== 'function') return;
+  const matches = (host, domain) => host === domain || host.endsWith('.' + domain);
+  const hostname = (value, relative = false) => {
+    try {
+      const parsed = relative ? new URL(value, document.baseURI || location.href) : new URL(value);
+      return ['http:', 'https:', 'ws:', 'wss:'].includes(parsed.protocol) ? parsed.hostname.toLowerCase().replace(/\.$/, '') : '';
+    } catch { return ''; }
+  };
+  const firstParty = () => {
+    try { return hostname(top.location.href); }
+    catch {
+      // Chromium supplies the ordered ancestor origins for cross-origin
+      // frames. Do not borrow the embedded frame's own origin as the top site.
+      const ancestors = location.ancestorOrigins;
+      return ancestors?.length ? hostname(ancestors[ancestors.length - 1]) : '';
+    }
+  };
+  const WrappedWebSocket = new Proxy(NativeWebSocket, {
+    construct(target, args, newTarget) {
+      if (args.length) {
+        // WebIDL string coercion happens once, preserving native validation
+        // of protocols and the rest of the constructor arguments.
+        const raw = '' + args[0], host = hostname(raw, true), first = firstParty();
+        const domain = domains.find(value => matches(host, value));
+        const loopback = host => host === 'localhost' || host.endsWith('.localhost') || host === '[::1]' || /^127(?:\.[0-9]{1,3}){3}$/.test(host) || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(host);
+        if (blockLoopback && loopback(host) && !loopback(first)) throw new DOMException('Blocked by privacy policy', 'SecurityError');
+        if (mode !== 'off' && domain && !(first && (matches(host, first) || matches(first, host) || serviceRoots[domain]?.some(value => matches(first, value))))) {
+          throw new DOMException('Blocked by privacy policy', 'SecurityError');
+        }
+        args = [raw, ...args.slice(1)];
+      }
+      return Reflect.construct(target, args, newTarget);
+    },
+  });
+  Object.defineProperty(NativeWebSocket.prototype, 'constructor', { ...Object.getOwnPropertyDescriptor(NativeWebSocket.prototype, 'constructor'), value: WrappedWebSocket });
+  Object.defineProperty(globalThis, 'WebSocket', { ...Object.getOwnPropertyDescriptor(globalThis, 'WebSocket'), value: WrappedWebSocket });
+}
+
+export async function applyBrowserPrivacy(context, { privacy, geolocation, websocketRouting = 'playwright' } = {}) {
   const { mode } = normalizePrivacy(privacy), geo = normalizeGeolocation(geolocation);
-  if (!context || typeof context.clearPermissions !== 'function' || typeof context.grantPermissions !== 'function' || typeof context.setGeolocation !== 'function' || (mode !== 'off' && typeof context.route !== 'function')) throw fail('浏览器内核不支持此隐私配置。');
-  const state = { mode, blockedRequests: 0, geolocation: geo, geolocationPolicy: geo ? 'proxy-region' : 'deny', trackerScope: 'third-party-http', serviceWorkers: mode === 'off' ? 'allow' : 'block', routeInstalled: false };
+  if (!['playwright', 'constructor'].includes(websocketRouting)) throw fail('浏览器 WebSocket 隐私接口无效。');
+  if (!context || typeof context.clearPermissions !== 'function' || typeof context.grantPermissions !== 'function' || typeof context.setGeolocation !== 'function' || (mode !== 'off' && (typeof context.route !== 'function' || (websocketRouting === 'playwright' ? typeof context.routeWebSocket !== 'function' : typeof context.addInitScript !== 'function') || typeof context.pages !== 'function' || typeof context.on !== 'function'))) throw fail('浏览器内核不支持此隐私配置。');
+  const state = { mode, blockedRequests: 0, blockedWebSockets: websocketRouting.startsWith('constructor') && mode !== 'off' ? null : 0, websocketRouting, geolocation: geo, geolocationPolicy: geo ? 'proxy-region' : 'deny', trackerScope: 'third-party-http-websocket', websocketScope: 'page-and-frame', serviceWorkers: mode === 'off' ? 'allow' : 'block', routeInstalled: false };
   await context.clearPermissions();
   await context.setGeolocation(geo);
   await context.grantPermissions(geo ? ['geolocation'] : []);
@@ -147,6 +192,29 @@ export async function applyBrowserPrivacy(context, { privacy, geolocation } = {}
     context.on('page', page => { void denyLocation(page).catch(() => page.close().catch(() => {})); });
   }
   if (mode !== 'off') {
+    // The supported WebSocket routing API has no Request/frame accessor. A
+    // page route supplies the top-level party; the context route covers the
+    // interval before a new page's route is registered, without guessing it
+    // from other open tabs. Neither handler ever connects blocked sockets.
+    const websocketHandler = page => async socket => {
+      if (shouldBlockTracker(socket.url(), { mode, firstPartyUrl: page?.url() })) {
+        state.blockedRequests++; state.blockedWebSockets++;
+        await socket.close({ code: 1008, reason: 'Blocked by privacy policy' }).catch(() => {});
+      } else {
+        try { socket.connectToServer(); }
+        catch { await socket.close({ code: 1011, reason: 'Connection unavailable' }).catch(() => {}); }
+      }
+    };
+    if (websocketRouting.startsWith('constructor')) {
+      const policy = { mode, domains: mode === 'strict' ? STRICT_TRACKER_DOMAINS : STANDARD_TRACKER_DOMAINS, serviceRoots: TRACKER_SERVICE_ROOTS };
+      await context.addInitScript(installConstructorWebSocketPolicy, policy);
+      await Promise.all(context.pages().flatMap(page => page.frames().map(frame => frame.evaluate(installConstructorWebSocketPolicy, policy))));
+    } else {
+      await context.routeWebSocket('**/*', websocketHandler());
+      const routePage = page => page.routeWebSocket('**/*', websocketHandler(page));
+      context.on('page', page => { void routePage(page).catch(() => page.close().catch(() => {})); });
+      await Promise.all(context.pages().map(routePage));
+    }
     await context.route('**/*', async route => {
       const request = route.request();
       if (shouldBlockTracker(request.url(), { mode, firstPartyUrl: firstPartyURL(request) })) {
@@ -159,6 +227,8 @@ export async function applyBrowserPrivacy(context, { privacy, geolocation } = {}
 }
 export function snapshotPrivacy(state) {
   return { mode: normalizePrivacy(state?.mode).mode, blockedRequests: Number.isSafeInteger(state?.blockedRequests) && state.blockedRequests >= 0 ? state.blockedRequests : 0,
+    websocketRouting: state?.websocketRouting ?? 'playwright',
+    blockedWebSockets: state?.blockedWebSockets === null ? null : Number.isSafeInteger(state?.blockedWebSockets) && state.blockedWebSockets >= 0 ? state.blockedWebSockets : 0,
     geolocation: state?.geolocation ? { ...state.geolocation } : null, geolocationPolicy: state?.geolocation ? 'proxy-region' : 'deny',
-    trackerScope: 'third-party-http', serviceWorkers: state?.serviceWorkers ?? 'block', enabled: state?.mode !== 'off' };
+    trackerScope: 'third-party-http-websocket', websocketScope: 'page-and-frame', serviceWorkers: state?.serviceWorkers ?? 'block', enabled: state?.mode !== 'off' };
 }

@@ -50,6 +50,8 @@ export function selectBrowserDeviceProfile(form, deviceProfileId) {
 }
 
 export function changeBrowserDeviceEngine(form, engine) {
+  // A draft's explicit template survives a switch between mapped providers;
+  // native field differences are applied only when this draft is saved.
   const next = supportsBrowserDeviceProfiles(engine) ? form : selectBrowserDeviceProfile(form, PROVIDER_DEFAULT_DEVICE_PROFILE_ID);
   return { ...next, engine };
 }

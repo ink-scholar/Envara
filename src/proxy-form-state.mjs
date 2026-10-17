@@ -1,3 +1,5 @@
+import { httpProxyUsernameError } from '../shared/proxy-auth.mjs';
+
 export const proxyFields = ['id', 'name', 'protocol', 'host', 'port', 'username', 'password', 'region', 'serverName', 'skipCertVerify', 'clientFingerprint', 'alpn', 'udp'];
 
 function alpnEntries(value) {
@@ -35,6 +37,8 @@ export function proxyFormError(proxy) {
   if (!String(proxy.host || '').trim() || !Number.isInteger(Number(proxy.port)) || Number(proxy.port) < 1 || Number(proxy.port) > 65535) {
     return '请先填写服务器地址和有效端口。';
   }
+  const usernameError = httpProxyUsernameError(proxy.protocol, proxy.username);
+  if (usernameError) return usernameError;
   if (proxy.protocol === 'anytls' && !proxy.password) return '请填写 AnyTLS 节点密码。';
   if (proxy.protocol === 'anytls') {
     const alpn = alpnEntries(proxy.alpn);

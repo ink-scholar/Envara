@@ -75,9 +75,9 @@ test('pinned integrity rejects modified artifacts before extraction', () => {
 });
 
 test('tar reader preserves native binary bytes and rejects traversal or truncated archive entries', () => {
-  const archive = tar([['package/package.json', '{"version":"1.61.1"}'], ['node-v24.18.0-darwin-arm64/bin/node', Buffer.from([0, 255, 1, 2])]]);
+  const archive = tar([['package/package.json', '{"version":"1.60.0"}'], ['node-v24.18.0-darwin-arm64/bin/node', Buffer.from([0, 255, 1, 2])]]);
   const files = tarGzFiles(archive);
-  assert.equal(files.get('package/package.json').toString(), '{"version":"1.61.1"}');
+  assert.equal(files.get('package/package.json').toString(), '{"version":"1.60.0"}');
   assert.deepEqual(files.get('node-v24.18.0-darwin-arm64/bin/node'), Buffer.from([0, 255, 1, 2]));
   assert.throws(() => tarGzFiles(tar([['../outside', 'invalid']])), /Unsafe/);
   const broken = Buffer.alloc(512);

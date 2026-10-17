@@ -50,11 +50,25 @@ enum { RECHECK_NAME_EXIT, RECHECK_INFO_EXIT, RECHECK_NAME_SUCCESS, RECHECK_INFO_
     RECHECK_FIRST_PARENT, RECHECK_SECOND_BIRTH, RECHECK_SECOND_CREDENTIALS, RECHECK_SECOND_PARENT,
     RECHECK_SECOND_UNKNOWN, RECHECK_AFTER_BIRTH, RECHECK_AFTER_CREDENTIALS, RECHECK_AFTER_PARENT,
     RECHECK_SECOND_SHORT, RECHECK_NAME_THEN_INFO, RECHECK_INFO_THEN_NAME, RECHECK_INTERRUPTED,
-    RECHECK_ZOMBIE_PARENT };
+    RECHECK_ZOMBIE_PARENT, RECHECK_PID_SUCCESS, RECHECK_PID_EXIT, RECHECK_PID_THEN_NAME,
+    RECHECK_PID_THEN_INFO, RECHECK_PID_CANDIDATE, RECHECK_PID_MISMATCH, RECHECK_PID_SECOND_BIRTH,
+    RECHECK_PID_SECOND_CREDENTIALS, RECHECK_PID_SECOND_PARENT, RECHECK_PID_SECOND_UNKNOWN,
+    RECHECK_PID_FIRST_PARENT, RECHECK_PID_INTERRUPTED };
 static pid_t fixture_recheck_pid;
-static int fixture_recheck_mode, fixture_recheck_names, fixture_recheck_infos, fixture_recheck_reads;
+static int fixture_recheck_mode, fixture_recheck_names, fixture_recheck_pids, fixture_recheck_infos, fixture_recheck_reads;
 static int fixture_recheck_sleeps, fixture_recheck_control, fixture_recheck_triggered;
 static struct proc_bsdinfo fixture_recheck_original;
+static int fixture_recheck_exit(void);
+static int fixture_recheck_identity_mode(void) {
+    switch (fixture_recheck_mode) {
+        case RECHECK_PID_SECOND_BIRTH: return RECHECK_SECOND_BIRTH;
+        case RECHECK_PID_SECOND_CREDENTIALS: return RECHECK_SECOND_CREDENTIALS;
+        case RECHECK_PID_SECOND_PARENT: return RECHECK_SECOND_PARENT;
+        case RECHECK_PID_SECOND_UNKNOWN: return RECHECK_SECOND_UNKNOWN;
+        case RECHECK_PID_FIRST_PARENT: return RECHECK_FIRST_PARENT;
+        default: return fixture_recheck_mode;
+    }
+}
 static pid_t fixture_terminal_pid;
 static int fixture_terminal_parent_control, fixture_terminal_exit_control, fixture_terminal_changed;
 static int fixture_terminal_info_exit;
@@ -70,10 +84,30 @@ enum { REAP_ABSENT, REAP_STRESS, REAP_FIRST_ABSENT, REAP_FIRST_UNKNOWN, REAP_FIR
     REAP_SECOND_SHORT, REAP_SECOND_BIRTH, REAP_SECOND_CREDENTIALS, REAP_SECOND_PARENT,
     REAP_SECOND_LIVE, REAP_PARENT_ABSENT, REAP_PARENT_ZOMBIE, REAP_PARENT_BIRTH,
     REAP_PARENT_CREDENTIALS, REAP_PARENT_UNKNOWN, REAP_PARENT_SHORT, REAP_PARENT_TOKEN,
-    REAP_PARENT_AFTER_BIRTH, REAP_PARENT_AFTER_CREDENTIALS, REAP_PRIOR_UNCERTAIN };
+    REAP_PARENT_AFTER_BIRTH, REAP_PARENT_AFTER_CREDENTIALS, REAP_PRIOR_UNCERTAIN,
+    REAP_FIRST_STRESS, REAP_ABSENCE_SECOND_UNKNOWN, REAP_ABSENCE_SECOND_ZERO_ERRNO,
+    REAP_ABSENCE_SECOND_EAGAIN, REAP_ABSENCE_SECOND_SHORT, REAP_ABSENCE_SECOND_LIVE,
+    REAP_ABSENCE_SECOND_BIRTH, REAP_ABSENCE_SECOND_CREDENTIALS, REAP_ABSENCE_PARENT_ABSENT,
+    REAP_ABSENCE_PARENT_ZOMBIE, REAP_ABSENCE_PARENT_BIRTH, REAP_ABSENCE_PARENT_CREDENTIALS,
+    REAP_ABSENCE_PARENT_UNKNOWN, REAP_ABSENCE_PARENT_SHORT, REAP_ABSENCE_PARENT_TOKEN,
+    REAP_ABSENCE_PARENT_AFTER_BIRTH, REAP_ABSENCE_PARENT_AFTER_CREDENTIALS,
+    REAP_ABSENCE_PARENT_BINDING, REAP_ABSENCE_VECTOR_REUSE, REAP_ABSENCE_ROUND_REUSE,
+    REAP_ABSENCE_FINAL_REUSE, REAP_ABSENCE_CHURN, REAP_FIRST_LIVE, REAP_FIRST_LIVE_STRESS };
 static pid_t fixture_reap_pid, fixture_reap_parent;
 static int fixture_reap_mode, fixture_reap_reads, fixture_reap_parent_reads, fixture_reap_reaped, fixture_reap_lists;
 static int fixture_reap_control, fixture_reap_events;
+static struct proc_bsdinfo fixture_reap_original;
+enum { LEAF_ABSENT, LEAF_ZOMBIE, LEAF_FIRST_UNKNOWN, LEAF_FIRST_SHORT,
+    LEAF_FIRST_BIRTH, LEAF_FIRST_CREDENTIALS, LEAF_SECOND_UNKNOWN, LEAF_SECOND_ZERO_ERRNO,
+    LEAF_SECOND_EAGAIN, LEAF_SECOND_SHORT, LEAF_SECOND_LIVE, LEAF_SECOND_ZOMBIE,
+    LEAF_ZOMBIE_SECOND_BIRTH, LEAF_ZOMBIE_SECOND_CREDENTIALS, LEAF_ROUND_UNKNOWN,
+    LEAF_ROUND_LIVE, LEAF_ROUND_BIRTH, LEAF_ROUND_CREDENTIALS, LEAF_FINAL_LIVE, LEAF_FINAL_BIRTH };
+static pid_t fixture_leaf_pid;
+static int fixture_leaf_mode, fixture_leaf_lists, fixture_leaf_reads, fixture_leaf_triggered;
+static int fixture_leaf_control, fixture_leaf_events;
+static struct proc_bsdinfo fixture_leaf_original;
+static int fixture_leaf_exit(void);
+static int fixture_leaf_pidinfo(int pid,int flavor,uint64_t arg,void *buffer,int size);
 enum { RETIRE_UNKNOWN, RETIRE_NO_ERRNO, RETIRE_EAGAIN, RETIRE_SHORT, RETIRE_BIRTH, RETIRE_CREDENTIALS };
 static pid_t fixture_retire_pid, fixture_alias_pid, fixture_alias_actual;
 static int fixture_retire_mode;
@@ -115,7 +149,7 @@ static int fixture_proc_listchildpids(pid_t parent,void *buffer,int size);
 static kern_return_t fixture_task_info(task_name_t task, task_flavor_t flavor,
     task_info_t information, mach_msg_type_number_t *count) {
     pid_t actual=0;
-    if (flavor==TASK_AUDIT_TOKEN && fixture_reap_reaped && fixture_reap_mode==REAP_PARENT_TOKEN &&
+    if (flavor==TASK_AUDIT_TOKEN && fixture_reap_reaped && (fixture_reap_mode==REAP_PARENT_TOKEN || fixture_reap_mode==REAP_ABSENCE_PARENT_TOKEN) &&
         pid_for_task(task,&actual)==KERN_SUCCESS && actual==fixture_reap_parent) return KERN_PROTECTION_FAILURE;
     if (flavor==TASK_AUDIT_TOKEN && fixture_candidate_pid>1 &&
         pid_for_task(task,&actual)==KERN_SUCCESS && actual==fixture_candidate_pid) {
@@ -150,15 +184,23 @@ static kern_return_t fixture_pid_for_task(mach_port_name_t task, int *pid) {
         (*pid)++;
     }
     if (result==KERN_SUCCESS && *pid==fixture_recheck_pid) {
+        fixture_recheck_pids++;
         if (fixture_recheck_mode==RECHECK_PID_INVALID) return KERN_INVALID_ARGUMENT;
-        if (fixture_recheck_mode==RECHECK_PID_FAILURE) return KERN_FAILURE;
+        if (fixture_recheck_mode==RECHECK_PID_MISMATCH) { (*pid)++; return result; }
+        if (fixture_recheck_mode==RECHECK_PID_FAILURE ||
+            (fixture_recheck_mode>=RECHECK_PID_SUCCESS && fixture_recheck_pids==1)) {
+            if (fixture_recheck_mode==RECHECK_PID_EXIT) (void)fixture_recheck_exit();
+            *pid=0;
+            return KERN_FAILURE;
+        }
     }
     return result;
 }
 static int fixture_refresh_nanosleep(const struct timespec *requested, struct timespec *remaining) {
-    if (fixture_recheck_pid>1 && requested->tv_sec==0 && requested->tv_nsec==1000000) {
+    if (fixture_recheck_pid>1 && requested->tv_sec==0 &&
+        (requested->tv_nsec==1000000 || requested->tv_nsec==10000000)) {
         fixture_recheck_sleeps++;
-        if (fixture_recheck_mode==RECHECK_INTERRUPTED) {errno=EINTR;return -1;}
+        if (fixture_recheck_mode==RECHECK_INTERRUPTED || fixture_recheck_mode==RECHECK_PID_INTERRUPTED) {errno=EINTR;return -1;}
     }
     return nanosleep(requested,remaining);
 }
@@ -188,6 +230,8 @@ static int fixture_signal_with_audittoken(audit_token_t *token, int signal_numbe
     return result;
 }
 static int fixture_proc_pidinfo(int pid,int flavor,uint64_t arg,void *buffer,int size) {
+    if (flavor==PROC_PIDTBSDINFO && pid==fixture_leaf_pid && fixture_leaf_triggered)
+        return fixture_leaf_pidinfo(pid,flavor,arg,buffer,size);
     if (flavor==PROC_PIDTBSDINFO && pid==fixture_retire_pid) {
         if (fixture_retire_mode<=RETIRE_EAGAIN) {
             errno=fixture_retire_mode==RETIRE_UNKNOWN?EACCES:fixture_retire_mode==RETIRE_EAGAIN?EAGAIN:0;return 0;
@@ -225,7 +269,8 @@ static int fixture_proc_pidinfo(int pid,int flavor,uint64_t arg,void *buffer,int
         errno=ESRCH;return 0;
     }
     int recheck_read=pid==fixture_recheck_pid && flavor==PROC_PIDTBSDINFO;
-    if (recheck_read && ++fixture_recheck_reads==3 && fixture_recheck_mode==RECHECK_SECOND_UNKNOWN) {errno=EACCES;return 0;}
+    int recheck_mode=fixture_recheck_identity_mode();
+    if (recheck_read && ++fixture_recheck_reads==3 && recheck_mode==RECHECK_SECOND_UNKNOWN) {errno=EACCES;return 0;}
     int name_read=pid==fixture_name_pid && fixture_name_finished && flavor==PROC_PIDTBSDINFO;
     if (name_read) {
         fixture_name_reads++;
@@ -267,13 +312,13 @@ static int fixture_proc_pidinfo(int pid,int flavor,uint64_t arg,void *buffer,int
     }
     if (recheck_read && count==sizeof(struct proc_bsdinfo)) {
         struct proc_bsdinfo *info=buffer;int read=fixture_recheck_reads;
-        if ((read==3 && fixture_recheck_mode==RECHECK_SECOND_BIRTH) ||
-            (read==4 && fixture_recheck_mode==RECHECK_AFTER_BIRTH)) info->pbi_start_tvusec=(info->pbi_start_tvusec+1)%1000000;
-        if ((read==3 && fixture_recheck_mode==RECHECK_SECOND_CREDENTIALS) ||
-            (read==4 && fixture_recheck_mode==RECHECK_AFTER_CREDENTIALS)) info->pbi_svuid++;
-        if ((read==2 && fixture_recheck_mode==RECHECK_FIRST_PARENT) ||
-            (read>=3 && (fixture_recheck_mode==RECHECK_SECOND_PARENT || fixture_recheck_mode==RECHECK_ZOMBIE_PARENT)) ||
-            (read==4 && fixture_recheck_mode==RECHECK_AFTER_PARENT)) info->pbi_ppid=1;
+        if ((read==3 && recheck_mode==RECHECK_SECOND_BIRTH) ||
+            (read==4 && recheck_mode==RECHECK_AFTER_BIRTH)) info->pbi_start_tvusec=(info->pbi_start_tvusec+1)%1000000;
+        if ((read==3 && recheck_mode==RECHECK_SECOND_CREDENTIALS) ||
+            (read==4 && recheck_mode==RECHECK_AFTER_CREDENTIALS)) info->pbi_svuid++;
+        if ((read==2 && recheck_mode==RECHECK_FIRST_PARENT) ||
+            (read>=3 && (recheck_mode==RECHECK_SECOND_PARENT || recheck_mode==RECHECK_ZOMBIE_PARENT)) ||
+            (read==4 && recheck_mode==RECHECK_AFTER_PARENT)) info->pbi_ppid=1;
     }
     if (reparent_read && count==sizeof(struct proc_bsdinfo)) {
         struct proc_bsdinfo *info=buffer;
@@ -310,7 +355,17 @@ static int fixture_proc_pidinfo(int pid,int flavor,uint64_t arg,void *buffer,int
 }
 static int fixture_proc_listchildpids(pid_t parent,void *buffer,int size) {
     int count=proc_listchildpids(parent,buffer,size);
-    if (parent==fixture_reap_parent) fixture_reap_lists++;
+    if (parent==fixture_leaf_pid && ++fixture_leaf_lists==2) {
+        if (count!=0 || !fixture_leaf_exit()) {errno=EIO;return -1;}
+        errno=0; /* Preserve the successful empty inventory result. */
+    }
+    if (parent==fixture_reap_parent) {
+        fixture_reap_lists++;
+        if (fixture_reap_reaped && ((fixture_reap_mode==REAP_ABSENCE_VECTOR_REUSE && fixture_reap_lists==2) ||
+            (fixture_reap_mode==REAP_ABSENCE_ROUND_REUSE && fixture_reap_lists==3) ||
+            fixture_reap_mode==REAP_ABSENCE_CHURN) && count>=0 && count<size/(int)sizeof(pid_t))
+            ((pid_t *)buffer)[count++]=fixture_reap_pid;
+    }
     if (fixture_alias_pid>1 && count>0 && count<size/(int)sizeof(pid_t))
         for (int i=0;i<count;i++) if (((pid_t *)buffer)[i]==fixture_alias_actual) ((pid_t *)buffer)[i]=fixture_alias_pid;
     if (parent==fixture_candidate_parent) {
@@ -527,11 +582,46 @@ static int fixture_candidate_reap(void) {
 }
 /* Order a real reap between the known child's first zombie read and its
  * confirmation. The positive/stress cases never forge native identity data. */
+static int fixture_leaf_exit(void) {
+    int zombie=fixture_leaf_mode==LEAF_ZOMBIE || fixture_leaf_mode==LEAF_FIRST_BIRTH ||
+        fixture_leaf_mode==LEAF_FIRST_CREDENTIALS || fixture_leaf_mode==LEAF_ZOMBIE_SECOND_BIRTH ||
+        fixture_leaf_mode==LEAF_ZOMBIE_SECOND_CREDENTIALS;
+    struct fixture_event event;
+    if (!command(fixture_leaf_control,zombie?'E':'R') ||
+        !exact_io(fixture_leaf_events,&event,sizeof(event),0,1000) ||
+        event.kind!=(zombie?EVENT_ZOMBIE:EVENT_ZOMBIE_REAPED) || !event.verified) return 0;
+    struct proc_bsdinfo actual;errno=0;
+    int count=proc_pidinfo(fixture_leaf_pid,PROC_PIDTBSDINFO,1,&actual,sizeof(actual));
+    if (zombie ? count!=sizeof(actual) || actual.pbi_status!=SZOMB : count!=0 || errno!=ESRCH) return 0;
+    fixture_leaf_triggered=1;return 1;
+}
+static int fixture_leaf_pidinfo(int pid,int flavor,uint64_t arg,void *buffer,int size) {
+    int read=++fixture_leaf_reads,mode=fixture_leaf_mode;
+    if ((read==1 && mode==LEAF_FIRST_UNKNOWN) || (read==2 && mode==LEAF_SECOND_UNKNOWN) ||
+        (read==3 && mode==LEAF_ROUND_UNKNOWN)) {errno=EACCES;return 0;}
+    if (read==2 && (mode==LEAF_SECOND_ZERO_ERRNO || mode==LEAF_SECOND_EAGAIN)) {
+        errno=mode==LEAF_SECOND_EAGAIN?EAGAIN:0;return 0;
+    }
+    int injected=(read==1 && (mode==LEAF_FIRST_SHORT || mode==LEAF_FIRST_BIRTH || mode==LEAF_FIRST_CREDENTIALS)) ||
+        (read==2 && mode>=LEAF_SECOND_SHORT && mode<=LEAF_ZOMBIE_SECOND_CREDENTIALS) ||
+        (read==3 && mode>=LEAF_ROUND_LIVE && mode<=LEAF_ROUND_CREDENTIALS) ||
+        (read==5 && mode>=LEAF_FINAL_LIVE && mode<=LEAF_FINAL_BIRTH);
+    if (!injected) return proc_pidinfo(pid,flavor,arg,buffer,size);
+    memcpy(buffer,&fixture_leaf_original,sizeof(fixture_leaf_original));
+    struct proc_bsdinfo *info=buffer;errno=0;
+    info->pbi_status=(mode==LEAF_SECOND_ZOMBIE || mode==LEAF_FIRST_BIRTH || mode==LEAF_FIRST_CREDENTIALS ||
+        mode==LEAF_ZOMBIE_SECOND_BIRTH || mode==LEAF_ZOMBIE_SECOND_CREDENTIALS)?SZOMB:SRUN;
+    if (mode==LEAF_FIRST_BIRTH || mode==LEAF_ZOMBIE_SECOND_BIRTH || mode==LEAF_ROUND_BIRTH || mode==LEAF_FINAL_BIRTH)
+        info->pbi_start_tvusec=(info->pbi_start_tvusec+1)%1000000;
+    if (mode==LEAF_FIRST_CREDENTIALS || mode==LEAF_ZOMBIE_SECOND_CREDENTIALS || mode==LEAF_ROUND_CREDENTIALS) info->pbi_svuid++;
+    return (mode==LEAF_FIRST_SHORT || mode==LEAF_SECOND_SHORT)?(int)sizeof(*info)-1:(int)sizeof(*info);
+}
 static int fixture_known_reap_pidinfo(int pid,int flavor,uint64_t arg,void *buffer,int size) {
     int mode=fixture_reap_mode, child=pid==fixture_reap_pid;
     int read=child?++fixture_reap_reads:++fixture_reap_parent_reads;
-    int reap=child && ((read==1 && mode==REAP_FIRST_ABSENT) ||
-        (read==2 && (mode==REAP_ABSENT || mode==REAP_STRESS || mode>=REAP_PARENT_ABSENT)));
+    int first=mode==REAP_FIRST_ABSENT || mode>=REAP_FIRST_STRESS;
+    int reap=child && ((read==1 && first) ||
+        (read==2 && !first && (mode==REAP_ABSENT || mode==REAP_STRESS || mode>=REAP_PARENT_ABSENT)));
     if (reap) {
         struct fixture_event event;
         if (!command(fixture_reap_control,'R') || !exact_io(fixture_reap_events,&event,sizeof(event),0,1000) ||
@@ -540,6 +630,23 @@ static int fixture_known_reap_pidinfo(int pid,int flavor,uint64_t arg,void *buff
         if (proc_pidinfo(pid,PROC_PIDTBSDINFO,1,&actual,sizeof(actual))!=0 || errno!=ESRCH) {errno=EIO;return 0;}
         fixture_reap_reaped=1;
     }
+    if (child && read==2 && (mode==REAP_ABSENCE_SECOND_UNKNOWN || mode==REAP_ABSENCE_SECOND_ZERO_ERRNO ||
+        mode==REAP_ABSENCE_SECOND_EAGAIN)) {
+        errno=mode==REAP_ABSENCE_SECOND_UNKNOWN?EACCES:mode==REAP_ABSENCE_SECOND_EAGAIN?EAGAIN:0;return 0;
+    }
+    if (child && fixture_reap_reaped && ((read==2 && mode>=REAP_ABSENCE_SECOND_SHORT && mode<=REAP_ABSENCE_SECOND_CREDENTIALS) ||
+        (mode==REAP_ABSENCE_VECTOR_REUSE && fixture_reap_lists==2) ||
+        (mode==REAP_ABSENCE_ROUND_REUSE && fixture_reap_lists==3) ||
+        (mode==REAP_ABSENCE_FINAL_REUSE && fixture_reap_lists==4))) {
+        memcpy(buffer,&fixture_reap_original,sizeof(fixture_reap_original));
+        struct proc_bsdinfo *info=buffer;info->pbi_status=SRUN;
+        if (mode==REAP_ABSENCE_SECOND_BIRTH || mode==REAP_ABSENCE_VECTOR_REUSE || mode==REAP_ABSENCE_ROUND_REUSE ||
+            mode==REAP_ABSENCE_FINAL_REUSE) info->pbi_start_tvusec=(info->pbi_start_tvusec+1)%1000000;
+        if (mode==REAP_ABSENCE_SECOND_CREDENTIALS) info->pbi_svuid++;
+        errno=0;return mode==REAP_ABSENCE_SECOND_SHORT?(int)sizeof(*info)-1:(int)sizeof(*info);
+    }
+    if (!child && mode>=REAP_ABSENCE_PARENT_ABSENT && mode<=REAP_ABSENCE_PARENT_AFTER_CREDENTIALS)
+        mode=REAP_PARENT_ABSENT+(mode-REAP_ABSENCE_PARENT_ABSENT);
     if ((child && ((read==1 && mode==REAP_FIRST_UNKNOWN) || (read==2 && mode==REAP_SECOND_UNKNOWN))) ||
         (!child && mode==REAP_PARENT_UNKNOWN)) {errno=EACCES;return 0;}
     if (!child && mode==REAP_PARENT_ABSENT) {errno=ESRCH;return 0;}
@@ -572,7 +679,7 @@ static kern_return_t fixture_recheck_info(task_t task, task_flavor_t flavor,
         return mode==RECHECK_INVALID_SHORT?KERN_INVALID_ARGUMENT:result;
     }
     if (mode==RECHECK_INFO_OTHER) return KERN_PROTECTION_FAILURE;
-    if (mode==RECHECK_INFO_PERSISTENT || mode==RECHECK_NAME_THEN_INFO ||
+    if (mode==RECHECK_INFO_PERSISTENT || mode==RECHECK_NAME_THEN_INFO || mode==RECHECK_PID_THEN_INFO ||
         ((mode==RECHECK_INFO_SUCCESS || mode==RECHECK_INFO_THEN_NAME) && fixture_recheck_infos==1))
         return KERN_INVALID_ARGUMENT;
     return result;
@@ -597,9 +704,9 @@ static kern_return_t fixture_task_name_for_pid(mach_port_name_t task,pid_t pid,m
         if (mode==RECHECK_NAME_OTHER) return KERN_PROTECTION_FAILURE;
         int info_first=mode==RECHECK_INFO_EXIT || mode==RECHECK_INFO_SUCCESS || mode==RECHECK_INFO_PERSISTENT ||
             mode==RECHECK_INFO_OTHER || mode==RECHECK_PID_INVALID || mode==RECHECK_PID_FAILURE ||
-            mode==RECHECK_SHORT || mode==RECHECK_INVALID_SHORT || mode==RECHECK_INFO_THEN_NAME;
+            mode==RECHECK_SHORT || mode==RECHECK_INVALID_SHORT || mode==RECHECK_INFO_THEN_NAME || mode>=RECHECK_PID_SUCCESS;
         if ((!info_first && fixture_recheck_names==1) || mode==RECHECK_NAME_PERSISTENT ||
-            (mode==RECHECK_INFO_THEN_NAME && fixture_recheck_names==2)) {
+            ((mode==RECHECK_INFO_THEN_NAME || mode==RECHECK_PID_THEN_NAME) && fixture_recheck_names==2)) {
             *name=MACH_PORT_NULL;
             if (mode==RECHECK_NAME_EXIT || mode==RECHECK_ZOMBIE_PARENT) (void)fixture_recheck_exit();
             return KERN_FAILURE;
@@ -992,7 +1099,7 @@ retirement_refused:;
         if (mode==CAND_PID_MISMATCH || mode==CAND_SHORT_TOKEN) REQUIRE(fixture_candidate_reaped && fixture_candidate_reads==2);
         if (mode==CAND_SECOND_PARENT || mode==CAND_SECOND_BIRTH || mode==CAND_SECOND_CREDENTIALS)
             REQUIRE(fixture_candidate_reads==2 && !fixture_candidate_names);
-        fixture_candidate_pid=0;fixture_candidate_parent=0;
+        fixture_candidate_pid=0;fixture_candidate_parent=0;fixture_leaf_pid=0;
         if (positive) {
             struct envara_app_family_failure failure;envara_app_family_first_failure(family,&failure);
             REQUIRE(failure.reason==ENVARA_APP_FAMILY_FAILURE_NONE);
@@ -1014,6 +1121,81 @@ retirement_refused:;
         }
         goto finished;
     }
+    if (!strncmp(argv[1],"leaf-end-",9)) {
+        const char *names[]={"leaf-end-absent","leaf-end-zombie","leaf-end-first-unknown","leaf-end-first-short",
+            "leaf-end-first-birth","leaf-end-first-credentials","leaf-end-second-unknown","leaf-end-second-zero-errno",
+            "leaf-end-second-eagain","leaf-end-second-short","leaf-end-second-live","leaf-end-second-zombie",
+            "leaf-end-zombie-second-birth","leaf-end-zombie-second-credentials","leaf-end-round-unknown",
+            "leaf-end-round-live","leaf-end-round-birth","leaf-end-round-credentials","leaf-end-final-live","leaf-end-final-birth"};
+        fixture_leaf_mode=-1;
+        for (unsigned i=0;i<sizeof(names)/sizeof(names[0]);i++) if (!strcmp(argv[1],names[i])) fixture_leaf_mode=(int)i;
+        REQUIRE(fixture_leaf_mode>=0);int positive=fixture_leaf_mode==LEAF_ABSENT || fixture_leaf_mode==LEAF_ZOMBIE;
+        family=envara_app_family_create(&f.leader);REQUIRE(family && family->count==3);
+        REQUIRE(make_live_candidate(&f) && envara_app_family_observe(family) && family->count==4);
+        fixture_leaf_pid=f.zombie.pid;fixture_leaf_control=f.control[0];fixture_leaf_events=f.events[0];
+        REQUIRE(proc_pidinfo(f.zombie.pid,PROC_PIDTBSDINFO,1,&fixture_leaf_original,sizeof(fixture_leaf_original))==sizeof(fixture_leaf_original));
+        int observed=envara_app_family_observe(family);
+        REQUIRE(fixture_leaf_triggered && fixture_leaf_lists==2 && !fixture_signal_calls);
+        if (positive) {
+            if (!observed || family->uncertain || fixture_leaf_reads<5 || family->count!=(fixture_leaf_mode==LEAF_ABSENT?3:4))
+                fprintf(stderr,"leaf terminal observation: observed=%d uncertain=%d reads=%d count=%zu reason=%s\n",
+                    observed,family->uncertain,fixture_leaf_reads,family->count,envara_app_family_failure_name(family->failure.reason));
+            REQUIRE(observed && !family->uncertain && fixture_leaf_reads>=5 &&
+                family->count==(fixture_leaf_mode==LEAF_ABSENT?3:4));
+            fixture_leaf_pid=0;
+            if (fixture_leaf_mode==LEAF_ZOMBIE) REQUIRE(reap_candidate(&f));
+            REQUIRE(envara_app_family_observe(family) && family->count==3 &&
+                envara_app_family_stop(family,&leader_signal_sent) && leader_signal_sent);
+            REQUIRE(wait_exited(&f.child,2000) && wait_exited(&f.grandchild,2000));
+            REQUIRE(reap_direct(f.leader_pid,&f.leader_reaped,2000,&signal_number) && signal_number==SIGKILL);
+            REQUIRE(envara_app_family_quiescent(family) && sibling_alive(&f));family_stopped=1;
+        } else {
+            struct envara_app_family_failure first,again;envara_app_family_first_failure(family,&first);
+            REQUIRE(!observed && family->uncertain && first.reason==ENVARA_APP_FAMILY_FAILURE_IDENTITY && first.os_error==ESTALE);
+            fixture_leaf_pid=0;
+            REQUIRE(!envara_app_family_stop(family,&leader_signal_sent) && !envara_app_family_retry_stop(family,&leader_signal_sent) &&
+                !envara_app_family_observe(family) && !envara_app_family_quiescent(family) && !fixture_signal_calls);
+            envara_app_family_first_failure(family,&again);
+            REQUIRE(!memcmp(&first,&again,sizeof(first)) && live_identity(&f.leader) && sibling_alive(&f));
+            failure_closed=1;first_failure_preserved=1;
+        }
+        goto finished;
+    }
+    if (!strncmp(argv[1],"absence-parent-",15)) {
+        int positive=!strcmp(argv[1],"absence-parent-stable");
+        int birth=!strcmp(argv[1],"absence-parent-birth");
+        REQUIRE(positive || birth || !strcmp(argv[1],"absence-parent-credentials"));
+        family=envara_app_family_create(&f.leader);REQUIRE(family && family->count==3);
+        REQUIRE(make_live_candidate(&f) && envara_app_family_observe(family) && family->count==4);
+        REQUIRE(reap_candidate(&f));
+        struct family_observation observation={0};struct family_member *parent=&family->members[0];
+        /* Real retained child and real reap establish the record. The changed
+         * saved parent below models a retired/reused parent generation, without
+         * pretending to force actual kernel PID reuse. */
+        REQUIRE(family_observe_child(family,&observation,parent,f.zombie.pid)==2 &&
+            observation.absent_count==1 && !family->uncertain && !fixture_signal_calls);
+        if (birth) observation.absent[0].parent.birth_microseconds=(observation.absent[0].parent.birth_microseconds+1)%1000000;
+        else if (!positive) observation.absent[0].parent.saved_uid++;
+        int observed=family_observe_child(family,&observation,parent,f.zombie.pid);
+        if (positive) {
+            REQUIRE(observed==2 && !family->uncertain && observation.absent_count==1 && !fixture_signal_calls);
+            REQUIRE(envara_app_family_observe(family) && family->count==3 &&
+                envara_app_family_stop(family,&leader_signal_sent) && leader_signal_sent);
+            REQUIRE(wait_exited(&f.child,2000) && wait_exited(&f.grandchild,2000));
+            REQUIRE(reap_direct(f.leader_pid,&f.leader_reaped,2000,&signal_number) && signal_number==SIGKILL);
+            REQUIRE(envara_app_family_quiescent(family) && sibling_alive(&f));family_stopped=1;
+        } else {
+            struct envara_app_family_failure first,again;envara_app_family_first_failure(family,&first);
+            REQUIRE(!observed && family->uncertain && !fixture_signal_calls &&
+                first.reason==ENVARA_APP_FAMILY_FAILURE_IDENTITY && first.os_error==ESTALE);
+            REQUIRE(!envara_app_family_stop(family,&leader_signal_sent) && !envara_app_family_retry_stop(family,&leader_signal_sent) &&
+                !envara_app_family_observe(family) && !envara_app_family_quiescent(family) && !fixture_signal_calls);
+            envara_app_family_first_failure(family,&again);
+            REQUIRE(!memcmp(&first,&again,sizeof(first)) && live_identity(&f.leader) && sibling_alive(&f));
+            failure_closed=1;first_failure_preserved=1;
+        }
+        goto finished;
+    }
     if (!strncmp(argv[1],"known-reap-",11)) {
         const char *names[]={"known-reap-absent","known-reap-stress","known-reap-first-absent",
             "known-reap-first-unknown","known-reap-first-short","known-reap-first-birth",
@@ -1022,27 +1204,44 @@ retirement_refused:;
             "known-reap-second-parent","known-reap-second-live","known-reap-parent-absent",
             "known-reap-parent-zombie","known-reap-parent-birth","known-reap-parent-credentials",
             "known-reap-parent-unknown","known-reap-parent-short","known-reap-parent-token",
-            "known-reap-parent-after-birth","known-reap-parent-after-credentials","known-reap-prior-uncertain"};
+            "known-reap-parent-after-birth","known-reap-parent-after-credentials","known-reap-prior-uncertain",
+            "known-reap-first-stress","known-reap-absence-second-unknown","known-reap-absence-second-zero-errno",
+            "known-reap-absence-second-eagain","known-reap-absence-second-short","known-reap-absence-second-live",
+            "known-reap-absence-second-birth","known-reap-absence-second-credentials","known-reap-absence-parent-absent",
+            "known-reap-absence-parent-zombie","known-reap-absence-parent-birth","known-reap-absence-parent-credentials",
+            "known-reap-absence-parent-unknown","known-reap-absence-parent-short","known-reap-absence-parent-token",
+            "known-reap-absence-parent-after-birth","known-reap-absence-parent-after-credentials",
+            "known-reap-absence-parent-binding","known-reap-absence-vector-reuse","known-reap-absence-round-reuse",
+            "known-reap-absence-final-reuse","known-reap-absence-churn", "known-reap-first-live", "known-reap-first-live-stress"};
         fixture_reap_mode=-1;
         for (unsigned i=0;i<sizeof(names)/sizeof(names[0]);i++) if (!strcmp(argv[1],names[i])) fixture_reap_mode=(int)i;
         REQUIRE(fixture_reap_mode>=0);
         family=envara_app_family_create(&f.leader);REQUIRE(family && family->count==3);
-        int positive=fixture_reap_mode==REAP_ABSENT || fixture_reap_mode==REAP_STRESS;
-        unsigned rounds=fixture_reap_mode==REAP_STRESS?64:1;
+        int positive=fixture_reap_mode==REAP_ABSENT || fixture_reap_mode==REAP_STRESS ||
+            fixture_reap_mode==REAP_FIRST_ABSENT || fixture_reap_mode==REAP_FIRST_STRESS ||
+            fixture_reap_mode==REAP_FIRST_LIVE || fixture_reap_mode==REAP_FIRST_LIVE_STRESS;
+        int churn=fixture_reap_mode==REAP_ABSENCE_CHURN;
+        unsigned rounds=(fixture_reap_mode==REAP_STRESS || fixture_reap_mode==REAP_FIRST_STRESS ||
+            fixture_reap_mode==REAP_FIRST_LIVE_STRESS)?64:1;
         for (unsigned round=0;round<rounds;round++) {
             REQUIRE(make_live_candidate(&f) && envara_app_family_observe(family));
             REQUIRE(family->count==4 && family_find(family,f.zombie.pid)>=0);
             struct fixture_event event;struct envara_identity actual;
-            REQUIRE(command(f.control[0],'E') && exact_io(f.events[0],&event,sizeof(event),0,1500) &&
-                event.kind==EVENT_ZOMBIE && event.verified && read_zombie(f.zombie.pid,&actual) &&
-                family_same(&actual,&f.zombie) && actual.parent_pid==f.leader.pid);
+            if (fixture_reap_mode!=REAP_FIRST_LIVE && fixture_reap_mode!=REAP_FIRST_LIVE_STRESS) {
+                REQUIRE(command(f.control[0],'E') && exact_io(f.events[0],&event,sizeof(event),0,1500) &&
+                    event.kind==EVENT_ZOMBIE && event.verified && read_zombie(f.zombie.pid,&actual) &&
+                    family_same(&actual,&f.zombie) && actual.parent_pid==f.leader.pid);
+            } else REQUIRE(live_identity(&f.zombie));
             fixture_reap_pid=f.zombie.pid;fixture_reap_parent=f.leader.pid;
             fixture_reap_control=f.control[0];fixture_reap_events=f.events[0];
             fixture_reap_reads=0;fixture_reap_parent_reads=0;fixture_reap_reaped=0;fixture_reap_lists=0;
+            REQUIRE(proc_pidinfo(f.zombie.pid,PROC_PIDTBSDINFO,1,&fixture_reap_original,sizeof(fixture_reap_original))==sizeof(fixture_reap_original));
+            if (fixture_reap_mode==REAP_ABSENCE_PARENT_BINDING)
+                family->members[family_find(family,f.zombie.pid)].identity.parent_pid=getpid();
             if (fixture_reap_mode==REAP_PRIOR_UNCERTAIN)
                 (void)family_refuse_reason(family,ENVARA_APP_FAMILY_FAILURE_TOKEN,EACCES,KERN_PROTECTION_FAILURE);
             int observed=envara_app_family_observe(family);
-            REQUIRE(!fixture_signal_calls && (family->count==4 || (positive && family->count==3)));
+            REQUIRE(!fixture_signal_calls && (family->count==4 || family->count==3));
             if (positive) {
                 if (!observed) {
                     struct envara_app_family_failure failure;envara_app_family_first_failure(family,&failure);
@@ -1053,7 +1252,23 @@ retirement_refused:;
                 REQUIRE(observed && !family->uncertain && fixture_reap_reaped && fixture_reap_reads>=3 &&
                     fixture_reap_parent_reads>=2 && stable_children(&f,0));
                 struct envara_app_family_failure failure;envara_app_family_first_failure(family,&failure);
-                REQUIRE(failure.reason==ENVARA_APP_FAMILY_FAILURE_NONE);known_reap_transitions++;
+                REQUIRE(failure.reason==ENVARA_APP_FAMILY_FAILURE_NONE);
+                if (fixture_reap_mode==REAP_FIRST_ABSENT || fixture_reap_mode==REAP_FIRST_STRESS ||
+                    fixture_reap_mode==REAP_FIRST_LIVE || fixture_reap_mode==REAP_FIRST_LIVE_STRESS)
+                    REQUIRE(family->count==3 && fixture_reap_lists>=4);
+                known_reap_transitions++;
+            } else if (churn) {
+                struct envara_app_family_failure first,again;envara_app_family_first_failure(family,&first);
+                REQUIRE(!observed && !family->uncertain && family->retry_pending && fixture_reap_lists==6 &&
+                    fixture_reap_reaped && family->count==3 && first.reason==ENVARA_APP_FAMILY_FAILURE_CHURN && first.os_error==EAGAIN);
+                REQUIRE(!envara_app_family_stop(family,&leader_signal_sent) && !leader_signal_sent && !fixture_signal_calls);
+                fixture_reap_pid=0;fixture_reap_parent=0;
+                REQUIRE(envara_app_family_retry_stop(family,&leader_signal_sent) && leader_signal_sent);
+                envara_app_family_first_failure(family,&again);
+                REQUIRE(!memcmp(&first,&again,sizeof(first)) && wait_exited(&f.child,2000) && wait_exited(&f.grandchild,2000));
+                REQUIRE(reap_direct(f.leader_pid,&f.leader_reaped,2000,&signal_number) && signal_number==SIGKILL);
+                REQUIRE(envara_app_family_quiescent(family) && sibling_alive(&f));
+                family_stopped=1;typed_retry_succeeded=1;first_failure_preserved=1;
             } else {
                 REQUIRE(!observed && family->uncertain);
                 struct envara_app_family_failure first,again;envara_app_family_first_failure(family,&first);
@@ -1108,31 +1323,54 @@ retirement_refused:;
             "refresh-recheck-second-credentials","refresh-recheck-second-parent","refresh-recheck-second-unknown",
             "refresh-recheck-after-birth","refresh-recheck-after-credentials","refresh-recheck-after-parent",
             "refresh-recheck-second-short","refresh-recheck-name-then-info","refresh-recheck-info-then-name",
-            "refresh-recheck-interrupted","refresh-recheck-zombie-parent"};
+            "refresh-recheck-interrupted","refresh-recheck-zombie-parent","refresh-recheck-pid-success",
+            "refresh-recheck-pid-exit","refresh-recheck-pid-then-name","refresh-recheck-pid-then-info",
+            "refresh-recheck-pid-candidate","refresh-recheck-pid-mismatch","refresh-recheck-pid-second-birth",
+            "refresh-recheck-pid-second-credentials","refresh-recheck-pid-second-parent","refresh-recheck-pid-second-unknown",
+            "refresh-recheck-pid-first-parent","refresh-recheck-pid-interrupted"};
         fixture_recheck_mode=-1;
         for (unsigned i=0;i<sizeof(names)/sizeof(names[0]);i++) if (!strcmp(argv[1],names[i])) fixture_recheck_mode=(int)i;
         REQUIRE(fixture_recheck_mode>=0);
         family=envara_app_family_create(&f.leader);REQUIRE(family && family->count==3);
         int index=family_find(family,f.grandchild.pid);REQUIRE(index>=0);
-        REQUIRE(proc_pidinfo(f.grandchild.pid,PROC_PIDTBSDINFO,1,&fixture_recheck_original,sizeof(fixture_recheck_original))==sizeof(fixture_recheck_original));
-        fixture_recheck_pid=f.grandchild.pid;fixture_recheck_control=f.detach[1];
-        struct family_member *target=&family->members[index];target->token.val[7]^=1;
+        int mode=fixture_recheck_mode,candidate=mode==RECHECK_PID_CANDIDATE;
+        struct family_member unregistered={0};
+        if (candidate) {
+            REQUIRE(make_live_candidate(&f) && family_find(family,f.zombie.pid)<0);
+            unregistered.identity=f.zombie;
+        }
+        struct family_member *target=candidate?&unregistered:&family->members[index];
+        REQUIRE(proc_pidinfo(target->identity.pid,PROC_PIDTBSDINFO,1,&fixture_recheck_original,sizeof(fixture_recheck_original))==sizeof(fixture_recheck_original));
+        fixture_recheck_pid=target->identity.pid;fixture_recheck_control=f.detach[1];
+        target->token.val[7]^=1;
         audit_token_t saved=target->token;
-        int refreshed=family_member_refresh(family,target),mode=fixture_recheck_mode;
+        int refreshed=candidate?family_member_refresh_attempt(family,target,NULL,0,0,1):family_member_refresh(family,target);
         REQUIRE(fixture_recheck_names>=1 && fixture_recheck_names<=2 && fixture_recheck_sleeps<=1 &&
             fixture_recheck_reads<=4 && !fixture_signal_calls && family->count==3);
-        int terminal=mode==RECHECK_NAME_EXIT || mode==RECHECK_INFO_EXIT;
-        int live_success=mode==RECHECK_NAME_SUCCESS || mode==RECHECK_INFO_SUCCESS;
+        int terminal=mode==RECHECK_NAME_EXIT || mode==RECHECK_INFO_EXIT || mode==RECHECK_PID_EXIT;
+        int live_success=mode==RECHECK_NAME_SUCCESS || mode==RECHECK_INFO_SUCCESS || mode==RECHECK_PID_SUCCESS;
         int positive=terminal || live_success;
         if (terminal || mode==RECHECK_ZOMBIE_PARENT) REQUIRE(fixture_recheck_triggered);
         if (live_success) REQUIRE(fixture_recheck_names==2 && fixture_recheck_sleeps==1 &&
-            fixture_recheck_infos==(mode==RECHECK_NAME_SUCCESS?1:2) && memcmp(&saved,&target->token,sizeof(saved)));
+            fixture_recheck_infos==(mode==RECHECK_INFO_SUCCESS?2:1) && memcmp(&saved,&target->token,sizeof(saved)));
         if (mode==RECHECK_NAME_PERSISTENT || mode==RECHECK_INFO_PERSISTENT ||
             mode==RECHECK_NAME_THEN_INFO || mode==RECHECK_INFO_THEN_NAME) REQUIRE(fixture_recheck_names==2 && fixture_recheck_sleeps==1);
         if (mode==RECHECK_NAME_OTHER || mode==RECHECK_INFO_OTHER || mode==RECHECK_PID_INVALID ||
-            mode==RECHECK_PID_FAILURE || mode==RECHECK_SHORT || mode==RECHECK_INVALID_SHORT ||
+            mode==RECHECK_SHORT || mode==RECHECK_INVALID_SHORT ||
             mode==RECHECK_FIRST_PARENT) REQUIRE(fixture_recheck_names==1 && !fixture_recheck_sleeps);
         if (mode==RECHECK_INTERRUPTED) REQUIRE(fixture_recheck_names==1 && fixture_recheck_sleeps==1);
+        if (mode==RECHECK_PID_FAILURE || mode>=RECHECK_PID_SUCCESS) {
+            int second_mach=mode==RECHECK_PID_FAILURE || mode==RECHECK_PID_SUCCESS ||
+                mode==RECHECK_PID_THEN_NAME || mode==RECHECK_PID_THEN_INFO;
+            int no_retry=candidate || mode==RECHECK_PID_MISMATCH || mode==RECHECK_PID_FIRST_PARENT;
+            int second_identity=mode>=RECHECK_PID_SECOND_BIRTH && mode<=RECHECK_PID_SECOND_UNKNOWN;
+            REQUIRE(fixture_recheck_names==(second_mach?2:1) &&
+                fixture_recheck_pids==(second_mach && mode!=RECHECK_PID_THEN_NAME?2:1) &&
+                fixture_recheck_infos==((mode==RECHECK_PID_SUCCESS || mode==RECHECK_PID_THEN_INFO)?1:0) &&
+                fixture_recheck_sleeps==(no_retry?0:1) &&
+                fixture_recheck_reads==(second_identity?3:(no_retry || mode==RECHECK_PID_INTERRUPTED)?2:4));
+        }
+        if (candidate) REQUIRE(live_identity(&f.zombie) && family_find(family,f.zombie.pid)<0);
         fixture_recheck_pid=0;fixture_recheck_triggered=0;
         if (positive) {
             struct envara_app_family_failure diagnosis;envara_app_family_first_failure(family,&diagnosis);
@@ -1145,7 +1383,13 @@ retirement_refused:;
             struct envara_app_family_failure first,again;envara_app_family_first_failure(family,&first);
             REQUIRE(refreshed==-1 && family->uncertain && !memcmp(&saved,&target->token,sizeof(saved)));
             REQUIRE(first.reason==ENVARA_APP_FAMILY_FAILURE_IDENTITY || first.reason==ENVARA_APP_FAMILY_FAILURE_TOKEN);
-            if (mode==RECHECK_INTERRUPTED) REQUIRE(first.reason==ENVARA_APP_FAMILY_FAILURE_TOKEN && first.os_error==EACCES && first.mach_error==KERN_FAILURE);
+            if (mode==RECHECK_INTERRUPTED || mode==RECHECK_PID_FAILURE || mode>=RECHECK_PID_SUCCESS) {
+                int identity=mode==RECHECK_PID_MISMATCH ||
+                    (mode>=RECHECK_PID_SECOND_BIRTH && mode<=RECHECK_PID_SECOND_UNKNOWN);
+                REQUIRE(first.reason==(identity?ENVARA_APP_FAMILY_FAILURE_IDENTITY:ENVARA_APP_FAMILY_FAILURE_TOKEN) &&
+                    first.os_error==(identity?ESTALE:EACCES) &&
+                    first.mach_error==(identity?0:mode==RECHECK_PID_THEN_INFO?KERN_INVALID_ARGUMENT:KERN_FAILURE));
+            }
             REQUIRE(!envara_app_family_retry_stop(family,&leader_signal_sent) && !leader_signal_sent);
             REQUIRE(!envara_app_family_observe(family) && !envara_app_family_quiescent(family) && !fixture_signal_calls);
             envara_app_family_first_failure(family,&again);
@@ -1448,7 +1692,7 @@ finished:
     fixture_reparent_pid=0;fixture_reparent_done=0;
     fixture_recheck_pid=0;fixture_recheck_triggered=0;
     fixture_terminal_pid=0;fixture_terminal_info_exit=0;
-    fixture_candidate_pid=0;fixture_candidate_parent=0;
+    fixture_candidate_pid=0;fixture_candidate_parent=0;fixture_leaf_pid=0;
     fixture_reap_pid=0;fixture_reap_parent=0;
     fixture_retire_pid=0;fixture_alias_pid=0;fixture_alias_actual=0;fixture_swap_tree=NULL;
     fixture_swap_old=0;fixture_swap_new=0;

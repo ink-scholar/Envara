@@ -5,7 +5,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 // ScrollIntoView scrolls the page so the element is visible, with smooth easing.

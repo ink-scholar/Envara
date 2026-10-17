@@ -13,7 +13,7 @@ import (
 	"browseforge/internal/profile"
 	bfruntime "browseforge/internal/runtime"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 func (m *Manager) launchFirefox(p *profile.Profile) (*Session, error) {
@@ -62,6 +62,31 @@ func (m *Manager) launchFirefox(p *profile.Profile) (*Session, error) {
 		return nil, err
 	}
 
+	privacyAddon, err := prepareFirefoxPrivacyAddon(privacyMode)
+	if err != nil {
+		return nil, fmt.Errorf("prepare WebSocket privacy add-on: %w", err)
+	}
+	addonOwned := true
+	defer func() {
+		if addonOwned {
+			privacyAddon.Close()
+		}
+	}()
+	addons := []string{}
+	switch existing := config["addons"].(type) {
+	case []string:
+		addons = append(addons, existing...)
+	case []any:
+		for _, value := range existing {
+			if path, ok := value.(string); ok {
+				addons = append(addons, path)
+			}
+		}
+	case nil:
+	default:
+		return nil, fmt.Errorf("invalid Camoufox add-on configuration")
+	}
+	config["addons"] = append(addons, privacyAddon.directory)
 	configJSON, err := json.Marshal(config)
 	if err != nil {
 		return nil, fmt.Errorf("encode camoufox config: %w", err)
@@ -146,7 +171,15 @@ func (m *Manager) launchFirefox(p *profile.Profile) (*Session, error) {
 		}
 		return nil, fmt.Errorf("launch firefox: %w", humanizeError(err))
 	}
-	privacyState, err := installBrowserPrivacy(ctx, p, false)
+	ctx.OnClose(func(playwright.BrowserContext) { privacyAddon.Close() })
+	if err := privacyAddon.WaitReady(ctx); err != nil {
+		ctx.Close()
+		if relay != nil {
+			relay.Close()
+		}
+		return nil, err
+	}
+	privacyState, err := installBrowserPrivacy(ctx, p, false, true)
 	if err != nil {
 		if relay != nil {
 			relay.Close()
@@ -177,6 +210,7 @@ func (m *Manager) launchFirefox(p *profile.Profile) (*Session, error) {
 		}
 	}
 
+	addonOwned = false
 	return &Session{
 		ID:             fmt.Sprintf("sess_%s", p.ID),
 		routeDigest:    SessionRouteDigest(effectiveProxy.Proxy),
@@ -185,6 +219,7 @@ func (m *Manager) launchFirefox(p *profile.Profile) (*Session, error) {
 		Context:        ctx,
 		Page:           page,
 		relay:          relay,
+		privacyAddon:   privacyAddon,
 		ProfileDir:     p.ProfileDir,
 		UserDataDir:    userDataDir,
 		ExecutablePath: absPath,

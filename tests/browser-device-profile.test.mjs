@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { BrowseForgeService } from '../electron/browseforge-service.mjs';
-import { BROWSER_DEVICE_PROFILES, PROVIDER_DEFAULT_DEVICE_PROFILE_ID, defaultBrowserDeviceProfileId, deviceProfileFingerprint, getBrowserDeviceProfile, supportsBrowserDeviceProfiles, validateBrowserDeviceProfileInput } from '../shared/browser-device-profile.mjs';
+import { BROWSER_DEVICE_PROFILES, PROVIDER_DEFAULT_DEVICE_PROFILE_ID, applyBrowserDeviceProfile, defaultBrowserDeviceProfileId, deviceProfileFingerprint, getBrowserDeviceProfile, supportsBrowserDeviceProfiles, validateBrowserDeviceProfileInput } from '../shared/browser-device-profile.mjs';
 
 async function fixture(t, platform = 'darwin') {
   const root = await mkdtemp(path.join(os.tmpdir(), 'envara-device-profile-'));
@@ -80,14 +80,15 @@ test('device catalog is versioned, country-independent and limited to tested pro
   assert.equal(defaultBrowserDeviceProfileId('US'), PROVIDER_DEFAULT_DEVICE_PROFILE_ID);
   assert.equal(getBrowserDeviceProfile(PROVIDER_DEFAULT_DEVICE_PROFILE_ID), null);
   assert.throws(() => getBrowserDeviceProfile('us-mac'), { code: 'DEVICE_PROFILE_INVALID' });
-  assert(supportsBrowserDeviceProfiles('cloakbrowser')); assert(!supportsBrowserDeviceProfiles('camoufox'));
+  for (const engine of ['cloakbrowser', 'camoufox', 'browseforge-chromium']) assert(supportsBrowserDeviceProfiles(engine));
+  assert(!supportsBrowserDeviceProfiles('unmapped-provider'));
   assert(BROWSER_DEVICE_PROFILES.every(profile => Object.isFrozen(profile) && !Object.hasOwn(profile, 'country')));
   const fingerprint = deviceProfileFingerprint('mac-standard-v1');
   assert.deepEqual(fingerprint, { 'screen.width': 1440, 'screen.height': 900, 'screen.devicePixelRatio': 2, 'navigator.hardwareConcurrency': 8, 'navigator.deviceMemory': 8 });
   assert(!Object.keys(fingerprint).some(key => /webgl|font|useragent|timezone|language/i.test(key)));
   fingerprint['screen.width'] = 100;
   assert.equal(deviceProfileFingerprint('mac-standard-v1')['screen.width'], 1440);
-  assert.throws(() => validateBrowserDeviceProfileInput({ deviceProfileId: 'mac-standard-v1' }, 'camoufox', 'darwin'), { code: 'DEVICE_PROFILE_UNSUPPORTED' });
+  assert.throws(() => validateBrowserDeviceProfileInput({ deviceProfileId: 'mac-standard-v1' }, 'unmapped-provider', 'darwin'), { code: 'DEVICE_PROFILE_UNSUPPORTED' });
   assert.throws(() => validateBrowserDeviceProfileInput({ deviceProfileId: 'windows-standard-v1' }, 'cloakbrowser', 'darwin'), { code: 'DEVICE_PROFILE_PLATFORM_UNSUPPORTED' });
 });
 
@@ -110,11 +111,11 @@ test('minimal new environments delegate all device defaults to their selected pr
   });
 });
 
-test('an explicit fixed preset still persists its concrete settings instead of becoming provider-default', async t => {
-  for (const [host, id, platform] of [['darwin', 'mac-standard-v1', 'macos'], ['win32', 'windows-standard-v1', 'windows'], ['linux', 'linux-standard-v1', 'linux']]) await t.test(host, async t => {
-    const f = await fixture(t, host), profile = await f.create({ deviceProfileId: id });
+test('an explicit fixed preset persists its native settings for every provider and host', async t => {
+  for (const engine of ['cloakbrowser', 'camoufox', 'browseforge-chromium']) for (const [host, id, platform] of [['darwin', 'mac-standard-v1', 'macos'], ['win32', 'windows-standard-v1', 'windows'], ['linux', 'linux-standard-v1', 'linux']]) await t.test(`${engine}/${host}`, async t => {
+    const f = await fixture(t, host), profile = await f.create({ engine, deviceProfileId: id });
     assert.equal(profile.deviceProfileId, id); assert.equal(profile.platform, platform);
-    assert.deepEqual(f.profiles[0].fingerprint, deviceProfileFingerprint(id));
+    assert.deepEqual(f.profiles[0].fingerprint, deviceProfileFingerprint(id, engine));
     assert.equal((await f.service.store.read()).profiles[0].deviceProfileId, id);
   });
 });
@@ -140,7 +141,7 @@ test('provider defaults get independent saved seeds that survive service restart
   assert.equal(await readFile(marker, 'utf8'), 'fixture-login-data');
 });
 
-test('old custom creation calls and unsupported providers preserve their explicit configuration', async t => {
+test('old custom creation calls preserve their explicit configuration', async t => {
   const f = await fixture(t);
   for (const patch of [
     { platform: 'windows', width: 1920, height: 1080 },
@@ -156,7 +157,6 @@ test('old custom creation calls and unsupported providers preserve their explici
     if (patch.fingerprint) assert.deepEqual(result.fingerprint, patch.fingerprint);
   }
   await assert.rejects(f.create({ deviceProfileId: 'windows-standard-v1' }), { code: 'DEVICE_PROFILE_PLATFORM_UNSUPPORTED' });
-  await assert.rejects(f.create({ engine: 'camoufox', deviceProfileId: 'mac-standard-v1' }), { code: 'DEVICE_PROFILE_UNSUPPORTED' });
 });
 
 test('unlabelled existing environments stay untouched until a device profile is explicitly selected', async t => {
@@ -268,7 +268,7 @@ test('selecting a fixed device clears stale available geometry while custom mode
   assert.deepEqual(f.profiles[0].fingerprint, deviceProfileFingerprint('mac-standard-v1'));
   const fixedImport = { ...(await f.service.exportProfiles({ id: original.id })).profiles[0], fingerprint: { ...deviceProfileFingerprint('mac-standard-v1'), ...geometry } };
   const result = await f.service.call('importProfiles', { profiles: [fixedImport] });
-  assert.deepEqual(result.profiles.find(p => p.id === result.actionResult.createdIds[0]).fingerprint, deviceProfileFingerprint('mac-standard-v1'));
+  assert.deepEqual(result.profiles.find(p => p.id === result.actionResult.createdIds[0]).fingerprint, fixedImport.fingerprint, 'import restores the exact saved identity instead of reapplying the template');
 });
 
 test('clones retain immutable device specs with a fresh seed and no generated noise or browser data', async t => {
@@ -385,4 +385,137 @@ test('editing a legacy environment without a seed never creates a new identity',
   await f.service.call('updateProfile', { id, profile: { notes: 'A note', seed: null } });
   assert.equal(f.profiles[0].fingerprint_seed, 0);
   assert.deepEqual(f.profiles[0].fingerprint, before);
+});
+
+test('Camoufox templates use only pinned native properties and leave RAM and the inner viewport native', async () => {
+  const schema = JSON.parse(await readFile(new URL('../third_party/browseforge/internal/profile/camoufox-data/native-properties.json', import.meta.url), 'utf8'));
+  const properties = new Set(schema.map(item => item.property));
+  for (const device of BROWSER_DEVICE_PROFILES) {
+    const fields = deviceProfileFingerprint(device.id, 'camoufox');
+    for (const key of Object.keys(fields)) assert(properties.has(key), `native Camoufox property: ${key}`);
+    assert.equal(fields['window.devicePixelRatio'], device.deviceScaleFactor);
+    assert.equal(fields['navigator.hardwareConcurrency'], device.hardwareConcurrency);
+    assert.equal(fields['screen.availWidth'], fields['screen.width']);
+    assert.equal(fields['screen.availHeight'], fields['screen.height']);
+    assert.equal(fields['window.outerWidth'], fields['screen.width']);
+    assert.equal(fields['window.outerHeight'], fields['screen.height']);
+    for (const key of ['navigator.deviceMemory', 'screen.devicePixelRatio', 'window.innerWidth', 'window.innerHeight']) assert.equal(Object.hasOwn(fields, key), false, key);
+  }
+});
+
+test('applying a native template replaces dependent geometry without replacing the provider identity', () => {
+  const old = { 'screen.width': 2560, 'screen.availWidth': 2500, 'window.outerWidth': 2400, 'window.innerWidth': 2300,
+    'screen.height': 1440, 'screen.availHeight': 1400, 'window.outerHeight': 1350, 'window.innerHeight': 1280,
+    'navigator.deviceMemory': 4, 'screen.devicePixelRatio': 1, 'webGl:vendor': 'provider sample', fonts: ['Sample Font'], 'canvas:aaOffset': 17 };
+  const before = structuredClone(old);
+  for (const engine of ['camoufox', 'browseforge-chromium']) {
+    const changed = applyBrowserDeviceProfile(old, 'mac-standard-v1', engine);
+    for (const [key, value] of Object.entries(deviceProfileFingerprint('mac-standard-v1', engine))) assert.deepEqual(changed[key], value);
+    assert.equal(Object.hasOwn(changed, 'window.innerWidth'), false);
+    assert.equal(Object.hasOwn(changed, 'window.innerHeight'), false);
+    assert.deepEqual(changed.fonts, old.fonts); assert.equal(changed['webGl:vendor'], old['webGl:vendor']);
+    assert.equal(changed['canvas:aaOffset'], old['canvas:aaOffset']);
+    if (engine === 'camoufox') {
+      assert.equal(Object.hasOwn(changed, 'navigator.deviceMemory'), false);
+      assert.equal(Object.hasOwn(changed, 'screen.devicePixelRatio'), false);
+    } else {
+      assert.equal(Object.hasOwn(changed, 'window.outerWidth'), false);
+      assert.equal(Object.hasOwn(changed, 'screen.availWidth'), false);
+    }
+  }
+  assert.deepEqual(old, before);
+});
+
+test('new providers apply templates only on selection and preserve the saved identity through unrelated edits and import', async t => {
+  for (const engine of ['camoufox', 'browseforge-chromium']) await t.test(engine, async t => {
+    const f = await fixture(t), source = await f.create({ engine });
+    const fields = { 'screen.width': 2560, 'screen.height': 1440, 'screen.availWidth': 2560, 'screen.availHeight': 1400,
+      'window.outerWidth': 2400, 'window.outerHeight': 1300, 'window.innerWidth': 2300, 'window.innerHeight': 1200,
+      'navigator.hardwareConcurrency': 12, 'webGl:vendor': 'sample vendor', fonts: ['Sample Font'], 'custom.fixture': true };
+    Object.assign(f.profiles[0], { identity: { target_os: 'macos' }, fingerprint: structuredClone(fields), fingerprint_generation: { provider: engine, version: 1, tuple_id: 'synthetic-source', generated_fields: structuredClone(fields) } });
+    const seed = f.profiles[0].fingerprint_seed;
+    await f.service.call('updateProfile', { id: source.id, profile: { notes: 'No identity change' } });
+    assert.deepEqual(f.profiles[0].fingerprint, fields);
+    assert.deepEqual(f.profiles[0].fingerprint_generation.generated_fields, fields);
+    await f.service.call('updateProfile', { id: source.id, profile: { deviceProfileId: 'mac-standard-v1' } });
+    const selected = applyBrowserDeviceProfile(fields, 'mac-standard-v1', engine);
+    assert.deepEqual(f.profiles[0].fingerprint, selected);
+    assert.equal(f.profiles[0].fingerprint_seed, seed);
+    for (const key of Object.keys(selected).filter(key => /^(screen\.|window\.|navigator\.hardwareConcurrency)/.test(key))) assert.equal(Object.hasOwn(f.profiles[0].fingerprint_generation.generated_fields, key), false, key);
+    assert.equal(f.profiles[0].fingerprint_generation.generated_fields['webGl:vendor'], fields['webGl:vendor']);
+    const generation = structuredClone(f.profiles[0].fingerprint_generation);
+    await f.service.call('updateProfile', { id: source.id, profile: { deviceProfileId: 'mac-standard-v1', width: 1440, height: 900, notes: 'Form resubmits the saved choice' } });
+    assert.deepEqual(f.profiles[0].fingerprint, selected);
+    assert.deepEqual(f.profiles[0].fingerprint_generation, generation);
+    const exported = await f.service.exportProfiles({ id: source.id });
+    // Independent custom viewport settings are not part of a later import edit.
+    exported.profiles[0].fingerprint['window.innerWidth'] = 1280;
+    exported.profiles[0].fingerprint['window.innerHeight'] = 720;
+    const importedResult = await f.service.call('importProfiles', { document: exported });
+    const importedId = importedResult.actionResult.createdIds[0];
+    const imported = f.profiles.find(profile => profile.id === importedId);
+    assert.deepEqual(imported.fingerprint, exported.profiles[0].fingerprint);
+    assert.deepEqual(imported.fingerprint_generation, generation);
+    await f.service.call('updateProfile', { id: importedId, profile: { deviceProfileId: 'mac-standard-v1', notes: 'Retain the imported identity' } });
+    assert.deepEqual(imported.fingerprint, exported.profiles[0].fingerprint);
+    assert.deepEqual(imported.fingerprint_generation, generation);
+  });
+});
+
+test('new provider fixed labels reject mismatched native device settings before launch', async t => {
+  for (const engine of ['camoufox', 'browseforge-chromium']) await t.test(engine, async t => {
+    const f = await fixture(t), profile = await f.create({ engine, deviceProfileId: 'mac-standard-v1' });
+    const dprKey = engine === 'camoufox' ? 'window.devicePixelRatio' : 'screen.devicePixelRatio';
+    f.profiles[0].fingerprint[dprKey] = 1;
+    await assert.rejects(f.service.call('startProfile', { id: profile.id }), { code: 'DEVICE_PROFILE_CONFLICT' });
+    assert.equal(f.requests.filter(r => r.route === '/api/sessions' && r.method === 'POST').length, 0);
+  });
+});
+
+test('an incomplete fixed import is rejected rather than synthesizing missing identity fields', async t => {
+  for (const engine of ['cloakbrowser', 'camoufox', 'browseforge-chromium']) await t.test(engine, async t => {
+    const f = await fixture(t);
+    const fingerprint = deviceProfileFingerprint('mac-standard-v1', engine);
+    delete fingerprint['navigator.hardwareConcurrency'];
+    await assert.rejects(f.service.call('importProfiles', { profiles: [{ name: 'Incomplete template', engine, deviceProfileId: 'mac-standard-v1', fingerprint }] }), { code: 'DEVICE_PROFILE_CONFLICT' });
+    assert.equal(f.profiles.length, 0);
+    assert.equal(f.requests.filter(r => r.route === '/api/profiles' && r.method === 'POST').length, 0);
+  });
+});
+
+test('Camoufox fixed templates reject incompatible or unidentifiable old OS identities without rewriting them', async t => {
+  const f = await fixture(t);
+  for (const fields of [
+    { identity: { target_os: 'windows' }, fingerprint: { fonts: ['Fixture'] } },
+    { identity: { target_os: 'macos' }, fingerprint: { 'navigator.platform': 'Win32', fonts: ['Fixture'] } },
+    { fingerprint: { 'navigator.platform': 'Win32', 'navigator.oscpu': 'Windows NT 10.0; Win64; x64', fonts: ['Fixture'] } },
+    { fingerprint: { 'navigator.userAgent': 'Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/135.0' } },
+    { fingerprint: { 'webGl:vendor': 'Unknown origin fixture', fonts: ['Fixture'] } },
+  ]) {
+    const created = await f.create({ engine: 'camoufox' });
+    const native = f.profiles.find(profile => profile.id === created.id);
+    Object.assign(native, fields);
+    const before = structuredClone(native);
+    await assert.rejects(f.service.call('updateProfile', { id: created.id, profile: { deviceProfileId: 'mac-standard-v1' } }), { code: 'DEVICE_PROFILE_CONFLICT' });
+    assert.deepEqual(native, before);
+    assert.equal((await f.service.snapshot()).profiles.find(profile => profile.id === created.id).deviceProfileId, 'provider-default');
+  }
+  const legacy = await f.create({ engine: 'camoufox', fingerprint: { 'navigator.platform': 'MacIntel', 'navigator.oscpu': 'Intel Mac OS X 10.15', fonts: ['Fixture'] } });
+  await f.service.call('updateProfile', { id: legacy.id, profile: { deviceProfileId: 'mac-standard-v1' } });
+  const native = f.profiles.find(profile => profile.id === legacy.id);
+  assert.deepEqual(native.fingerprint.fonts, ['Fixture']);
+  assert.equal(native.fingerprint['navigator.platform'], 'MacIntel');
+  assert.equal(native.fingerprint['window.devicePixelRatio'], 2);
+});
+
+test('Camoufox OS consistency is checked for fixed creation, import and launch', async t => {
+  const f = await fixture(t);
+  const fingerprint = { ...deviceProfileFingerprint('mac-standard-v1', 'camoufox'), 'navigator.platform': 'Win32' };
+  await assert.rejects(f.create({ engine: 'camoufox', deviceProfileId: 'mac-standard-v1', fingerprint }), { code: 'DEVICE_PROFILE_CONFLICT' });
+  await assert.rejects(f.service.call('importProfiles', { profiles: [{ name: 'Conflicting OS', engine: 'camoufox', deviceProfileId: 'mac-standard-v1', fingerprint }] }), { code: 'DEVICE_PROFILE_CONFLICT' });
+  assert.equal(f.profiles.length, 0);
+  const created = await f.create({ engine: 'camoufox', deviceProfileId: 'mac-standard-v1' });
+  f.profiles[0].fingerprint['navigator.platform'] = 'Linux x86_64';
+  await assert.rejects(f.service.call('startProfile', { id: created.id }), { code: 'DEVICE_PROFILE_CONFLICT' });
+  assert.equal(f.requests.filter(r => r.route === '/api/sessions' && r.method === 'POST').length, 0);
 });

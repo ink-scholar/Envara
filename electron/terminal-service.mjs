@@ -3,7 +3,7 @@ import os from 'node:os';
 import net from 'node:net';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
-import { access, chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { captureTerminalProcess, closeTerminalProcess } from './terminal-process.mjs';
 import { TerminalNetworkFence } from './terminal-network-fence.mjs';
@@ -21,6 +21,7 @@ const SECRET_TAIL_FLUSH_MS = 40;
 const MAX_QUEUE_BYTES = 256 * 1024;
 const OUTPUT_CHUNK_BYTES = 32 * 1024;
 const FALLBACK_EXIT_TIMEOUT_MS = 1000;
+const ACCOUNT_DELETIONS_DIRECTORY = 'claude-account-deletions';
 const codeError = (message, code = 'TERMINAL_VALIDATION_ERROR') => Object.assign(new Error(message), { code });
 const storageFailure = error => ['EACCES', 'EPERM', 'EROFS', 'ENOSPC'].includes(error?.code)
   ? codeError('无法写入此环境的独立终端配置，请检查应用数据目录的权限与剩余空间。', 'TERMINAL_STORAGE_UNAVAILABLE') : error;
@@ -100,6 +101,24 @@ async function ownedFile(filename, source, overwrite = false) {
   finally { await rm(temporary, { force: true }); }
 }
 
+// A removed account is detached here before its metadata is committed. This
+// directory is outside profiles/, so neither scoped nor legacy exports copy it.
+// A crash before metadata commit restores the account; after commit only its
+// detached data is eligible for cleanup. Never read authentication contents.
+async function checkedAccountPath(root, components = []) {
+  let target = root;
+  for (const component of ['', ...components]) {
+    if (component) target = path.join(target, component);
+    let info;
+    try { info = await lstat(target); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    if (!info.isDirectory() || info.isSymbolicLink() || info.mode & 0o022
+      || process.getuid && info.uid !== process.getuid() || await realpath(target) !== target)
+      throw codeError('Claude 登录档案删除目录不安全，未执行删除。', 'CLAUDE_ACCOUNT_UNSAFE_PATH');
+  }
+  return target;
+}
+
 /** Real per-profile PTYs with private tool configuration; this is not an OS sandbox. */
 // Seatbelt admits only loopback peers, so a remote HTTP(S) upstream stays unfenced.
 function loopbackRoutePort(bridge, endpoint) {
@@ -140,6 +159,8 @@ export class TerminalService {
     this.sessions = new Map();
     this.profileQueues = new Map();
     this.settingsQueue = Promise.resolve();
+    this.pendingClaudeStarts = new Map();
+    this.deletingClaudeAccounts = new Set();
     // Failure generations catch a core exit while resolveContext is awaiting
     // its probe, before the starting session knows its managed proxy id.
     this.managedProxyFailures = new Map();
@@ -155,6 +176,7 @@ export class TerminalService {
     this.settingsFile = path.join(this.root, 'workspace.json');
     this.claudeAccounts = new ClaudeAccountStore({ root: this.root });
     await this.claudeAccounts.ready;
+    await this.recoverClaudeAccountDeletions();
     try {
       const info = await lstat(this.settingsFile);
       if (info.isSymbolicLink() || !info.isFile() || info.size > 1024 * 1024) throw codeError('终端元数据文件无效。', 'TERMINAL_UNSAFE_PATH');
@@ -222,8 +244,26 @@ export class TerminalService {
   /* The browser this environment's links use. It is read when a link arrives,
    * so changing it applies to the next link without a restart. */
   linkBrowser(id) { validId(id); return this.settings.get(id)?.browserProfileId ?? null; }
+  reserveClaudeAccountStart(id, accountId = DEFAULT_CLAUDE_ACCOUNT) {
+    validId(id); validateClaudeAccountId(accountId);
+    const key = `${id}:${accountId}`;
+    if (this.deletingClaudeAccounts.has(key)) throw codeError('此 Claude 登录档案正在删除，请稍后重试。', 'CLAUDE_ACCOUNT_DELETE_BUSY');
+    this.pendingClaudeStarts.set(key, (this.pendingClaudeStarts.get(key) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const count = this.pendingClaudeStarts.get(key) - 1;
+      if (count) this.pendingClaudeStarts.set(key, count);
+      else this.pendingClaudeStarts.delete(key);
+    };
+  }
+  reserveClaudeAccountDuplicateStart(sessionId) {
+    const source = this.session(sessionId);
+    return source.kind === 'claude-code' ? this.reserveClaudeAccountStart(source.profileId, source.claudeAccountId) : () => {};
+  }
   accountInUse(id, accountId) {
-    return [...this.sessions.values()].some(session => session.profileId === id && session.kind === 'claude-code'
+    return Boolean(this.pendingClaudeStarts.get(`${id}:${accountId}`)) || [...this.sessions.values()].some(session => session.profileId === id && session.kind === 'claude-code'
       && session.claudeAccountId === accountId && ['starting', 'running', 'closing'].includes(session.status));
   }
   async listClaudeAccounts({ id }) {
@@ -247,6 +287,91 @@ export class TerminalService {
       if (this.accountInUse(id, accountId)) throw codeError('请先关闭使用此登录档案的 Claude 终端，再重命名。', 'CLAUDE_ACCOUNT_IN_USE');
       return { account: { ...await this.claudeAccounts.rename(id, accountId, name), inUse: false } };
     });
+  }
+  async recoverClaudeAccountDeletion(id, accountId, { allowPending = false } = {}) {
+    validId(id); validateClaudeAccountId(accountId);
+    if (accountId === DEFAULT_CLAUDE_ACCOUNT) throw codeError('默认登录档案不能删除，可以重命名。', 'CLAUDE_ACCOUNT_DEFAULT');
+    const detached = await checkedAccountPath(this.root, [ACCOUNT_DELETIONS_DIRECTORY, id, accountId]);
+    if (!detached) return { recovered: false };
+    const account = (await this.claudeAccounts.list(id)).find(item => item.id === accountId);
+    if (account) {
+      const parent = await checkedAccountPath(this.root, ['profiles', id, 'claude-accounts']);
+      if (!parent) throw codeError('Claude 登录档案删除恢复未完成，资料仍保留，请重启后重试。', 'CLAUDE_ACCOUNT_DELETE_RECOVERY_REQUIRED');
+      const original = path.join(parent, accountId);
+      try { await lstat(original); }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        await rename(detached, original);
+        return { recovered: true };
+      }
+      // An external writer may have created this path. Preserve both copies.
+      throw codeError('Claude 登录档案删除恢复未完成，资料仍保留，请重启后重试。', 'CLAUDE_ACCOUNT_DELETE_RECOVERY_REQUIRED');
+    }
+    try { await rm(detached, { recursive: true, force: false }); }
+    catch {
+      if (allowPending) return { recovered: true, deleted: true, cleanupPending: true };
+      throw codeError('Claude 登录档案删除恢复未完成，资料仍保留，请重启后重试。', 'CLAUDE_ACCOUNT_DELETE_RECOVERY_REQUIRED');
+    }
+    return { recovered: true, deleted: true };
+  }
+  async recoverClaudeAccountDeletions() {
+    const root = await checkedAccountPath(this.root, [ACCOUNT_DELETIONS_DIRECTORY]);
+    if (!root) return;
+    for (const id of await readdir(root)) {
+      validId(id);
+      const directory = await checkedAccountPath(root, [id]);
+      for (const accountId of await readdir(directory)) {
+        try { await this.recoverClaudeAccountDeletion(id, accountId); }
+        catch (error) {
+          if (error.code === 'CLAUDE_ACCOUNT_UNSAFE_PATH') throw error;
+          throw codeError('Claude 登录档案删除恢复未完成，资料仍保留，请重启后重试。', 'CLAUDE_ACCOUNT_DELETE_RECOVERY_REQUIRED');
+        }
+      }
+    }
+  }
+  deleteClaudeAccount({ id, accountId, confirmed = false }) {
+    validId(id); validateClaudeAccountId(accountId);
+    if (confirmed !== true) throw codeError('请先确认删除此 Claude 登录档案。', 'CLAUDE_ACCOUNT_DELETE_CONFIRMATION_REQUIRED');
+    if (accountId === DEFAULT_CLAUDE_ACCOUNT) throw codeError('默认登录档案不能删除，可以重命名。', 'CLAUDE_ACCOUNT_DEFAULT');
+    if (this.accountInUse(id, accountId)) throw codeError('请先关闭使用此登录档案的 Claude 终端，再删除。', 'CLAUDE_ACCOUNT_IN_USE');
+    const key = `${id}:${accountId}`;
+    if (this.deletingClaudeAccounts.has(key)) throw codeError('此 Claude 登录档案正在删除，请稍后重试。', 'CLAUDE_ACCOUNT_DELETE_BUSY');
+    this.deletingClaudeAccounts.add(key);
+    return this.serialized(id, async () => {
+      if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
+      if (this.accountInUse(id, accountId)) throw codeError('请先关闭使用此登录档案的 Claude 终端，再删除。', 'CLAUDE_ACCOUNT_IN_USE');
+      const recovered = await this.recoverClaudeAccountDeletion(id, accountId, { allowPending: true });
+      if (recovered.deleted) return { accountId, deleted: true, cleanupPending: recovered.cleanupPending === true };
+      await this.claudeAccounts.get(id, accountId);
+      const original = await checkedAccountPath(this.root, ['profiles', id, 'claude-accounts', accountId]);
+      let detached;
+      if (original) {
+        await checkedAccountPath(this.root);
+        const root = await privateDirectory(this.root, ACCOUNT_DELETIONS_DIRECTORY, { owned: true });
+        const parent = await privateDirectory(root, id, { owned: true });
+        detached = path.join(parent, accountId);
+        // Validate again immediately before moving only the selected account.
+        if (!await checkedAccountPath(this.root, ['profiles', id, 'claude-accounts', accountId]))
+          throw codeError('Claude 登录档案删除未完成，原资料已保留，请重试。', 'CLAUDE_ACCOUNT_DELETE_FAILED');
+        await rename(original, detached);
+      }
+      try { await this.claudeAccounts.remove(id, accountId); }
+      catch {
+        if (detached) {
+          try { await this.recoverClaudeAccountDeletion(id, accountId); }
+          catch { throw codeError('Claude 登录档案删除恢复未完成，资料仍保留，请重启后重试。', 'CLAUDE_ACCOUNT_DELETE_RECOVERY_REQUIRED'); }
+        }
+        throw codeError('Claude 登录档案删除未完成，原资料已保留，请重试。', 'CLAUDE_ACCOUNT_DELETE_FAILED');
+      }
+      if (detached) {
+        try { await this.recoverClaudeAccountDeletion(id, accountId); }
+        catch { return { accountId, deleted: true, cleanupPending: true }; }
+      }
+      return { accountId, deleted: true, cleanupPending: false };
+    }).catch(error => {
+      if (/^(CLAUDE_ACCOUNT_|TERMINAL_UNSAFE_PATH$|APP_CLOSING$)/.test(error?.code ?? '')) throw error;
+      throw codeError('Claude 登录档案删除未完成，原资料已保留，请重试。', 'CLAUDE_ACCOUNT_DELETE_FAILED');
+    }).finally(() => this.deletingClaudeAccounts.delete(key));
   }
   async setLinkBrowser({ id, browserProfileId }) {
     return this.serialized(id, async () => {
@@ -324,6 +449,9 @@ export class TerminalService {
     if (!(await stat(cwd)).isDirectory()) throw codeError('终端工作目录必须是文件夹。');
     await access(cwd, constants.R_OK | constants.X_OK);
     await this.updateSettings(id, previous => ({ ...(previous ?? {}), cwd }));
+    // Internal application launches also use this picker, without a renderer
+    // operation reply. Views reread the saved workspace through their snapshot.
+    try { Promise.resolve(this.onEvent({ type: 'workspace', profileId: id })).catch(() => {}); } catch {}
     return cwd;
   }
   async directories(id, accountId = DEFAULT_CLAUDE_ACCOUNT) {
@@ -407,6 +535,7 @@ export class TerminalService {
     if (kind !== 'claude-code' && claudeInstallSource !== undefined) throw codeError('普通终端不能选择 Claude 安装来源。', 'CLAUDE_CODE_INSTALL_SOURCE_INVALID');
     const installSource = kind === 'claude-code' ? claudeInstallSource === undefined ? 'download' : claudeInstallSource : null;
     if (kind === 'claude-code' && !['download', 'local'].includes(installSource)) throw codeError('Claude 安装来源无效，请重新选择。', 'CLAUDE_CODE_INSTALL_SOURCE_INVALID');
+    const releaseAccount = kind === 'claude-code' ? this.reserveClaudeAccountStart(id, accountId ?? DEFAULT_CLAUDE_ACCOUNT) : null;
     return this.serialized(id, async () => {
       if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
       const account = kind === 'claude-code' ? await this.claudeAccounts.get(id, accountId ?? DEFAULT_CLAUDE_ACCOUNT) : null;
@@ -417,10 +546,11 @@ export class TerminalService {
       const cwd = directory != null ? await this.rememberDirectory(id, directory) : this.settings.get(id)?.cwd;
       if (!cwd) throw codeError('请先选择终端工作目录。', 'TERMINAL_DIRECTORY_REQUIRED');
       return this.startSession({ id, cwd, columns, rows, kind, browserProfileId, account, requestId, claudeInstallSource: installSource });
-    });
+    }).finally(() => releaseAccount?.());
   }
   async duplicate({ sessionId, columns, rows }) {
     const source = this.session(sessionId);
+    const releaseAccount = source.kind === 'claude-code' ? this.reserveClaudeAccountStart(source.profileId, source.claudeAccountId) : null;
     return this.serialized(source.profileId, async () => {
       if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
       this.requireDuplicable(source);
@@ -429,7 +559,7 @@ export class TerminalService {
       const context = { ...source.launchContext, proxy: source.launchContext.proxy && { ...source.launchContext.proxy } };
       const account = source.kind === 'claude-code' ? await this.claudeAccounts.get(source.profileId, source.claudeAccountId) : null;
       return this.startSession({ id: source.profileId, cwd: source.cwd, columns: columns ?? source.columns, rows: rows ?? source.rows, context, source, kind: source.kind, browserProfileId: source.browserProfileId, account, claudeInstallSource: source.claudeInstallSource });
-    });
+    }).finally(() => releaseAccount?.());
   }
   requireDuplicable(session) {
     if (session.status !== 'running' || session.finished || session.finishing || !session.launchContext) throw codeError('只能复制仍在运行的终端。', 'TERMINAL_NOT_RUNNING');

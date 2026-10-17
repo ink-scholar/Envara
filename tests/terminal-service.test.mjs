@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TerminalService } from '../electron/terminal-service.mjs';
 
@@ -53,6 +54,67 @@ test('snapshots and folder selection never resolve the network; creation require
   await assert.rejects(f.service.setDirectory({ id: 'profile_a', path: f.cwd }), { code: 'TERMINAL_RUNNING' });
   const saved = JSON.parse(await readFile(path.join(f.root, 'data/terminal/workspace.json')));
   assert.deepEqual(Object.keys(saved.profiles[0]).sort(), ['cwd', 'id']);
+});
+
+test('remembering a directory publishes only its workspace identity after persistence completes', async t => {
+  const f = await fixture(t), cwd = await realpath(f.cwd);
+  const persist = f.service.saveSettings.bind(f.service);
+  let entered, release, committed = false, observed;
+  const saving = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  f.service.saveSettings = async () => { await persist(); entered(); await gate; committed = true; };
+  f.service.onEvent = event => {
+    f.events.push(event);
+    observed = { committed, stored: JSON.parse(readFileSync(f.service.settingsFile, 'utf8')) };
+  };
+  const selecting = f.service.rememberDirectory('profile_a', f.cwd);
+  await saving;
+  try { assert.deepEqual(f.events, [], 'a pending settings commit must not publish a workspace change'); }
+  finally { release(); }
+  assert.equal(await selecting, cwd);
+  assert.deepEqual(f.events, [{ type: 'workspace', profileId: 'profile_a' }]);
+  assert.equal(observed.committed, true);
+  assert.deepEqual(observed.stored.profiles, [{ id: 'profile_a', cwd }]);
+  assert.equal(f.resolutions(), 0);
+  assert.equal(f.fakes.length, 0);
+});
+
+test('failed directory persistence and invalid directories never publish workspace changes', async t => {
+  const f = await fixture(t);
+  await f.service.rememberDirectory('profile_a', f.cwd);
+  f.events.length = 0;
+  const before = [...f.service.settings], disk = await readFile(f.service.settingsFile, 'utf8');
+  const other = path.join(f.root, 'other'); await mkdir(other);
+  const persist = f.service.saveSettings.bind(f.service);
+  const failure = Object.assign(new Error('owned fixture commit refused'), { code: 'EACCES' });
+  f.service.saveSettings = async () => { throw failure; };
+  await assert.rejects(f.service.rememberDirectory('profile_a', other), error => error === failure);
+  assert.deepEqual(f.events, []);
+  assert.deepEqual([...f.service.settings], before);
+  assert.equal(await readFile(f.service.settingsFile, 'utf8'), disk);
+  f.service.saveSettings = persist;
+  const file = path.join(f.root, 'ordinary-file'); await writeFile(file, 'fixture');
+  for (const selectedPath of ['relative/path', path.join(f.root, 'missing'), file])
+    await assert.rejects(f.service.rememberDirectory('profile_a', selectedPath));
+  assert.deepEqual(f.events, []);
+  assert.deepEqual([...f.service.settings], before);
+  assert.equal(await readFile(f.service.settingsFile, 'utf8'), disk);
+});
+
+test('workspace notification failures do not reverse a successful directory save', async t => {
+  for (const kind of ['throw', 'reject']) await t.test(kind, async t => {
+    const f = await fixture(t), cwd = await realpath(f.cwd);
+    const failure = new Error('owned fixture observer failed');
+    f.service.onEvent = event => {
+      f.events.push(event);
+      if (kind === 'throw') throw failure;
+      return Promise.reject(failure);
+    };
+    assert.equal(await f.service.rememberDirectory('profile_a', f.cwd), cwd);
+    assert.deepEqual(f.events, [{ type: 'workspace', profileId: 'profile_a' }]);
+    assert.equal(f.service.settings.get('profile_a').cwd, cwd);
+    assert.deepEqual(JSON.parse(await readFile(f.service.settingsFile, 'utf8')).profiles, [{ id: 'profile_a', cwd }]);
+  });
 });
 
 test('terminal language follows its launch context, reports native fallback and never inherits host Chinese', async t => {
@@ -334,7 +396,8 @@ test('slow output consumers keep finite replay and buffers, apply PTY backpressu
   assert.ok(f.fakes[0].pauses > 0);
   assert.ok(state.sequence > 2);
   unblock(); await delay(30);
-  const sequences = delivered.map(event => event.sequence);
+  const sequences = delivered.filter(event => event.sessionId === session.sessionId).map(event => event.sequence);
+  assert.ok(sequences.length > 2 && sequences.every(Number.isSafeInteger));
   assert.deepEqual(sequences, [...sequences].sort((a, b) => a - b));
 });
 

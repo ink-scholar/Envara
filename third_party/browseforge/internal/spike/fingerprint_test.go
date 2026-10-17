@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 func getCamoufoxPath() string {

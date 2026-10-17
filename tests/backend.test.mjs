@@ -48,7 +48,7 @@ class FakeRuntime {
 
 async function fixture(t, runtime = new FakeRuntime()) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'envara-backend-'));
-  const service = new EnvaraService(directory, runtime, { platform: 'darwin', appVersion: '0.1.0' });
+  const service = new EnvaraService(directory, runtime, { platform: 'darwin', appVersion: '0.1.0' }, () => {}, { addressGeocoder: { reverse: async () => null, close() {} } });
   await service.ready;
   t.after(async () => { await service.shutdown(); await rm(directory, { recursive: true, force: true }); });
   return { directory, service, runtime };

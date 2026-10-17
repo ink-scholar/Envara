@@ -37,7 +37,9 @@ test('application context passes the shared locale without changing the requeste
     languageFor: locale => resolveProcessLanguage(locale, available),
     childEnvironment: (...args) => { calls.push(args); const selected = resolveProcessLanguage(args[5], available); return { LANG: selected.posix, LC_ALL: selected.posix }; },
   };
-  const result = await applicationWorkspaceContext('profile_a', { terminal, service: { resolveWorkspaceContext: async () => context },
+  const result = await applicationWorkspaceContext('profile_a', { terminal, service: { resolveWorkspaceContext: async (id, options) => {
+    assert.equal(id, 'profile_a'); assert.deepEqual(options, { force: true, requireManagedRoute: true }); return context;
+  } },
     directoryUsable: async cwd => cwd === '/owned/project' });
   assert.equal(calls[0][5], 'ms-MY'); assert.equal(calls[0][4], null);
   assert.equal(result.locale, 'ms-MY'); assert.equal(result.language.effective, 'en-US');

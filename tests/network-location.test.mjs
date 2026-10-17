@@ -26,6 +26,22 @@ test('IP confirmation ignores forged IP, timezone, street label and precise coor
   assert.throws(() => confirmNetworkLocation({ mode: 'ip', confirmed: true }, { ...network, ok: false }), { code: 'NETWORK_LOCATION_NOT_VERIFIED' });
 });
 
+test('nearby map references persist independently and only private confirmation can supply them', () => {
+  const reference = { kind: 'nearby-reference', label: 'Example Street, Manila', latitude: 14.601, longitude: 121.001, source: 'Photon', attribution: '© OpenStreetMap contributors' };
+  const input = { mode: 'ip', confirmed: true, referenceLocation: { ...reference, label: 'Forged street' } };
+  assert.equal(confirmNetworkLocation(input, network).referenceLocation, undefined);
+  const location = confirmNetworkLocation(input, network, '2026-10-09T00:01:00.000Z', reference);
+  assert.deepEqual(location.referenceLocation, reference);
+  assert.deepEqual(normalizeNetworkLocation(JSON.parse(JSON.stringify(location))), location, 'exports/imports preserve the reference as map context');
+  assert.deepEqual(networkLocationGeolocation(location), network.geolocation, 'reference coordinates never become browser/native location');
+  assert.equal(location.label, 'Manila, Metro Manila, Philippines'); assert.equal(location.accuracy, 50000); assert.equal(location.addressResolved, false);
+  for (const invalid of [{ ...reference, kind: 'verified-street' }, { ...reference, source: 'forged' }, { ...reference, latitude: 91 }, { ...reference, longitude: null }, { ...reference, accuracy: 1 }, { ...reference, label: '' }]) {
+    assert.throws(() => normalizeNetworkLocation({ ...location, referenceLocation: invalid }), { code: 'INVALID_NETWORK_LOCATION' });
+  }
+  const manual = confirmNetworkLocation({ mode: 'manual', confirmed: true, label: 'Chosen address', latitude: 0, longitude: 0, referenceLocation: reference }, network, undefined, reference);
+  assert.equal(manual.referenceLocation, undefined); assert.equal(manual.label, 'Chosen address'); assert.equal(manual.latitude, 0);
+});
+
 test('Google Maps explicit pin differs from its camera centre and does not geocode a text query', () => {
   const pin = parseGoogleMapsLocation('https://www.google.com/maps/place/Example/@14,120,15z/data=!4m2!3d14.6!4d121');
   assert.equal(pin.latitude, 14.6); assert.equal(pin.longitude, 121);

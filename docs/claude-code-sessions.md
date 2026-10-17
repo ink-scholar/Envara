@@ -1,6 +1,6 @@
 # Claude Code sessions
 
-Applies to Envara 0.5.25. The current release target is macOS arm64. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
+This document describes the Envara 1.0.0 implementation. The release target is macOS arm64; the final package’s measured scope and limitations are recorded in [verification](verification.md#100-发布验证). Historical 0.5.24 and 0.5.25 measurements retain their original package scope; they do not establish final-package Claude account or model-call acceptance. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
 
 ## Start and installation
 
@@ -24,6 +24,14 @@ Each selected profile pins both `CLAUDE_CONFIG_DIR` and `ANTHROPIC_CONFIG_DIR`; 
 Envara displays profile names, not inferred authentication status. Closing a terminal, stopping the program or updating Envara does not delete profile data. Official sign-in, token refresh, account policies and remote model availability remain the service's responsibility. Browser website sign-in and CLI sign-in are distinct.
 
 Terminal export includes only the chosen Claude profile, including its scoped Anthropic directory, plus shared shell configuration/history. It excludes other profiles, the old shared Anthropic directory, program files, caches and host credentials. Encrypted import creates a new environment and requires explicit proxy mapping. macOS Keychain entries are not exported; copied files do not guarantee cross-machine sign-in.
+
+### Profile management
+
+The new-session dialog can create a named profile without starting Claude, and **Manage profile** can rename or delete the selected profile. Renaming changes its display name while retaining its directory and data. The default profile can be renamed but cannot be deleted individually.
+
+Deletion requires confirmation for the selected profile and removes only that profile's configuration and history. Other profiles, the environment's Claude installation and shared shell data are retained. If removal of remaining files is incomplete, the dialog reports pending cleanup and offers a retry rather than claiming that cleanup finished.
+
+Renaming and deletion are refused while a dedicated terminal using that profile is starting, running or closing. End the relevant terminal session first; closing its view alone retains the session. This use check describes process ownership, not account authentication. Deletion also prevents a new session or duplicate from starting with the same profile during the operation.
 
 ## Browser and network binding
 

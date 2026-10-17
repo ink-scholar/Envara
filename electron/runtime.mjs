@@ -280,7 +280,7 @@ export class BrowserRuntime {
       const executablePath = await this._prepareExecutable(installed.binaryPath, profile);
       const context = await this._native(() => this.launch(config), executablePath);
       const session = { context, profile, profileDir, closed: false, onClose };
-      try { session.privacy = await applyBrowserPrivacy(context, { privacy: profile.privacy, geolocation: profile.geolocation }); }
+      try { session.privacy = await applyBrowserPrivacy(context, { privacy: profile.privacy, geolocation: profile.geolocation, websocketRouting: 'constructor' }); }
       catch (error) { await context.close().catch(() => {}); throw error; }
       const finish = (error) => {
         if (session.closed) return;

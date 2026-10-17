@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 
 	"browseforge/internal/profile"
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 // Explicit collection hosts; ordinary app APIs and authentication are untouched.
@@ -70,9 +70,11 @@ var trackerServiceRoots = map[string][]string{
 }
 
 type PrivacyState struct {
-	Mode            string
-	Geolocation     *profile.Geolocation
-	BlockedRequests atomic.Uint64
+	Mode              string
+	Geolocation       *profile.Geolocation
+	BlockedRequests   atomic.Uint64
+	BlockedWebSockets atomic.Uint64
+	WebSocketRouting  string
 }
 
 func (s *PrivacyState) Snapshot() map[string]any {
@@ -90,7 +92,11 @@ func (s *PrivacyState) Snapshot() map[string]any {
 	if s.Mode == "off" {
 		serviceWorkers = "allow"
 	}
-	snapshot := map[string]any{"mode": s.Mode, "blockedRequests": s.BlockedRequests.Load(), "geolocation": geo, "geolocationPolicy": geoPolicy, "trackerScope": "third-party-http", "enabled": s.Mode != "off", "serviceWorkers": serviceWorkers}
+	snapshot := map[string]any{"mode": s.Mode, "blockedRequests": s.BlockedRequests.Load(), "geolocation": geo, "geolocationPolicy": geoPolicy, "trackerScope": "third-party-http-websocket", "websocketScope": "page-and-frame", "blockedWebSockets": s.BlockedWebSockets.Load(), "websocketRouting": s.WebSocketRouting, "enabled": s.Mode != "off", "serviceWorkers": serviceWorkers}
+	if (s.WebSocketRouting == "constructor" || s.WebSocketRouting == "webextension") && s.Mode != "off" {
+		snapshot["blockedWebSockets"] = nil
+		snapshot["websocketTrackerRules"] = "built-in-hosts"
+	}
 	if label := trackerListLabel(); label != "" && s.Mode != "off" {
 		snapshot["trackerList"] = label
 	}
@@ -99,7 +105,7 @@ func (s *PrivacyState) Snapshot() map[string]any {
 
 func checkedPrivacyURL(raw string) *url.URL {
 	parsed, err := url.Parse(raw)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https" && parsed.Scheme != "ws" && parsed.Scheme != "wss") || parsed.Hostname() == "" {
 		return nil
 	}
 	return parsed
@@ -342,7 +348,51 @@ func denyChromiumLocation(ctx playwright.BrowserContext, page playwright.Page) e
 	return err
 }
 
-func installBrowserPrivacy(ctx playwright.BrowserContext, p *profile.Profile, chromium bool) (*PrivacyState, error) {
+// WebSocket routes have no Request/frame accessor. Page routes retain the top
+// party; the context fallback never borrows another tab's first-party exception.
+// Only page/frame WebSockets are covered by this supported Playwright API.
+func privacyWebSocketHandler(state *PrivacyState, page playwright.Page) func(playwright.WebSocketRoute) {
+	return func(socket playwright.WebSocketRoute) {
+		firstParty := ""
+		if page != nil {
+			firstParty = page.URL()
+		}
+		refused := loopbackHost(socket.URL()) && !loopbackHost(firstParty)
+		blocked := blockTrackerRequest(socket.URL(), firstParty, state.Mode, kindWebsocket)
+		if refused || blocked {
+			if blocked {
+				state.BlockedRequests.Add(1)
+				state.BlockedWebSockets.Add(1)
+			}
+			socket.Close(playwright.WebSocketRouteCloseOptions{Code: playwright.Int(1008), Reason: playwright.String("Blocked by privacy policy")})
+			return
+		}
+		if _, err := socket.ConnectToServer(); err != nil {
+			socket.Close(playwright.WebSocketRouteCloseOptions{Code: playwright.Int(1011), Reason: playwright.String("Connection unavailable")})
+		}
+	}
+}
+
+func installPrivacyWebSockets(ctx playwright.BrowserContext, state *PrivacyState) error {
+	if err := ctx.RouteWebSocket("**/*", privacyWebSocketHandler(state, nil)); err != nil {
+		return err
+	}
+	ctx.OnPage(func(page playwright.Page) {
+		go func() {
+			if page.RouteWebSocket("**/*", privacyWebSocketHandler(state, page)) != nil {
+				page.Close()
+			}
+		}()
+	})
+	for _, page := range ctx.Pages() {
+		if err := page.RouteWebSocket("**/*", privacyWebSocketHandler(state, page)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func installBrowserPrivacy(ctx playwright.BrowserContext, p *profile.Profile, chromium bool, webSocketAddonReady ...bool) (*PrivacyState, error) {
 	mode, err := browserPrivacyMode(p)
 	if err != nil {
 		return nil, err
@@ -350,7 +400,15 @@ func installBrowserPrivacy(ctx playwright.BrowserContext, p *profile.Profile, ch
 	if ctx == nil {
 		return nil, fmt.Errorf("privacy requires a browser context")
 	}
-	state := &PrivacyState{Mode: mode}
+	state := &PrivacyState{Mode: mode, WebSocketRouting: "playwright"}
+	if p.RuntimeID == "cloakbrowser" {
+		state.WebSocketRouting = "constructor"
+	} else if p.RuntimeID == "camoufox" {
+		if len(webSocketAddonReady) != 1 || !webSocketAddonReady[0] {
+			return nil, fmt.Errorf("Camoufox WebSocket privacy add-on is not ready")
+		}
+		state.WebSocketRouting = "webextension"
+	}
 	if p.SessionGeolocation != nil {
 		geo := *p.SessionGeolocation
 		state.Geolocation = &geo
@@ -383,6 +441,15 @@ func installBrowserPrivacy(ctx playwright.BrowserContext, p *profile.Profile, ch
 				}
 			}()
 		})
+	}
+	if strings.HasPrefix(state.WebSocketRouting, "constructor") {
+		if err := installConstructorPrivacyWebSockets(ctx, state); err != nil {
+			return nil, err
+		}
+	} else if state.WebSocketRouting != "webextension" {
+		if err := installPrivacyWebSockets(ctx, state); err != nil {
+			return nil, err
+		}
 	}
 	if err := ctx.Route("**/*", func(route playwright.Route) {
 		request := route.Request()

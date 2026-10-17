@@ -27,3 +27,4 @@ __pycache__/
 *.py[cod]
 /release-*/
 build/local-authorization-archive/
+build/package-resources/

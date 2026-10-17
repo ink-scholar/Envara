@@ -15,7 +15,7 @@ import (
 	"browseforge/internal/profile"
 	bfruntime "browseforge/internal/runtime"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 func TestShouldRetryLaunchForProtocolEOF(t *testing.T) {

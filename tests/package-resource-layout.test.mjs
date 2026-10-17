@@ -6,6 +6,7 @@ import { minimatch } from 'minimatch';
 import { getFileMatchers } from 'app-builder-lib/out/fileMatcher.js';
 import { bundledPFRoutingPaths } from '../electron/macos-pf-resources.mjs';
 import { PF_NOTION_TRIAL_CARRIER } from '../electron/macos-pf-notion-trial.mjs';
+import { PF_AUTHORIZATION_PACKAGE_DIRECTORY } from '../scripts/macos-pf-package-contract.mjs';
 import { packagedResourceEntries } from '../scripts/verify-package-resources.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
@@ -31,6 +32,7 @@ test('macOS ships NE/link alternatives and one authorization payload, excluding 
     'macos-local/Resources/Mitmproxy Redirector.app/Contents/MacOS/Mitmproxy Redirector', 'macos-link-router/Contents/MacOS/EnvaraLinkRouter']) assert.equal(includes(routing[0], name), true, name);
   for (const name of ['macos-pf/node', 'macos-pf-before-performance-91b62a/node', 'win32/x64/EnvaraAppRouting.exe', 'win32/arm64/EnvaraAppRouting.exe', 'macos/.swift-build/debug/tool']) assert.equal(includes(routing[0], name), false, name);
   assert.equal(entries.filter(entry => entry.to === 'local-authorization').length, 1);
+  assert.equal(entries.find(entry => entry.to === 'local-authorization').from, PF_AUTHORIZATION_PACKAGE_DIRECTORY);
 });
 
 test('Windows selects its own routing architecture, while Linux carries neither platform-specific payload', () => {

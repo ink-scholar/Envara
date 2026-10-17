@@ -31,14 +31,13 @@ export function EnvironmentOverview({
   onToggleAll,
   allChecked,
   loading,
-  onCreate,
   onEdit,
   t,
   hasProfiles,
   onReset
 }) {
   if (loading) return <div className="table-loading">{t("正在读取环境…")}</div>;
-  if (!profiles.length) return <WorkspaceEmpty title={hasProfiles ? "没有匹配的环境" : "创建你的第一个环境"} action={hasProfiles ? "显示全部" : "新建环境"} onAction={hasProfiles ? onReset : onCreate} t={t} />;
+  if (!profiles.length) return <WorkspaceEmpty title={hasProfiles ? "没有匹配的环境" : "创建你的第一个环境"} action={hasProfiles ? "显示全部" : undefined} onAction={onReset} t={t} />;
   return <div className="environment-table common-environment-table">
     <div className="table-head common-profile-grid">
       <input type="checkbox" className="row-checkbox" checked={allChecked} ref={input => {if (input) input.indeterminate = !allChecked && profiles.some(profile => checkedIds.includes(profile.id));}} onChange={onToggleAll} aria-label={t("选择全部环境")} />
@@ -53,10 +52,10 @@ export function EnvironmentOverview({
         <input className="row-checkbox" type="checkbox" checked={checkedIds.includes(profile.id)} aria-label={t("选择 {name}", {
           name: profile.name
         })} onClick={event => event.stopPropagation()} onChange={() => onToggleChecked(profile.id)} />
-        <button className="profile-open cell-stack" onClick={() => onSelect(profile.id)} aria-pressed={selectedId === profile.id}><strong>{profile.name}</strong>{profile.group ? <small>{profile.group}</small> : null}</button>
+        <button className="profile-open cell-stack" onClick={() => onSelect(profile.id)} aria-pressed={selectedId === profile.id} title={profile.name}><strong>{profile.name}</strong>{profile.group ? <small title={profile.group}>{profile.group}</small> : null}</button>
         <span className="cell-stack"><span>{proxy?.name || t("本机网络")}</span><small>{network?.ip || t("待检测")}</small></span>
         <span className="cell-stack"><span>{location || t("启动时自动匹配")}</span><small>{presentation.timezone || network?.timezone || t("自动时区")}{presentation.savedOnly ? ` · ${t("已保存配置")}` : ""}</small></span>
-        <span className="cell-stack workspace-directory-cell" title={profile.workspace?.cwd || profile.cwd || ""}><span>{profile.workspace?.cwd || profile.cwd || t("选择目录")}</span><small>{profile.workspace?.cwd || profile.cwd ? t("配置与历史独立") : ""}</small></span>
+        <span className="cell-stack workspace-directory-cell" title={profile.workspace?.cwd || profile.cwd || ""}><span>{profile.workspace?.cwd || profile.cwd || t("选择目录")}</span></span>
         <button className="icon-button" aria-label={t("编辑环境")} onClick={event => {
           event.stopPropagation();
           onEdit(profile);
@@ -82,12 +81,13 @@ export function ContextDetail({
   const presentation = savedNetworkPresentation(profile, proxy);
   const { network } = presentation;
   const location = networkLocation(network);
+  const nearbyAddress = proxy?.location?.confirmed && proxy.location.mode === "ip" ? proxy.location.referenceLocation?.label : null;
   return <>
-    <div className="detail-heading"><h2>{profile.name}</h2><p>{profile.group || proxy?.name || t("本机网络")}</p></div>
+    <div className="detail-heading"><h2>{profile.name}</h2>{profile.group && <p>{profile.group}</p>}</div>
     <div className="context-network-card"><div className="context-card-icon"><GlobeHemisphereWest size={23} /></div><strong>{proxy?.name || t("本机网络")}</strong><span>{network?.ip || t("出口待识别")}</span>{network && <small>{location}</small>}</div>
     <dl className="detail-properties compact-context-properties">
       <div><dt>{t("时区")}</dt><dd>{presentation.timezone || network?.timezone || t("启动时自动匹配")}{presentation.savedOnly && <small>{t("已保存配置")}</small>}</dd></div>
-      <div><dt>{t("定位")}</dt><dd>{proxy?.location?.confirmed ? <>{proxy.location.label || t("跟随网络出口")}<small>{t(proxy.location.mode === "ip" ? "IP 推荐位置" : "手动选择位置")}</small></> : network ? location || t("待识别") : t("跟随网络出口")}</dd></div>
+      <div><dt>{t(nearbyAddress ? "附近地址" : "定位")}</dt><dd>{proxy?.location?.confirmed ? <>{nearbyAddress || proxy.location.label || t("跟随网络出口")}{nearbyAddress ? <><small>{t("仅供参考，可手动调整。")}</small><small>Photon · © OpenStreetMap contributors</small></> : <small>{t(proxy.location.mode === "ip" ? "自动定位" : "手动选择位置")}</small>}</> : network ? location || t("待识别") : t("跟随网络出口")}</dd></div>
       <div><dt>{t("语言")}</dt><dd>{profile.locale || t("跟随网络出口")}</dd></div>
       <div><dt>{t("隐私防护")}</dt><dd>{t({
             standard: "标准",
@@ -239,7 +239,7 @@ export function ApplicationsWorkspace({
             </div>}
           </div>}
         </div>;
-      })}</div> : <WorkspaceEmpty icon={Desktop} title={profile ? "添加软件到这个境舱" : "先创建网络环境"} action={desktop ? "添加软件" : undefined} onAction={onPick} t={t} />}
+      })}</div> : <WorkspaceEmpty icon={Desktop} title={profile ? "添加软件到这个境舱" : "先创建网络环境"} t={t} />}
     {tab !== "signInData" && startable && rows.length > 0 && <details className="application-notes">
       <summary><Info size={14} /><span>{t("运行方式与应用数据")}</span></summary>
       <ul>{["附加的应用会一直运行，直到你停止它、它自行退出，或你退出境舱。指纹浏览器和终端不计入其中。",
@@ -306,7 +306,7 @@ export function MonitorWorkspace({
         label,
         icon: Icon,
         rows
-      }) => <div key={id}><span><Icon size={17} />{t(label)}</span><strong>{rows.length}</strong><small>{t("运行中")}</small></div>)}</div>
+      }) => <div key={id}><span><Icon size={17} />{t(label)}</span><strong>{rows.length}</strong></div>)}</div>
     <div className="section-heading"><h2>{t("正在运行")}</h2></div>
     <div className="monitor-runtime-list">{categories.flatMap(({
         id,

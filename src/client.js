@@ -89,7 +89,7 @@ const preview = {
       }
       case 'importProfiles': throw new Error('请在桌面 App 中导入环境配置');
       case 'openDocumentation': {
-        const urls = { project: 'https://github.com/ink-scholar/Envara', 'runtime-license': 'https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md' };
+        const urls = { 'map-attribution': 'https://www.openstreetmap.org/copyright', project: 'https://github.com/ink-scholar/Envara', 'runtime-license': 'https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md' };
         if (!Object.hasOwn(urls, args.target)) throw new Error('无效文档链接');
         window.open(urls[args.target], '_blank', 'noopener,noreferrer');
         return { ok: true };
@@ -106,7 +106,7 @@ const preview = {
         throw new Error('本地软件与网络接管需要境舱桌面应用。');
       case 'listLocalApplications':
         return { applications: [], platform: 'preview', available: false, scanComplete: true, truncated: false };
-      case 'checkEnvironmentNetwork': case 'previewProxyNetwork':
+      case 'checkEnvironmentNetwork': case 'previewProxyNetwork': case 'searchNetworkAddress':
         throw new Error('真实网络出口检测需要境舱桌面应用。');
       case 'installEngine': case 'startProfile': case 'stopProfile': case 'focusProfile': case 'checkProxy': case 'openDataDirectory':
         throw new Error('当前是界面预览，未安装或连接浏览器内核；请打开 Envara 桌面 App 使用浏览器与本地功能。');

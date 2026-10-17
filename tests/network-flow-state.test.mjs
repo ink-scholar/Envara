@@ -1,8 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { locationFormState, verifiedLocationPreview, locationConfirmation, proxyRouteFields, networkApplicationChoices, chooseApplicationProfile, isApplicationAlreadyAttached, createdProfileFromSnapshot, savedNetworkPresentation, terminalTimezonePresentation } from '../src/network-flow-state.mjs';
+import { locationFormState, verifiedLocationPreview, locationConfirmation, seedManualLocation, proxyRouteFields, networkApplicationChoices, chooseApplicationProfile, isApplicationAlreadyAttached, createdProfileFromSnapshot, savedNetworkPresentation, terminalTimezonePresentation } from '../src/network-flow-state.mjs';
 
 const preview = { network: { ok: true, scope: 'egress', ip: '192.0.2.10', timezone: 'Asia/Manila' }, locationRecommendation: { source: 'ip-estimate' }, locationPreviewToken: 'private-form-token' };
+
+test('an empty manual search starts from the verified region without fabricating or replacing coordinates', () => {
+  const regional = { ...preview, network: { ...preview.network, city: 'Tokyo', region: 'Tokyo', country: 'Japan', geolocation: { latitude: 35.6, longitude: 139.7 } } };
+  const empty = { ...locationFormState(), mode: 'manual' };
+  assert.deepEqual(seedManualLocation(empty, regional), { ...empty, label: 'Tokyo, Japan' });
+  assert.deepEqual(empty, { mode: 'manual', label: '', mapsUrl: '', latitude: '', longitude: '', confirmed: false });
+  for (const manual of [{ label: 'Chosen street' }, { mapsUrl: 'https://www.google.com/maps/?q=1,2' }, { latitude: '0' }, { longitude: 0 }, { latitude: '1.23', longitude: '4.56' }]) {
+    const state = { ...empty, ...manual };
+    assert.equal(seedManualLocation(state, regional), state);
+  }
+  assert.equal(seedManualLocation(empty, { ...regional, locationPreviewToken: null }), empty);
+  assert.equal(seedManualLocation(empty, preview), empty);
+});
 
 test('a location cannot be confirmed from a direct lookup, missing timezone or failed route', () => {
   for (const value of [null, { ...preview, locationPreviewToken: null }, { ...preview, network: { ...preview.network, scope: 'direct' } },

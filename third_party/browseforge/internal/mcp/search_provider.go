@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 const defaultSearchProviderName = "google"

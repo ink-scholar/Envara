@@ -80,7 +80,7 @@ async function usableDirectory(cwd) {
   } catch { return false; }
 }
 export async function applicationWorkspaceContext(profileId, { service, terminal, directoryUsable = usableDirectory }) {
-  const context = await service.resolveWorkspaceContext(profileId, { force: true });
+  const context = await service.resolveWorkspaceContext(profileId, { force: true, requireManagedRoute: true });
   const state = await terminal.snapshot({ id: profileId });
   const cwd = state.profiles?.find(item => item.profileId === profileId)?.cwd;
   if (!cwd || !path.isAbsolute(cwd)) throw Object.assign(new Error('请先为此境舱选择工作目录。'), { code: 'APPLICATION_DIRECTORY_REQUIRED' });

@@ -12,7 +12,7 @@ import (
 
 	"browseforge/internal/browser"
 	"github.com/go-chi/chi/v5"
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 type guardedLinkPage struct {

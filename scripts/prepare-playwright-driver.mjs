@@ -10,11 +10,14 @@ import { gunzipSync, inflateRawSync } from 'node:zlib';
 
 const execFile = promisify(execFileCallback);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const DRIVER_VERSION = '1.61.1';
+// Camoufox 135 uses the pre-1.61 Juggler WebSocket event contract. Keep the
+// official Go driver aligned with the Node provider until all engines support
+// newer handshake metadata; do not patch the upstream browser or protocol.
+export const DRIVER_VERSION = '1.60.0';
 export const NODE_VERSION = '24.18.0';
-export const GO_WRAPPER_VERSION = 'v0.6100.0';
-const NPM_INTEGRITY = 'sha512-h7Qlt6m4REp25qvIdvbDtVmD4LqVXfpRxhORv9L0jzETM05p4fuPJ3dKyuSXQxDSbXnmS79HAgi9589lGSpLkg==';
-const WRAPPER_COMMIT = '1c4f6330ed40337c3582539dbeb2a42ff73d01f6';
+export const GO_WRAPPER_VERSION = 'v0.6000.0';
+const NPM_INTEGRITY = 'sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA==';
+const WRAPPER_COMMIT = '9ff3502a95fb8da1a4f37fa9746b712c42e8334c';
 const NODE_SHA256 = {
   'darwin-arm64': 'e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1',
   'darwin-x64': 'dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080',
@@ -206,7 +209,7 @@ async function cachedSources(caches, artifacts) {
 export async function preparePlaywrightDriver({ rootDir = ROOT, outputDir = path.join(rootDir, 'build', 'backend', 'playwright-driver'), platform = process.platform, arch = process.arch, caches, downloadImpl = download } = {}) {
   if (platform !== process.platform || arch !== process.arch) throw new Error('Prepare the driver on a native runner for the packaging target.');
   const goMod = await readFile(path.join(rootDir, 'third_party', 'browseforge', 'go.mod'), 'utf8');
-  if (!goMod.includes(`github.com/mxschmitt/playwright-go ${GO_WRAPPER_VERSION}`)) throw new Error('Update pinned driver artifacts to match the vendored Go wrapper.');
+  if (!goMod.includes(`github.com/playwright-community/playwright-go ${GO_WRAPPER_VERSION}`)) throw new Error('Update pinned driver artifacts to match the vendored Go wrapper.');
   const artifacts = driverArtifacts(platform, arch);
   const cacheRoots = caches ?? [process.env.ENVARA_PLAYWRIGHT_DRIVER_CACHE, outputDir, ...defaultDriverCaches(rootDir, platform)];
   const cached = await cachedSources(cacheRoots, artifacts);
@@ -252,10 +255,10 @@ export async function preparePlaywrightDriver({ rootDir = ROOT, outputDir = path
     if (platform !== 'win32') await chmod(path.join(stage, artifacts.nodeExecutable), 0o755);
     const bundle = path.join(stage, 'package', 'lib', 'coreBundle.js');
     await writeFile(bundle, patchDriverBundle(await readFile(bundle, 'utf8')), { mode: 0o644 });
-    await writeFile(path.join(stage, 'ENVARA_DRIVER_CHANGES.md'), `# Driver compatibility modification\n\nPlaywright ${DRIVER_VERSION} is pre-patched exactly as playwright-go ${GO_WRAPPER_VERSION} patchDriverBundle(): optional access and default values for pageError.location.url, lineNumber, and columnNumber. This makes the Go installer idempotent with read-only packaged resources. Browser binaries are not included.\n\nPatch source: https://github.com/mxschmitt/playwright-go/blob/${WRAPPER_COMMIT}/run.go\n`);
-    const wrapperLicensePath = path.join(rootDir, 'test-artifacts', 'sidecar-prototype', 'go-mod-cache', 'github.com', 'mxschmitt', `playwright-go@${GO_WRAPPER_VERSION}`, 'LICENSE');
+    await writeFile(path.join(stage, 'ENVARA_DRIVER_CHANGES.md'), `# Driver compatibility modification\n\nPlaywright ${DRIVER_VERSION} is pre-patched exactly as playwright-go ${GO_WRAPPER_VERSION} patchDriverBundle(): optional access and default values for pageError.location.url, lineNumber, and columnNumber. This makes the Go installer idempotent with read-only packaged resources. Browser binaries are not included.\n\nPatch source: https://github.com/playwright-community/playwright-go/blob/${WRAPPER_COMMIT}/run.go\n`);
+    const wrapperLicensePath = path.join(rootDir, 'test-artifacts', 'sidecar-prototype', 'go-mod-cache', 'github.com', 'playwright-community', `playwright-go@${GO_WRAPPER_VERSION}`, 'LICENSE');
     const wrapperLicense = await exists(wrapperLicensePath) ? await readFile(wrapperLicensePath)
-      : await downloadImpl(`https://raw.githubusercontent.com/mxschmitt/playwright-go/${WRAPPER_COMMIT}/LICENSE`);
+      : await downloadImpl(`https://raw.githubusercontent.com/playwright-community/playwright-go/${WRAPPER_COMMIT}/LICENSE`);
     await writeFile(path.join(stage, 'playwright-go-LICENSE'), wrapperLicense);
     for (const file of ['LICENSE', 'NOTICE', 'ThirdPartyNotices.txt']) {
       if (!await exists(path.join(stage, 'package', file))) throw new Error(`Playwright package is missing required notice ${file}.`);

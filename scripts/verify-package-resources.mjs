@@ -19,6 +19,8 @@ import { driverArtifacts, NODE_VERSION } from './prepare-playwright-driver.mjs';
 import { PROXY_CORE_VERSION, PROXY_CORE_COMMIT, proxyCoreArtifacts } from './prepare-proxy-core.mjs';
 import { PF_RUNTIME_MODULE_FILES } from './build-macos-pf-routing.mjs';
 import { bundledPFRoutingPaths } from '../electron/macos-pf-resources.mjs';
+import { inspectElectronLicenseResources } from './electron-license-resources.mjs';
+import { parsePFPackageCandidate } from './macos-pf-package-contract.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const posix = value => value.split(path.sep).join('/');
@@ -192,7 +194,7 @@ export async function inspectPFRoutingResources({ resourceRoot, arch = process.a
       'installer-upgrade-dbcf.h', 'known-installations/dbcf.manifest.json',
       'installer-upgrade-43b.h', 'known-installations/43b.manifest.json',
       'installer-upgrade-acfc.h', 'known-installations/acfc.manifest.json',
-      'installer-upgrade-c34.h', 'known-installations/c34.manifest.json', 'installer-upgrade-4b9f85.h', 'known-installations/4b9f85.manifest.json', 'installer-upgrade-43392e.h', 'known-installations/43392e.manifest.json', 'installer-upgrade-03245359.h', 'known-installations/03245359.manifest.json', 'installer-upgrade-2059a0.h', 'known-installations/2059a0.manifest.json', 'installer-upgrade-127e83.h', 'known-installations/127e83.manifest.json', 'installer-upgrade-010117.h', 'known-installations/010117.manifest.json', 'installer-upgrade-9b51cf.h', 'known-installations/9b51cf.manifest.json', 'installer-upgrade-91b62a.h', 'known-installations/91b62a.manifest.json', 'installer-upgrade-7c91a1.h', 'known-installations/7c91a1.manifest.json', 'installer-upgrade-af79b1.h', 'known-installations/af79b1.manifest.json', 'installer-upgrade-dceba9.h', 'known-installations/dceba9.manifest.json', 'installer-upgrade-fa70a2.h', 'known-installations/fa70a2.manifest.json', 'installer-upgrade-32811e.h', 'known-installations/32811e.manifest.json', 'installer-upgrade-22a6f3.h', 'known-installations/22a6f3.manifest.json', 'installer-upgrade-78c3.h', 'known-installations/78c3.manifest.json', 'installer-upgrade-fb74.h', 'known-installations/fb74.manifest.json', 'installer-upgrade-554c.h', 'known-installations/554c.manifest.json', 'installer-upgrade-2af8.h', 'known-installations/2af8.manifest.json', 'installer-upgrade-005f.h', 'known-installations/005f.manifest.json', 'installer-upgrade-88f8.h', 'known-installations/88f8.manifest.json', 'installer-upgrade-0b6d.h', 'known-installations/0b6d.manifest.json', 'installer-upgrade-0359.h', 'known-installations/0359.manifest.json', 'installer-upgrade-f0b99f.h', 'known-installations/f0b99f.manifest.json', 'installer-upgrade-f39101.h', 'known-installations/f39101.manifest.json', 'installer-upgrade-a8bd00.h', 'known-installations/a8bd00.manifest.json', 'installer-upgrade-da6e7c.h', 'known-installations/da6e7c.manifest.json', 'pf-hook.c', 'pf-hook.h', 'pf-hook-abi.h', 'pf-run-ledger.c', 'pf-run-ledger.h',
+      'installer-upgrade-c34.h', 'known-installations/c34.manifest.json', 'installer-upgrade-4b9f85.h', 'known-installations/4b9f85.manifest.json', 'installer-upgrade-43392e.h', 'known-installations/43392e.manifest.json', 'installer-upgrade-03245359.h', 'known-installations/03245359.manifest.json', 'installer-upgrade-2059a0.h', 'known-installations/2059a0.manifest.json', 'installer-upgrade-127e83.h', 'known-installations/127e83.manifest.json', 'installer-upgrade-010117.h', 'known-installations/010117.manifest.json', 'installer-upgrade-9b51cf.h', 'known-installations/9b51cf.manifest.json', 'installer-upgrade-91b62a.h', 'known-installations/91b62a.manifest.json', 'installer-upgrade-7c91a1.h', 'known-installations/7c91a1.manifest.json', 'installer-upgrade-af79b1.h', 'known-installations/af79b1.manifest.json', 'installer-upgrade-dceba9.h', 'known-installations/dceba9.manifest.json', 'installer-upgrade-fa70a2.h', 'known-installations/fa70a2.manifest.json', 'installer-upgrade-32811e.h', 'known-installations/32811e.manifest.json', 'installer-upgrade-22a6f3.h', 'known-installations/22a6f3.manifest.json', 'installer-upgrade-78c3.h', 'known-installations/78c3.manifest.json', 'installer-upgrade-fb74.h', 'known-installations/fb74.manifest.json', 'installer-upgrade-554c.h', 'known-installations/554c.manifest.json', 'installer-upgrade-2af8.h', 'known-installations/2af8.manifest.json', 'installer-upgrade-005f.h', 'known-installations/005f.manifest.json', 'installer-upgrade-88f8.h', 'known-installations/88f8.manifest.json', 'installer-upgrade-0b6d.h', 'known-installations/0b6d.manifest.json', 'installer-upgrade-0359.h', 'known-installations/0359.manifest.json', 'installer-upgrade-6e95.h', 'known-installations/6e95.manifest.json', 'installer-upgrade-f0b99f.h', 'known-installations/f0b99f.manifest.json', 'installer-upgrade-f39101.h', 'known-installations/f39101.manifest.json', 'installer-upgrade-a8bd00.h', 'known-installations/a8bd00.manifest.json', 'installer-upgrade-da6e7c.h', 'known-installations/da6e7c.manifest.json', 'pf-hook.c', 'pf-hook.h', 'pf-hook-abi.h', 'pf-run-ledger.c', 'pf-run-ledger.h',
       'pf-filter-command.c', 'pf-filter-command.h',
       'pf-filter-transaction.c', 'pf-filter-transaction.h',
       'app-command.c', 'app-command.h',
@@ -331,6 +333,10 @@ async function verify(options) {
     for (const filename of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'build/icon.png']) await verifyArchiveEntry(filename);
     report.checks.push('All owned Electron production modules, shared language catalog, macOS local-routing modules, explicitly packaged macOS PF .mjs modules and all generated dist/client files compared by SHA-256; development smoke files excluded');
 
+    await check('resources/licenses/electron', async () => {
+      report.electronLicenses = await inspectElectronLicenseResources({ sourceRoot: projectRoot, resourceRoot: target.resources });
+      report.checks.push('Both mandatory Electron notice mappings, exact installed/distribution version and complete regular-file bytes verified');
+    });
     assert.ok(Array.isArray(sourcePackage.build?.extraResources) && sourcePackage.build.extraResources.length, 'No configured extraResources');
     for (const configured of packagedResourceEntries(sourcePackage.build, target.platform, target.arch)) {
       assert.ok(configured && typeof configured.from === 'string' && typeof configured.to === 'string', 'extraResources must explicitly name from/to');
@@ -384,11 +390,8 @@ async function verify(options) {
     await check('resources/local-authorization/pinned-carrier', async () => {
       if (target.platform !== 'darwin') return;
       const source = asar.extractFile(archive, 'electron/macos-pf-notion-trial.mjs').toString('utf8');
-      const pinned = /PF_NOTION_TRIAL_CANDIDATE = Object\.freeze\(\{\s*authorizerSHA256: '([0-9a-f]{64})',\s*manifestSHA256: '([0-9a-f]{64})',/.exec(source);
-      assert.ok(pinned, 'The packaged app does not declare a parseable trial candidate pin');
-      const [, authorizerSHA256, manifestSHA256] = pinned;
+      const { authorizerSHA256, manifestSHA256, carrierName: expected } = parsePFPackageCandidate(source);
       const carriers = (await readdir(path.join(target.resources, 'local-authorization'))).filter(name => name.endsWith('.app')).sort();
-      const expected = `EnvaraPFAuthorization-${manifestSHA256.slice(0, 12)}.app`;
       assert.deepEqual(carriers, [expected], `Bundled carriers ${JSON.stringify(carriers)} do not match the pinned candidate ${expected}`);
       const payload = path.join(target.resources, 'local-authorization', expected, 'Contents/Resources/app-routing/macos-pf');
       assert.equal(await sha256File(path.join(payload, 'manifest.json')), manifestSHA256, 'Bundled carrier manifest differs from the pinned candidate');

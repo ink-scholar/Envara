@@ -132,7 +132,7 @@ test('application family retains uncertain custody after token or generation-bou
         assert.equal(report.activatesSystem, false); assert.equal(report.ready, false); assert.equal(report.protected, false);
       }
       // The child is registered while live, exits normally, and is really
-      // reaped between two native BSD reads. Stress repeats 64 fresh children;
+      // reaped before or between native BSD reads. Stress repeats 64 fresh children;
       // boundary injections must retain permanent custody and first failure.
       for (const scenario of ['known-reap-absent', 'known-reap-stress', 'known-reap-first-absent',
         'known-reap-first-unknown', 'known-reap-first-short', 'known-reap-first-birth',
@@ -141,19 +141,56 @@ test('application family retains uncertain custody after token or generation-bou
         'known-reap-second-parent', 'known-reap-second-live', 'known-reap-parent-absent',
         'known-reap-parent-zombie', 'known-reap-parent-birth', 'known-reap-parent-credentials',
         'known-reap-parent-unknown', 'known-reap-parent-short', 'known-reap-parent-token',
-        'known-reap-parent-after-birth', 'known-reap-parent-after-credentials', 'known-reap-prior-uncertain']) {
+        'known-reap-parent-after-birth', 'known-reap-parent-after-credentials', 'known-reap-prior-uncertain',
+        'known-reap-first-stress', 'known-reap-absence-second-unknown', 'known-reap-absence-second-zero-errno',
+        'known-reap-absence-second-eagain', 'known-reap-absence-second-short', 'known-reap-absence-second-live',
+        'known-reap-absence-second-birth', 'known-reap-absence-second-credentials', 'known-reap-absence-parent-absent',
+        'known-reap-absence-parent-zombie', 'known-reap-absence-parent-birth', 'known-reap-absence-parent-credentials',
+        'known-reap-absence-parent-unknown', 'known-reap-absence-parent-short', 'known-reap-absence-parent-token',
+        'known-reap-absence-parent-after-birth', 'known-reap-absence-parent-after-credentials',
+        'known-reap-absence-parent-binding', 'known-reap-absence-vector-reuse', 'known-reap-absence-round-reuse',
+        'known-reap-absence-final-reuse', 'known-reap-absence-churn', 'known-reap-first-live', 'known-reap-first-live-stress']) {
         const result = spawnSync(executable, [scenario], { encoding: 'utf8', timeout: 15_000, cwd: temporary });
         assert.equal(result.error, undefined, `${scenario}: ${result.error?.message}`);
         assert.equal(result.signal, null, `${scenario}: ${result.stderr}`);
         assert.equal(result.status, 0, `${scenario}: ${result.stderr}\n${result.stdout}`);
-        const positive = scenario === 'known-reap-absent' || scenario === 'known-reap-stress';
+        const positive = ['known-reap-absent', 'known-reap-stress', 'known-reap-first-absent', 'known-reap-first-stress',
+          'known-reap-first-live', 'known-reap-first-live-stress'].includes(scenario);
+        const churn = scenario === 'known-reap-absence-churn';
         const report = JSON.parse(result.stdout.trim());
-        assert.equal(report.ok, true); assert.equal(report.familyStopped, positive);
-        assert.equal(report.failureRetainedCustody, !positive); assert.equal(report.ownedCleanupComplete, true);
+        assert.equal(report.ok, true); assert.equal(report.familyStopped, positive || churn);
+        assert.equal(report.failureRetainedCustody, !positive && !churn); assert.equal(report.ownedCleanupComplete, true);
         assert.equal(report.firstFailurePreserved, !positive);
-        assert.equal(report.knownReapTransitions, scenario === 'known-reap-stress' ? 64 : positive ? 1 : 0);
+        assert.equal(report.knownReapTransitions, ['known-reap-stress', 'known-reap-first-stress', 'known-reap-first-live-stress'].includes(scenario) ? 64 : positive ? 1 : 0);
+        assert.equal(report.typedRetrySucceeded, churn);
         assert.equal(report.sameIdentitySiblingUnaffected, true);
         assert.equal(report.activatesSystem, false); assert.equal(report.ready, false); assert.equal(report.protected, false);
+      }
+      for (const scenario of ['leaf-end-absent', 'leaf-end-zombie', 'leaf-end-first-unknown', 'leaf-end-first-short',
+        'leaf-end-first-birth', 'leaf-end-first-credentials', 'leaf-end-second-unknown', 'leaf-end-second-zero-errno',
+        'leaf-end-second-eagain', 'leaf-end-second-short', 'leaf-end-second-live', 'leaf-end-second-zombie',
+        'leaf-end-zombie-second-birth', 'leaf-end-zombie-second-credentials', 'leaf-end-round-unknown',
+        'leaf-end-round-live', 'leaf-end-round-birth', 'leaf-end-round-credentials', 'leaf-end-final-live', 'leaf-end-final-birth']) {
+        const result = spawnSync(executable, [scenario], { encoding: 'utf8', timeout: 15_000, cwd: temporary });
+        assert.equal(result.error, undefined, result.error?.message);
+        assert.equal(result.signal, null, result.stderr);
+        assert.equal(result.status, 0, `${scenario}: ${result.stderr}\n${result.stdout}`);
+        const report = JSON.parse(result.stdout.trim()), positive = ['leaf-end-absent', 'leaf-end-zombie'].includes(scenario);
+        assert.equal(report.ok, true); assert.equal(report.familyStopped, positive);
+        assert.equal(report.failureRetainedCustody, !positive); assert.equal(report.firstFailurePreserved, !positive);
+        assert.equal(report.sameIdentitySiblingUnaffected, true); assert.equal(report.ownedCleanupComplete, true);
+        assert.equal(report.ready, false); assert.equal(report.protected, false); assert.equal(report.activatesSystem, false);
+      }
+      for (const scenario of ['absence-parent-stable', 'absence-parent-birth', 'absence-parent-credentials']) {
+        const result = spawnSync(executable, [scenario], { encoding: 'utf8', timeout: 15_000, cwd: temporary });
+        assert.equal(result.error, undefined, result.error?.message);
+        assert.equal(result.signal, null, result.stderr);
+        assert.equal(result.status, 0, `${scenario}: ${result.stderr}\n${result.stdout}`);
+        const report = JSON.parse(result.stdout.trim()), positive = scenario === 'absence-parent-stable';
+        assert.equal(report.ok, true); assert.equal(report.familyStopped, positive);
+        assert.equal(report.failureRetainedCustody, !positive); assert.equal(report.firstFailurePreserved, !positive);
+        assert.equal(report.sameIdentitySiblingUnaffected, true); assert.equal(report.ownedCleanupComplete, true);
+        assert.equal(report.ready, false); assert.equal(report.protected, false); assert.equal(report.activatesSystem, false);
       }
       for (const scenario of ['known-zombie-reparent', 'known-name-zombie-reparent', 'known-info-zombie-reparent']) {
         const result = spawnSync(executable, [scenario], { encoding: 'utf8', timeout: 15_000, cwd: temporary });
@@ -222,13 +259,18 @@ test('application family retains uncertain custody after token or generation-bou
         'refresh-recheck-second-credentials', 'refresh-recheck-second-parent', 'refresh-recheck-second-unknown',
         'refresh-recheck-after-birth', 'refresh-recheck-after-credentials', 'refresh-recheck-after-parent',
         'refresh-recheck-second-short', 'refresh-recheck-name-then-info', 'refresh-recheck-info-then-name',
-        'refresh-recheck-interrupted', 'refresh-recheck-zombie-parent']) {
+        'refresh-recheck-interrupted', 'refresh-recheck-zombie-parent', 'refresh-recheck-pid-success',
+        'refresh-recheck-pid-exit', 'refresh-recheck-pid-then-name', 'refresh-recheck-pid-then-info',
+        'refresh-recheck-pid-candidate', 'refresh-recheck-pid-mismatch', 'refresh-recheck-pid-second-birth',
+        'refresh-recheck-pid-second-credentials', 'refresh-recheck-pid-second-parent', 'refresh-recheck-pid-second-unknown',
+        'refresh-recheck-pid-first-parent', 'refresh-recheck-pid-interrupted']) {
         const result = spawnSync(executable, [scenario], { encoding: 'utf8', timeout: 15_000, cwd: temporary });
         assert.equal(result.error, undefined, `${scenario}: ${result.error?.message}`);
         assert.equal(result.signal, null, `${scenario}: ${result.stderr}`);
         assert.equal(result.status, 0, `${scenario}: ${result.stderr}\n${result.stdout}`);
         const reconciled = ['refresh-recheck-name-exit', 'refresh-recheck-info-exit',
-          'refresh-recheck-name-success', 'refresh-recheck-info-success'].includes(scenario);
+          'refresh-recheck-name-success', 'refresh-recheck-info-success',
+          'refresh-recheck-pid-success', 'refresh-recheck-pid-exit'].includes(scenario);
         assert.deepEqual(JSON.parse(result.stdout.trim()), {
           ok: true, fixtureOnly: true, ready: false, protected: false, activatesSystem: false,
           sameIdentitySiblingUnaffected: true, ownedCleanupComplete: true,

@@ -15,6 +15,15 @@ export function verifiedLocationPreview(preview) {
     typeof preview.locationPreviewToken === 'string' && !!preview.locationPreviewToken;
 }
 
+// Prefill a search area only. A city label must never fabricate a street pin or
+// replace a saved/manual choice, including a partially entered coordinate.
+export function seedManualLocation(location, preview) {
+  if (!verifiedLocationPreview(preview) || ['label', 'mapsUrl', 'latitude', 'longitude'].some(key => String(location?.[key] ?? '').trim() !== '')) return location;
+  const network = preview.network;
+  const label = [...new Set([network.city, network.region, network.country ?? network.countryCode].filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()))].join(', ').slice(0, 500);
+  return label ? { ...location, label, confirmed: false } : location;
+}
+
 export function locationConfirmation(location, preview) {
   if (!verifiedLocationPreview(preview)) throw new Error('请先检测当前代理，再确认位置与时区。');
   if (location?.confirmed !== true) throw new Error('请确认这个网络环境的位置与时区。');

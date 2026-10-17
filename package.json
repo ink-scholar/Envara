@@ -1,7 +1,7 @@
 {
   "name": "envara",
-  "version": "0.5.25",
-  "description": "Envara 境舱 — an open-source desktop workspace for isolated fingerprint browser environments",
+  "version": "1.0.0",
+  "description": "Envara 境舱 — an open-source desktop workspace for browsers, terminals and supported desktop applications",
   "author": "ink-scholar",
   "license": "MIT",
   "main": "electron/main.mjs",
@@ -14,7 +14,7 @@
     "start": "npm run native:prepare && npm run proxy:prepare && electron .",
     "test": "node --test tests/*.test.mjs",
     "test:smoke": "node scripts/native-smoke.mjs",
-    "dist:mac": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run routing:build:mac && npm run routing:build:mac:local && npm run routing:build:mac:acceptance && npm run routing:build:mac:pf && npm run routing:build:mac:link-router && npm run build && electron-builder --mac",
+    "dist:mac": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run routing:build:mac && npm run routing:build:mac:local && npm run routing:build:mac:acceptance && npm run routing:build:mac:pf && npm run routing:prepare:mac:package && npm run routing:build:mac:link-router && npm run build && electron-builder --mac",
     "dist:win": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run routing:build:win && npm run build && electron-builder --win --x64",
     "dist:win:cross": "node scripts/prepare-windows-desktop.mjs --build",
     "dist:linux": "npm run native:prepare && npm run backend:prepare && npm run proxy:prepare && npm run build && electron-builder --linux --x64",
@@ -39,7 +39,9 @@
     "test:workspace": "node scripts/workspace-smoke.mjs",
     "test:privacy:sidecar": "node scripts/privacy-sidecar-smoke.mjs",
     "test:package:resources": "node scripts/verify-package-resources.mjs",
-    "routing:build:mac:link-router": "node scripts/build-macos-link-router.mjs"
+    "routing:build:mac:link-router": "node scripts/build-macos-link-router.mjs",
+    "routing:prepare:mac:package": "node scripts/prepare-macos-pf-package.mjs",
+    "routing:test:mac:pf": "node scripts/test-macos-pf-routing.mjs"
   },
   "dependencies": {
     "cloakbrowser": "0.5.12",
@@ -113,7 +115,7 @@
           ]
         },
         {
-          "from": "build/local-authorization",
+          "from": "build/package-resources/local-authorization",
           "to": "local-authorization",
           "filter": [
             "**/*"
@@ -179,6 +181,14 @@
       {
         "from": "third_party/browseforge/internal/profile/camoufox-data",
         "to": "licenses/camoufox-identity"
+      },
+      {
+        "from": "node_modules/electron/dist/LICENSE",
+        "to": "licenses/electron/LICENSE"
+      },
+      {
+        "from": "node_modules/electron/dist/LICENSES.chromium.html",
+        "to": "licenses/electron/LICENSES.chromium.html"
       }
     ]
   }

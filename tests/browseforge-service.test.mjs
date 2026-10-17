@@ -6,6 +6,8 @@ import test from 'node:test';
 import { BrowseForgeService } from '../electron/browseforge-service.mjs';
 import { ProxyNetworkProbe } from '../electron/proxy-network.mjs';
 import { languages } from '../shared/interface-languages.mjs';
+import { networkApplicationChoices, chooseApplicationProfile, createdProfileFromSnapshot } from '../src/network-flow-state.mjs';
+import { linkBrowsersFor } from '../src/link-browser.mjs';
 
 const descriptors = [
   { id: 'cloakbrowser', display_name: 'CloakBrowser', family: 'chromium', enabled: true, platform_supported: true, capabilities: { supports_seed_fingerprint: true, supports_structured_config: false } },
@@ -66,7 +68,7 @@ async function fixture(t, options = {}) {
     for (const descriptor of client.descriptors) { descriptor.binary_path = path.join(directory, 'bin', `${descriptor.id}${process.platform === 'win32' ? '.exe' : ''}`); await writeFile(descriptor.binary_path, 'fixture executable', { mode: 0o700 }); }
   }
   const offlineProbe = new ProxyNetworkProbe({ transport: async () => { throw new Error('fixture offline; no external network requests'); } });
-  const service = new BrowseForgeService(directory, client, { platform: 'darwin' }, () => {}, { profilesDir, networkProbe: offlineProbe, ...serviceOptions });
+  const service = new BrowseForgeService(directory, client, { platform: 'darwin' }, () => {}, { profilesDir, networkProbe: offlineProbe, addressGeocoder: { reverse: async () => null, close() {} }, ...serviceOptions });
   await service.ready;
   t.after(async () => { await service.shutdown(); await rm(directory, { recursive: true, force: true }); });
   return { directory, profilesDir, client, service };
@@ -394,6 +396,47 @@ test('proxy and group bindings are preserved and missing region or proxy referen
 
 const networkGeo = { success: true, ip: '8.8.8.8', country: 'United States', country_code: 'US', region: 'New York', city: 'New York', timezone: { id: 'America/New_York' } };
 const savedProxy = async (service, patch = {}) => (await service.call('saveProxy', { proxy: { name: '认证出口', protocol: 'http', host: 'proxy.example', port: 8080, username: 'dummy-user', password: 'dummy-password', ...patch } })).proxies.find((proxy) => proxy.name === (patch.name ?? '认证出口'));
+
+test('global confirmed regions flow into BrowseForge profiles and groups without rewriting saved identity', async (t) => {
+  let measured = { ...networkGeo, country: 'Japan', country_code: 'JP', region: 'Tokyo', city: 'Tokyo', timezone: { id: 'Asia/Tokyo' } };
+  const { service, client } = await fixture(t, { networkProbe: new ProxyNetworkProbe({ transport: async () => measured }) });
+  const draft = { name: '全球出口', protocol: 'http', host: 'proxy.example', port: 8080 };
+  const preview = await service.call('previewProxyNetwork', { proxy: draft });
+  const saved = (await service.call('saveProxy', { proxy: { ...draft, location: { mode: 'ip', confirmed: true } }, locationPreviewToken: preview.locationPreviewToken })).proxies[0];
+  assert.equal(saved.region, '', 'automatic region selection does not become an explicit saved override');
+  const profile = await create(service, { engine: 'browseforge-chromium', proxyId: saved.id, group: '全球地区' });
+  assert.equal(client.profiles[0].proxy.region, 'jp-tokyo');
+  const identity = structuredClone({ seed: client.profiles[0].fingerprint_seed, fingerprint: client.profiles[0].fingerprint });
+  await service.call('saveGroup', { name: '全球地区', proxyId: saved.id });
+  assert.equal(client.groups[0].proxy.region, 'jp-tokyo');
+
+  measured = { ...networkGeo, country: 'Malaysia', country_code: 'MY', region: 'Selangor', city: 'Petaling', timezone: { id: 'Asia/Kuala_Lumpur' } };
+  const moved = { ...draft, id: saved.id, port: 8081 };
+  const nextPreview = await service.call('previewProxyNetwork', { proxy: moved });
+  await service.call('saveProxy', { proxy: { ...moved, location: { mode: 'ip', confirmed: true } }, locationPreviewToken: nextPreview.locationPreviewToken });
+  assert.equal(client.profiles[0].proxy.region, 'my', 'an unsupported city uses its supported country');
+  assert.equal(client.groups[0].proxy.region, 'my');
+  await service.call('updateProfile', { id: profile.id, profile: { name: '改名后环境' } });
+  assert.deepEqual({ seed: client.profiles[0].fingerprint_seed, fingerprint: client.profiles[0].fingerprint }, identity);
+  const stored = (await service.store.read()).proxies.find(item => item.id === saved.id);
+  assert.equal(stored.region, '');
+  assert.equal(stored.location.countryCode, 'MY');
+  assert.match(stored.location.label, /Petaling/);
+});
+
+test('invalid explicit BrowseForge region is refused across profile, proxy and group writes', async (t) => {
+  const { service, client } = await fixture(t);
+  const supported = await savedProxy(service, { name: '合法地区', region: 'jp-tokyo' });
+  const invalid = await savedProxy(service, { name: '不支持地区', region: 'jp-osaka', host: 'other.example' });
+  const profile = await create(service, { engine: 'browseforge-chromium', proxyId: supported.id, group: '地区校验' });
+  await assert.rejects(create(service, { engine: 'browseforge-chromium', proxyId: invalid.id }), { code: 'INVALID_PROXY_REGION' });
+  await assert.rejects(service.call('saveProxy', { proxy: { ...supported, region: 'jp-osaka' } }), { code: 'INVALID_PROXY_REGION' });
+  await assert.rejects(service.call('saveGroup', { name: '地区校验', proxyId: invalid.id }), { code: 'INVALID_PROXY_REGION' });
+  assert.equal(client.profiles.length, 1);
+  assert.equal(client.profiles[0].id, profile.id);
+  assert.equal(client.profiles[0].proxy.region, 'jp-tokyo');
+  assert.deepEqual(client.groups, []);
+});
 
 test('network creation previews actual egress then stores only a matching confirmed location', async (t) => {
   const { service } = await fixture(t, { networkProbe: new ProxyNetworkProbe({ transport: async () => networkGeo }) });
@@ -805,7 +848,12 @@ test('AnyTLS location preview uses an owned authenticated route and releases onl
   const managed = managedProxyFixture();
   const originalProbe = managed.networkProbe.probe.bind(managed.networkProbe);
   managed.networkProbe.probe = async (...args) => ({ ...(await originalProbe(...args)), scope: 'egress', countryCode: 'JP', country: 'Japan', geolocation: { latitude: 35.6, longitude: 139.7, accuracy: 50000 } });
-  const { service } = await fixture(t, managed);
+  const referenceLocation = { kind: 'nearby-reference', label: 'Example Street', latitude: 35.61, longitude: 139.71, source: 'Photon', attribution: '© OpenStreetMap contributors' };
+  const { service } = await fixture(t, { ...managed, addressGeocoder: { close() {}, async reverse({ proxy: wire }) {
+    assert.deepEqual(wire, managed.probes.at(-1).proxy, 'reverse reuses the exact wire that verified egress');
+    assert.equal(managed.wires.has(managed.calls.at(-1).id), true, 'the owned draft remains active until reverse completes');
+    return referenceLocation;
+  } } });
   const saved = (await service.call('saveProxy', { proxy: anytlsConfig({ name: '已保存' }) })).proxies[0];
   const profile = await create(service, { proxyId: saved.id, timezone: '' });
   await service.resolveWorkspaceContext(profile.id);
@@ -814,6 +862,7 @@ test('AnyTLS location preview uses an owned authenticated route and releases onl
   const draft = anytlsConfig({ name: '新位置', host: 'draft.example.test', alpn: ['h2', 'http/1.1'], udp: false });
   const preview = await service.call('previewProxyNetwork', { proxy: draft });
   assert.ok(preview.locationPreviewToken); assert.equal(preview.locationRecommendation.timezone, 'Asia/Tokyo');
+  assert.deepEqual(preview.referenceLocation, referenceLocation);
   assert.equal(managed.wires.size, 1); assert.equal(managed.wires.has(saved.id), true);
   const created = managed.calls.at(-1);
   assert.match(created.id, /^draft_/); assert.deepEqual(created.alpn, draft.alpn); assert.equal(created.udp, false); assert.equal(created.serverName, draft.serverName);
@@ -822,6 +871,10 @@ test('AnyTLS location preview uses an owned authenticated route and releases onl
   assert.equal(wire.host, '127.0.0.1'); assert.notEqual(wire.password, draft.password);
   assert.equal(JSON.stringify(preview).includes(draft.password), false); assert.equal(JSON.stringify(preview).includes(wire.password), false);
   assert.equal(JSON.stringify(await service.store.read()), before);
+  service.addressGeocoder.reverse = async () => { throw new Error('fixture reverse unavailable'); };
+  const fallback = await service.call('previewProxyNetwork', { proxy: draft });
+  assert.ok(fallback.locationPreviewToken); assert.equal(fallback.referenceLocation, null);
+  assert.equal(managed.releases.length, 2); assert.equal(managed.wires.size, 1); assert.equal(managed.wires.has(saved.id), true);
 });
 
 test('managed core death cannot refill a resolved timezone from the saved network selection', async (t) => {
@@ -877,6 +930,82 @@ test('AnyTLS browser and terminal contexts use the same authenticated internal H
   const snapshot = JSON.stringify(await service.snapshot());
   assert.equal(snapshot.includes(context.proxy.password), false); assert.equal(snapshot.includes(context.proxy.username), false);
   assert.ok(managed.calls.every((row) => row.id === proxy.id && row.protocol === 'anytls'));
+});
+
+test('ordinary application routes use an owned core while saved browser bindings keep their existing upstream', async t => {
+  for (const protocol of ['http', 'https', 'socks5']) {
+    const managed = managedProxyFixture();
+    managed.proxyCore.routingIdentity = id => managed.wires.has(id) ? { proxyId: id, nodeType: protocol, routeIdentity: 'owned-route', corePid: 12345, coreGeneration: 'owned-generation', coreVersion: 'v1.19.32' } : null;
+    const { service, client } = await fixture(t, managed);
+    const proxy = await savedProxy(service, { protocol });
+    const profile = await create(service, { proxyId: proxy.id });
+    const before = structuredClone(client.profiles[0]), saved = JSON.stringify(await service.store.read());
+    const ordinary = await service.resolveWorkspaceContext(profile.id);
+    assert.equal(ordinary.managedProxy, false); assert.equal(ordinary.proxy.host, proxy.host); assert.equal(managed.calls.length, 0);
+    const application = await service.resolveWorkspaceContext(profile.id, { force: true, requireManagedRoute: true });
+    assert.equal(application.managedProxy, true); assert.equal(application.proxy.host, '127.0.0.1');
+    assert.equal(application.applicationRoute.protocol, 'socks5'); assert.equal(application.applicationRoute.udp, protocol === 'socks5');
+    assert.equal(application.applicationRoute.udpPolicy, protocol === 'socks5' ? 'proxy' : 'block');
+    assert.equal(application.managedRoute.nodeType, protocol); assert.equal(application.managedRoute.profileId, profile.id);
+    assert.equal(managed.probes.at(-1).proxy.password, application.applicationRoute.password);
+    assert.deepEqual(client.profiles[0], before); assert.equal(JSON.stringify(await service.store.read()), saved);
+    assert.equal(JSON.stringify(await service.snapshot()).includes(application.proxy.password), false);
+    service.invalidateManagedProxy(proxy.id);
+    assert.equal((await service.snapshot()).profiles[0].network.ok, false);
+    await service.releaseProxy(proxy); assert.equal(managed.wires.has(proxy.id), false);
+  }
+});
+
+test('application route creation fails closed on absent bindings, core failure and missing ownership', async t => {
+  const managed = managedProxyFixture();
+  const { service } = await fixture(t, managed);
+  const unbound = await create(service, { proxyId: null });
+  await assert.rejects(service.resolveWorkspaceContext(unbound.id, { requireManagedRoute: true }), { code: 'MANAGED_PROXY_BINDING_MISSING' });
+  assert.equal(managed.probes.length, 0);
+  const proxy = await savedProxy(service), profile = await create(service, { proxyId: proxy.id });
+  managed.proxyCore.failure = true;
+  await assert.rejects(service.resolveWorkspaceContext(profile.id, { requireManagedRoute: true }), value => value.code === 'PROXY_CORE_FAILED' && !value.message.includes(proxy.password));
+  assert.equal(managed.probes.length, 0);
+  managed.proxyCore.failure = false;
+  await assert.rejects(service.resolveWorkspaceContext(profile.id, { requireManagedRoute: true }), { code: 'INVALID_PROXY_CORE' });
+  managed.proxyCore.routingIdentity = () => ({ proxyId: proxy.id, nodeType: proxy.protocol });
+  const probe = managed.networkProbe.probe.bind(managed.networkProbe);
+  managed.networkProbe.probe = async (...args) => { const result = await probe(...args); service.invalidateManagedProxy(proxy.id); return result; };
+  await assert.rejects(service.resolveWorkspaceContext(profile.id, { requireManagedRoute: true }), { code: 'PROXY_CORE_STOPPED' });
+});
+
+test('HTTPS attachment selection creates an ungrouped owner and links its browser without a group-policy write', async t => {
+  const managed = managedProxyFixture();
+  managed.proxyCore.routingIdentity = id => ({ proxyId: id, nodeType: 'https' });
+  const { service, client } = await fixture(t, managed);
+  const proxy = await savedProxy(service, { protocol: 'https' });
+  const initial = await service.snapshot();
+  const choice = networkApplicationChoices(initial.proxies, initial.groups, initial.profiles).find(item => item.proxyId === proxy.id);
+  assert.equal(choice.id, `node:${proxy.id}`); assert.equal(choice.group, '');
+  assert.equal(chooseApplicationProfile(choice, initial.profiles, null), null);
+  await create(service, { proxyId: choice.proxyId, group: choice.group });
+  const created = await service.snapshot();
+  const owner = createdProfileFromSnapshot(new Set(initial.profiles.map(item => item.id)), created, choice);
+  assert.ok(owner); assert.equal(linkBrowsersFor(created.profiles, owner)[0].id, owner.id);
+  const context = await service.resolveWorkspaceContext(owner.id, { requireManagedRoute: true });
+  assert.equal(context.managedRoute.nodeType, 'https'); assert.equal(context.proxyId, proxy.id);
+  assert.equal(client.requests.some(row => row.route.startsWith('/api/groups') && row.method !== 'GET'), false);
+});
+
+test('releasing AnyTLS invalidates only its supported wire while ordinary raw and managed measurements stay distinct', async t => {
+  const managed = managedProxyFixture();
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => networkGeo });
+  const { service } = await fixture(t, { ...managed, networkProbe });
+  const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  await service.call('checkProxy', { proxy: anytlsConfig() });
+  await service.resolveWorkspaceContext((await create(service, { proxyId: raw.id })).id);
+  await service.releaseProxy(raw); assert.equal(managed.wires.has(raw.id), false);
+  const ordinary = await savedProxy(service);
+  managed.proxyCore.routingIdentity = id => ({ proxyId: id, nodeType: 'http' });
+  await service.resolveWorkspaceContext((await create(service, { proxyId: ordinary.id })).id, { requireManagedRoute: true });
+  networkProbe.transport = async () => { throw new Error('fixture offline'); };
+  const result = await service.call('checkProxy', { id: ordinary.id });
+  assert.equal(result.ok, false); assert.equal((await service.snapshot()).proxies.find(item => item.id === ordinary.id).network.ok, false);
 });
 
 test('AnyTLS group policy keeps enforced/default semantics across ordinary policy replacement and reopen', async (t) => {
@@ -1149,7 +1278,7 @@ test('AnyTLS runtime failure invalidates only affected wire/geolocation contexts
   assert.equal(failed.profiles.find((row) => row.id === affected.id).resolvedTimezone, null);
   assert.equal(failed.profiles.find((row) => row.id === affected.id).geolocation, null);
   assert.equal(failed.profiles.find((row) => row.id === affected.id).resolvedLocale, null);
-  assert.match(failed.profiles.find((row) => row.id === affected.id).networkLastError, /AnyTLS/);
+  assert.match(failed.profiles.find((row) => row.id === affected.id).networkLastError, /代理网络内核已停止/);
   assert.equal(failed.profiles.find((row) => row.id === unrelated.id).network.ok, true);
   assert.equal(failed.profiles.find((row) => row.id === unrelated.id).geolocation.latitude, 35.6);
   assert.deepEqual(invalidated, [original]);

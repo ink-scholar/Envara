@@ -10,7 +10,8 @@ import { _electron } from 'playwright-core';
 const noDisplay = process.platform === 'linux' && !process.env.DISPLAY;
 const classes = ['button', 'button primary', 'button danger', 'icon-button',
   'terminal-icon-button', 'terminal-text-button', 'terminal-text-button terminal-start-button',
-  'terminal-empty-start', 'terminal-close-session', 'terminal-duplicate-session'];
+  'terminal-empty-start', 'terminal-close-session', 'terminal-duplicate-session',
+  'terminal-text-button terminal-account-delete'];
 let fixture, desktop, page;
 
 before(async () => {
@@ -95,4 +96,52 @@ test('keyboard focus stays visible and reduced motion disables action transition
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   const duration = (await style(page.locator('#control-0'))).transition.split(',').map(value => Number.parseFloat(value));
   assert.ok(duration.every(value => value > 0 && value <= .12), 'ordinary feedback stays brief');
+});
+
+
+test('terminal actions use the compact scale and wrap long labels without widening their container', { skip: noDisplay }, async () => {
+  const result = await page.evaluate(() => {
+    const host = document.createElement('div');
+    host.style.cssText = 'width:190px;display:flex;flex-wrap:wrap';
+    host.innerHTML = '<button class="terminal-text-button">Eine sehr lange übersetzte Terminalaktion</button>';
+    document.body.append(host);
+    const button = host.firstElementChild, css = getComputedStyle(button);
+    const box = button.getBoundingClientRect(), outer = host.getBoundingClientRect();
+    const value = { height: box.height, width: box.width, available: outer.width, fontSize: css.fontSize, radius: css.borderRadius, whiteSpace: css.whiteSpace };
+    host.remove();
+    return value;
+  });
+  assert.equal(result.fontSize, '12px');
+  assert.equal(result.radius, '8px');
+  assert.equal(result.whiteSpace, 'normal');
+  assert.ok(result.height >= 30, 'compact actions retain a 30px minimum target');
+  assert.ok(result.width <= result.available, 'translated labels wrap within their action group');
+  for (const i of [4, 5, 6, 7, 8, 9, 10]) {
+    const control = page.locator(`#control-${i}`);
+    assert.ok((await control.boundingBox()).height >= 30, `${classes[i]} uses the compact minimum`);
+  }
+});
+
+test('the terminal chooser stays inside its own dock and long session names retain a visible status', { skip: noDisplay }, async () => {
+  const result = await page.evaluate(() => {
+    const dock = document.createElement('section');
+    dock.className = 'terminal-dock';
+    dock.style.cssText = 'width:640px;height:320px';
+    dock.innerHTML = `<div class="terminal-session-tabs"><button class="terminal-session-tab"><span class="terminal-session-name">${'Long named workspace '.repeat(12)}</span><small>Running</small></button></div><div class="terminal-new-session"><div>${'<p>Translated account configuration</p>'.repeat(20)}</div></div>`;
+    document.body.append(dock);
+    const chooser = dock.querySelector('.terminal-new-session'), tab = dock.querySelector('.terminal-session-tab');
+    const name = dock.querySelector('.terminal-session-name'), status = dock.querySelector('small');
+    const outer = dock.getBoundingClientRect(), popup = chooser.getBoundingClientRect();
+    const value = { inside: popup.left >= outer.left && popup.right <= outer.right && popup.top >= outer.top && popup.bottom <= outer.bottom,
+      scrollable: chooser.scrollHeight > chooser.clientHeight, overflowY: getComputedStyle(chooser).overflowY,
+      tabWidth: tab.getBoundingClientRect().width, nameWidth: name.getBoundingClientRect().width, statusWidth: status.getBoundingClientRect().width,
+      nameOverflow: getComputedStyle(name).textOverflow, statusShrink: getComputedStyle(status).flexShrink };
+    dock.remove();
+    return value;
+  });
+  assert.ok(result.inside, 'the chooser is positioned and bounded by its own dock');
+  assert.ok(result.scrollable && result.overflowY === 'auto', 'long forms scroll within the available dock height');
+  assert.ok(result.tabWidth <= 260 && result.nameWidth > 0 && result.statusWidth > 0, 'a single long name cannot consume the tab strip');
+  assert.equal(result.nameOverflow, 'ellipsis');
+  assert.equal(result.statusShrink, '0');
 });

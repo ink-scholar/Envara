@@ -156,6 +156,17 @@ export class ClaudeAccountStore {
       return publicAccount(account);
     });
   }
+  remove(id, accountId) {
+    profileId(id); claudeAccountId(accountId);
+    if (accountId === DEFAULT_CLAUDE_ACCOUNT) throw fail('默认登录档案不能删除，可以重命名。', 'CLAUDE_ACCOUNT_DEFAULT');
+    return this.mutate(profiles => {
+      const accounts = profiles.get(id) ?? [defaultAccount()];
+      const account = accounts.find(item => item.id === accountId);
+      if (!account) throw fail('此 Claude 登录档案已不存在，请重新选择。', 'CLAUDE_ACCOUNT_NOT_FOUND');
+      profiles.set(id, accounts.filter(item => item.id !== accountId));
+      return publicAccount(account);
+    });
+  }
   removeProfile(id) {
     profileId(id);
     return this.mutate(profiles => { profiles.delete(id); });

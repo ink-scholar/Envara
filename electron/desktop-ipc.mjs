@@ -4,7 +4,7 @@ import { environmentMutationProfile } from './environment-import-lifecycle.mjs';
 
 const bootstrapReads = new Set(['snapshot', 'terminalSnapshot']);
 const terminalProfileMethods = new Set(['chooseWorkspaceDirectory', 'pickTerminalDirectory', 'setTerminalLinkBrowser',
-  'openTerminal', 'openTerminalWindow', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'claudeInstallationStatus']);
+  'openTerminal', 'openTerminalWindow', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'deleteClaudeAccount', 'claudeInstallationStatus']);
 const terminalSessionMethods = new Set(['duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal']);
 
 async function assertTerminalScope(source, request, terminal) {

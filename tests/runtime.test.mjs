@@ -23,6 +23,8 @@ async function fixture(t, options = {}) {
   context.clearPermissions = async () => { privacyCalls.push(['clearPermissions']); };
   context.grantPermissions = async permissions => { privacyCalls.push(['grantPermissions', permissions]); };
   context.setGeolocation = async geolocation => { privacyCalls.push(['setGeolocation', geolocation]); };
+  context.addInitScript = async (script, policy) => { privacyCalls.push(['addInitScript', policy?.mode]); };
+  page.frames = () => [{ evaluate: async () => { privacyCalls.push(['framePrivacy']); } }];
   context.route = async (pattern, handler) => { privacyCalls.push(['route', pattern]); context.privacyHandler = handler; };
   context.newCDPSession = async () => ({
     send: async (method, params) => { privacyCalls.push(['cdp', method, params]); return method === 'Target.getTargetInfo' ? { targetInfo: { browserContextId: 'fixture-owned-context' } } : {}; },

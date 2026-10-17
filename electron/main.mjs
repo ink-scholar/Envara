@@ -213,7 +213,7 @@ const applicationMethods = new Set(['saveApplication', 'startApplication', 'stop
   'getApplicationRoutingStatus', 'setupApplicationRouting', 'setApplicationLinkBrowser']);
 for (const method of [...applicationMethods, 'pickApplication', 'listLocalApplications', 'applicationIcon',
   'showApplicationWindow', 'clearApplicationData', 'signInData', 'deleteSignInData', 'linkRouterStatus', 'setLinkRouter',
-  'previewProxyNetwork', 'checkEnvironmentNetwork', 'openNetworkLocationMap']) allowedMethods.add(method);
+  'previewProxyNetwork', 'searchNetworkAddress', 'checkEnvironmentNetwork', 'openNetworkLocationMap']) allowedMethods.add(method);
 for (const method of ['runNotionTrial', 'stopNotionTrial', 'notionTrialSnapshot', 'exportNotionDiagnostics', 'applicationStorage', 'reclaimApplicationStorage']) allowedMethods.add(method);
 allowedMethods.add('exportEnvironment');
 
@@ -460,6 +460,7 @@ async function handleCall(method, args = {}, caller = window) {
     if (typeof service?.previewProxyNetwork !== 'function') throw new Error('当前后端不支持网络位置预览。');
     return service.previewProxyNetwork(args);
   }
+  if (method === 'searchNetworkAddress') return service.searchNetworkAddress(args);
   if (applicationMethods.has(method)) {
     if (!applications) throw new Error('附加软件需要完整桌面应用。');
     if (['saveApplication', 'deleteApplication', 'setupApplicationRouting'].includes(method)) assertNotionTrialContextIdle();
@@ -500,7 +501,7 @@ async function handleCall(method, args = {}, caller = window) {
     return terminalController.serialize(() => openTerminalWindow(args));
   }
   if (method === 'openDocumentation') {
-    const urls = { project: 'https://github.com/ink-scholar/Envara', 'runtime-license': 'https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md', automation: 'https://github.com/nczz/BrowseForge/blob/fa9e0bb670e749706a9c8f2d4095333347d6c521/docs/developer-integration.md', upstream: 'https://github.com/nczz/BrowseForge' };
+    const urls = { 'map-attribution': 'https://www.openstreetmap.org/copyright', project: 'https://github.com/ink-scholar/Envara', 'runtime-license': 'https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md', automation: 'https://github.com/nczz/BrowseForge/blob/fa9e0bb670e749706a9c8f2d4095333347d6c521/docs/developer-integration.md', upstream: 'https://github.com/nczz/BrowseForge' };
     if (!Object.hasOwn(urls, args.target)) throw new Error('无效文档链接');
     await shell.openExternal(urls[args.target]);
     return { ok: true };
@@ -750,7 +751,10 @@ async function initializeDesktopServices({ checkOpen }) {
     await initializeStep('sidecar-initialize', () => sidecar.initialize());
     service = new BrowseForgeService(dataDir, sidecar.client, { platform: process.platform, appVersion: app.getVersion(), backend: 'BrowseForge (Envara desktop)', upstreamVersion: '2.1.15', localApi: sidecar.baseUrl }, publish, {
       profilesDir: path.join(sidecar.baseDir, 'profiles'), getEngineStates: () => sidecar.getEngineStates(), proxyCore,
-      ...(isWorkspaceSmoke ? { networkProbe: new ProxyNetworkProbe({ transport: async () => ({ success: true, ip: '8.8.8.8', country: 'Philippines', country_code: 'PH', city: 'Manila', latitude: 14.6, longitude: 121, timezone: { id: 'Asia/Manila' } }) }) } : {}),
+      ...(isWorkspaceSmoke ? {
+        networkProbe: new ProxyNetworkProbe({ transport: async () => ({ success: true, ip: '8.8.8.8', country: 'Philippines', country_code: 'PH', city: 'Manila', latitude: 14.6, longitude: 121, timezone: { id: 'Asia/Manila' } }) }),
+        addressGeocoder: { search: async () => ({ source: 'Photon', attribution: '© OpenStreetMap contributors', candidates: [{ id: 'owned-place-fixture', label: 'Synthetic public landmark, Manila', latitude: 14.58, longitude: 120.98 }] }) },
+      } : {}),
       installEngine: id => sidecar.installEngine(id), getMetrics: profiles => sidecar.metrics(profiles),
       getConnectionInfo: () => ({ apiUrl: sidecar.baseUrl + '/api', mcpUrl: sidecar.baseUrl + '/mcp', status: sidecar.process ? 'ready' : 'stopped', version: '2.1.15', sourceCommit: 'fa9e0bb670e749706a9c8f2d4095333347d6c521' }),
       cancelInstall: () => sidecar.cancelInstall(),

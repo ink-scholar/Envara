@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { translate } from './i18n.mjs';
 import { createInterfaceLanguageController } from './interface-language-state.mjs';
 
@@ -16,14 +16,15 @@ export function I18nProvider({ children, language: preferredLanguage, onLanguage
     return () => { unsubscribe(); controller.stop(); };
   }, [controller]);
   const { language } = state;
+  const t = useCallback((text, vars) => translate(text, language, vars), [language]);
   useEffect(() => { document.documentElement.lang = language; }, [language]);
   const value = useMemo(() => ({
     ...state,
     setLanguage: controller.setLanguage,
     previewLanguage: controller.previewLanguage,
     reloadLanguage: controller.reload,
-    t: (text, vars) => translate(text, language, vars),
-  }), [state, language, controller]);
+    t,
+  }), [state, t, controller]);
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
 

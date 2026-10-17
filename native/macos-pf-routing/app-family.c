@@ -19,6 +19,12 @@ int envara_app_family_available(void) { return family_signal_api != NULL; }
 
 #define ENVARA_APP_FAMILY_LIMIT 256U
 struct family_member { struct envara_identity identity; audit_token_t token; };
+struct family_observation {
+    size_t absent_count;
+    struct { pid_t pid; struct envara_identity parent; } absent[ENVARA_APP_FAMILY_LIMIT];
+    size_t terminal_count;
+    struct { struct envara_identity identity; int absent; } terminal[ENVARA_APP_FAMILY_LIMIT];
+};
 struct envara_app_family {
     pid_t owner;
     int uncertain, stopped, retry_pending, retry_error;
@@ -77,6 +83,24 @@ static int family_same(const struct envara_identity *a, const struct envara_iden
         a->uid == b->uid && a->ruid == b->ruid && a->saved_uid == b->saved_uid &&
         a->gid == b->gid && a->rgid == b->rgid && a->saved_gid == b->saved_gid;
 }
+static int family_recheck_absent(envara_app_family *family, const struct family_observation *observation) {
+    for (size_t i = 0; i < observation->absent_count; i++) {
+        struct envara_identity actual;
+        if (family_identity(observation->absent[i].pid, &actual, NULL) != 0)
+            return family_refuse(family, ESTALE);
+    }
+    return 1;
+}
+static int family_recheck_terminal(envara_app_family *family, struct family_observation *observation) {
+    for (size_t i = 0; i < observation->terminal_count; i++) {
+        struct envara_identity actual;
+        int state = family_identity(observation->terminal[i].identity.pid, &actual, NULL);
+        if (state == 0) { observation->terminal[i].absent = 1; continue; }
+        if (observation->terminal[i].absent || state != 2 ||
+            !family_same(&observation->terminal[i].identity, &actual)) return family_refuse(family, ESTALE);
+    }
+    return 1;
+}
 static int family_membership_changed(envara_app_family *family) {
     if (family->membership_revision == UINT64_MAX)
         return family_refuse_reason(family, ENVARA_APP_FAMILY_FAILURE_CAPACITY, EOVERFLOW, 0);
@@ -106,10 +130,30 @@ static int family_confirm_zombie(const struct envara_identity *seen, int bind_pa
     return state == 2 && family_same(seen, &confirmed) &&
         (!bind_parent || seen->parent_pid == confirmed.parent_pid) ? 2 : -1;
 }
-static int family_refresh_pause(void) {
+static int family_record_terminal(envara_app_family *family, struct family_observation *observation,
+    const struct family_member *member, int state) {
+    struct envara_identity actual;
+    int confirmed = state == 2 ? family_confirm_zombie(&member->identity, 0) :
+        family_identity(member->identity.pid, &actual, NULL);
+    if (state == 0 ? confirmed != 0 : (confirmed != 0 && confirmed != 2)) return family_refuse(family, ESTALE);
+    state = confirmed;
+    for (size_t i = 0; i < observation->terminal_count; i++) {
+        if (observation->terminal[i].identity.pid != member->identity.pid) continue;
+        if (!family_same(&observation->terminal[i].identity, &member->identity) ||
+            (observation->terminal[i].absent && state != 0)) return family_refuse(family, ESTALE);
+        if (state == 0) observation->terminal[i].absent = 1;
+        return 1;
+    }
+    if (observation->terminal_count >= ENVARA_APP_FAMILY_LIMIT)
+        return family_refuse_reason(family, ENVARA_APP_FAMILY_FAILURE_CAPACITY, EOVERFLOW, 0);
+    observation->terminal[observation->terminal_count].identity = member->identity;
+    observation->terminal[observation->terminal_count++].absent = state == 0;
+    return 1;
+}
+static int family_refresh_pause(long nanoseconds) {
     /* One scheduling opportunity for the observed task-gone/BSD-live exit
      * window. Interrupted sleep is never restarted or promoted to success. */
-    const struct timespec pause = {0, 1000000};
+    const struct timespec pause = {0, nanoseconds};
     return nanosleep(&pause, NULL) == 0;
 }
 static int family_member_refresh_attempt(envara_app_family *family, struct family_member *member,
@@ -143,7 +187,7 @@ static int family_member_refresh_attempt(envara_app_family *family, struct famil
             if (state >= 0) return state;
         }
         else if (!bracket && error == KERN_FAILURE && state == 1 && family_same(&before, &after) &&
-            before.parent_pid == after.parent_pid && family_refresh_pause())
+            before.parent_pid == after.parent_pid && family_refresh_pause(1000000))
             return family_member_refresh_attempt(family, member, NULL, after.parent_pid, 1, candidate);
         return family_refresh_refuse(family, ENVARA_APP_FAMILY_FAILURE_TOKEN, EACCES, error);
     }
@@ -170,8 +214,13 @@ static int family_member_refresh_attempt(envara_app_family *family, struct famil
     if (state != 1 || !family_same(&before, &after))
         return family_refresh_refuse(family, ENVARA_APP_FAMILY_FAILURE_IDENTITY, ESTALE, 0);
     if (error != KERN_SUCCESS || count != TASK_AUDIT_TOKEN_COUNT) {
-        if (!bracket && info_called && error == KERN_INVALID_ARGUMENT && count == TASK_AUDIT_TOKEN_COUNT &&
-            before.parent_pid == after.parent_pid && family_refresh_pause())
+        /* A retained task may exec/exit after its name port was acquired.
+         * Reacquire once only after the complete same-identity BSD bracket;
+         * candidates and successful API contradictions keep their refusal. */
+        int info_invalid_window = info_called && error == KERN_INVALID_ARGUMENT;
+        int pid_failure_window = !candidate && !info_called && error == KERN_FAILURE;
+        if (!bracket && (info_invalid_window || pid_failure_window) && count == TASK_AUDIT_TOKEN_COUNT &&
+            before.parent_pid == after.parent_pid && family_refresh_pause(pid_failure_window ? 10000000 : 1000000))
             return family_member_refresh_attempt(family, member, NULL, after.parent_pid, 1, candidate);
         return family_refresh_refuse(family, ENVARA_APP_FAMILY_FAILURE_TOKEN, error == KERN_SUCCESS ? EIO : EACCES, error);
     }
@@ -223,14 +272,40 @@ static int family_stable_zombie(envara_app_family *family, struct family_member 
         after.parent_pid != seen->parent_pid || family_member_refresh(family, parent) != 1) return -1;
     return 1;
 }
-static int family_observe_child(envara_app_family *family, struct family_member *parent, pid_t pid) {
+/* Return 2 for a registered child reaped after enumeration: the caller must
+ * finish both vectors and start a complete new round. Keep absence records for
+ * this entire observation so retirement cannot admit a reused PID mid-round. */
+static int family_observe_child(envara_app_family *family, struct family_observation *observation,
+    struct family_member *parent, pid_t pid) {
+    int existing = family_find(family, pid), absent = -1;
+    for (size_t i = 0; i < observation->absent_count; i++)
+        if (observation->absent[i].pid == pid) { absent = (int)i; break; }
     struct envara_identity actual; int state = family_identity(pid, &actual, NULL);
+    for (size_t i = 0; i < observation->terminal_count; i++) {
+        if (observation->terminal[i].identity.pid != pid) continue;
+        if (state == 0) { observation->terminal[i].absent = 1; break; }
+        if (observation->terminal[i].absent || state != 2 ||
+            !family_same(&observation->terminal[i].identity, &actual)) return family_refuse(family, ESTALE);
+    }
+    if (absent >= 0 && state != 0) return family_refuse(family, ESTALE);
+    if (state == 0 && (existing > 0 || absent >= 0)) {
+        if ((absent >= 0 ? !family_same(&observation->absent[absent].parent, &parent->identity) :
+                family->members[existing].identity.parent_pid != parent->identity.pid) ||
+            family_member_refresh(family, parent) != 1 ||
+            family_identity(pid, &actual, NULL) != 0) return family_refuse(family, ESTALE);
+        if (absent < 0) {
+            if (observation->absent_count >= ENVARA_APP_FAMILY_LIMIT)
+                return family_refuse_reason(family, ENVARA_APP_FAMILY_FAILURE_CAPACITY, EOVERFLOW, 0);
+            observation->absent[observation->absent_count].pid = pid;
+            observation->absent[observation->absent_count++].parent = parent->identity;
+        }
+        return 2;
+    }
     /* A listed PID without a complete identity is an attribution gap, not
      * retryable vector churn, even when the syscall happened to say EAGAIN. */
     if ((state != 1 && state != 2) || actual.parent_pid != parent->identity.pid ||
         !envara_identity_matches(&actual, family->members[0].identity.uid, family->members[0].identity.gid))
         return family_refuse(family, ESTALE);
-    int existing = family_find(family, actual.pid);
     if (existing >= 0 && !family_same(&family->members[existing].identity, &actual)) return family_refuse(family, ESTALE);
     if (state == 2) {
         return family_stable_zombie(family, parent, &actual) >= 0 ? 1 : family_refuse(family, ESTALE);
@@ -249,8 +324,10 @@ static int family_observe_child(envara_app_family *family, struct family_member 
 int envara_app_family_observe(envara_app_family *family) {
     if (!family || family->owner != getpid() || family->uncertain) return family_refuse(family, EACCES);
     if (family->retry_pending) { errno = family->retry_error; return 0; }
+    struct family_observation observation = {0};
     for (unsigned round = 0; round < 3; round++) {
-        if (!family_retire_absent(family)) return 0;
+        if (!family_recheck_absent(family, &observation) || !family_recheck_terminal(family, &observation) ||
+            !family_retire_absent(family)) return 0;
         int changed = 0;
         for (size_t i = 0; i < family->count; i++) {
             struct family_member *parent = &family->members[i];
@@ -260,16 +337,32 @@ int envara_app_family_observe(envara_app_family *family) {
             pid_t first[ENVARA_APP_FAMILY_LIMIT], second[ENVARA_APP_FAMILY_LIMIT];
             int count = family_children(parent->identity.pid, first);
             if (count < 0) return family_refuse_reason(family, ENVARA_APP_FAMILY_FAILURE_INVENTORY, EACCES, 0);
-            for (int j = 0; j < count; j++) if (!family_observe_child(family, parent, first[j])) return 0;
+            for (int j = 0; j < count; j++) {
+                int result = family_observe_child(family, &observation, parent, first[j]);
+                if (!result) return 0;
+                if (result == 2) changed = 1;
+            }
             int other = family_children(parent->identity.pid, second);
             if (other < 0) return family_refuse_reason(family, ENVARA_APP_FAMILY_FAILURE_INVENTORY, EACCES, 0);
             /* Every PID in both vectors must have complete native attribution
              * before a vector-only difference can be classified as retryable. */
-            for (int j = 0; j < other; j++) if (!family_observe_child(family, parent, second[j])) return 0;
-            if (family_member_refresh(family, parent) != 1) return family_refuse(family, ESTALE);
+            for (int j = 0; j < other; j++) {
+                int result = family_observe_child(family, &observation, parent, second[j]);
+                if (!result) return 0;
+                if (result == 2) changed = 1;
+            }
+            live = family_member_refresh(family, parent);
+            if (live != 1) {
+                /* A registered leaf can finish after both empty child scans.
+                 * Confirm its terminal generation and repeat the full round;
+                 * no new membership, signal authority or quiescence follows. */
+                if (!i || count || other || (live != 0 && live != 2) ||
+                    !family_record_terminal(family, &observation, parent, live)) return family_refuse(family, ESTALE);
+                changed = 1;
+            }
             if (other != count || memcmp(first, second, (size_t)count * sizeof(pid_t))) changed = 1;
         }
-        if (!changed) return 1;
+        if (!changed) return family_recheck_absent(family, &observation) && family_recheck_terminal(family, &observation);
     }
     return family_defer(family, ENVARA_APP_FAMILY_FAILURE_CHURN, EAGAIN);
 }

@@ -126,6 +126,8 @@ export async function buildMacOSPF({ root = ROOT, output = path.join(root, 'buil
     'known-installations/0b6d.manifest.json',
     'installer-upgrade-0359.h',
     'known-installations/0359.manifest.json',
+    'installer-upgrade-6e95.h',
+    'known-installations/6e95.manifest.json',
     'pf-filter-command.c',
     'pf-filter-command.h',
     'pf-filter-transaction.c',

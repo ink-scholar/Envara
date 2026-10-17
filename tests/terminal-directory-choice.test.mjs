@@ -57,8 +57,8 @@ test('a picked folder removed before launch requires a fresh native pick instead
 test('the chooser uses the same directory requirement for display, disabled action and submit handler', async () => {
   const source = await readFile(new URL('../src/TerminalPane.jsx', import.meta.url), 'utf8');
   assert.match(source, /const directory = terminalDirectoryChoice\(newSession, directoryFor\(host\?\.id\)\?\.cwd\);\s*const folder = directory\.path;/);
-  assert.match(source, /const confirmNewSession = async \(\) => \{[\s\S]*?if \(!host \|\| pending \|\| !terminalDirectoryChoice\(newSession\)\.ready\) return;/);
-  assert.match(source, /disabled=\{\!\!pending \|\| !host \|\| !directory\.ready \|\|/);
+  assert.match(source, /const confirmNewSession = async \(\) => \{[\s\S]*?if \(!host \|\| pending \|\| accountMutationRef\.current \|\| accountEditor \|\| !terminalDirectoryChoice\(newSession\)\.ready\) return;/);
+  assert.match(source, /disabled=\{\!\!pending \|\| !!editingAccount \|\| !host \|\| !directory\.ready \|\|/);
   assert.match(source, /\.\.\.invalidatePickedTerminalDirectory\(value\), requestId: null/);
   assert.match(source, /directory: \{ path: result\.path, token: result\.token \}, directoryNeedsSelection: false/);
 });

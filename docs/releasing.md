@@ -28,12 +28,16 @@ npm run routing:build:mac
 npm run routing:build:mac:local
 npm run routing:build:mac:acceptance
 npm run routing:build:mac:pf
+npm run routing:test:mac:pf
+npm run routing:prepare:mac:package
 npm run routing:build:mac:link-router
 ```
 
-PF 资源有固定 manifest、安装器和授权载体校验。更改其源文件后，先保留需要支持的旧安装精确快照，再审核新 manifest 和安装器摘要；按 `scripts/build-macos-pf-authorization-app.mjs` 构建匹配的载体，并同步 `electron/macos-pf-notion-trial.mjs` 的候选 pin。不要用动态信任当前文件、跳过校验或提升 readiness 来绕过不一致。载体目录只保留本次发布使用的完整资源。构建操作本身不安装或激活系统组件。
+PF 资源有固定 manifest、安装器和授权载体校验。更改其源文件后，先保留需要支持的旧安装精确快照，再审核新 manifest 和安装器摘要；按 `scripts/build-macos-pf-authorization-app.mjs` 构建匹配的载体，并同步 `electron/macos-pf-notion-trial.mjs` 的候选 pin。不要用动态信任当前文件、跳过校验或提升 readiness 来绕过不一致。`routing:prepare:mac:package` 严格核验审核 pin、源资源和载体原始构建记录，仅将选中的完整载体放入 `build/package-resources/local-authorization`，保留历史载体。缺少选中载体时调用既有构建器；已有 staging 若属于旧候选或含未知内容则拒绝覆盖，先将其移至独立归档再重新准备。该步骤不会自动更新 pin。构建操作本身不安装或激活系统组件。
 
-保留全部许可证及 Mihomo 对应源码。供应商原版二进制和签名保持原样；Envara 自有构建去除编译机绝对路径。
+原生 fixture 命令运行测试源码及已准备的原生二进制；也可用 `npm run routing:test:mac:pf -- --resources /absolute/prepared/macos-pf` 选择独立资源。它不会安装、激活或自动构建资源。
+
+保留全部许可证及 Mihomo 对应源码。Electron 的原版 `LICENSE` 和 `LICENSES.chromium.html` 必须随安装包放入 `licenses/electron/`，资源核验会检查它们与当前 Electron 分发文件一致。供应商原版二进制和签名保持原样；Envara 自有构建去除编译机绝对路径。
 
 ## 构建并核对制品
 

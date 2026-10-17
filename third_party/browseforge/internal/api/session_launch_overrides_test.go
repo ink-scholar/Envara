@@ -15,7 +15,7 @@ import (
 	"browseforge/internal/browser"
 	"browseforge/internal/profile"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 type sessionLaunchPage struct{ playwright.Page }

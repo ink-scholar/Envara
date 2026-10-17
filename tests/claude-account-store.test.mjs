@@ -93,6 +93,24 @@ test('duplicate labels are rejected within an environment without losing existin
   assert.equal((await store.create('env_two', first.name)).name, first.name);
 });
 
+test('single-account removal is atomic, preserves other labels, and never removes the default', async t => {
+  const f = await fixture(t), store = await openStore(f.root);
+  const one = await store.create('env_one', 'Remove'), two = await store.create('env_one', 'Keep');
+  await store.rename('env_one', 'default', 'Primary');
+  const before = await readFile(f.filename, 'utf8'), save = store.save;
+  store.save = async () => { throw Object.assign(new Error('Synthetic write failure'), { code: 'EIO' }); };
+  await assert.rejects(store.remove('env_one', one.id), { code: 'EIO' });
+  store.save = save;
+  assert.equal(await readFile(f.filename, 'utf8'), before);
+  assert.equal((await store.get('env_one', one.id)).name, 'Remove');
+  assert.throws(() => store.remove('env_one', 'default'), hasCode('CLAUDE_ACCOUNT_DEFAULT'));
+  await assert.rejects(store.remove('env_other', one.id), hasCode('CLAUDE_ACCOUNT_NOT_FOUND'));
+  assert.deepEqual(await store.remove('env_one', one.id), one);
+  const restarted = await openStore(f.root);
+  assert.deepEqual(await restarted.list('env_one'), [{ ...DEFAULT, name: 'Primary' }, two]);
+  await assert.rejects(store.remove('env_one', one.id), hasCode('CLAUDE_ACCOUNT_NOT_FOUND'));
+});
+
 test('adoption atomically preserves a renamed default beside a named account using the old default label', async t => {
   const f = await fixture(t), store = await openStore(f.root);
   const account = { id: `account_${'a'.repeat(32)}`, name: '默认' };

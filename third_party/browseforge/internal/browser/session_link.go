@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"browseforge/internal/profile"
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 var ErrSessionLinkChanged = errors.New("selected browser launch or route has changed")

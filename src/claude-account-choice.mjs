@@ -1,5 +1,14 @@
 export const NEW_CLAUDE_ACCOUNT = '__new__';
 
+export function claudeAccountLabel(account, t) {
+  return account.default && account.name === '默认' ? t('默认档案') : account.name;
+}
+
+export function reconcileClaudeAccountChoice(items, accountId) {
+  if (accountId === NEW_CLAUDE_ACCOUNT || items.some(account => account.id === accountId)) return accountId;
+  return items.find(account => account.default)?.id ?? items[0]?.id ?? NEW_CLAUDE_ACCOUNT;
+}
+
 const downloadErrors = {
   CLAUDE_CODE_LOCAL_INSTALL_UNAVAILABLE: '本机未找到可用的 Claude 原生安装，请选择下载独立安装。',
   CLAUDE_CODE_INSTALLATION_INVALID: '境舱的 Claude 安装无效，请检查其本地安装后重试；未改用本机版本。',

@@ -64,7 +64,6 @@ test('the terminal chooser wires its tested constraints and keeps ordinary link 
   assert.match(pane, /privacyMode !== 'off' && <small className="terminal-claude-privacy-note">\{t\('关闭遥测可能影响 Remote Control 等功能。'\)\}/);
   assert.match(pane, /账号登录；启动前检查 API 配置冲突/);
   assert.match(pane, /进入终端后运行 claude，可自行添加参数。/);
-  assert.match(pane, /登录信息按档案保留。/);
   assert.doesNotMatch(pane, /'启动 Claude Code'/, 'creation opens the prepared terminal, not Claude itself');
   assert.match(pane, /if \(event\.type === 'status' \|\| event\.type === 'exit'\) retainFailure\(event\)/);
   assert.match(pane, /retainFailure\(session\)/);

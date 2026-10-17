@@ -14,7 +14,7 @@ import (
 	"browseforge/internal/humanize"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 // --- Session endpoints ---

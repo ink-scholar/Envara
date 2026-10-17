@@ -102,7 +102,7 @@ test('UI connects all dismissal paths to the reservation and three export entrie
   assert.match(close, /value === current \? null : value/);
   assert.match(source, /pendingRef\.current\.has\(`cancelImport:\$\{args\.importId\}`\)/);
   const modal = source.slice(source.indexOf('function Modal('), source.indexOf('function Field('));
-  assert.match(modal, /event\.key === "Escape"[\s\S]*?onClose\(\)/);
+  assert.match(modal, /event\.key === "Escape"[\s\S]*?closeRef\.current\(\)/);
   assert.match(modal, /event\.target === event\.currentTarget\) onClose\(\)/);
   assert.match(modal, /label=\{t\("关闭"\)\} onClick=\{onClose\}/);
   assert.match(source, /disabled=\{!api\.isDesktop \|\| browserExportActive\(profile, pending\) \|\| busy\}/);

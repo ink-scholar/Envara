@@ -2,7 +2,7 @@
 // fetches a URL or claims to have geocoded a street address.
 // https://developers.google.com/maps/documentation/urls/get-started
 const fail = (message, code = 'INVALID_NETWORK_LOCATION') => Object.assign(new Error(message), { code });
-const allowed = new Set(['mode', 'confirmed', 'label', 'mapsUrl', 'latitude', 'longitude', 'accuracy', 'accuracyKind', 'source', 'coordinateSource', 'addressResolved', 'confirmedAt', 'detectedAt', 'egressIP', 'egressTimezone', 'timezone', 'countryCode']);
+const allowed = new Set(['mode', 'confirmed', 'label', 'mapsUrl', 'latitude', 'longitude', 'accuracy', 'accuracyKind', 'source', 'coordinateSource', 'addressResolved', 'referenceLocation', 'confirmedAt', 'detectedAt', 'egressIP', 'egressTimezone', 'timezone', 'countryCode']);
 const has = (value) => value !== undefined && value !== null && value !== '';
 function text(value, max = 500) {
   if (value == null) return '';
@@ -18,6 +18,17 @@ function coordinates(latitude, longitude) {
   if (!has(latitude) && !has(longitude)) return null;
   if (!has(latitude) || !has(longitude)) throw fail('请同时填写纬度和经度。');
   return { latitude: coordinate(latitude, -90, 90), longitude: coordinate(longitude, -180, 180) };
+}
+// Optional map context is kept separate from the IP estimate and never becomes
+// browser/native geolocation. Imports may preserve it as a nearby reference.
+function nearbyReference(value) {
+  if (value == null) return null;
+  const keys = new Set(['kind', 'label', 'latitude', 'longitude', 'source', 'attribution']);
+  if (typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !keys.has(key)) ||
+      value.kind !== 'nearby-reference' || value.source !== 'Photon' || value.attribution !== '© OpenStreetMap contributors') throw fail('位置文本格式无效。');
+  const point = coordinates(value.latitude, value.longitude), label = text(value.label);
+  if (!point || !label) throw fail('位置文本格式无效。');
+  return { kind: 'nearby-reference', label, ...point, source: 'Photon', attribution: '© OpenStreetMap contributors' };
 }
 function pair(value) {
   if (typeof value !== 'string') return null;
@@ -88,9 +99,11 @@ export function normalizeNetworkLocation(value) {
   if (!point && !label && !parsed && value.mode !== 'ip') throw fail('请填写地址、Google Maps 链接或坐标。');
   const isIP = value.mode === 'ip';
   const accuracy = isIP && point ? coordinate(value.accuracy ?? 50000, 1000, 1000000) : point ? 1000 : null;
+  const referenceLocation = isIP ? nearbyReference(value.referenceLocation) : null;
   return { mode: value.mode, confirmed: true, label, mapsUrl: parsed?.mapsUrl ?? googleMapsLocationURL({ ...point, label }), latitude: point?.latitude ?? null, longitude: point?.longitude ?? null,
     accuracy, accuracyKind: isIP ? 'ip-estimate' : 'simulation-radius', source: isIP ? 'ip-estimate' : 'manual',
     coordinateSource: point ? isIP ? 'ip-estimate' : parsed?.latitude != null && value.coordinateSource !== 'user-coordinate' ? 'google-maps-link' : 'user-coordinate' : null, addressResolved: false,
+    ...(referenceLocation ? { referenceLocation } : {}),
     ...(has(value.confirmedAt) ? { confirmedAt: text(value.confirmedAt, 64) } : {}),
     ...(has(value.detectedAt) ? { detectedAt: text(value.detectedAt, 64) } : {}),
     ...(has(value.egressIP) ? { egressIP: text(value.egressIP, 64) } : {}),
@@ -100,11 +113,11 @@ export function normalizeNetworkLocation(value) {
 }
 
 /** Private matching probe supplies all IP provenance; renderer fields cannot. */
-export function confirmNetworkLocation(input, network, confirmedAt = new Date().toISOString()) {
+export function confirmNetworkLocation(input, network, confirmedAt = new Date().toISOString(), referenceLocation = null) {
   const recommendation = recommendNetworkLocation(network);
   if (!recommendation) throw fail('请先通过代理验证实际网络出口，再确认位置。', 'NETWORK_LOCATION_NOT_VERIFIED');
   if (input?.confirmed !== true || !['ip', 'manual'].includes(input?.mode)) throw fail('请确认网络环境的位置。');
-  if (input.mode === 'ip') return normalizeNetworkLocation({ ...recommendation, confirmed: true, confirmedAt });
+  if (input.mode === 'ip') return normalizeNetworkLocation({ ...recommendation, confirmed: true, confirmedAt, referenceLocation });
   const manual = normalizeNetworkLocation(input);
   return { ...manual, confirmedAt, detectedAt: recommendation.detectedAt, egressIP: recommendation.egressIP, egressTimezone: recommendation.egressTimezone, timezone: recommendation.timezone, countryCode: recommendation.countryCode };
 }

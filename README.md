@@ -5,7 +5,7 @@
 <p align="center"><strong>给每一套工作，一个独立的境舱。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原创代码许可证：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.25-475569" alt="Envara 0.5.25" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.0-475569" alt="Envara 1.0.0" /></a>
   <a href="docs/readme/en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 种 README 语言" /></a>
 </p>
 <p align="center">

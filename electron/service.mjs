@@ -7,7 +7,9 @@ import EnvaraStore from './store.mjs';
 import { normalizePrivacy } from './privacy-policy.mjs';
 import { isInterfaceLanguage } from '../shared/interface-languages.mjs';
 import { isAppearancePreference } from '../shared/appearance.mjs';
+import { assertHttpProxyUsername } from '../shared/proxy-auth.mjs';
 import { ProxyNetworkProbe, proxyFingerprint } from './proxy-network.mjs';
+import { AddressGeocoder } from './address-geocoder.mjs';
 import { assertNetworkLocationMatchesEgress, confirmNetworkLocation, networkLocationGeolocation, normalizeNetworkLocation, recommendNetworkLocation } from '../shared/network-location.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -152,6 +154,7 @@ export class EnvaraService {
     this.system = { platform: system.platform ?? process.platform, appVersion: system.appVersion ?? '0.1.0', dataDir: this.store.dataDir };
     this.onChange = onChange;
     this.networkProbe = options.networkProbe ?? new ProxyNetworkProbe();
+    this.addressGeocoder = options.addressGeocoder ?? new AddressGeocoder();
     this.locationPreviews = new Map();
     this.states = new Map();
     this.pendingStarts = new Set();
@@ -245,11 +248,11 @@ export class EnvaraService {
     await this.ready;
     if (this.closed) throw failure('应用正在退出。', 'APP_CLOSING');
     record(args, '操作参数');
-    const methods = new Set(['createProfile', 'updateProfile', 'cloneProfile', 'deleteProfile', 'clearProfile', 'startProfile', 'stopProfile', 'focusProfile', 'saveProxy', 'deleteProxy', 'checkProxy', 'previewProxyNetwork', 'saveSettings', 'installEngine', 'importProfiles', 'exportProfiles']);
+    const methods = new Set(['createProfile', 'updateProfile', 'cloneProfile', 'deleteProfile', 'clearProfile', 'startProfile', 'stopProfile', 'focusProfile', 'saveProxy', 'deleteProxy', 'checkProxy', 'previewProxyNetwork', 'searchNetworkAddress', 'saveSettings', 'installEngine', 'importProfiles', 'exportProfiles']);
     if (method === 'getSnapshot' || method === 'snapshot') return this.snapshot();
     if (!methods.has(method)) throw failure('不支持的操作。', 'UNKNOWN_METHOD');
     const result = await this[method](args);
-    return ['checkProxy', 'previewProxyNetwork', 'exportProfiles'].includes(method) ? result : this.snapshot();
+    return ['checkProxy', 'previewProxyNetwork', 'searchNetworkAddress', 'exportProfiles'].includes(method) ? result : this.snapshot();
   }
 
   async createProfile({ profile }) {
@@ -339,6 +342,7 @@ export class EnvaraService {
 
   async launch(profile, proxy, state) {
     try {
+      assertHttpProxyUsername(proxy?.protocol, proxy?.username);
       await mkdir(this.profileDir(profile.id), { recursive: true, mode: 0o700 });
       let scopedProfile = profile;
       if (proxy?.location?.confirmed === true) {
@@ -410,6 +414,7 @@ export class EnvaraService {
 
   async saveProxy({ proxy, locationPreviewToken }) {
     const config = proxyConfig(proxy);
+    assertHttpProxyUsername(config.protocol, config.username);
     const requestedLocation = Object.hasOwn(proxy, 'location') ? normalizeNetworkLocation(proxy.location) : undefined;
     await this.store.transaction((workspace) => {
       const previous = proxy.id != null ? workspace.proxies.find((item) => item.id === proxy.id) : null;
@@ -419,7 +424,7 @@ export class EnvaraService {
       if (requestedLocation && (!unchanged || locationPreviewToken != null)) {
         const preview = this.locationPreviews.get(locationPreviewToken);
         if (!preview || preview.expiresAt <= Date.now() || preview.fingerprint !== proxyFingerprint(config)) throw failure('请先检测当前代理，再确认网络环境的位置。', 'NETWORK_LOCATION_NOT_VERIFIED');
-        config.location = confirmNetworkLocation(proxy.location, preview.network);
+        config.location = confirmNetworkLocation(proxy.location, preview.network, undefined, preview.referenceLocation);
       } else if (requestedLocation === null) config.location = null;
       else if (requestedLocation || previousLocation) config.location = requestedLocation ?? previousLocation;
       if (proxy.id != null) {
@@ -439,20 +444,34 @@ export class EnvaraService {
     this.changed();
   }
 
-  async previewProxyNetwork({ proxy }) {
+  async previewProxyNetwork({ proxy, language = 'en' }) {
     await this.ready;
     if (this.closed) throw failure('应用正在退出。', 'APP_CLOSING');
     const config = proxyConfig({ ...proxy, name: proxy?.name || '网络出口', location: undefined });
     const network = await this.networkProbe.probe(config, { force: true });
     const locationRecommendation = recommendNetworkLocation(network);
+    let referenceLocation = null;
+    if (locationRecommendation?.latitude != null) {
+      try { referenceLocation = await this.addressGeocoder.reverse({ coordinates: network.geolocation, proxy: config, language }); }
+      catch { /* Nearby map context is optional; the measured egress stays intact. */ }
+    }
+    if (this.closed) throw failure('应用正在退出。', 'APP_CLOSING');
     let locationPreviewToken = null;
     if (locationRecommendation) {
       for (const [token, preview] of this.locationPreviews) if (preview.expiresAt <= Date.now()) this.locationPreviews.delete(token);
       if (this.locationPreviews.size >= 128) this.locationPreviews.delete(this.locationPreviews.keys().next().value);
       locationPreviewToken = randomUUID();
-      this.locationPreviews.set(locationPreviewToken, { fingerprint: proxyFingerprint(config), network: structuredClone(network), expiresAt: Date.now() + 15 * 60 * 1000 });
+      this.locationPreviews.set(locationPreviewToken, { fingerprint: proxyFingerprint(config), network: structuredClone(network), referenceLocation: structuredClone(referenceLocation), expiresAt: Date.now() + 15 * 60 * 1000 });
     }
-    return { network, locationRecommendation, locationPreviewToken };
+    return { network, locationRecommendation, referenceLocation, locationPreviewToken };
+  }
+  async searchNetworkAddress({ proxy, locationPreviewToken, query, language }) {
+    await this.ready;
+    if (this.closed) throw failure('应用正在退出。', 'APP_CLOSING');
+    const config = proxyConfig({ ...proxy, name: proxy?.name || '网络出口', location: undefined });
+    const preview = this.locationPreviews.get(locationPreviewToken);
+    if (!preview || preview.expiresAt <= Date.now() || preview.fingerprint !== proxyFingerprint(config)) throw failure('请先检测当前代理，再查询地址。', 'ADDRESS_NETWORK_NOT_VERIFIED');
+    return this.addressGeocoder.search({ query, language, proxy: config, bias: preview.network.geolocation });
   }
 
   async deleteProxy({ id: proxyId }) {
@@ -471,6 +490,7 @@ export class EnvaraService {
     id(proxyId);
     const proxy = (await this.store.read()).proxies.find((item) => item.id === proxyId);
     if (!proxy) throw failure('网络出口不存在。', 'PROXY_NOT_FOUND');
+    assertHttpProxyUsername(proxy.protocol, proxy.username);
     return new Promise((resolve) => {
       const started = performance.now();
       const socket = net.createConnection({ host: proxy.host, port: proxy.port });
@@ -558,6 +578,7 @@ export class EnvaraService {
     await this.ready;
     this.closed = true;
     this.networkProbe.close?.();
+    this.addressGeocoder.close?.();
     this.locationPreviews.clear();
     await Promise.allSettled([...this.pendingStarts]);
     if (this.runtime?.closeAll) await this.runtime.closeAll();

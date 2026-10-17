@@ -5,6 +5,20 @@ import { TerminalStreamStore, splitTerminalInput, terminalHeightForPointer, term
 const state = (sequence, replay, status = 'running') => ({ profiles: [{ profileId: 'profile-1', name: 'One', cwd: '/workspace', sessions: [{ sessionId: 'session-1', profileId: 'profile-1', sequence, replay, status, startedAt: '2026-10-07T00:00:00.000Z' }] }] });
 const data = (sequence, value) => ({ type: 'data', profileId: 'profile-1', sessionId: 'session-1', sequence, data: value });
 
+test('workspace notifications reread persisted state without creating or changing sessions', () => {
+  const store = new TerminalStreamStore();
+  store.applySnapshot(state(2, 'kept output'));
+  const before = store.snapshot();
+  assert.deepEqual(store.applyEvent({ type: 'workspace', profileId: 'profile-1' }), { writes: [], refreshNeeded: true });
+  assert.deepEqual(store.snapshot(), before);
+  assert.equal(store.replayFor('session-1'), 'kept output');
+  store.applySnapshot({ profiles: [{ ...before.profiles[0], cwd: '/new-workspace' }] }, { complete: true });
+  assert.equal(store.snapshot().profiles[0].cwd, '/new-workspace');
+  assert.equal(store.snapshot().profiles[0].sessions.length, 1);
+  for (const profileId of [undefined, null, '', 17])
+    assert.deepEqual(store.applyEvent({ type: 'workspace', profileId }), { writes: [], refreshNeeded: false });
+});
+
 test('buffers events arriving before the snapshot and drops replay-covered sequences', () => {
   const store = new TerminalStreamStore();
   assert.equal(store.applyEvent(data(3, 'already in replay')).refreshNeeded, true);

@@ -20,7 +20,7 @@ import (
 	"browseforge/internal/profile"
 	bfruntime "browseforge/internal/runtime"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 const chromiumWebRTCIPHandlingArg = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"

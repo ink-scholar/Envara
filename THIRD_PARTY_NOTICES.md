@@ -6,7 +6,7 @@ Envara's original application code is licensed under the MIT License. Third-part
 
 | Component | License | Copyright / source |
 | --- | --- | --- |
-| Electron | MIT | Electron contributors; 2013–2020 GitHub Inc. · [source](https://github.com/electron/electron) |
+| Electron 44.6.0 | MIT | Electron contributors; 2013–2020 GitHub Inc. · [source](https://github.com/electron/electron) |
 | React and React DOM | MIT | Meta Platforms, Inc. and affiliates · [source](https://github.com/facebook/react) |
 | Vite | MIT | 2019–present VoidZero Inc. and Vite contributors · [source](https://github.com/vitejs/vite) |
 | @vitejs/plugin-react | MIT | 2019–present Yuxi (Evan) You and Vite contributors · [source](https://github.com/vitejs/vite-plugin-react) |
@@ -27,13 +27,13 @@ Envara's original application code is licensed under the MIT License. Third-part
 | https-proxy-agent 9.1.0 / socks-proxy-agent 10.1.0 | MIT | 2013 Nathan Rajlich · [source](https://github.com/TooTallNate/proxy-agents) |
 | ipaddr.js 2.5.0 | MIT | 2011–2017 whitequark · [source](https://github.com/whitequark/ipaddr.js) |
 
-Electron includes Chromium, Node.js and additional components with their own licenses. The Electron runtime distribution includes its `LICENSE` and `LICENSES.chromium.html` notices. Transitive dependencies and build tools may carry additional licenses; their notices are retained in their distributions.
+Desktop package resources retain Electron 44.6.0's unmodified MIT license at `licenses/electron/LICENSE` and its runtime distribution's Chromium and third-party notices at `licenses/electron/LICENSES.chromium.html`. Electron includes Chromium, Node.js and additional components that retain their respective licenses. Transitive dependencies and build tools may carry additional licenses; their notices are retained in their distributions.
 
 ## Vendored backend and prepared resources
 
 BrowseForge v2.1.15 is incorporated at commit `fa9e0bb670e749706a9c8f2d4095333347d6c521`. Its original MIT copyright and license are preserved under `third_party/browseforge/`. Envara applies local desktop lifecycle, manual identity, and integration patches. The source baseline is recorded in [ENVARA_UPSTREAM.md](third_party/browseforge/ENVARA_UPSTREAM.md).
 
-The prepared backend resources include a compiled Go sidecar, the official Playwright driver 1.61.1 and its Node.js runtime. The Go standard library uses the Go project's BSD-style license; Node.js carries its own MIT and third-party notices. The resource builders retain the Go runtime and module licenses in `build/backend/licenses/`, and the driver, binding, Node and bundled dependency notices beside the prepared driver. Build provenance records exact versions and checksums. These generated resources are excluded from the source repository and are separate from browser-engine binaries.
+The prepared backend resources include a compiled Go sidecar, the official Playwright driver 1.60.0 and its Node.js runtime. The Go standard library uses the Go project's BSD-style license; Node.js carries its own MIT and third-party notices. The resource builders retain the Go runtime and module licenses in `build/backend/licenses/`, and the driver, binding, Node and bundled dependency notices beside the prepared driver. Build provenance records exact versions and checksums. These generated resources are excluded from the source repository and are separate from browser-engine binaries.
 
 ### Build-time Camoufox identity data
 
@@ -127,6 +127,12 @@ The compiled CloakBrowser Chromium binary is **not included** in the Envara sour
 The wrapper's MIT license does not apply to that binary. It is governed by [CloakBrowser Binary License v1.3, July 2026](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md), including restrictions on redistribution and third-party hosted browser access. Version access can require an upstream subscription. The official license, as applicable to the version obtained, is authoritative; Envara does not grant an additional license to the binary.
 
 The multi-engine catalog also includes Camoufox and BrowseForge Chromium Alpha. Camoufox source is under [MPL-2.0](https://github.com/daijro/camoufox/blob/main/LICENSE); the BrowseForge Chromium runtime repository uses [Apache-2.0](https://github.com/nczz/browseforge-runtime-chromium/blob/92cfe89356ef0e7fb22979f5ee8d95a0a832d69b/LICENSE), with Chromium and other upstream components retaining their own notices. Their browser binaries are obtained through the respective official channels, not redistributed by Envara. Catalog integration does not mean a binary has been installed or accepted on every platform; current evidence is recorded in the [capability matrix](docs/capability-matrix.md).
+
+## Address lookup service (development source)
+
+The development source adds user-triggered address lookup through the selected verified proxy using the public [Photon demo server](https://github.com/komoot/photon#demo-server), operated by komoot. Photon software is licensed under Apache-2.0; no Photon server or database is bundled with Envara. The public service permits moderate usage, may throttle requests and provides no availability guarantee. Envara limits requests and caches recent results in memory.
+
+Returned geographic data is attributed to [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright) and is available under the Open Database License (ODbL). The lookup result displays this attribution. Selecting a result supplies a user-confirmed coordinate; it does not verify an IP address or establish a residential address. This service integration is not part of the released Envara 0.5.25 baseline.
 
 ## Design references and assets
 

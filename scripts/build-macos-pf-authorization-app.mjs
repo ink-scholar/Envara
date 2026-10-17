@@ -57,6 +57,7 @@ const KNOWN_PRIORS = new Set([
   '88f8c7363d7b689829e712b39f26c09ca9856685cc71fd8b1e05cbeb43027715',
   '0b6d9bffd6629d4855bf44b5d7f2e99b88e9732020cd84f72919dcae35020a13',
   '03596ac0849e4e91a39367934e7555ab166eb9084a5ca2bb15a3a0230b9d0539',
+  '6e95b89a2a3ca407abf6b80591d03c9b7581db32103f51e3f6db29b3cf726f7c',
 ]);
 const LEAVES = [...Object.keys(PF_MANIFEST_FILES), 'manifest.json', 'EnvaraPFInstall'].sort();
 const within = (base, target) => target === base || (!path.relative(base, target).startsWith('../') && !path.isAbsolute(path.relative(base, target)));

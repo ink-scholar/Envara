@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 func TestStartPlaywrightDriverRequiresExplicitBundledMode(t *testing.T) {
@@ -99,7 +99,10 @@ func TestBundledPlaywrightDriverRejectsWrongVersionBeforeRun(t *testing.T) {
 	}
 	t.Setenv("ENVARA_DESKTOP_BUNDLED_DRIVER", "1")
 	directory := t.TempDir()
-	cli := filepath.Join(directory, "cli.js")
+	cli := filepath.Join(directory, "package", "cli.js")
+	if err := os.Mkdir(filepath.Dir(cli), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	node := filepath.Join(directory, "node")
 	logFile := filepath.Join(directory, "calls")
 	if err := os.WriteFile(cli, []byte("owned unused CLI fixture\n"), 0o600); err != nil {

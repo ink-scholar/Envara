@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 type lifecyclePoolPage struct {

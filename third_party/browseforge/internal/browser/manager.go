@@ -16,7 +16,7 @@ import (
 	"browseforge/internal/profile"
 	bfruntime "browseforge/internal/runtime"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 // Session represents a running browser profile
@@ -30,6 +30,7 @@ type Session struct {
 	Context        playwright.BrowserContext
 	Page           playwright.Page
 	relay          *SOCKS5Relay
+	privacyAddon   *firefoxPrivacyAddon
 	ConnectURL     string // Bind endpoint for external Playwright clients
 	ProfileDir     string
 	UserDataDir    string
@@ -465,6 +466,9 @@ func (m *Manager) closeSessionResources(s *Session, reason string) {
 		}
 		if s.relay != nil {
 			s.relay.Close()
+		}
+		if s.privacyAddon != nil {
+			s.privacyAddon.Close()
 		}
 		slog.Info("session resources closed", "session", s.ID, "reason", reason, "profile", s.ProfileID, "runtime_id", s.RuntimeID, "connectURL", s.ConnectURL)
 	})

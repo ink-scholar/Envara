@@ -54,7 +54,7 @@ test('explicit service roots permit sibling APIs while outside sites and hostnam
 
 test('top-level navigation uses its destination while fetches and child navigation retain the actual top party', async () => {
   let handler;
-  const context = { clearPermissions: async () => {}, setGeolocation: async () => {}, grantPermissions: async () => {}, route: async (_pattern, callback) => { handler = callback; } };
+  const context = { pages: () => [], on: () => {}, routeWebSocket: async () => {}, clearPermissions: async () => {}, setGeolocation: async () => {}, grantPermissions: async () => {}, route: async (_pattern, callback) => { handler = callback; } };
   const state = await applyBrowserPrivacy(context, { privacy: { mode: 'standard' }, geolocation: { latitude: 0, longitude: 0, accuracy: 50000 } });
   const top = { url: () => 'https://example.com/old-page', parentFrame: () => null };
   const child = { url: () => 'https://child.example.net/', parentFrame: () => top };
@@ -105,4 +105,83 @@ test('the BrowseForge kernel enforces exactly the same tracker hosts and service
   const jsRoots = Function(`return ${/const TRACKER_SERVICE_ROOTS = Object\.freeze\((\{[\s\S]*?\})\);/.exec(js)[1]}`)();
   assert.deepEqual(goRoots, jsRoots);
   for (const domain of STRICT_TRACKER_DOMAINS) assert.ok(jsRoots[domain], `${domain} has an explicit service root`);
+});
+
+test('WS and WSS keep tier, first-party and service-root exceptions', () => {
+  for (const scheme of ['ws', 'wss']) {
+    const target = `${scheme}://api.segment.io/live`;
+    assert.equal(shouldBlockTracker(target, { firstPartyUrl: 'https://example.test' }), true);
+    assert.equal(shouldBlockTracker(target, { firstPartyUrl: 'https://app.segment.com' }), false);
+    assert.equal(shouldBlockTracker(target, { firstPartyUrl: 'https://app.segment.com.evil.test' }), true);
+    assert.equal(shouldBlockTracker(target, { mode: 'off' }), false);
+    assert.equal(shouldBlockTracker(`${scheme}://api.mixpanel.com/live`, { mode: 'standard' }), false);
+    assert.equal(shouldBlockTracker(`${scheme}://api.mixpanel.com/live`, { mode: 'strict' }), true);
+    assert.equal(shouldBlockTracker(`${scheme}://chat.example.test/live`, { mode: 'strict' }), false);
+  }
+});
+
+test('WebSocket routes cover existing and new pages, preserve page ownership and close blocked sockets without connecting', async () => {
+  const page = { url: () => 'https://app.segment.com/', routeWebSocket: async (_pattern, callback) => { page.handler = callback; } };
+  let newPage, fallback;
+  const context = { pages: () => [page], on: (event, callback) => { if (event === 'page') newPage = callback; },
+    clearPermissions: async () => {}, setGeolocation: async () => {}, grantPermissions: async () => {}, route: async () => {},
+    routeWebSocket: async (_pattern, callback) => { fallback = callback; } };
+  const state = await applyBrowserPrivacy(context, { geolocation: { latitude: 0, longitude: 0, accuracy: 50000 } });
+  const invoke = async (handler, url, failure = false) => {
+    let connected = 0, closed;
+    await handler({ url: () => url, close: async options => { closed = options.code; }, connectToServer: () => { connected++; if (failure) throw Error('offline'); } });
+    return { connected, closed };
+  };
+  assert.deepEqual(await invoke(page.handler, 'wss://api.segment.io/live'), { connected: 1, closed: undefined });
+  assert.deepEqual(await invoke(fallback, 'wss://api.segment.io/live'), { connected: 0, closed: 1008 });
+  const outside = { url: () => 'https://example.test/', routeWebSocket: async (_pattern, callback) => { outside.handler = callback; } };
+  newPage(outside);
+  assert.deepEqual(await invoke(outside.handler, 'ws://api.segment.io/live'), { connected: 0, closed: 1008 });
+  assert.deepEqual(await invoke(outside.handler, 'wss://chat.example.test/live'), { connected: 1, closed: undefined });
+  assert.deepEqual(await invoke(outside.handler, 'wss://chat.example.test/live', true), { connected: 1, closed: 1011 });
+  assert.equal(snapshotPrivacy(state).blockedWebSockets, 2);
+  assert.equal(snapshotPrivacy(state).blockedRequests, 2);
+  assert.equal(snapshotPrivacy(state).trackerScope, 'third-party-http-websocket');
+});
+
+test('enabled privacy fails when WebSocket routing is unsupported; off does not require it', async () => {
+  const context = { clearPermissions: async () => {}, setGeolocation: async () => {}, grantPermissions: async () => {}, route: async () => {} };
+  const geolocation = { latitude: 0, longitude: 0, accuracy: 50000 };
+  await assert.rejects(applyBrowserPrivacy(context, { geolocation }), { code: 'INVALID_PRIVACY_POLICY' });
+  await applyBrowserPrivacy(context, { geolocation, privacy: 'off' });
+});
+
+test('Cloak constructor adapter is identical in both launchers and resolves base URLs before native construction', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { runInNewContext } = await import('node:vm');
+  let install, policy;
+  const context = { pages: () => [], on: () => {}, clearPermissions: async () => {}, setGeolocation: async () => {}, grantPermissions: async () => {}, route: async () => {},
+    addInitScript: async (fn, args) => { install = fn; policy = args; } };
+  const state = await applyBrowserPrivacy(context, { websocketRouting: 'constructor', geolocation: { latitude: 0, longitude: 0, accuracy: 50000 } });
+  assert.equal(snapshotPrivacy(state).blockedWebSockets, null);
+  const source = await readFile(new URL('../third_party/browseforge/internal/browser/privacy_websocket_constructor.go', import.meta.url), 'utf8');
+  assert.equal(/const constructorWebSocketPolicyScript = `([\s\S]*?)`/.exec(source)[1], install.toString());
+  const run = ({ target, first = 'https://example.test/', base = first, mode = 'standard', ancestors, blockLoopback = false }) => {
+    const native = [];
+    function NativeSocket(value) { native.push(value); }
+    const sandbox = { WebSocket: NativeSocket, URL, DOMException, document: { baseURI: base }, location: { href: first, ancestorOrigins: ancestors }, policy: { ...policy, mode, blockLoopback }, target };
+    sandbox.top = ancestors ? Object.defineProperty({}, 'location', { get() { throw Error('cross origin'); } }) : { location: { href: first } };
+    runInNewContext(`(${install.toString()})(policy)`, sandbox);
+    let error;
+    try { runInNewContext('new WebSocket(target)', sandbox); } catch (caught) { error = caught.name; }
+    return { native, error };
+  };
+  assert.deepEqual(run({ target: '/live', base: 'wss://api.segment.io/' }), { native: [], error: 'SecurityError' });
+  assert.deepEqual(run({ target: 'wss://api.segment.io/live', first: 'https://app.segment.com/' }), { native: ['wss://api.segment.io/live'], error: undefined });
+  assert.deepEqual(run({ target: 'wss://api.segment.io/live', first: 'https://api.segment.io/', ancestors: ['https://example.test'] }), { native: [], error: 'SecurityError' });
+  assert.deepEqual(run({ target: 'wss://api.segment.io/live', mode: 'off' }), { native: ['wss://api.segment.io/live'], error: undefined });
+  for (const host of ['127.0.0.1', '127.1', 'localhost', '[::1]', '[::ffff:127.0.0.1]']) {
+    assert.deepEqual(run({ target: `ws://${host}/live`, mode: 'off', blockLoopback: true }), { native: [], error: 'SecurityError' }, host);
+  }
+  for (const host of ['127.example.test', 'localhost.example.test', '[::2]']) {
+    assert.deepEqual(run({ target: `ws://${host}/live`, blockLoopback: true }), { native: [`ws://${host}/live`], error: undefined }, host);
+  }
+  let coerced = 0;
+  assert.deepEqual(run({ target: { toString() { coerced++; return 'wss://chat.example.test/'; } } }), { native: ['wss://chat.example.test/'], error: undefined });
+  assert.equal(coerced, 1);
 });

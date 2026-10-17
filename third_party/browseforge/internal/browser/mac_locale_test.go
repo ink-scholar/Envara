@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mxschmitt/playwright-go"
+	"github.com/playwright-community/playwright-go"
 )
 
 func TestMacLocaleLauncherQuotesExecutableAndForwardsArguments(t *testing.T) {

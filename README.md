@@ -45,6 +45,8 @@ Envara 境舱是开源的本地桌面工作台。为不同项目、账号或地�
 
 从 [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) 下载 **macOS Apple Silicon（arm64）** DMG 或 ZIP，附 SHA-256 校验文件。当前制品未使用 Apple Developer ID 签名，也未公证；安装步骤见指南。其他平台暂不提供已验证制品。
 
+**第一次使用，建议从一个项目开始。** 先添加并检测网络出口，再创建环境、选择浏览器；需要终端时选好工作目录，需要桌面软件时绑定受支持的应用。以后回到同一环境，可以沿用已保存的浏览资料、终端配置和应用数据，减少切换工具时的重复配置。
+
 [使用指南](docs/user-guide.md) · [全部功能](docs/capability-matrix.md) · [验证范围](docs/verification.md) · [从源码开发与贡献](CONTRIBUTING.md) · [反馈问题](https://github.com/ink-scholar/Envara/issues)
 
 ## 支持境舱

@@ -45,6 +45,8 @@ See [capabilities and limits](../capability-matrix.md) for attached-app system a
 
 Download the **macOS Apple Silicon (arm64)** DMG or ZIP from [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest), with SHA-256 checksums. Current artifacts are not signed with an Apple Developer ID or notarized; see the guide for installation steps. Verified builds for other platforms are not available yet.
 
+**For your first session, start with one project.** Add and check a network route, then create an environment and choose a browser. Select a working directory when opening a terminal, or attach a supported desktop app as needed. Return to the same environment to reuse your saved browser data, terminal settings and app data, with less setup when switching between tools.
+
 [User guide](../user-guide.md) · [All features](../capability-matrix.md) · [Verification scope](../verification.md) · [Develop and contribute](../../CONTRIBUTING.md) · [Report an issue](https://github.com/ink-scholar/Envara/issues)
 
 ## Support Envara

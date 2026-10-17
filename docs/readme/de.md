@@ -147,4 +147,6 @@ Die Web-Vorschau dient ausschließlich der Oberflächenentwicklung. Echte Browse
 
 Der Originalcode von Envara steht unter [MIT](../../LICENSE). BrowseForge behält seine [MIT-Lizenz](../../third_party/browseforge/LICENSE) und die [Dokumentation der festgelegten Upstream-Version](../../third_party/browseforge/ENVARA_UPSTREAM.md). Der separate Mihomo-Kern behält [GPLv3](../../third_party/proxy-core/LICENSE) und seinen [zugehörigen Quellcode](../../third_party/proxy-core/SOURCE.md). Für Browser-Binärdateien gelten eigene Lizenzen; sie sind nicht von der MIT-Lizenz der App erfasst. Die vollständigen Angaben stehen in den [Drittanbieterhinweisen](../../THIRD_PARTY_NOTICES.md).
 
-[Fehlerberichte](https://github.com/ink-scholar/Envara/issues), Codebeiträge, verbesserte Übersetzungen und Sterne sind willkommen. Jede Unterstützung ist freiwillig; ein Spendenkanal ist noch nicht aktiviert. [Projekt unterstützen](../SUPPORT.md)
+Die Entwicklung verursacht erhebliche Kosten für die KI-Nutzung. Wenn Envara dir hilft, kannst du das Projekt freiwillig unterstützen: [USDT](../SUPPORT.md#usdt) · [USDC](../SUPPORT.md#usdc) · [Binance](../SUPPORT.md#binance). Sterne, Fehlerberichte, Übersetzungen und Codebeiträge helfen ebenfalls.
+
+[Ausführliche Anleitung (auf vereinfachtem Chinesisch)](../user-guide.md)

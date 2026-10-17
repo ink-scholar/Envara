@@ -147,4 +147,6 @@ Web プレビューはインターフェース開発専用です。実際のブ�
 
 Envara の独自コードには [MIT](../../LICENSE) を適用します。BrowseForge は元の [MIT ライセンス](../../third_party/browseforge/LICENSE)と[固定バージョンの記録](../../third_party/browseforge/ENVARA_UPSTREAM.md)を保持しています。独立した Mihomo コアは [GPLv3](../../third_party/proxy-core/LICENSE)と[対応するソースコード](../../third_party/proxy-core/SOURCE.md)を維持しています。ブラウザーのバイナリにはそれぞれのライセンスが適用され、アプリの MIT ライセンスには含まれません。詳しい帰属は[第三者に関する通知](../../THIRD_PARTY_NOTICES.md)をご覧ください。
 
-[問題報告](https://github.com/ink-scholar/Envara/issues)、コードや翻訳への貢献、Star を歓迎します。支援はすべて任意です。寄付窓口はまだ開設していません。[プロジェクトを支援](../SUPPORT.md)
+開発には多くの AI 利用費用がかかっています。Envara が役立った方は、任意でご支援いただけると幸いです：[USDT](../SUPPORT.md#usdt) · [USDC](../SUPPORT.md#usdc) · [Binance](../SUPPORT.md#binance)。Star、問題報告、翻訳やコードへの貢献も歓迎します。
+
+[詳しい使い方（簡体字中国語）](../user-guide.md)

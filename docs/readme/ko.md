@@ -147,4 +147,6 @@ Web 미리 보기는 인터페이스 개발용입니다. 실제 브라우저, PT
 
 Envara의 자체 코드에는 [MIT](../../LICENSE)가 적용됩니다. BrowseForge는 기존 [MIT 라이선스](../../third_party/browseforge/LICENSE)와 [고정 버전 기록](../../third_party/browseforge/ENVARA_UPSTREAM.md)을 유지합니다. 독립 Mihomo 코어는 [GPLv3](../../third_party/proxy-core/LICENSE)와 [해당 소스 코드](../../third_party/proxy-core/SOURCE.md)를 유지합니다. 브라우저 바이너리에는 각자의 라이선스가 적용되며 앱의 MIT 라이선스에 포함되지 않습니다. 전체 출처 및 라이선스 정보는 [타사 고지](../../THIRD_PARTY_NOTICES.md)를 참고하세요.
 
-[문제 보고](https://github.com/ink-scholar/Envara/issues), 코드 기여, 번역 개선과 Star를 환영합니다. 모든 지원은 자발적이며, 기부 채널은 아직 열려 있지 않습니다. [프로젝트 지원](../SUPPORT.md)
+개발에는 많은 AI 사용 비용이 들었습니다. Envara가 도움이 되었다면 자발적인 후원을 환영합니다: [USDT](../SUPPORT.md#usdt) · [USDC](../SUPPORT.md#usdc) · [Binance](../SUPPORT.md#binance). Star, 문제 보고, 번역과 코드 기여도 큰 도움이 됩니다.
+
+[자세한 사용 안내（중국어 간체）](../user-guide.md)

@@ -147,4 +147,6 @@ Web 預覽僅用於介面開發；真實瀏覽器、PTY 和系統路由需要桌
 
 Envara 原創程式碼採用 [MIT](../../LICENSE)。BrowseForge 保留其 [MIT 授權](../../third_party/browseforge/LICENSE)及[固定版本紀錄](../../third_party/browseforge/ENVARA_UPSTREAM.md)。獨立 Mihomo 核心保留 [GPLv3](../../third_party/proxy-core/LICENSE)及[對應原始碼](../../third_party/proxy-core/SOURCE.md)。瀏覽器二進位檔適用各自授權，不包含在應用程式的 MIT 授權內。完整歸屬請見[第三方聲明](../../THIRD_PARTY_NOTICES.md)。
 
-歡迎[回報問題](https://github.com/ink-scholar/Envara/issues)、提交程式碼、改進翻譯或 Star。支持均為自願；捐贈管道尚未啟用。[支持專案](../SUPPORT.md)
+開發中投入了大量 AI 呼叫成本。如果 Envara 對你有幫助，歡迎自願支持：[USDT](../SUPPORT.md#usdt) · [USDC](../SUPPORT.md#usdc) · [Binance](../SUPPORT.md#binance)。Star、回報問題、翻譯與程式碼貢獻同樣重要。
+
+[詳細使用指南（簡體中文）](../user-guide.md)

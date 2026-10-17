@@ -147,4 +147,6 @@ La vista previa web solo sirve para desarrollar la interfaz; los navegadores rea
 
 El código original de Envara utiliza la licencia [MIT](../../LICENSE). BrowseForge conserva su [licencia MIT](../../third_party/browseforge/LICENSE) y el [registro de la versión fijada](../../third_party/browseforge/ENVARA_UPSTREAM.md). El núcleo independiente Mihomo conserva la licencia [GPLv3](../../third_party/proxy-core/LICENSE) y el [código fuente correspondiente](../../third_party/proxy-core/SOURCE.md). Los binarios de los navegadores están sujetos a sus propias licencias y no están incluidos en la licencia MIT de la aplicación. Consulta los [avisos de terceros](../../THIRD_PARTY_NOTICES.md) para conocer todas las atribuciones.
 
-Puedes [informar de problemas](https://github.com/ink-scholar/Envara/issues), contribuir código, mejorar las traducciones o dar una estrella al proyecto. Todo apoyo es voluntario; los canales de donación aún no están habilitados. [Apoyar el proyecto](../SUPPORT.md)
+El desarrollo ha supuesto un gasto considerable en servicios de IA. Si Envara te resulta útil, puedes apoyarlo de forma voluntaria: [USDT](../SUPPORT.md#usdt) · [USDC](../SUPPORT.md#usdc) · [Binance](../SUPPORT.md#binance). Las estrellas, los informes de problemas, las traducciones y las contribuciones de código también ayudan.
+
+[Guía de uso detallada (en chino simplificado)](../user-guide.md)

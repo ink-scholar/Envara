@@ -222,6 +222,7 @@ export function BrowserWorkspace({
         <div className="browser-empty">
           <Browsers size={34} weight="duotone" aria-hidden="true" />
           <h2>{translate(profiles.length ? '没有匹配的环境' : '添加第一个浏览器环境')}</h2>
+          {profiles.length === 0 && <p>{translate('请先在「环境」页新建环境并选择浏览器内核。')}</p>}
           {profiles.length > 0 && (
             <button type="button" className="button" onClick={() => { setQuery(''); setFilter('all'); }}>
               {translate('显示全部')}

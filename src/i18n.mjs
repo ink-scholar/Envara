@@ -641,6 +641,7 @@ export const english = {
   "添加出口": "Add network",
   "添加代理后，可在环境配置中选择对应的网络出口。": "Add a proxy, then select it in the environment settings.",
   "添加第一个浏览器环境": "Add your first browser environment",
+  "请先在「环境」页新建环境并选择浏览器内核。": "First, create an environment and choose a browser engine on the “Environments” page.",
   "添加环境": "Add environment",
   "添加软件": "Add application",
   "添加软件到这个境舱": "Add an application to this environment",

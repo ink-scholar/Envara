@@ -536,6 +536,7 @@
   "添加出口": "Añadir red",
   "添加代理后，可在环境配置中选择对应的网络出口。": "Añade un proxy y luego selecciónalo en los ajustes del entorno.",
   "添加第一个浏览器环境": "Añade tu primer entorno de navegador",
+  "请先在「环境」页新建环境并选择浏览器内核。": "Primero, crea un entorno y elige un motor de navegador en la página «Entornos».",
   "添加环境": "Añadir entorno",
   "添加软件": "Añadir aplicación",
   "添加软件到这个境舱": "Añadir una aplicación a este entorno",

@@ -149,7 +149,10 @@ export class LinkRouter {
     /* A saved browser that left this network is not followed out of it: the
      * link stays in the environment's own browser, and the user is told. */
     const replaced = Boolean(chosen) && chosen !== browserId;
-    const opening = Promise.resolve().then(() => this.protectBrowserOperation(browserId, () => this.service.openProfileLink({ id: browserId, url }))).then(
+    const opening = Promise.resolve().then(() => {
+      const expectedNetwork = this.service.linkNetworkSelection?.(profile, workspace) ?? { group: profile.group ?? '', proxyId: profile.proxyId ?? null };
+      return this.protectBrowserOperation(browserId, () => this.service.openProfileLink({ id: browserId, url, sourceProfileId: profile.id, expectedNetwork }));
+    }).then(
       () => this.notify({ type: 'link', message: replaced ? `${source}的链接已在「${browser.name}」中打开；原先选定的浏览器不在这个网络里` : `${source}的链接已在「${browser.name}」中打开`, detail: url, profileId: browserId }),
       /* A browser that refuses is not a reason to send the link out of the
        * environment quietly; it is reported and the link stays closed. */

@@ -129,6 +129,25 @@ test('changing the selected browser, network, core generation or context revokes
   }
 });
 
+test('changing fingerprint generation revokes an idle binding before any browser launch', async t => {
+  const generation = { provider: 'browseforge-chromium', version: 1, tuple_id: 'fixture-macos', generated_fields: {} };
+  for (const [name, change] of [
+    ['remove an empty generation marker', profile => { profile.fingerprintGeneration = null; }],
+    ['change the generated tuple', profile => { profile.fingerprintGeneration.tuple_id = 'fixture-macos-other'; }],
+    ['change generated values', profile => { profile.fingerprintGeneration.generated_fields.hardware_concurrency = 8; }],
+  ]) await t.test(name, async subtest => {
+    const f = await fixture(subtest);
+    const profile = f.state.profiles[1];
+    Object.assign(profile, { engine: 'browseforge-chromium', seed: 123, fingerprint: {}, fingerprintGeneration: clone(generation) });
+    const binding = await f.create();
+    change(profile);
+    const answer = await send(binding, rpc('browser_navigate', { url: 'https://example.test/' }));
+    assert.equal(answer.result.isError, true);
+    assert.match(answer.result.content[0].text, /CLAUDE_BROWSER_BINDING_CHANGED/);
+    assert.equal(f.calls.filter(call => ['ensure', 'rest', 'mcp'].includes(call.kind)).length, 0);
+  });
+});
+
 test('system browser, missing network and another node cannot create a binding', async t => {
   const f = await fixture(t);
   await assert.rejects(f.create('term_system', 'system'), { code: 'CLAUDE_BROWSER_REQUIRED' });

@@ -2,6 +2,7 @@
 #define ENVARA_PF_LAUNCH_GUARDIAN_H
 
 #include "native.h"
+#include "app-family.h"
 #include <stddef.h>
 
 /* A linkable, blocking native parent supervisor. It does not install policy,
@@ -27,7 +28,8 @@ enum envara_launch_guard_reason {
 };
 enum envara_launch_guard_event {
     ENVARA_GUARD_ARMED, ENVARA_GUARD_REVOKED, ENVARA_GUARD_CHILD_REAPED,
-    ENVARA_GUARD_RELEASE_REFUSED, ENVARA_GUARD_RELEASED, ENVARA_GUARD_RESUMED
+    ENVARA_GUARD_RELEASE_REFUSED, ENVARA_GUARD_RELEASED, ENVARA_GUARD_RESUMED,
+    ENVARA_GUARD_CLEANUP_PENDING
 };
 struct envara_launch_guard_report {
     enum envara_launch_guard_reason reason;
@@ -35,6 +37,10 @@ struct envara_launch_guard_report {
     int persistent_deny_observed, scope_quiescent_observed;
     int ready, protected_ready, whole_guard_crash_verified;
     int resume_sent, resumed;
+    /* Native lifecycle facts only; no readiness or whole-guard assertion. */
+    int network_revoked, family_stop_confirmed;
+    unsigned cleanup_attempt;
+    struct envara_app_family_failure family_failure;
 };
 struct envara_launch_guard_authority {
     /* Compiled fixed-controller callbacks only, never wire supplied pointers.
@@ -46,6 +52,10 @@ struct envara_launch_guard_authority {
     void (*observe)(enum envara_launch_guard_event event,
                     const struct envara_launch_guard_report *report, void *context);
     void *context;
+    /* Irreversible fixed native operation: fresh exact DENY AND own frontend
+     * closure/reap. Called before any application signal; 1 only on both.
+     * Refusal retains custody. S/R may retry cleanup, never resume authority. */
+    int (*revoke_owned_network)(void *context);
 };
 struct envara_launch_guard_request {
     int fixture_only;

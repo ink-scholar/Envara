@@ -132,9 +132,7 @@ test('root, environment, registration and data leaf symlinks are never traversed
     const options = { root, uid, platform: 'darwin' };
     assert.deepEqual(await attachedApplicationDataInventory(options), []);
     assert.equal(await pruneAttachedApplicationCache({ ...options, environmentId, registrationId }), 0);
-    if (['registration', 'leaf'].includes(level))
-      await assert.rejects(eraseEnvironmentData(environmentId, { ...options, registrationId }), { code: 'APPLICATION_DATA_NOT_CLEARED' });
-    else assert.deepEqual(await eraseEnvironmentData(environmentId, { ...options, registrationId }), []);
+    await assert.rejects(eraseEnvironmentData(environmentId, { ...options, registrationId }), { code: 'APPLICATION_DATA_NOT_CLEARED' });
     assert.equal(await readFile(path.join(data, 'Cookies'), 'utf8'), 'session', 'the external target has not been erased');
   });
 });
@@ -179,4 +177,89 @@ test('a failed leaf removal reports incomplete cleanup and never claims the regi
     assert.deepEqual(error.incomplete, [registrationId]);
     return true;
   });
+});
+
+test('erasure distinguishes absent layouts from existing unsafe or unreadable layouts without deleting anything', async t => {
+  const root = '/owned-erasure-fixture', uid = 501;
+  const environment = path.join(root, environmentId);
+  const dir = { isDirectory: () => true, isSymbolicLink: () => false, uid };
+  for (const kind of ['root-permission', 'environment-permission', 'environment-list-permission', 'root-link', 'environment-link', 'foreign-root', 'not-directory', 'root-absent', 'environment-absent', 'environment-disappeared'])
+    await t.test(kind, async () => {
+      let deletes = 0, lists = 0;
+      const fs = {
+        async lstat(target) {
+          if (kind === 'root-permission' && target === root || kind === 'environment-permission' && target === environment)
+            throw Object.assign(new Error('Synthetic access refusal'), { code: 'EACCES' });
+          if (kind === 'root-absent' && target === root || kind === 'environment-absent' && target === environment)
+            throw Object.assign(new Error('Synthetic missing layout'), { code: 'ENOENT' });
+          if (kind === 'root-link' && target === root || kind === 'environment-link' && target === environment) return { ...dir, isSymbolicLink: () => true };
+          if (kind === 'foreign-root' && target === root) return { ...dir, uid: uid + 1 };
+          if (kind === 'not-directory' && target === environment) return { ...dir, isDirectory: () => false };
+          return dir;
+        },
+        async readdir(target) {
+          lists++;
+          assert.equal(target, environment);
+          throw Object.assign(new Error('Synthetic list refusal'), { code: kind === 'environment-disappeared' ? 'ENOENT' : 'EACCES' });
+        },
+        async rm() { deletes++; },
+      };
+      const result = eraseEnvironmentData(environmentId, { root, uid, platform: 'darwin', fs });
+      if (kind.endsWith('absent') || kind === 'environment-disappeared') assert.deepEqual(await result, []);
+      else await assert.rejects(result, error => error.code === 'APPLICATION_DATA_NOT_CLEARED' && !error.message.includes(root));
+      assert.equal(deletes, 0, 'a refusal never bypasses access or ownership checks');
+      assert.equal(lists, ['environment-list-permission', 'environment-disappeared'].includes(kind) ? 1 : 0);
+    });
+});
+
+function largeTreeFixture({ nested = false, missing = false } = {}) {
+  const root = '/owned-application-data-fixture', uid = 501;
+  const registration = path.join(root, environmentId, registrationId), data = path.join(registration, 'UserData');
+  const tree = nested ? path.join(data, 'Cache') : data;
+  const counters = { files: 0, yielded: 0, laterLeafReads: 0, removals: [] };
+  const dir = () => ({ isDirectory: () => true, isSymbolicLink: () => false, uid, size: 0, blocks: 0 });
+  const fs = {
+    async lstat(target) {
+      if ([root, path.dirname(registration), registration, data, ...(nested ? [tree] : []), path.join(registration, 'Home')].includes(target)) return dir();
+      if (target.startsWith(`${tree}/entry-`)) {
+        counters.files++;
+        if (missing) throw Object.assign(new Error('Synthetic vanished entry'), { code: 'ENOENT' });
+        return { ...dir(), isDirectory: () => false, size: 1, blocks: 1, mtimeMs: 1700000000000 + Number(path.basename(target).slice(6)) };
+      }
+      throw Object.assign(new Error('Synthetic absent path'), { code: 'ENOENT' });
+    },
+    async readdir(target) {
+      if (target === root) return [environmentId];
+      if (target === path.dirname(registration)) return [registrationId];
+      if (target === path.join(registration, 'Home')) { counters.laterLeafReads++; return []; }
+      if (target !== tree) return [];
+      // Count iteration as well as I/O: an exhausted parent must stop walking
+      // the remaining names instead of invoking a no-op child for each one.
+      return { *[Symbol.iterator]() { for (let index = 0; index < 400005; index++) { counters.yielded++; yield `entry-${index}`; } } };
+    },
+    async rm(target) { counters.removals.push(target); },
+  };
+  return { root, uid, fs, counters, tree };
+}
+
+test('cache measurement stops before more I/O or sibling iteration once its tree budget is exhausted', async t => {
+  for (const missing of [false, true]) await t.test(missing ? 'vanished entries still consume budget' : 'existing entries', async () => {
+    const f = largeTreeFixture({ nested: true, missing });
+    const bytes = await pruneAttachedApplicationCache({ ...f, environmentId, registrationId, platform: 'darwin' });
+    assert.equal(f.counters.files, 199999, 'the tree root and each attempted file stat consume one entry');
+    assert(f.counters.yielded <= 200000, 'the parent stops rather than iterating all remaining siblings');
+    assert.equal(bytes, missing ? 0 : 199999 * 512, 'reported freed size remains the measured part of the allowed cache');
+    assert.deepEqual(f.counters.removals, [f.tree], 'the cache allowlist is unchanged');
+  });
+});
+
+test('inventory size and top-level modification time share one bounded traversal across all owned leaves', async () => {
+  const f = largeTreeFixture();
+  const [item] = await attachedApplicationDataInventory({ ...f, platform: 'darwin' });
+  assert.equal(f.counters.files, 199999, 'top-level metadata must not add a second unbounded stat pass');
+  assert(f.counters.yielded <= 200000);
+  assert.equal(f.counters.laterLeafReads, 0, 'later leaves stop once the application budget is exhausted');
+  assert.equal(item.bytes, 199999 * 512);
+  assert.equal(item.modifiedAt, new Date(1700000000000 + 199998).toISOString());
+  assert.deepEqual(f.counters.removals, [], 'inventory remains read-only');
 });

@@ -13,7 +13,7 @@ const id = value => { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().filter(key => value[key] !== undefined).map(key => [key, canonical(value[key])])) : value;
 const digest = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 const text = value => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }] });
-const profileSignature = profile => digest(Object.fromEntries(['engine', 'platform', 'seed', 'locale', 'timezone', 'launchOverrides', 'fingerprint', 'group', 'proxyId', 'profileProxyId', 'proxyMode'].map(key => [key, profile?.[key] ?? null])));
+const profileSignature = profile => digest(Object.fromEntries(['engine', 'platform', 'seed', 'fingerprintGeneration', 'locale', 'timezone', 'launchOverrides', 'fingerprint', 'group', 'proxyId', 'profileProxyId', 'proxyMode'].map(key => [key, profile?.[key] ?? null])));
 
 /** Private identity: proxy credentials are hashed in memory and never exported. */
 export function browserRouteSignature(context) {

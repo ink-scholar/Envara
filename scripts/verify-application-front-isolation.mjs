@@ -28,7 +28,7 @@ const proof = { passed: false, runDir, platform: `${process.platform}-${process.
     'A DNS-shaped datagram is sent only to an owned high-port receiver. UDP connect checks at DNS ports send no datagrams, and DNSServiceCreateConnection submits no name query.',
   ] };
 const children = new Set(), serverSockets = new Set(), servers = [], datagrams = [];
-const emittedSourceFiles = ['notion-launch.m', 'notion-launch.h', 'notion-launch-fixture.m', 'gui-launch.m', 'launcher.c', 'native.h'];
+const emittedSourceFiles = ['app-keychain.m', 'app-keychain.h', 'app-scope-proof.c', 'app-scope-proof.h', 'notion-launch.m', 'notion-launch.h', 'notion-launch-fixture.m', 'gui-launch.m', 'launcher.c', 'native.h'];
 const sourceHashes = async () => Object.fromEntries(await Promise.all(emittedSourceFiles.map(async file => [file, createHash('sha256').update(await readFile(path.join(native, file))).digest('hex')])));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const check = message => { proof.checks.push(message); console.log('PASS ' + message); };
@@ -99,7 +99,7 @@ try {
   proof.uid = process.getuid(); proof.sourceHashes = await sourceHashes();
   const fixture = path.join(temporary, 'native-profile-fixture'), probe = path.join(temporary, 'network-probe'), descriptors = path.join(temporary, 'descriptor-probe');
   const flags = ['clang', '-std=gnu11', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations', '-target', `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macos13.0`];
-  await run('/usr/bin/xcrun', [...flags, path.join(native, 'gui-launch.m'), path.join(native, 'launcher.c'), path.join(native, 'notion-launch-fixture.m'),
+  await run('/usr/bin/xcrun', [...flags, path.join(native, 'gui-launch.m'), path.join(native, 'launcher.c'), path.join(native, 'app-keychain.m'), path.join(native, 'app-scope-proof.c'), path.join(native, 'notion-launch-fixture.m'),
     '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'Security', '-lbsm', '-o', fixture], { timeout: 60000 });
   await run('/usr/bin/xcrun', [...flags, path.join(root, 'scripts/fixtures/application-front-probe.c'), '-o', probe], { timeout: 30000 });
   await run('/usr/bin/xcrun', [...flags, '-I', native, path.join(root, 'scripts/fixtures/application-front-descriptors.c'), path.join(native, 'launcher.c'), '-o', descriptors], { timeout: 30000 });
@@ -116,12 +116,14 @@ try {
     for (const flag of ['ready', 'protected', 'activatesSystem']) assert.equal(context[flag], false);
     for (const name of ['UserData', 'Home', 'Cache', 'Temp', 'Extensions']) assert.equal(context[name], path.join(base, name));
     assert.equal(context.SharedData, path.join(base, 'Home/.vscode-shared'));
+    for (const [key, suffix] of [['UserDataAlias', 'u'], ['TempAlias', 't']])
+      assert(new RegExp('^/Library/PrivilegedHelperTools/io\\.envara\\.pf-s/[0-9a-f]{16}' + suffix + '$').test(context[key]));
     const environmentValues = Object.fromEntries(context.environment.map(value => { const at = value.indexOf('='); assert(at > 0); return [value.slice(0, at), value.slice(at + 1)]; }));
-    for (const [key, value] of Object.entries({ HOME: context.Home, TMPDIR: context.Temp + '/', TMP: context.Temp, TEMP: context.Temp,
+    for (const [key, value] of Object.entries({ HOME: context.Home, TMPDIR: context.TempAlias + '/', TMP: context.TempAlias, TEMP: context.TempAlias,
       XDG_CACHE_HOME: context.Cache, XDG_CONFIG_HOME: context.UserData, LANG: context.posixLocale, LC_CTYPE: context.posixLocale,
       LC_ALL: context.posixLocale, TZ: 'Asia/Manila', ENVARA_BROWSER_LOCALE: language })) assert.equal(environmentValues[key], value);
     assert.equal(environmentValues.HTTP_PROXY, undefined); assert.equal(environmentValues.ENVARA_FIXTURE_HOST_SENTINEL, undefined);
-    for (const [flag, value] of [['--user-data-dir', context.UserData], ['--disk-cache-dir', context.Cache], ['--extensions-dir', context.Extensions], ['--shared-data-dir', context.SharedData]]) assert(context.arguments.includes(`${flag}=${value}`));
+    for (const [flag, value] of [['--user-data-dir', context.UserDataAlias], ['--disk-cache-dir', context.Cache], ['--extensions-dir', context.Extensions], ['--shared-data-dir', context.SharedData]]) assert(context.arguments.includes(`${flag}=${value}`));
     assert(context.arguments.includes('--proxy-server=socks5://127.0.0.1:23456'));
     assert(context.arguments.includes('--proxy-bypass-list=<-loopback>'));
     assert(context.arguments.includes('--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'));
@@ -129,7 +131,7 @@ try {
     await assert.rejects(lstat(base), { code: 'ENOENT' });
     contexts.push(context);
   }
-  for (const name of ['UserData', 'Home', 'Cache', 'Temp', 'Extensions', 'SharedData']) assert.equal(new Set(contexts.map(context => context[name])).size, 3);
+  for (const name of ['UserData', 'Home', 'Cache', 'Temp', 'Extensions', 'SharedData', 'UserDataAlias', 'TempAlias']) assert.equal(new Set(contexts.map(context => context[name])).size, 3);
   assert.equal(contexts[2].localeFallback, true); assert.equal(contexts[2].posixLocale, 'en_US.UTF-8');
   proof.generatedContexts = contexts;
   proof.limitations.push('Native path/argument/environment builders were exercised with separate environment and registration ids. No root-owned data allocation, filesystem containment or real application adoption of those settings is asserted.');

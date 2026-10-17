@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage, nativeTheme } from 'electron';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,7 @@ import { signInDataRows, SignInDataNames, runningSignInDataId, signInDataInUse }
 import { showManagedApplicationWindow } from './application-window.mjs';
 import { TerminalLinkChannel, LinkSocketServer } from './terminal-link-channel.mjs';
 import { LinkRouter } from './link-router.mjs';
+import { LinkPreferences } from './link-preferences.mjs';
 import { EnvaraService } from './service.mjs';
 import { BrowserRuntime } from './runtime.mjs';
 import { SidecarManager } from './sidecar-manager.mjs';
@@ -43,6 +44,9 @@ import { createStartupDiagnostics } from './startup-diagnostics.mjs';
 import { createDesktopStartup } from './desktop-startup.mjs';
 import { registerDesktopIPC } from './desktop-ipc.mjs';
 import { shutdownDesktopServices } from './desktop-services.mjs';
+import { finishEnvironmentDeletion } from './environment-deletion-cleanup.mjs';
+import { createAppearanceManager, readInitialAppearance } from './appearance.mjs';
+import { appearanceBackground } from '../shared/appearance.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const isSmoke = process.env.ENVARA_SMOKE === '1' && !app.isPackaged;
@@ -83,6 +87,8 @@ const applicationIcon = createApplicationIcons({ render: electronApplicationIcon
   isKnown: async target => localApplications.knows(target) || pickedApplicationPaths.has(target) ||
     !!applications && (await applications.snapshot()).applications.some(item => item.path === target) });
 const views = new Map();
+const appearance = createAppearanceManager({ nativeTheme, views, preference: readInitialAppearance(path.join(app.getPath('userData'),
+  ...(isSmoke || process.env.ENVARA_BACKEND === 'legacy' ? [] : ['browseforge-manager']), 'workspace.json')) });
 const terminalWindows = new Map();
 let quitting = false;
 let requestEpoch = 0;
@@ -109,7 +115,7 @@ function proxyMappingRequest(importId, data, scope = 'environment') {
 function workspaceSnapshot(value) {
   if (!value || !Array.isArray(value.profiles) || !Array.isArray(value.proxies) || !value.system) return value;
   const core = proxyCore?.snapshot();
-  return { ...value, system: { ...value.system,
+  return { ...value, settings: { ...value.settings, appearance: appearance.snapshot().preference }, system: { ...value.system,
     proxyCore: { supported: core?.available === true, version: core?.version ?? null, protocols: core?.protocols ?? [],
       errorCode: core?.error ?? null, message: core?.available ? '内置 AnyTLS 内核已就绪。' : '内置 AnyTLS 内核不可用，请使用完整安装包。' },
     terminal: { supported: !!terminal, isolation: 'configuration', networkScope: 'proxy-aware-cli' } } };
@@ -117,6 +123,9 @@ function workspaceSnapshot(value) {
 
 async function fullWorkspaceSnapshot(value) {
   if (!value || !Array.isArray(value.profiles) || !Array.isArray(value.proxies) || !value.system) return value;
+  // The expensive profile snapshot may predate a settings save. Read only the
+  // local store so a delayed network response cannot revert the chosen theme.
+  if (service?.store) appearance.setPreference((await service.store.read()).settings.appearance);
   const applicationState = applications ? await applications.snapshot() : { applications: [], applicationRouting: { ready: false, installed: false, authorized: false, status: 'unavailable', message: '应用网络组件尚未安装。' } };
   if (typeof applications?.routing?.controlledNotionTrialAvailability === 'function') {
     const availability = await getNotionTrialAvailability();
@@ -281,20 +290,11 @@ async function ensureLinkRouterInstalled() {
   return target;
 }
 // Remember a refused system prompt instead of asking again at every launch.
-let linkPreferences = { openInEnvironment: true, declinedAt: null };
 const linkPreferencesFile = () => path.join(app.getPath('userData'), 'link-preferences.json');
-async function loadLinkPreferences() {
-  try {
-    const saved = JSON.parse(await readFile(linkPreferencesFile(), 'utf8'));
-    linkPreferences = { openInEnvironment: saved?.openInEnvironment !== false, declinedAt: typeof saved?.declinedAt === 'string' ? saved.declinedAt : null };
-  } catch { linkPreferences = { openInEnvironment: true, declinedAt: null }; }
-}
-async function saveLinkPreferences(next) {
-  linkPreferences = next;
-  await writeFile(linkPreferencesFile(), `${JSON.stringify(linkPreferences, null, 2)}\n`, { mode: 0o600 });
-}
+const linkPreferences = new LinkPreferences({ file: linkPreferencesFile });
 async function linkRouterStatus() {
-  const preference = { preference: linkPreferences.openInEnvironment, declined: Boolean(linkPreferences.declinedAt) };
+  const saved = linkPreferences.snapshot();
+  const preference = { preference: saved.openInEnvironment, declined: Boolean(saved.declinedAt) };
   if (process.platform !== 'darwin') return { available: false, enabled: false, handler: null, previous: null, ...preference };
   try {
     await ensureLinkRouterInstalled();
@@ -305,17 +305,20 @@ async function linkRouterStatus() {
 }
 async function requestLinkRouter() {
   await ensureLinkRouterInstalled();
+  let output;
   try {
-    const output = await linkRouterRun(['--enable']);
-    await saveLinkPreferences({ ...linkPreferences, declinedAt: null });
-    return { granted: true, output };
+    output = await linkRouterRun(['--enable']);
   } catch (error) {
-    await saveLinkPreferences({ ...linkPreferences, declinedAt: new Date().toISOString() }).catch(() => {});
+    await linkPreferences.patch({ declinedAt: new Date().toISOString() }).catch(() => {});
     return { granted: false, output: String(error?.stdout || error?.message || '').trim().slice(0, 200) };
   }
+  // A persistence failure after OS authorization is not a declined OS prompt.
+  await linkPreferences.patch({ declinedAt: null });
+  return { granted: true, output };
 }
 async function offerLinkRouting() {
-  if (process.platform !== 'darwin' || !linkPreferences.openInEnvironment || linkPreferences.declinedAt) return;
+  const saved = linkPreferences.snapshot();
+  if (process.platform !== 'darwin' || !saved.openInEnvironment || saved.declinedAt) return;
   const status = await linkRouterStatus();
   if (status.available && !status.enabled) await requestLinkRouter();
 }
@@ -416,9 +419,10 @@ async function handleCall(method, args = {}, caller = window) {
   if (method === 'linkRouterStatus') return linkRouterStatus();
   if (method === 'setLinkRouter') {
     if (typeof args.enabled !== 'boolean') throw Object.assign(new Error('链接设置参数无效。'), { code: 'LINK_ROUTER_REQUEST_INVALID' });
-    await saveLinkPreferences({ ...linkPreferences, openInEnvironment: args.enabled });
-    /* On asks macOS (its own dialog decides). Off sends every link to this Mac's
-     * browser and gives the system default back to the browser it was before. */
+    await linkPreferences.patch({ openInEnvironment: args.enabled });
+    /* On asks macOS (its own dialog decides). Off sends ordinary managed links
+     * to this Mac's browser and restores the previous default. Dedicated Claude
+     * sessions retain their explicit browser binding. */
     if (args.enabled) { const outcome = await requestLinkRouter(); return { ...(await linkRouterStatus()), granted: outcome.granted }; }
     const status = await linkRouterStatus();
     if (status.enabled) await linkRouterRun(['--disable']);
@@ -603,25 +607,14 @@ async function handleCall(method, args = {}, caller = window) {
       sidecar ? { document: data, proxyMap: args.proxyMap ?? {} } : { profiles: data.profiles }));
   }
   const result = await protectApplicationMutation(method, args, () => terminalController ? terminalController.protectMutation(method, args, () => service.call(method, args)) : service.call(method, args));
-  if (method === 'deleteProfile') {
-    if (applications) for (const item of (await applications.snapshot()).applications.filter(item => item.profileId === args.id)) await applications.deleteApplication({ id: item.id });
-    const cleaned = await eraseAttachedApplicationData(args.id).then(() => true, () => false);
-    if (cleaned) releaseDeletedEnvironmentImportProfile({ imports: pendingImports, profileId: args.id });
-  }
-  if (method === 'bulkProfiles' && args.action === 'delete') {
-    const deleted = new Set((result?.actionResult?.results ?? result?.results ?? []).filter(item => item.ok).map(item => item.id));
-    if (applications) for (const item of (await applications.snapshot()).applications.filter(item => deleted.has(item.profileId))) await applications.deleteApplication({ id: item.id });
-    for (const id of deleted) {
-      const cleaned = await eraseAttachedApplicationData(id).then(() => true, () => false);
-      if (cleaned) releaseDeletedEnvironmentImportProfile({ imports: pendingImports, profileId: id });
-    }
-  }
-  return result;
+  return finishEnvironmentDeletion({ method, args, result, applications, eraseData: eraseAttachedApplicationData,
+    releaseImport: profileId => releaseDeletedEnvironmentImportProfile({ imports: pendingImports, profileId }) });
 }
 
 function registerView(view, kind, profileId = null) {
   const contents = view.webContents;
   views.set(contents, { window: view, kind, profileId });
+  contents.on('dom-ready', () => appearance.updateWindow(view));
   view.on('closed', () => {
     views.delete(contents);
     for (const [key, item] of terminalWindows) if (item === view) terminalWindows.delete(key);
@@ -649,7 +642,8 @@ async function loadView(view, query = {}) {
 }
 
 function viewOptions() {
-  return { backgroundColor: '#1e1e1e', titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 17 }, icon: path.join(root, 'build/icon.png'), webPreferences: { preload: path.join(root, 'electron/preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, devTools: !app.isPackaged } };
+  const theme = appearance.snapshot();
+  return { backgroundColor: appearanceBackground(theme.effective), titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 17 }, icon: path.join(root, 'build/icon.png'), webPreferences: { preload: path.join(root, 'electron/preload.cjs'), additionalArguments: [`--envara-appearance=${theme.preference}`, `--envara-theme=${theme.effective}`], contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, devTools: !app.isPackaged } };
 }
 
 async function openTerminalWindow(args) {
@@ -787,10 +781,10 @@ async function initializeDesktopServices({ checkOpen }) {
       },
     });
     await initializeStep('terminal-store', () => terminal.ready);
-    await initializeStep('link-preferences', loadLinkPreferences);
+    await initializeStep('link-preferences', () => linkPreferences.load());
     // Resolve applications lazily: the router is constructed before their service.
     linkRouter = new LinkRouter({ service, terminal, protectBrowserOperation, applications: { snapshot: async () => applications ? applications.snapshot() : { applications: [] } },
-      enabled: () => linkPreferences.openInEnvironment,
+      enabled: () => linkPreferences.snapshot().openInEnvironment,
       registrationRoot: '/Library/PrivilegedHelperTools/io.envara.pf-apps',
       openDefault: async url => { await openOutsideEnvironment(url); },
       notify: event => { for (const { window: view, kind } of views.values()) if (!view.isDestroyed() && kind === 'workspace') view.webContents.send('envara:link-event', event); } });

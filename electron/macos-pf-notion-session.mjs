@@ -16,6 +16,10 @@ export const PF_SESSION_LEASE_SECONDS = 30 * 24 * 60 * 60;
 export const PF_NOTION_CLEANUP_RESERVE_MS = 40000;
 export const PF_NOTION_CLOSE_RESERVE_MS = 10000;
 export const PF_NOTION_RESUME_TIMEOUT_MS = 60000;
+export const PF_NOTION_STOP_TIMEOUT_MS = 60000;
+// A preparation-only S can use 60 seconds before R and the owned tail begin.
+// Only verified evidence from this client's bound run selects this RPC budget.
+export const PF_NOTION_PREPARATION_STOP_TIMEOUT_MS = 110000;
 // Node clamps any timer delay above 2^31-1 ms to 1 ms.
 const MAXIMUM_TIMER_MS = 2147483647;
 const failed = code => Object.assign(new Error('Bounded Notion channel refused'), { code });
@@ -175,7 +179,8 @@ export function validatePFNotionCallTimingDiagnostic(value) {
     value.schema === timingSchema && value.source === timingSource && value.diagnosticOnly === true &&
     Number.isInteger(value.sequence) && value.sequence >= 1 && value.sequence <= 64 && methods.has(value.method) &&
     Number.isInteger(value.requestedTimeoutMs) && value.requestedTimeoutMs >= 1 &&
-    value.requestedTimeoutMs <= (value.method === 'prepareNotionApplication' ? 110000 : 60000) &&
+    value.requestedTimeoutMs <= (value.method === 'prepareNotionApplication' ? 110000 :
+      value.method === 'stopNotionApplication' ? PF_NOTION_PREPARATION_STOP_TIMEOUT_MS : 60000) &&
     Number.isInteger(value.effectiveTimeoutMs) && value.effectiveTimeoutMs >= 1 && value.effectiveTimeoutMs <= value.requestedTimeoutMs &&
     (cleanupMethods.has(value.method) ? [PF_NOTION_CLOSE_RESERVE_MS, PF_NOTION_CLEANUP_RESERVE_MS].includes(value.cleanupReserveMs)
       : value.cleanupReserveMs === PF_NOTION_CLEANUP_RESERVE_MS) && boundedMs(value.remainingMsAtStart) &&
@@ -198,18 +203,44 @@ const appFailureStages = new Set(['register', 'inspect', 'lock', 'baseline', 're
 const appNativeStages = new Set(['register', 'preflight', 'gui-session', 'route-read', 'transport-start', 'front-listen', 'front-spawn', 'front-handshake',
   'factory-open', 'deny-commit', 'transport-ack', 'front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'guardian']);
 const registerReasons = new Set(['INVALID_NATIVE_APP_REQUEST', 'FIXED_ROOT_NATIVE_ENTRY_REQUIRED', 'APP_REGISTRY_UNAVAILABLE', 'NATIVE_APP_OPERATION_REFUSED']);
-const operationReasons = new Set(['NATIVE_OPERATION_REFUSED', 'NATIVE_CONTEXT_LOAD_REFUSED', 'NATIVE_CONTROLLER_BINDING_REFUSED', 'NATIVE_ORIGINAL_SOCKET_REFUSED', 'NATIVE_LISTENER_CREDENTIAL_REFUSED', 'NATIVE_PIPE_BINDING_REFUSED', 'NATIVE_GUI_SESSION_REFUSED', 'NATIVE_APP_IDENTITY_REFUSED', 'NATIVE_HOOK_LEASE_REFUSED', 'NATIVE_PF_OPEN_REFUSED', 'NATIVE_PF_GUARD_REFUSED', 'NATIVE_FILTER_READBACK_REFUSED', 'NATIVE_FILTER_TRANSACTION_REFUSED', 'NATIVE_JOURNAL_REFUSED', 'NATIVE_TICKET_BINDING_REFUSED', 'NATIVE_TICKET_FILTER_REFUSED', 'NATIVE_SCOPE_CHECK_REFUSED', 'NATIVE_GUARD_DESCRIPTOR_REFUSED', 'NATIVE_LEASE_EXPIRED_REFUSED', 'NATIVE_NOTION_DATA_PREPARE_REFUSED', 'NATIVE_NOTION_STAGE_REFUSED', 'NATIVE_NOTION_SUPPORTED_ARGUMENT_REFUSED', 'NATIVE_NOTION_SUPPORTED_PLIST_REFUSED', 'NATIVE_NOTION_SUPPORTED_VERSION_REFUSED', 'NATIVE_NOTION_SUPPORTED_SIGNATURE_REFUSED', 'NATIVE_NOTION_PLAN_ARGUMENT_REFUSED', 'NATIVE_NOTION_PLAN_REGISTRY_REFUSED', 'NATIVE_NOTION_PLAN_CONTEXT_REFUSED', 'NATIVE_NOTION_PLAN_REQUEST_REFUSED', 'NATIVE_NOTION_PLAN_SEALED_REFUSED', 'NATIVE_NOTION_PLAN_SUPPORTED_REFUSED', 'NATIVE_NOTION_PLAN_DIGEST_REFUSED', 'NATIVE_NOTION_PLAN_CDHASH_REFUSED', 'NATIVE_NOTION_PLAN_REQUIREMENT_REFUSED', 'NATIVE_NOTION_PLAN_DATA_REFUSED', 'NATIVE_NOTION_PLAN_ALLOCATION_REFUSED', 'NATIVE_NOTION_DATA_ARGUMENT_REFUSED', 'NATIVE_NOTION_DATA_ENTRY_REFUSED', 'NATIVE_NOTION_DATA_ANCESTOR_REFUSED', 'NATIVE_NOTION_DATA_LEAF_REFUSED', 'NATIVE_NOTION_DATA_DENY_REFUSED', 'NATIVE_NOTION_STAGE_ARGUMENT_REFUSED', 'NATIVE_NOTION_STAGE_AUTHORITY_REFUSED', 'NATIVE_NOTION_STAGE_ENTRY_REFUSED', 'NATIVE_NOTION_STAGE_SESSION_REFUSED', 'NATIVE_NOTION_STAGE_ORIGINAL_RUNNING_REFUSED', 'NATIVE_NOTION_STAGE_ACCOUNT_REFUSED', 'NATIVE_NOTION_STAGE_ENVIRONMENT_REFUSED', 'NATIVE_NOTION_STAGE_DATA_REFUSED', 'NATIVE_NOTION_STAGE_RECHECK_REFUSED', 'NATIVE_NOTION_STAGE_SPAWN_REFUSED', 'NATIVE_NOTION_STAGE_STOPPED_REFUSED', 'NATIVE_NOTION_STAGE_CHILD_REFUSED']);
+const operationReasons = new Set(['NATIVE_OPERATION_REFUSED', 'NATIVE_CONTEXT_LOAD_REFUSED', 'NATIVE_CONTROLLER_BINDING_REFUSED', 'NATIVE_ORIGINAL_SOCKET_REFUSED', 'NATIVE_LISTENER_CREDENTIAL_REFUSED', 'NATIVE_PIPE_BINDING_REFUSED', 'NATIVE_GUI_SESSION_REFUSED', 'NATIVE_APP_IDENTITY_REFUSED', 'NATIVE_HOOK_LEASE_REFUSED', 'NATIVE_PF_OPEN_REFUSED', 'NATIVE_PF_GUARD_REFUSED', 'NATIVE_FILTER_READBACK_REFUSED', 'NATIVE_FILTER_TRANSACTION_REFUSED', 'NATIVE_JOURNAL_REFUSED', 'NATIVE_TICKET_BINDING_REFUSED', 'NATIVE_TICKET_FILTER_REFUSED', 'NATIVE_SCOPE_CHECK_REFUSED', 'NATIVE_GUARD_DESCRIPTOR_REFUSED', 'NATIVE_LEASE_EXPIRED_REFUSED', 'NATIVE_NOTION_DATA_PREPARE_REFUSED', 'NATIVE_NOTION_STAGE_REFUSED', 'NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED', 'NATIVE_NOTION_SUPPORTED_ARGUMENT_REFUSED', 'NATIVE_NOTION_SUPPORTED_PLIST_REFUSED', 'NATIVE_NOTION_SUPPORTED_VERSION_REFUSED', 'NATIVE_NOTION_SUPPORTED_SIGNATURE_REFUSED', 'NATIVE_NOTION_PLAN_ARGUMENT_REFUSED', 'NATIVE_NOTION_PLAN_REGISTRY_REFUSED', 'NATIVE_NOTION_PLAN_CONTEXT_REFUSED', 'NATIVE_NOTION_PLAN_REQUEST_REFUSED', 'NATIVE_NOTION_PLAN_SEALED_REFUSED', 'NATIVE_NOTION_PLAN_SUPPORTED_REFUSED', 'NATIVE_NOTION_PLAN_DIGEST_REFUSED', 'NATIVE_NOTION_PLAN_CDHASH_REFUSED', 'NATIVE_NOTION_PLAN_REQUIREMENT_REFUSED', 'NATIVE_NOTION_PLAN_DATA_REFUSED', 'NATIVE_NOTION_PLAN_ALLOCATION_REFUSED', 'NATIVE_NOTION_DATA_ARGUMENT_REFUSED', 'NATIVE_NOTION_DATA_ENTRY_REFUSED', 'NATIVE_NOTION_DATA_ANCESTOR_REFUSED', 'NATIVE_NOTION_DATA_LEAF_REFUSED', 'NATIVE_NOTION_DATA_DENY_REFUSED', 'NATIVE_NOTION_STAGE_ARGUMENT_REFUSED', 'NATIVE_NOTION_STAGE_AUTHORITY_REFUSED', 'NATIVE_NOTION_STAGE_ENTRY_REFUSED', 'NATIVE_NOTION_STAGE_SESSION_REFUSED', 'NATIVE_NOTION_STAGE_ORIGINAL_RUNNING_REFUSED', 'NATIVE_NOTION_STAGE_ACCOUNT_REFUSED', 'NATIVE_NOTION_STAGE_ENVIRONMENT_REFUSED', 'NATIVE_NOTION_STAGE_DATA_REFUSED', 'NATIVE_NOTION_STAGE_RECHECK_REFUSED', 'NATIVE_NOTION_STAGE_SPAWN_REFUSED', 'NATIVE_NOTION_STAGE_STOPPED_REFUSED', 'NATIVE_NOTION_STAGE_CHILD_REFUSED']);
 const safeNativeFailure = value => exact(value, ['stage', 'reason', 'error']) && appNativeStages.has(value.stage) &&
   (value.stage === 'register' ? registerReasons.has(value.reason) : operationReasons.has(value.reason)) &&
   Number.isInteger(value.error) && value.error > 0 && value.error <= 1024 ? { stage: value.stage, reason: value.reason, error: value.error } : null;
+const preparationRefusal = value => {
+  const native = safeNativeFailure(value);
+  return native?.stage === 'guardian' && native.reason === 'NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED';
+};
 /* Diagnostic-only native launch step timing reported by the fixed controller:
  * fixed step names and bounded integers only. It is never cleanup evidence or a
  * launch, readiness or protection signal; a malformed list is dropped. */
 const stageTimingSteps = new Set(['front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'ticket-claim', 'stage-fresh',
-  'data-prepare', 'stage-plan', 'stage-recheck', 'stage-spawn', 'stage-stopped', 'stage-adopt', 'resume-verify']);
+  'data-prepare', 'stage-plan', 'stage-recheck', 'stage-spawn', 'stage-stopped', 'stage-adopt', 'resume-verify',
+  'keychain-begin', 'keychain-scoped', 'keychain-normal', 'keychain-stage-ready', 'keychain-select', 'keychain-published',
+  'keychain-stage-cleaned', 'keychain-verify', 'keychain-host-verify', 'keychain-complete',
+  'keychain-parent-context', 'keychain-parent-session', 'keychain-parent-deny',
+  'keychain-parent-holds', 'keychain-parent-selector', 'keychain-parent-deadline',
+  'keychain-parent-wait-policy', 'keychain-parent-stage', 'keychain-parent-account',
+  'keychain-parent-identity', 'keychain-parent-environment', 'keychain-parent-pipes',
+  'keychain-parent-spawn', 'keychain-parent-child', 'keychain-parent-write',
+  'keychain-parent-resume', 'keychain-parent-read', 'keychain-parent-reply',
+  'keychain-parent-wait-scope', 'keychain-parent-exit', 'keychain-parent-trailing',
+  'keychain-parent-stage-open', 'keychain-parent-publish', 'keychain-parent-stage-close',
+  'keychain-parent-verify', 'keychain-parent-host-changed', 'keychain-parent-final',
+  'keychain-helper-entry', 'keychain-helper-pipes', 'keychain-helper-request-read',
+  'keychain-helper-request-shape', 'keychain-helper-self-identity', 'keychain-helper-parent-identity',
+  'keychain-helper-executable', 'keychain-helper-pipe-binding', 'keychain-helper-session',
+  'keychain-helper-home', 'keychain-helper-holds-open', 'keychain-helper-holds-binding',
+  'keychain-helper-selector', 'keychain-helper-stage-load', 'keychain-helper-sandbox',
+  'keychain-helper-interaction', 'keychain-helper-select-recheck', 'keychain-helper-keychain-open',
+  'keychain-helper-set-default', 'keychain-helper-select-postcheck', 'keychain-helper-copy-default',
+  'keychain-helper-default-path', 'keychain-helper-default-owner', 'keychain-helper-default-status',
+  'keychain-helper-search-list', 'keychain-helper-domain-search', 'keychain-helper-search-digest',
+  'keychain-helper-search-missing', 'keychain-helper-metadata-postcheck', 'keychain-helper-reply-write',
+  'keychain-helper-timeout']);
 const stageTimingMs = value => Number.isSafeInteger(value) && value >= 0 && value <= 86400000;
 export function safePFNativeStageTimings(value) {
-  if (!Array.isArray(value) || value.length > 16) return null;
+  if (!Array.isArray(value) || value.length > 32) return null;
   const output = [];
   for (const item of value) {
     if (!exact(item, ['step', 'stepMs', 'totalMs', 'fullChecks', 'identityChecks', 'receivedMs']) || !stageTimingSteps.has(item.step) ||
@@ -222,6 +253,38 @@ export function safePFNativeStageTimings(value) {
 }
 const diagnosticSchema = 'envara.macos-pf-notion-response-diagnostic/v1';
 const diagnosticSource = 'verified-authorizer-session-client';
+const familyFailureReasons = new Set(['none', 'identity', 'token', 'inventory', 'churn', 'capacity', 'signal', 'stop-timeout', 'unavailable']);
+const cleanupPendingFactKeys = ['cleanupAttempt', 'denyVerified', 'frontClosedVerified', 'familyStoppedVerified',
+  'familyFailureReason', 'familyFailureErrno', 'familyFailureMach'];
+export function safePFNotionCleanupPending(value) {
+  const fact = item => exact(item, cleanupPendingFactKeys) && Number.isInteger(item.cleanupAttempt) && item.cleanupAttempt >= 0 && item.cleanupAttempt <= 2147483647 &&
+    ['denyVerified', 'frontClosedVerified', 'familyStoppedVerified'].every(key => typeof item[key] === 'boolean') &&
+    (item.familyFailureReason === 'unknown' ? item.familyFailureErrno === null && item.familyFailureMach === null :
+      familyFailureReasons.has(item.familyFailureReason) && Number.isInteger(item.familyFailureErrno) && item.familyFailureErrno >= 0 && item.familyFailureErrno <= 1024 &&
+      Number.isInteger(item.familyFailureMach) && item.familyFailureMach >= -2147483648 && item.familyFailureMach <= 2147483647 &&
+      (item.familyFailureReason === 'none' ? item.familyFailureErrno === 0 && item.familyFailureMach === 0 : item.familyFailureErrno > 0));
+  if (!exact(value, ['first', 'latest']) || !fact(value.first) || !fact(value.latest) || value.latest.cleanupAttempt < value.first.cleanupAttempt) return null;
+  const projected = { first: Object.fromEntries(cleanupPendingFactKeys.map(key => [key, value.first[key]])),
+    latest: Object.fromEntries(cleanupPendingFactKeys.map(key => [key, value.latest[key]])) };
+  return projected.first.cleanupAttempt === projected.latest.cleanupAttempt &&
+    JSON.stringify(projected.first) !== JSON.stringify(projected.latest) ? null : projected;
+}
+const preparationPendingKeys = ['preparationId', 'generation', 'command', 'cleanupAttempt', 'childState', 'denyVerified', 'frontClosedVerified'];
+// This is explanatory preparation custody, never an application identity or
+// a stop/release receipt. Its original automatic record remains immutable.
+export function safePFNotionPreparationPending(value) {
+  const fact = item => exact(item, preparationPendingKeys) && canonicalUUID(item.preparationId) &&
+    Number.isInteger(item.generation) && item.generation >= 1 && item.generation <= 5 &&
+    ['automatic', 'S', 'R'].includes(item.command) && Number.isInteger(item.cleanupAttempt) && item.cleanupAttempt >= 0 &&
+    item.cleanupAttempt <= 2147483647 && (item.command === 'automatic' ? item.cleanupAttempt === 0 : item.cleanupAttempt >= 1) &&
+    ['unreaped', 'reaped', 'launcher-clear', 'unknown'].includes(item.childState) &&
+    ['denyVerified', 'frontClosedVerified'].every(key => typeof item[key] === 'boolean');
+  if (!exact(value, ['first', 'latest']) || !fact(value.first) || !fact(value.latest) || value.first.command !== 'automatic' ||
+      value.latest.preparationId !== value.first.preparationId || value.latest.generation !== value.first.generation) return null;
+  const projected = Object.fromEntries(['first', 'latest'].map(which => [which,
+    Object.fromEntries(preparationPendingKeys.map(key => [key, value[which][key]]))]));
+  return projected.latest.cleanupAttempt === 0 && JSON.stringify(projected.first) !== JSON.stringify(projected.latest) ? null : projected;
+}
 const diagnosticFailure = value => value === null ? null : exact(value, ['stage', 'code'], ['native']) &&
   appFailureStages.has(value.stage) && nativeErrorCodes.has(value.code) &&
   (!Object.hasOwn(value, 'native') || safeNativeFailure(value.native)) ? {
@@ -255,7 +318,9 @@ export function validatePFNotionResponseDiagnostic(value, method, runId, environ
     safeErrorDiagnostic({ ...(value.native ? { nativeFailure: value.native } : {}), ...Object.fromEntries(['failureStage', 'initialFailure', 'cleanupFailure']
       .filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])) }) !== null;
   return value.kind === 'result' && exact(value, ['schema', 'source', 'kind', 'method', 'runId', 'environmentId', 'profile', 'diagnosticOnly',
-    'phase', 'staged', 'resumed', 'cleanupComplete', 'cleanupUncertain', 'failure'], ['initialFailure', 'cleanupFailure', 'applicationEnded', 'nativeStageTimings']) && phases.has(value.phase) &&
+    'phase', 'staged', 'resumed', 'cleanupComplete', 'cleanupUncertain', 'failure'], ['initialFailure', 'cleanupFailure', 'applicationEnded', 'nativeStageTimings', 'cleanupPending', 'preparationCleanupPending']) && phases.has(value.phase) &&
+    (!Object.hasOwn(value, 'cleanupPending') || safePFNotionCleanupPending(value.cleanupPending) !== null) &&
+    (!Object.hasOwn(value, 'preparationCleanupPending') || safePFNotionPreparationPending(value.preparationCleanupPending) !== null) &&
     (!Object.hasOwn(value, 'nativeStageTimings') || method === 'applicationSnapshot' && safePFNativeStageTimings(value.nativeStageTimings)?.length > 0) &&
     ['staged', 'resumed', 'cleanupComplete', 'cleanupUncertain'].every(key => typeof value[key] === 'boolean') && diagnosticFailure(value.failure) !== undefined &&
     ['initialFailure', 'cleanupFailure'].every(key => !Object.hasOwn(value, key) || diagnosticFailure(value[key]) !== undefined);
@@ -272,6 +337,14 @@ export function projectPFNotionResponseDiagnostic(method, result, runId, environ
    * running when the observation window closes. */
   if (typeof result.applicationEnded === 'boolean') value.applicationEnded = result.applicationEnded;
   for (const key of ['initialFailure', 'cleanupFailure']) if (Object.hasOwn(result, key)) value[key] = diagnosticFailure(result[key]);
+  if (Object.hasOwn(result, 'cleanupPending')) {
+    const pending = safePFNotionCleanupPending(result.cleanupPending); if (!pending) return null;
+    value.cleanupPending = pending;
+  }
+  if (Object.hasOwn(result, 'preparationCleanupPending')) {
+    const pending = safePFNotionPreparationPending(result.preparationCleanupPending); if (!pending) return null;
+    value.preparationCleanupPending = pending;
+  }
   const timings = method === 'applicationSnapshot' ? safePFNativeStageTimings(result.nativeStageTimings) : null;
   if (timings?.length) value.nativeStageTimings = timings;
   return validatePFNotionResponseDiagnostic(value, method, runId, environmentId) ? value : null;
@@ -329,6 +402,14 @@ function publicResult(method, result, request = {}) {
     if (failure === undefined) throw failed('PF_HELPER_RESPONSE_INVALID');
     value[key] = failure;
   }
+  if (Object.hasOwn(result, 'cleanupPending')) {
+    const pending = safePFNotionCleanupPending(result.cleanupPending); if (!pending) throw failed('PF_HELPER_RESPONSE_INVALID');
+    value.cleanupPending = pending;
+  }
+  if (Object.hasOwn(result, 'preparationCleanupPending')) {
+    const pending = safePFNotionPreparationPending(result.preparationCleanupPending); if (!pending) throw failed('PF_HELPER_RESPONSE_INVALID');
+    value.preparationCleanupPending = pending;
+  }
   if (method === 'applicationSnapshot') {
     const timings = safePFNativeStageTimings(result.nativeStageTimings);
     if (timings?.length) value.nativeStageTimings = timings;
@@ -363,7 +444,8 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     selectedStatusRunId = null, lastStatusRunId = null, lastStatusInventory = null, lastStatusReadOnly = false,
     stdoutEOF = false, nonStatusRequestAttempted = false, historyComplete = true, lastSuccessfulStatusHistoryLength = 0,
     lastLatePrepare = null, lastApplicationSnapshot = null, observationPolls = 0, observationPollFailures = 0,
-    authorizationRefusedBeforeExecution = false, prepareRefused = false;
+    authorizationRefusedBeforeExecution = false, prepareRefused = false, cleanupPending = null, preparationCleanupPending = null,
+    preparationObserved = false;
   const callHistory = [], callTimings = [];
   const retired = new Map(); let settleExit;
   const exit = new Promise(resolve => { settleExit = resolve; });
@@ -385,6 +467,25 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     typeof result.cleanupUncertain === 'boolean' && (!Object.hasOwn(result, 'routeId') || result.routeId === preparedRoute) &&
     ['staged', 'resumed', 'prestageAborted', 'preflightAborted', 'cleanupComplete', 'cleanupRetryable'].every(key =>
       !Object.hasOwn(result, key) || typeof result[key] === 'boolean');
+  const observeCleanupPending = result => {
+    if (Object.hasOwn(result, 'preparationCleanupPending')) {
+      const observed = safePFNotionPreparationPending(result.preparationCleanupPending);
+      if (!observed || preparationCleanupPending && (JSON.stringify(observed.first) !== JSON.stringify(preparationCleanupPending.first) ||
+          observed.latest.cleanupAttempt < preparationCleanupPending.latest.cleanupAttempt ||
+          observed.latest.cleanupAttempt === preparationCleanupPending.latest.cleanupAttempt &&
+          JSON.stringify(observed.latest) !== JSON.stringify(preparationCleanupPending.latest))) throw failed('PF_HELPER_RESPONSE_INVALID');
+      preparationCleanupPending = observed;
+    }
+    const diagnostic = bound && projectPFNotionResponseDiagnostic('applicationSnapshot', result, bound.runId, bound.environmentId);
+    if (diagnostic && (diagnostic.preparationCleanupPending || preparationRefusal(diagnostic.initialFailure?.native) ||
+        preparationRefusal(diagnostic.failure?.native))) preparationObserved = true;
+    if (!Object.hasOwn(result, 'cleanupPending')) return;
+    const observed = safePFNotionCleanupPending(result.cleanupPending);
+    if (!observed || cleanupPending && (JSON.stringify(observed.first) !== JSON.stringify(cleanupPending.first) ||
+        observed.latest.cleanupAttempt < cleanupPending.latest.cleanupAttempt || observed.latest.cleanupAttempt === cleanupPending.latest.cleanupAttempt &&
+        JSON.stringify(observed.latest) !== JSON.stringify(cleanupPending.latest))) throw failed('PF_HELPER_RESPONSE_INVALID');
+    cleanupPending = observed;
+  };
   const observeBoundUncertainty = result => {
     if (!uncertainResult(result)) { boundCleanupRetryable = false; return; }
     // A live, same-bound keeper may retain cleanup authority after an
@@ -413,7 +514,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
       if (uncertainResult(result)) uncertain = true;
       if (Array.isArray(result.applications)) for (const application of result.applications) {
         if (uncertainResult(application)) {
-          if (boundApplicationResult(application)) observeBoundUncertainty(application);
+          if (boundApplicationResult(application)) { observeCleanupPending(application); observeBoundUncertainty(application); }
           else uncertain = true;
         }
       }
@@ -429,6 +530,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
       preparedRoute = result.routeId;
     } else {
       if (!boundApplicationResult(result)) throw failed('PF_HELPER_RESPONSE_INVALID');
+      observeCleanupPending(result);
       observeBoundUncertainty(result);
       const kind = cleanupKind(result, bound.runId, bound.environmentId);
       if (request.method === 'stopNotionApplication') { stopKind = kind; freshCleanupKind = null; }
@@ -450,6 +552,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
       if (!line.length || line.length > maximumBytes) return failChannel(failed('PF_HELPER_RESPONSE_INVALID'));
       try {
         const response = JSON.parse(line.toString('utf8'));
+        if (line.toString('utf8') !== JSON.stringify(response)) throw failed('PF_HELPER_RESPONSE_INVALID');
         if (response.protocol !== 'envara.application-routing' || response.version !== 1 ||
             Object.hasOwn(response, 'result') === Object.hasOwn(response, 'error')) throw failed('PF_HELPER_RESPONSE_INVALID');
         if (response.id === null && Object.hasOwn(response, 'error') && (!Object.hasOwn(response, 'ok') || response.ok === false)) {
@@ -485,6 +588,8 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
               if (Object.hasOwn(response.result ?? {}, 'routeId') && response.result.routeId !== preparedRoute) throw failed('PF_HELPER_RESPONSE_INVALID');
               lastLatePrepare = projectPFNotionResponseDiagnostic(prior.method, response.result, prior.runId, prior.environmentId);
               if (!lastLatePrepare) throw failed('PF_HELPER_RESPONSE_INVALID');
+              if (lastLatePrepare.preparationCleanupPending || preparationRefusal(lastLatePrepare.initialFailure?.native) ||
+                  preparationRefusal(lastLatePrepare.failure?.native)) preparationObserved = true;
             } else {
               const diagnostic = safeErrorDiagnostic(response.error);
               if (!nativeErrorCodes.has(response.error?.code) || !diagnostic) throw failed('PF_HELPER_RESPONSE_INVALID');
@@ -492,6 +597,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
                 runId: prior.runId, environmentId: prior.environmentId, profile: 'seatbelt-front-only', diagnosticOnly: true,
                 code: response.error.code, native: diagnostic.nativeFailure ?? null, ...Object.fromEntries(['failureStage', 'initialFailure', 'cleanupFailure']
                   .filter(key => Object.hasOwn(diagnostic, key)).map(key => [key, diagnostic[key]])) };
+              if (preparationRefusal(diagnostic.nativeFailure) || preparationRefusal(diagnostic.initialFailure?.native)) preparationObserved = true;
             }
           }
           // A timed-out operation remains abandoned. Its late result is never
@@ -503,7 +609,16 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
         if (Object.hasOwn(response, 'error')) {
           const diagnostic = safeErrorDiagnostic(response.error);
           if (!diagnostic) throw failed('PF_HELPER_RESPONSE_INVALID');
-          if (current.method === 'prepareNotionApplication') { prepareRefused = true; cleanupOnly = true; }
+          if (current.method === 'prepareNotionApplication') {
+            prepareRefused = true; cleanupOnly = true;
+            if (bound?.runId === current.runId && bound.environmentId === current.environmentId &&
+                (preparationRefusal(diagnostic.nativeFailure) || preparationRefusal(diagnostic.initialFailure?.native))) preparationObserved = true;
+          }
+          if (current.method === 'stopNotionApplication') {
+            // A failed stop cannot leave an older stop/snapshot receipt usable.
+            // This same bound channel may still answer a new explicit stop.
+            cleanupOnly = true; boundCleanupRetryable = false; stopKind = null; freshCleanupKind = null;
+          }
           pending = null; current.finish(Object.assign(failed(safeNativeCode(response.error)), diagnostic));
         }
         else {
@@ -566,6 +681,8 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
     if (closing && !shared) process.stdin.end();
     return process;
   }).catch(() => { closed = true; failChannel(failed('PF_HELPER_UNAVAILABLE')); settleExit(null); throw failed('PF_HELPER_UNAVAILABLE'); });
+  const stopTimeoutMs = runId => bound?.runId === runId && preparationObserved
+    ? PF_NOTION_PREPARATION_STOP_TIMEOUT_MS : PF_NOTION_STOP_TIMEOUT_MS;
   const call = async (method, params = {}, { timeoutMs = method === 'resumeNotionApplication' ? PF_NOTION_RESUME_TIMEOUT_MS : 15000, signal,
     observation = false } = {}) => {
     // The multi-step preparation includes a signed snapshot and cold staging.
@@ -575,7 +692,8 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
      * longer than about two minutes filled the bounded history with them, and
      * the stop sequence that explains a failed cleanup was never recorded. */
     if (observation !== false && (observation !== true || method !== 'applicationSnapshot')) throw failed('PF_HELPER_REQUEST_INVALID');
-    if (!methods.has(method) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > (method === 'prepareNotionApplication' ? 110000 : 60000) ||
+    if (!methods.has(method) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > (method === 'prepareNotionApplication' ? 110000 :
+        method === 'stopNotionApplication' ? stopTimeoutMs(params.runId) : 60000) ||
         signal?.aborted || closing || closed || pending || terminalError || (uncertain || cleanupOnly) && !cleanupMethods.has(method))
       throw failed(uncertain || cleanupOnly ? 'PF_HELPER_CLEANUP_UNCERTAIN' : 'PF_HELPER_REQUEST_INVALID');
     validatePFNotionSessionRequest(method, params);
@@ -627,7 +745,8 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
         input.fill(0); finish(failed(code));
       };
       const abort = () => abandon('PF_HELPER_ABORTED'), timer = setTimeout(() => abandon('PF_HELPER_DEADLINE'), limit);
-      pending = { id, method, runId: params.runId, statusRunId: method === 'status' ? params.runId : undefined,
+      pending = { id, method, runId: params.runId, environmentId: params.environmentId,
+        statusRunId: method === 'status' ? params.runId : undefined,
         profileId: params.application?.profileId, deadline: requestedAt + limit, abandon, finish };
       signal?.addEventListener('abort', abort, { once: true });
       start().then(() => {
@@ -718,6 +837,7 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
   const signals = new Set(['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGPIPE', 'SIGKILL', 'SIGABRT', 'SIGSEGV', 'SIGBUS', 'SIGILL', 'SIGTRAP',
     'SIGQUIT', 'SIGALRM', 'SIGUSR1', 'SIGUSR2', 'SIGFPE', 'SIGXCPU', 'SIGXFSZ', 'SIGPROF', 'SIGVTALRM', 'SIGSTOP', 'SIGTSTP',
     'SIGTTIN', 'SIGTTOU', 'SIGCONT', 'SIGCHLD', 'SIGWINCH', 'SIGURG', 'SIGIO', 'SIGSYS']);
+  call.stopTimeoutMs = stopTimeoutMs;
   call.snapshot = () => ({ started: startedAt != null, closed, closing, pending: pending != null,
     runId: bound?.runId ?? null, environmentId: bound?.environmentId ?? null,
     // Only a still-open, unbounded shared client can retain the exact endpoint
@@ -733,6 +853,8 @@ export function createPersistentPFNotionSessionClient({ spawnRootControlledLifec
       observationPolls, observationPollFailures,
       callTimings: structuredClone(callTimings),
       lastLatePrepare: lastLatePrepare ? structuredClone(lastLatePrepare) : null,
+      ...(cleanupPending ? { cleanupPending: structuredClone(cleanupPending) } : {}),
+      ...(preparationCleanupPending ? { preparationCleanupPending: structuredClone(preparationCleanupPending) } : {}),
       lastApplicationSnapshot: lastApplicationSnapshot ? structuredClone(lastApplicationSnapshot) : null },
     statusOnlyEvidence: statusOnlyEvidence(),
     maximumLifetimeSeconds: bounded ? lifetimeMs / 1000 : null, remainingMs: bounded ? Math.floor(remaining()) : null,

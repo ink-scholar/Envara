@@ -104,8 +104,8 @@ test('owned native TCP attestation, exact DOMAIN/auth/FIN, two realms, refusal a
       const f = await createNotionSOCKSFront({ routeContext, upstream: u.config, authorizeOwnership: options.wrap ? options.wrap(nativeAuthorize) : nativeAuthorize,
         timeoutMs: options.timeoutMs ?? 700, recheckMs: 100 }); fronts.push(f); return f
     }
-    async function handshake(c, f, bytes = request()) {
-      assert.equal((await c.connect(f)).ok, true); assert.equal((await c.write(Buffer.from([5, 1, 0]))).ok, true)
+    async function handshake(c, f, bytes = request(), methods = Buffer.from([5, 1, 0])) {
+      assert.equal((await c.connect(f)).ok, true); assert.equal((await c.write(methods)).ok, true)
       const greeting = await c.read(2); assert.equal(greeting.ok, true); assert.equal(greeting.data.equals(Buffer.from([5, 0])), true)
       assert.equal((await c.write(bytes)).ok, true); const reply = await c.read(10); return reply.ok && reply.data[0] === 5 && reply.data[1] === 0
     }
@@ -132,9 +132,32 @@ test('owned native TCP attestation, exact DOMAIN/auth/FIN, two realms, refusal a
         assert.equal(ua.stats.requests[0].equals(ub.stats.requests[0]), true); assert.equal(ua.stats.authenticated, 1); assert.equal(ub.stats.authenticated, 1)
         await a.close(); await b.close()
       })
+      await t.test('curl default and basic method offers select only noauth while upstream remains RFC1929', async () => {
+        const maximum = Buffer.alloc(257, 1); maximum[0] = 5; maximum[1] = 255; maximum[256] = 0
+        for (const greeting of [Buffer.from([5, 2, 0, 1]), Buffer.from([5, 1, 0]), Buffer.from([5, 3, 2, 0, 1]), maximum]) {
+          const c = await owner(), u = await core(), f = await front(c, u)
+          assert.equal(await handshake(c, f, request(), greeting), true)
+          assert.equal(u.stats.authenticated, 1)
+          assert.equal(u.stats.requests[0].equals(request()), true)
+          assert.equal(f.snapshot().connected, 1)
+          await c.close()
+        }
+      })
+      await t.test('fragmented method list and pipelined CONNECT retain every domain byte', async () => {
+        const c = await owner(), u = await core(), f = await front(c, u)
+        assert.equal((await c.connect(f)).ok, true)
+        assert.equal((await c.write(Buffer.from([5, 3]))).ok, true)
+        assert.equal((await c.write(Buffer.from([1]))).ok, true)
+        assert.equal((await c.write(Buffer.concat([Buffer.from([2, 0]), request()]))).ok, true)
+        assert.deepEqual((await c.read(2)).data, Buffer.from([5, 0]))
+        assert.deepEqual((await c.read(10)).data, Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, 0, 0]))
+        assert.equal(u.stats.authenticated, 1)
+        assert.equal(u.stats.requests[0].equals(request()), true)
+        await c.close()
+      })
       await t.test('unknown same-UID peer and wrong realm never reach upstream', async () => {
         const allowed = await owner(), other = await owner(), u = await core(), otherCore = await core(), f = await front(allowed, u), otherFront = await front(other, otherCore)
-        await other.connect(f); await other.write(Buffer.from([5, 1, 0])); assert.equal((await other.read(2)).ok, false)
+        await other.connect(f); await other.write(Buffer.from([5, 2, 0, 1])); assert.equal((await other.read(2)).ok, false)
         assert.equal(u.stats.connections, 0); assert.equal(f.snapshot().connected, 0)
         assert.equal((await other.cmd('CLOSE')).ok, true); assert.equal(await handshake(other, otherFront), true)
         assert.equal(otherCore.stats.authenticated, 1); assert.equal(u.stats.connections, 0); await other.close(); await allowed.close()
@@ -148,9 +171,11 @@ test('owned native TCP attestation, exact DOMAIN/auth/FIN, two realms, refusal a
         await c.close(); await new Promise(resolve => holding.close(resolve))
       })
       await t.test('malformed method, non-CONNECT and incomplete framing have no upstream fallback', async () => {
-        for (const mode of ['method', 'command', 'timeout']) {
+        for (const mode of ['method', 'command', 'timeout', 'no-methods', 'no-noauth', 'wrong-version', 'partial-methods']) {
           const c = await owner(), u = await core(), f = await front(c, u, { timeoutMs: 150 })
-          await c.connect(f); await c.write(Buffer.from(mode === 'method' ? [5, 1, 2] : mode === 'timeout' ? [5] : [5, 1, 0]))
+          const greetings = { method: [5, 1, 2], timeout: [5], 'no-methods': [5, 0], 'no-noauth': [5, 2, 1, 2],
+            'wrong-version': [4, 1, 0], 'partial-methods': [5, 2, 0] }
+          await c.connect(f); await c.write(Buffer.from(greetings[mode] ?? [5, 1, 0]))
           if (mode === 'command') { assert.equal((await c.read(2)).ok, true); await c.write(request(undefined, 3)); assert.equal((await c.read(10)).ok, false) }
           else assert.equal((await c.read(2)).ok, false)
           assert.equal(u.stats.connections, 0); await c.close()

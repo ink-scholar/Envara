@@ -90,6 +90,17 @@ test('the decision does not wait for a browser that is still starting', async ()
   assert.equal(notify.seen.at(-1).type, 'error'); assert.match(notify.seen.at(-1).message, /浏览器启动失败/);
 });
 
+test('a source-route selection failure remains an accepted managed decision and never triggers host fallback', async () => {
+  const notify = notifier();
+  const value = new LinkRouter({ service: { ...service, linkNetworkSelection: () => { throw new Error('Network selection changed'); } },
+    terminal: { linkBrowser: () => 'prof_ph2' }, notify, openDefault: async () => assert.fail('must not open outside') });
+  const result = await value.openFromProfile({ profileId: 'prof_ph', url: 'https://example.test/' });
+  assert.equal(result.opened, 'environment');
+  await value.settled();
+  assert.equal(notify.seen.at(-1).type, 'error');
+  assert.match(notify.seen.at(-1).message, /Network selection changed/);
+});
+
 test('only an explicit system-default choice sends a link to the host browser, and says so', async () => {
   const opened = [];
   const terminal = { sessionForProcess: () => ({ profileId: 'prof_ph', sessionId: 'term_3' }), linkBrowser: () => SYSTEM_BROWSER };

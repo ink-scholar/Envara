@@ -5,7 +5,7 @@
 <p align="center"><strong>Un entorno propio para cada flujo de trabajo.</strong><br />Un entorno. Tu navegador, terminal y aplicaciones.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licencia del código original: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.24-475569" alt="Envara 0.5.24" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.25-475569" alt="Envara 0.5.25" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README en 9 idiomas" /></a>
 </p>
 <p align="center">
@@ -73,7 +73,7 @@ Los programas, las cachés, los archivos temporales y Keychain no se incluyen en
 
 ### 🗂️ Menos interrupciones en la gestión diaria
 
-La interfaz oscura de tres columnas da un lugar claro a los entornos, las redes, el navegador, el terminal, las aplicaciones vinculadas y su estado de ejecución. Las acciones habituales están a mano; los detalles se agrupan en opciones avanzadas. Con nueve idiomas de interfaz, puedes empezar en el que te resulte más familiar.
+La interfaz de tres columnas ofrece los modos claro, oscuro y según el sistema, y da un lugar claro a los entornos, las redes, el navegador, el terminal, las aplicaciones vinculadas y su estado de ejecución. El ajuste de apariencia solo se aplica a Envara, sin cambiar la apariencia del equipo. Las acciones habituales están a mano; los detalles se agrupan en opciones avanzadas. Con nueve idiomas de interfaz, puedes empezar en el que te resulte más familiar.
 
 ## ¿Qué puedes hacer con Envara?
 

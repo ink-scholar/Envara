@@ -120,7 +120,15 @@ test('native default and explicit plans inspect real held file FDs without mutat
       'dceba9d272ef7cb74fbfb09cc2e15eb0108a838183ba8841da734c5409babbe4',
       'fa70a2ff212cf478f2165e086288815c9bd87c8c9538b40c5d75186a4398a7d4',
       '32811e9718b4c803c23b79f90828131709f6d0e139bc6713fd3482b0122214bb',
-      '22a6f3ea8e9354c3b32b488c50e8ae6ab0d9c5aa565a80911b1848f40aea87de'].includes(value.priorManifestSHA256));
+      '22a6f3ea8e9354c3b32b488c50e8ae6ab0d9c5aa565a80911b1848f40aea87de',
+      '78c3fcff00b6d66273290fb38e1bbfd14811b3ca6af81fe92baa87bd72e091e4',
+    'fb74d63e38710d8129e409cc72840b6a8bfc0ac3917de4905d7d5357e61c66f2',
+    '554c5ac706c108b7530842a4a5e156e095004ad0fb11e3fe821b255ac2ab6f2e',
+    '2af8c63918675c5ccca1d46fd763e462ea8cefabd6cc41ebdcefa85bc45049b6',
+    '005f91acca0cecfc7ef7c2f731e9a7e178a6a8268e88a048caf54ac762047dcc',
+    '88f8c7363d7b689829e712b39f26c09ca9856685cc71fd8b1e05cbeb43027715',
+    '0b6d9bffd6629d4855bf44b5d7f2e99b88e9732020cd84f72919dcae35020a13',
+    '03596ac0849e4e91a39367934e7555ab166eb9084a5ca2bb15a3a0230b9d0539'].includes(value.priorManifestSHA256));
         assert.equal(value.requiresUpgradeApproval, true);
         assert.equal(value.canRequestInstall, (value.controlledRuntimeAbsent || value.privateRuntimeInspectionRequired) && !value.needsManualReview,
           'a verified prior may request an administrator precheck but cannot assume private runtime contents are empty');
@@ -500,7 +508,7 @@ test('the forty-two earlier reviewed prior inputs remain byte-for-byte pinned', 
 test('source trust tables classify exact 14-, 15- and 19-file priors independently of the current target', async () => {
   const contents = await readFile(source, 'utf8');
   const priors = contents.match(/known_prior_snapshots\[\]\s*=\s*\{([^}]+)\}/)?.[1];
-  assert.deepEqual([...priors.matchAll(/&ENVARA_PF_UPGRADE_([A-Z0-9]+)_SNAPSHOT/g)].map(([, tag]) => tag), ['F8', 'E940', '518', '2A7', '832', 'FF9', '6F8', '199', '46A', 'C37', 'F99', '05D6', '14B87', 'DBCF', '43B', 'ACFC', 'C34', '4B9F85', '43392E', 'F0B99F', 'F39101', 'A8BD00', 'DA6E7C', '03245359', '2059A0', '127E83', '010117', '9B51CF', '91B62A', '7C91A1', 'AF79B1', 'DCEBA9', 'FA70A2', '32811E', '22A6F3']);
+  assert.deepEqual([...priors.matchAll(/&ENVARA_PF_UPGRADE_([A-Z0-9]+)_SNAPSHOT/g)].map(([, tag]) => tag), ['F8', 'E940', '518', '2A7', '832', 'FF9', '6F8', '199', '46A', 'C37', 'F99', '05D6', '14B87', 'DBCF', '43B', 'ACFC', 'C34', '4B9F85', '43392E', 'F0B99F', 'F39101', 'A8BD00', 'DA6E7C', '03245359', '2059A0', '127E83', '010117', '9B51CF', '91B62A', '7C91A1', 'AF79B1', 'DCEBA9', 'FA70A2', '32811E', '22A6F3', '78C3', 'FB74', '554C', '2AF8', '005F', '88F8', '0B6D', '0359']);
   const targetNames = [...Object.keys(PF_MANIFEST_FILES), 'manifest.json'].sort();
   assert.equal(targetNames.length, 19); assert.equal(PF_MANIFEST_FILES['stateless-verifier.mjs'], false);
   const snapshotMatcher = contents.match(/static bool snapshot_matches\([^)]*\)\s*\{([\s\S]*?)\n\}/)?.[1];
@@ -510,12 +518,12 @@ test('source trust tables classify exact 14-, 15- and 19-file priors independent
   assert.doesNotMatch(snapshotMatcher, /ACTUAL_FILE_COUNT|ENVARA_PF_INSTALL_FILE_COUNT|ENVARA_PF_INSTALL_FILES/);
   const classifier = contents.match(/static int existing_installation\([^)]*\)\s*\{([\s\S]*?)\n\}/)?.[1];
   assert.ok(classifier.includes('snapshot_matches(fd, known_prior_snapshots[i], true)'));
-  for (const tag of ['f8', 'e940', '518', '2a7', '832', 'ff9', '6f8', '199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117', '9b51cf', '91b62a', '7c91a1', 'af79b1', 'dceba9', 'fa70a2', '32811e', '22a6f3']) {
+  for (const tag of ['f8', 'e940', '518', '2a7', '832', 'ff9', '6f8', '199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117', '9b51cf', '91b62a', '7c91a1', 'af79b1', 'dceba9', 'fa70a2', '32811e', '22a6f3', '78c3', 'fb74', '554c', '2af8', '005f', '88f8', '0b6d', '0359']) {
     const header = await readFile(new URL(`../native/macos-pf-routing/installer-upgrade-${tag}.h`, import.meta.url), 'utf8');
     const entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
-    assert.equal(entries.length, ['199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117', '9b51cf', '91b62a', '7c91a1', 'af79b1', 'dceba9', 'fa70a2', '32811e', '22a6f3'].includes(tag) ? 19 : ['2a7', '832', 'ff9', '6f8'].includes(tag) ? 15 : 14);
+    assert.equal(entries.length, ['199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117', '9b51cf', '91b62a', '7c91a1', 'af79b1', 'dceba9', 'fa70a2', '32811e', '22a6f3', '78c3', 'fb74', '554c', '2af8', '005f', '88f8', '0b6d', '0359'].includes(tag) ? 19 : ['2a7', '832', 'ff9', '6f8'].includes(tag) ? 15 : 14);
     const absentNewModules = ['helper-production-native.mjs', 'notion-front-service.mjs', 'notion-socks-front.mjs', 'notion-socks-reader.mjs'];
-    const absent = ['199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117', '9b51cf', '91b62a', '7c91a1', 'af79b1', 'dceba9', 'fa70a2', '32811e', '22a6f3'].includes(tag) ? [] : [...absentNewModules, ...(['2a7', '832', 'ff9', '6f8'].includes(tag) ? [] : ['stateless-verifier.mjs'])].sort();
+    const absent = ['199', '46a', 'c37', 'f99', '05d6', '14b87', 'dbcf', '43b', 'acfc', 'c34', '4b9f85', '43392e', 'f0b99f', 'f39101', 'a8bd00', 'da6e7c', '03245359', '2059a0', '127e83', '010117', '9b51cf', '91b62a', '7c91a1', 'af79b1', 'dceba9', 'fa70a2', '32811e', '22a6f3', '78c3', 'fb74', '554c', '2af8', '005f', '88f8', '0b6d', '0359'].includes(tag) ? [] : [...absentNewModules, ...(['2a7', '832', 'ff9', '6f8'].includes(tag) ? [] : ['stateless-verifier.mjs'])].sort();
     assert.deepEqual(targetNames.filter(name => !entries.some(([, priorName]) => priorName === name)), absent);
     assert.match(header, /sizeof\(ENVARA_PF_UPGRADE_[A-Z0-9]+_FILES\)\/sizeof\(ENVARA_PF_UPGRADE_[A-Z0-9]+_FILES\[0\]\)/);
   }
@@ -977,6 +985,143 @@ test('retained 22a6f3 desktop installation has a separate exact upgrade snapshot
   assert.equal(digest(bytes), manifestSHA256);
   const header = await readFile(new URL('installer-upgrade-22a6f3.h', base), 'utf8');
   assert.equal(digest(header), 'c089e48a4d9f23c2f48e470dce2aa624d382b58cf03f911cb8c5e3155f9940d4');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, PF_MANIFEST_FILES[name] === true ? '0755' : '0644');
+  }
+});
+
+
+test('retained 78c3 installation has a separate exact upgrade snapshot', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = '78c3fcff00b6d66273290fb38e1bbfd14811b3ca6af81fe92baa87bd72e091e4';
+  const bytes = await readFile(new URL('known-installations/78c3.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-78c3.h', base), 'utf8');
+  assert.equal(digest(header), '8b9723ea51a691d2a50538c00d52cd11d75b9daadd311e1f1e35113b7d6d35d1');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, PF_MANIFEST_FILES[name] === true ? '0755' : '0644');
+  }
+});
+
+test('retained fb74 installation has a separate exact upgrade snapshot', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = 'fb74d63e38710d8129e409cc72840b6a8bfc0ac3917de4905d7d5357e61c66f2';
+  const bytes = await readFile(new URL('known-installations/fb74.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-fb74.h', base), 'utf8');
+  assert.equal(digest(header), '9a86771d4a6e56249814047f18f30ef630934e3690c4eb9a685203d5a836b582');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, PF_MANIFEST_FILES[name] === true ? '0755' : '0644');
+  }
+});
+
+test('retained 554c installation has a separate exact upgrade snapshot', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = '554c5ac706c108b7530842a4a5e156e095004ad0fb11e3fe821b255ac2ab6f2e';
+  const bytes = await readFile(new URL('known-installations/554c.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-554c.h', base), 'utf8');
+  assert.equal(digest(header), '184edbac9abf3fc6624cd0702b76544cd6cb7ba7802f3609a578ef99fb982de6');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, PF_MANIFEST_FILES[name] === true ? '0755' : '0644');
+  }
+});
+
+test('retained 2af8 installation has a separate exact upgrade snapshot', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = '2af8c63918675c5ccca1d46fd763e462ea8cefabd6cc41ebdcefa85bc45049b6';
+  const bytes = await readFile(new URL('known-installations/2af8.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-2af8.h', base), 'utf8');
+  assert.equal(digest(header), '3d75e73878d3348a64e06f0f738498068a4cefb7992c116fa6b3da0e979341e7');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, PF_MANIFEST_FILES[name] === true ? '0755' : '0644');
+  }
+});
+
+test('retained 005f installation has a separate exact upgrade snapshot', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = '005f91acca0cecfc7ef7c2f731e9a7e178a6a8268e88a048caf54ac762047dcc';
+  const bytes = await readFile(new URL('known-installations/005f.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-005f.h', base), 'utf8');
+  assert.equal(digest(header), '2e045bce63c98134b7eaf350120b6fcd8f7723437f18ef9750c894597341b567');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, PF_MANIFEST_FILES[name] === true ? '0755' : '0644');
+  }
+});
+
+test('retained 88f8 installation has a separate exact upgrade snapshot', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = '88f8c7363d7b689829e712b39f26c09ca9856685cc71fd8b1e05cbeb43027715';
+  const bytes = await readFile(new URL('known-installations/88f8.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-88f8.h', base), 'utf8');
+  assert.equal(digest(header), '16952bc16df1666c495ae9d5deecfc6d469745cedb5a81debeb61c4042896bb0');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, PF_MANIFEST_FILES[name] === true ? '0755' : '0644');
+  }
+});
+
+test('retained 0b6d installation has a separate exact upgrade snapshot', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = '0b6d9bffd6629d4855bf44b5d7f2e99b88e9732020cd84f72919dcae35020a13';
+  const bytes = await readFile(new URL('known-installations/0b6d.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-0b6d.h', base), 'utf8');
+  assert.equal(digest(header), 'fcdc20ddfe74b3d8c2e67bf453905fec9ab638618920fe1e6a04586e10fc1fea');
+  const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
+  assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
+  assert.equal(entries.length, 19);
+  assert.deepEqual(entries.map(([, name]) => name).sort(), [...Object.keys(manifest.files), 'manifest.json'].sort());
+  for (const [, name, hash, mode] of entries) {
+    assert.equal(hash, name === 'manifest.json' ? manifestSHA256 : manifest.files[name]);
+    assert.equal(mode, PF_MANIFEST_FILES[name] === true ? '0755' : '0644');
+  }
+});
+
+test('retained 0359 installation has a separate exact upgrade snapshot', async () => {
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const manifestSHA256 = '03596ac0849e4e91a39367934e7555ab166eb9084a5ca2bb15a3a0230b9d0539';
+  const bytes = await readFile(new URL('known-installations/0359.manifest.json', base));
+  assert.equal(digest(bytes), manifestSHA256);
+  const header = await readFile(new URL('installer-upgrade-0359.h', base), 'utf8');
+  assert.equal(digest(header), '4169eb4d712041453339885f1b863673dcb0f45bdd0324d48786ad23b1b32c00');
   const manifest = JSON.parse(bytes), entries = [...header.matchAll(/\{"([^"\n]+)","([0-9a-f]{64})",(0[0-7]{3})\}/g)];
   assert.equal(manifest.arch, 'arm64'); assert.equal(Object.keys(manifest.files).length, 18);
   assert.equal(entries.length, 19);

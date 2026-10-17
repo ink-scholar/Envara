@@ -71,3 +71,35 @@ test('the row shows running only while the application itself runs, and a failed
   assert.equal(row({ active: false, phase: 'failed' }), 'error');
   assert.equal(row({ active: false, phase: 'cleanup-required', cleanupUncertain: true }), 'error');
 });
+
+test('bound lifecycle results update one application and retain validated run identity', async () => {
+  const { applyNotionTrialOperationResult } = await import('../src/notion-trial-state.mjs');
+  const beforeRun = '534692dd-b2e8-498a-8018-32441ce490ca', runId = 'bb756095-daf2-4137-b7e6-f8714b0c9ad0', environmentId = '76e164dd-3827-4746-9e5d-43ae1f4219de';
+  const before = { profiles: [], proxies: [], system: {}, applications: [{ ...application, notionTrial: { applicationId: application.id, runId: beforeRun, environmentId, phase: 'cleaned' } }, { id: 'unrelated', status: 'running' }] };
+  const result = { applicationId: application.id, runId, environmentId, phase: 'cleaned', active: false, cleanupComplete: true, cleanupUncertain: false,
+    errorCode: 'APPLICATION_APP_NATIVE_REFUSED', initialFailure: { stage: 'cold-stage', code: 'APPLICATION_APP_NATIVE_REFUSED' }, cleanupFailure: null,
+    events: [{ sequence: 1, stage: 'failed', code: 'APPLICATION_APP_NATIVE_REFUSED' }], secret: 'never-render-this' };
+  const next = applyNotionTrialOperationResult(before, result, { method: 'runNotionTrial', applicationId: application.id, previousRunId: beforeRun });
+  assert.notEqual(next, before); assert.equal(next.applications[1], before.applications[1]);
+  assert.equal(next.applications[0].notionTrial.runId, runId); assert.equal(next.applications[0].notionTrial.environmentId, environmentId);
+  assert.deepEqual(next.applications[0].notionTrial.initialFailure, result.initialFailure); assert.equal(JSON.stringify(next).includes(result.secret), false);
+  assert.equal(notionTrialControls(next.applications[0], routing, true).active, false);
+  assert.equal(attachedApplicationStatus(notionTrialControls(next.applications[0], routing, true)), 'stopped');
+});
+
+test('partial action results cannot overwrite another application, environment, newer run or unbound state', async () => {
+  const { applyNotionTrialOperationResult } = await import('../src/notion-trial-state.mjs');
+  const old = '534692dd-b2e8-498a-8018-32441ce490ca', current = 'bb756095-daf2-4137-b7e6-f8714b0c9ad0', environmentId = '76e164dd-3827-4746-9e5d-43ae1f4219de';
+  const result = { applicationId: application.id, runId: current, environmentId, phase: 'cleaned', active: false, cleanupComplete: true, cleanupUncertain: false };
+  const before = { applications: [{ ...application, notionTrial: { ...result, runId: old } }] };
+  const options = { method: 'runNotionTrial', applicationId: application.id, previousRunId: old };
+  for (const patch of [{ applicationId: 'foreign' }, { runId: old }, { runId: current.toUpperCase() }, { environmentId: old }, { phase: 'running' }, { active: true }, { cleanupComplete: 'true' }, { cleanupUncertain: null }])
+    assert.equal(applyNotionTrialOperationResult(before, { ...result, ...patch }, options), null);
+  const newer = { applications: [{ ...application, notionTrial: { ...result, runId: 'a3975362-a88a-43c0-ab8d-6f0688d871bd', phase: 'running', active: true } }] };
+  assert.equal(applyNotionTrialOperationResult(newer, result, options), null, 'a late result may not overwrite a new run');
+  assert.equal(applyNotionTrialOperationResult({ applications: [{ ...application, identity: '' }] }, result, options), null);
+  assert.equal(applyNotionTrialOperationResult(before, result, { ...options, method: 'saveApplication' }), null);
+  assert.equal(applyNotionTrialOperationResult(before, result, { ...options, method: 'stopNotionTrial' }), null, 'Stop must match the run selected when requested');
+  assert.ok(applyNotionTrialOperationResult({ applications: [{ ...application, notionTrial: { ...result, active: true, phase: 'running' } }] }, result,
+    { ...options, method: 'stopNotionTrial', previousRunId: current }));
+});

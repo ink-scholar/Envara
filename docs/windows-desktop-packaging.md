@@ -1,6 +1,6 @@
 # Windows x64 desktop packaging
 
-Envara 0.5.24 targets macOS arm64 artifacts. Windows x64 has a development packaging path, **not completed native acceptance or a supported Windows release**. No VM is required or started by these preparation commands.
+Envara 0.5.25 targets macOS arm64 artifacts. Windows x64 has a development packaging path, **not completed native acceptance or a supported Windows release**. No VM is required or started by these preparation commands.
 
 ## Commands
 

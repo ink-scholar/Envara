@@ -6,6 +6,7 @@ import { performance } from 'node:perf_hooks';
 import EnvaraStore from './store.mjs';
 import { normalizePrivacy } from './privacy-policy.mjs';
 import { isInterfaceLanguage } from '../shared/interface-languages.mjs';
+import { isAppearancePreference } from '../shared/appearance.mjs';
 import { ProxyNetworkProbe, proxyFingerprint } from './proxy-network.mjs';
 import { assertNetworkLocationMatchesEgress, confirmNetworkLocation, networkLocationGeolocation, normalizeNetworkLocation, recommendNetworkLocation } from '../shared/network-location.mjs';
 
@@ -488,11 +489,12 @@ export class EnvaraService {
   }
 
   settingsConfig(settings) {
-    allowed(settings, new Set(['closeBrowsersOnExit', 'language']), '设置');
+    allowed(settings, new Set(['closeBrowsersOnExit', 'language', 'appearance']), '设置');
     if (typeof settings.closeBrowsersOnExit !== 'boolean') throw failure('退出时关闭浏览器必须是布尔值。');
     if (!settings.closeBrowsersOnExit) throw failure('当前版本退出应用时会关闭所有浏览器会话。');
     if (settings.language != null && !isInterfaceLanguage(settings.language)) throw failure('界面语言无效。');
-    return { closeBrowsersOnExit: settings.closeBrowsersOnExit, ...(settings.language != null ? { language: settings.language } : {}) };
+    if (Object.hasOwn(settings, 'appearance') && !isAppearancePreference(settings.appearance)) throw failure('无法保存外观，请重试。');
+    return { closeBrowsersOnExit: settings.closeBrowsersOnExit, ...(settings.language != null ? { language: settings.language } : {}), ...(settings.appearance != null ? { appearance: settings.appearance } : {}) };
   }
 
   async saveSettings({ settings }) {

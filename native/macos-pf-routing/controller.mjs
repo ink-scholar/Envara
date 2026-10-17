@@ -22,6 +22,11 @@ export const PF_APP_BOUND_LEASE_SCHEMA = 'envara.macos-pf-app-bound-lease/v1';
 const PF_APP_CONTEXT_CLOCK_SCHEMA = 'envara.macos-pf-app-context-clock/v1';
 const PF_APP_TRANSPORT_SCHEMA = 'envara.macos-pf-app-transport/v1';
 const PF_APP_KEEPER_SCHEMA = 'envara.pf-app-keeper/v1';
+const PF_APP_PREPARATION_SCHEMA = 'envara.pf-app-preparation/v1';
+const APP_PREPARATION_KEYS = ['schema', 'event', 'ticketId', 'registrationId', 'versionId', 'environmentId', 'runId',
+  'keeperPID', 'keeperBirth', 'preparationId', 'generation', 'command', 'cleanupAttempt', 'childState',
+  'launchAuthorityBurned', 'custodyHeld', 'denyVerified', 'frontClosedVerified', 'ready', 'protected'].sort().join('|');
+const APP_PREPARATION_CHILD_STATES = new Set(['unreaped', 'reaped', 'launcher-clear', 'unknown']);
 const APP_KEEPER_RESUME_NEGATIVE_EVENTS = new Set(['stopping', 'released', 'release-refused']);
 /* A keeper frame carries the fixed native profile it was produced under. The
  * run's first frame fixes the expected profile for that run; every later frame
@@ -41,6 +46,25 @@ const APP_KEEPER_REPORT_BOOLEANS = ['persistentDenyObserved', 'stoppedBeforeExec
   'resumeSent', 'resumed', 'cancelSent', 'executedIdentityVerified', 'seatbeltAppliedByFixedExec', 'frontAdmissionVerified', 'ready', 'protected'];
 const APP_KEEPER_REPORT_KEYS = ['schema', 'event', 'ticketId', 'registrationId', 'versionId', 'environmentId', 'runId',
   'pid', 'birth', 'keeperPID', 'profile', ...APP_KEEPER_REPORT_BOOLEANS].sort().join('|');
+const APP_KEEPER_CLEANUP_BOOLEANS = ['launchAuthorityBurned', 'custodyHeld', 'denyVerified', 'frontClosedVerified',
+  'familyStoppedVerified', 'ready', 'protected'];
+const APP_KEEPER_CLEANUP_KEYS = ['schema', 'event', 'ticketId', 'registrationId', 'versionId', 'environmentId', 'runId',
+  'pid', 'birth', 'keeperPID', 'keeperBirth', 'profile', 'cleanupAttempt', ...APP_KEEPER_CLEANUP_BOOLEANS].sort().join('|');
+const APP_FAMILY_FAILURE_KEYS = ['familyFailureReason', 'familyFailureErrno', 'familyFailureMach'];
+const APP_KEEPER_CLEANUP_DIAGNOSTIC_KEYS = [...APP_KEEPER_CLEANUP_KEYS.split('|'), ...APP_FAMILY_FAILURE_KEYS].sort().join('|');
+const APP_FAMILY_FAILURE_REASONS = new Set(['none', 'identity', 'token', 'inventory', 'churn', 'capacity', 'signal', 'stop-timeout', 'unavailable']);
+const signed32 = value => Number.isInteger(value) && value >= -2147483648 && value <= 2147483647;
+function validFamilyFailure(value) {
+  return APP_FAMILY_FAILURE_REASONS.has(value.familyFailureReason) &&
+    Number.isInteger(value.familyFailureErrno) && value.familyFailureErrno >= 0 && value.familyFailureErrno <= 1024 &&
+    signed32(value.familyFailureMach) && (value.familyFailureReason === 'none'
+      ? value.familyFailureErrno === 0 && value.familyFailureMach === 0 : value.familyFailureErrno > 0);
+}
+function cleanupPendingFact(event, legacy) {
+  return Object.freeze({ cleanupAttempt: event.cleanupAttempt, denyVerified: event.denyVerified, frontClosedVerified: event.frontClosedVerified,
+    familyStoppedVerified: event.familyStoppedVerified, familyFailureReason: legacy ? 'unknown' : event.familyFailureReason,
+    familyFailureErrno: legacy ? null : event.familyFailureErrno, familyFailureMach: legacy ? null : event.familyFailureMach });
+}
 // Cold staging repeatedly verifies both signed bundles before adopting a
 // stopped child. Its bounded wait must cover that work, rather than treating
 // it like a small control ACK and revoking a healthy, still-preparing keeper.
@@ -49,6 +73,9 @@ export const PF_APP_COLD_STAGE_TIMEOUT_MS = 60000;
 // keeper's authenticated channel. Cleanup gets a separate bounded interval to
 // learn whether the keeper adopted a child or returned to its transport loop.
 export const PF_APP_STAGE_CLEANUP_WAIT_MS = 15000;
+// Preparation cancellation includes its own exact child wait and full scope
+// checks. It has no application identity and cannot use the guardian S proof.
+export const PF_APP_PREPARATION_STOP_TIMEOUT_MS = 60000;
 // Resume revalidates the signed application before SIGCONT, then verifies the
 // executed identity. Give that whole native operation its own bounded wait;
 // the desktop client additionally reserves time for stop/snapshot/close.
@@ -78,9 +105,31 @@ const APP_ACTIVE_NATIVE_FAILURE_STAGES = new Set(['front-commit', 'front-admissi
  * waiter, changes a phase, burns or restores launch authority, or proves any
  * custody; at most APP_STAGE_PROGRESS_LIMIT are kept per transport. */
 const APP_STAGE_PROGRESS_STEPS = new Set(['front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'ticket-claim', 'stage-fresh',
-  'data-prepare', 'stage-plan', 'stage-recheck', 'stage-spawn', 'stage-stopped', 'stage-adopt', 'resume-verify']);
+  'data-prepare', 'stage-plan', 'stage-recheck', 'stage-spawn', 'stage-stopped', 'stage-adopt', 'resume-verify',
+  'keychain-begin', 'keychain-scoped', 'keychain-normal', 'keychain-stage-ready', 'keychain-select', 'keychain-published',
+  'keychain-stage-cleaned', 'keychain-verify', 'keychain-host-verify', 'keychain-complete',
+  'keychain-parent-context', 'keychain-parent-session', 'keychain-parent-deny',
+  'keychain-parent-holds', 'keychain-parent-selector', 'keychain-parent-deadline',
+  'keychain-parent-wait-policy', 'keychain-parent-stage', 'keychain-parent-account',
+  'keychain-parent-identity', 'keychain-parent-environment', 'keychain-parent-pipes',
+  'keychain-parent-spawn', 'keychain-parent-child', 'keychain-parent-write',
+  'keychain-parent-resume', 'keychain-parent-read', 'keychain-parent-reply',
+  'keychain-parent-wait-scope', 'keychain-parent-exit', 'keychain-parent-trailing',
+  'keychain-parent-stage-open', 'keychain-parent-publish', 'keychain-parent-stage-close',
+  'keychain-parent-verify', 'keychain-parent-host-changed', 'keychain-parent-final',
+  'keychain-helper-entry', 'keychain-helper-pipes', 'keychain-helper-request-read',
+  'keychain-helper-request-shape', 'keychain-helper-self-identity', 'keychain-helper-parent-identity',
+  'keychain-helper-executable', 'keychain-helper-pipe-binding', 'keychain-helper-session',
+  'keychain-helper-home', 'keychain-helper-holds-open', 'keychain-helper-holds-binding',
+  'keychain-helper-selector', 'keychain-helper-stage-load', 'keychain-helper-sandbox',
+  'keychain-helper-interaction', 'keychain-helper-select-recheck', 'keychain-helper-keychain-open',
+  'keychain-helper-set-default', 'keychain-helper-select-postcheck', 'keychain-helper-copy-default',
+  'keychain-helper-default-path', 'keychain-helper-default-owner', 'keychain-helper-default-status',
+  'keychain-helper-search-list', 'keychain-helper-domain-search', 'keychain-helper-search-digest',
+  'keychain-helper-search-missing', 'keychain-helper-metadata-postcheck', 'keychain-helper-reply-write',
+  'keychain-helper-timeout']);
 const APP_STAGE_PROGRESS_KEYS = ['schema', 'event', 'runId', 'environmentId', 'step', 'stepMs', 'totalMs', 'fullChecks', 'identityChecks', 'ready', 'protected'].sort().join('|');
-export const APP_STAGE_PROGRESS_LIMIT = 16;
+export const APP_STAGE_PROGRESS_LIMIT = 32;
 const APP_STAGE_PROGRESS_MAX_MS = 86400000;
 const stageProgressMs = value => Number.isSafeInteger(value) && value >= 0 && value <= APP_STAGE_PROGRESS_MAX_MS;
 const stageProgressCount = value => Number.isSafeInteger(value) && value >= 0 && value <= 65535;
@@ -105,6 +154,7 @@ const APP_NATIVE_FAILURE_REASONS = new Set(['NATIVE_OPERATION_REFUSED', 'NATIVE_
   'NATIVE_FILTER_READBACK_REFUSED', 'NATIVE_FILTER_TRANSACTION_REFUSED', 'NATIVE_JOURNAL_REFUSED', 'NATIVE_TICKET_BINDING_REFUSED',
   'NATIVE_TICKET_FILTER_REFUSED', 'NATIVE_SCOPE_CHECK_REFUSED', 'NATIVE_GUARD_DESCRIPTOR_REFUSED', 'NATIVE_LEASE_EXPIRED_REFUSED',
   'NATIVE_NOTION_DATA_PREPARE_REFUSED', 'NATIVE_NOTION_STAGE_REFUSED',
+  'NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED',
   'NATIVE_NOTION_SUPPORTED_ARGUMENT_REFUSED',
   'NATIVE_NOTION_SUPPORTED_PLIST_REFUSED',
   'NATIVE_NOTION_SUPPORTED_VERSION_REFUSED',
@@ -361,7 +411,7 @@ function outwardAppFailure(run, code = run.initialFailure?.code ?? 'APPLICATION_
     ...(run.initialFailure.native ? { nativeFailure: structuredClone(run.initialFailure.native) } : {}) });
   /* Present only a genuine cleanup record. Attaching the first failure under a
    * cleanup key is what previously made one refusal look like two. */
-  if (run.cleanupFailure && run.cleanupFailure.code !== 'APPLICATION_APP_CLEANUP_UNCONFIRMED') error.cleanupFailure = structuredClone(run.cleanupFailure);
+  if (run.cleanupFailure) error.cleanupFailure = structuredClone(run.cleanupFailure);
   if (typeof run.cleanupRetryable === 'boolean') error.cleanupRetryable = run.cleanupRetryable;
   return error;
 }
@@ -1080,7 +1130,7 @@ export class MacOSPFExecutor {
           const event = JSON.parse(line.toString('utf8'));
           if (line.toString('utf8') !== JSON.stringify(event)) throw new Error();
           if (++count > 64 || !event || event.ready !== false || event.protected !== false || event.runId !== runId || event.environmentId !== environmentId ||
-              ![PF_APP_TRANSPORT_SCHEMA, PF_APP_KEEPER_SCHEMA].includes(event.schema)) throw new Error();
+              ![PF_APP_TRANSPORT_SCHEMA, PF_APP_KEEPER_SCHEMA, PF_APP_PREPARATION_SCHEMA].includes(event.schema)) throw new Error();
           if (entry.abortReceipt || entry.preflightAbortReceipt) throw new Error();
           // stdout can run before an already-due timer. The absolute L
           // deadline still burns launch before either a stopped ACK or a
@@ -1129,6 +1179,87 @@ export class MacOSPFExecutor {
             // may follow this diagnostic within the original startup deadline.
             entry.refusalPending = true; continue;
           }
+          if (event.schema === PF_APP_PREPARATION_SCHEMA) {
+            // This is the fixed preparation slot's negative custody report,
+            // never an adopted application or an application guardian frame.
+            if (Object.keys(event).sort().join('|') !== APP_PREPARATION_KEYS || event.event !== 'cleanup-pending' ||
+                entry.failure?.stage !== 'guardian' || entry.failure.reason !== 'NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED' ||
+                !Number.isFinite(entry.launchSentAt) || !entry.ticketId || entry.stoppedIdentity || entry.guardianArmed === true ||
+                entry.resumeAttempted || entry.guardianReleased === true || event.ticketId !== entry.ticketId ||
+                event.registrationId !== entry.registrationId || event.versionId !== entry.versionId ||
+                event.keeperPID !== entry.ack?.keeperPID || event.keeperBirth !== entry.ack?.keeperBirth ||
+                !uuid(event.preparationId) || !Number.isInteger(event.generation) || event.generation < 1 || event.generation > 5 ||
+                !APP_PREPARATION_CHILD_STATES.has(event.childState) || !['automatic', 'S', 'R'].includes(event.command) ||
+                !Number.isInteger(event.cleanupAttempt) || event.cleanupAttempt < 0 || event.cleanupAttempt > 2147483647 ||
+                event.launchAuthorityBurned !== true || event.custodyHeld !== true ||
+                typeof event.denyVerified !== 'boolean' || typeof event.frontClosedVerified !== 'boolean') throw new Error();
+            let waiter;
+            if (event.command === 'automatic') {
+              if (event.cleanupAttempt !== 0 || entry.preparationId || !['transport-started', 'cleanup-pending'].includes(entry.phase)) throw new Error();
+              entry.preparationId = event.preparationId; entry.preparationGeneration = event.generation;
+            } else {
+              if (event.preparationId !== entry.preparationId || event.generation !== entry.preparationGeneration ||
+                  event.cleanupAttempt !== entry.stopAttempts || event.cleanupAttempt < 1) throw new Error();
+              if (event.command === 'S') {
+                waiter = entry.waiters.find(item => item.cleanupAttempt === event.cleanupAttempt);
+                if (entry.releasing || event.cleanupAttempt !== entry.pendingStopAttempt || !waiter) throw new Error();
+              } else {
+                waiter = entry.waiters.find(item => item.timeoutCode === 'APPLICATION_APP_RELEASE_TIMEOUT');
+                if (!entry.releasing || entry.pendingStopAttempt != null || entry.phase !== 'stopping' || !waiter) throw new Error();
+              }
+              if (Date.now() >= waiter.deadline) { expireWaiter(waiter); throw new Error(); }
+            }
+            const fact = Object.freeze({ preparationId: event.preparationId, generation: event.generation, command: event.command,
+              cleanupAttempt: event.cleanupAttempt, childState: event.childState, denyVerified: event.denyVerified,
+              frontClosedVerified: event.frontClosedVerified });
+            entry.firstPreparationPending ??= fact; entry.latestPreparationPending = fact;
+            entry.cleanupOnly = true; entry.resumeRefused = true;
+            if (event.command !== 'R') entry.phase = 'cleanup-pending';
+            if (waiter) {
+              entry.cleanupWaitFailure = 'APPLICATION_APP_CLEANUP_UNCONFIRMED';
+              if (event.command === 'S') entry.pendingStopAttempt = null;
+              entry.waiters.splice(entry.waiters.indexOf(waiter), 1); clearTimeout(waiter.timer);
+              waiter.reject(failure('APPLICATION_APP_CLEANUP_UNCONFIRMED'));
+            }
+            continue;
+          }
+          if (event.schema === PF_APP_KEEPER_SCHEMA && event.event === 'cleanup-pending') {
+            // A negative answer retains this exact custodian, but proves no
+            // termination or release. It is never buffered for a future S.
+            const shape = Object.keys(event).sort().join('|');
+            const legacy = shape === APP_KEEPER_CLEANUP_KEYS;
+            if ((!legacy && (shape !== APP_KEEPER_CLEANUP_DIAGNOSTIC_KEYS || !validFamilyFailure(event))) ||
+                !entry.stoppedIdentity || event.ticketId !== entry.ticketId || event.registrationId !== entry.registrationId ||
+                event.versionId !== entry.versionId || event.keeperPID !== entry.ack?.keeperPID ||
+                event.keeperBirth !== entry.ack?.keeperBirth || event.pid !== entry.stoppedIdentity.pid ||
+                event.birth !== entry.stoppedIdentity.birth || event.profile !== keeperProfile(entry) ||
+                APP_KEEPER_CLEANUP_BOOLEANS.some(key => typeof event[key] !== 'boolean') ||
+                event.launchAuthorityBurned !== true || event.custodyHeld !== true ||
+                !Number.isInteger(event.cleanupAttempt) || event.cleanupAttempt < 0 || event.cleanupAttempt > 2147483647 || entry.releasing ||
+                ['stopping', 'released'].includes(entry.phase)) throw new Error();
+            if (event.cleanupAttempt === 0) {
+              if (entry.automaticCleanupPending || entry.lastCleanupPendingAttempt != null) throw new Error();
+              entry.automaticCleanupPending = true;
+            } else {
+              const waiter = entry.waiters.find(item => item.cleanupAttempt === event.cleanupAttempt);
+              if (event.cleanupAttempt !== entry.pendingStopAttempt || event.cleanupAttempt !== entry.stopAttempts || !waiter)
+                throw new Error();
+              if (Date.now() >= waiter.deadline) { expireWaiter(waiter); throw new Error(); }
+              entry.lastCleanupPendingAttempt = event.cleanupAttempt;
+              entry.pendingStopAttempt = null;
+              entry.cleanupWaitFailure = 'APPLICATION_APP_CLEANUP_UNCONFIRMED';
+            }
+            const fact = cleanupPendingFact(event, legacy);
+            entry.firstCleanupPending ??= fact; entry.latestCleanupPending = fact;
+            entry.cleanupOnly = true; entry.resumeRefused = true;
+            entry.phase = 'cleanup-pending';
+            for (const waiter of [...entry.waiters]) {
+              if (event.cleanupAttempt === 0 && ['APPLICATION_APP_STOP_TIMEOUT', 'APPLICATION_APP_RELEASE_TIMEOUT'].includes(waiter.timeoutCode)) continue;
+              entry.waiters.splice(entry.waiters.indexOf(waiter), 1); clearTimeout(waiter.timer);
+              waiter.reject(failure('APPLICATION_APP_CLEANUP_UNCONFIRMED'));
+            }
+            continue;
+          }
           const lateStopped = entry.stageTimedOut === true && entry.stageOutcomePending === true &&
             event.schema === PF_APP_KEEPER_SCHEMA && event.event === 'stopped';
           if (lateStopped) {
@@ -1157,14 +1288,14 @@ export class MacOSPFExecutor {
               // The S waiter is attached only after an exact late stopped
               // frame bound the guardian. Its stopping frame remains the only
               // reachable proof while the guardian owns that child.
-              if (entry.stageTimedOut && event.schema === PF_APP_KEEPER_SCHEMA && event.event === 'stopping' &&
+              if (event.schema === PF_APP_KEEPER_SCHEMA && event.event === 'stopping' &&
                   entry.guardianArmed === true && entry.stoppedIdentity && event.ticketId === entry.ticketId &&
                   event.registrationId === entry.registrationId && event.versionId === entry.versionId &&
                   event.keeperPID === entry.ack?.keeperPID && event.pid === entry.stoppedIdentity.pid && event.birth === entry.stoppedIdentity.birth &&
                   Object.keys(event).sort().join('|') === APP_KEEPER_REPORT_KEYS &&
                   APP_KEEPER_REPORT_BOOLEANS.every(key => typeof event[key] === 'boolean') && event.profile === keeperProfile(entry) &&
-                  event.persistentDenyObserved === true && event.resumeSent === false && event.resumed === false &&
-                  event.executedIdentityVerified === false && event.seatbeltAppliedByFixedExec === false && event.frontAdmissionVerified === false) {
+                  event.persistentDenyObserved === true && (!entry.stageTimedOut || event.resumeSent === false && event.resumed === false &&
+                  event.executedIdentityVerified === false && event.seatbeltAppliedByFixedExec === false && event.frontAdmissionVerified === false)) {
                 entry.events.push(event); settleWaiters(event); continue;
               }
               throw new Error();
@@ -1243,6 +1374,7 @@ export class MacOSPFExecutor {
       if (captured) return resolve(captured);
       const limit = entry.phase === 'starting' || entry.refusalPending ? Math.max(1, Math.min(timeoutMs, entry.deadline - Date.now())) : timeoutMs;
       const waiter = { predicate, resolve, reject, timer: null, deadline: Date.now() + limit, timeoutCode,
+        cleanupAttempt: timeoutCode === 'APPLICATION_APP_STOP_TIMEOUT' && !entry.stageOutcomePending ? entry.pendingStopAttempt : null,
         stageOutcomeWait: timeoutCode === 'APPLICATION_APP_STOP_TIMEOUT' && entry.stageTimedOut === true &&
           entry.stageOutcomePending === true && entry.cleanupOnly === true && entry.stoppingRequested === true };
       waiter.timer = setTimeout(() => expireWaiter(waiter), limit); entry.waiters.push(waiter);
@@ -1320,10 +1452,15 @@ export class MacOSPFExecutor {
     catch { entry.poison(); throw failure(command === 'B' && entry.resumeRefused ? 'APPLICATION_APP_RESUME_UNCONFIRMED' : 'APPLICATION_APP_TRANSPORT_UNCONFIRMED'); }
     if (entry.uncertain || entry.cleanupOnly && !['S', 'R'].includes(command)) throw failure(command === 'B' && entry.resumeRefused ? 'APPLICATION_APP_RESUME_UNCONFIRMED' : 'APPLICATION_APP_TRANSPORT_UNCONFIRMED');
     if (keeper.birth !== entry.ack.keeperBirth || keeper.path !== `${PF_INSTALL_ROOT}/envara-pf-native`) { entry.poison(); throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED'); }
-    let expected;
+    let expected, cleanupAttempt;
     if (command === 'L') { entry.ticketId = ticketId; expected = 'stopped'; }
     if (command === 'B') { if (entry.resumeAttempted || entry.phase !== 'stopped') throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED'); entry.resumeAttempted = true; expected = 'resumed'; }
-    if (command === 'S') { entry.stoppingRequested = true; expected = 'stopping'; }
+    if (command === 'S') {
+      if (entry.pendingStopAttempt != null || (entry.stopAttempts ?? 0) >= 2147483647) throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
+      entry.stoppingRequested = true; expected = 'stopping';
+      entry.stopAttempts = (entry.stopAttempts ?? 0) + 1;
+      entry.pendingStopAttempt = cleanupAttempt = entry.stopAttempts;
+    }
     if (command === 'R') { entry.releasing = true; expected = 'released'; }
     /* Cleanup-only S used to wait for the transport-cleanup-stopping frame,
      * which only the native main loop emits. A run whose launch authority was
@@ -1331,12 +1468,13 @@ export class MacOSPFExecutor {
      * wait could not be satisfied by any native behaviour and the run was left
      * requiring root recovery. While the guardian owns the child, its own
      * keeper stopping frame is the proof. */
-    const guardianOnly = entry.cleanupOnly === true && entry.guardianArmed === true && entry.guardianReleased !== true;
+    const guardianOnly = entry.guardianArmed === true && entry.guardianReleased !== true;
     const waiting = expected ? entry.wait(event => command === 'R' ? event.schema === PF_APP_TRANSPORT_SCHEMA && event.event === 'transport-released' :
       command === 'S' && guardianOnly ? event.schema === PF_APP_KEEPER_SCHEMA && event.event === 'stopping' && event.ticketId === entry.ticketId :
       command === 'S' && entry.cleanupOnly ? event.schema === PF_APP_TRANSPORT_SCHEMA && event.event === 'transport-cleanup-stopping' :
       event.schema === PF_APP_KEEPER_SCHEMA && event.event === expected && event.ticketId === entry.ticketId,
-      command === 'L' ? PF_APP_COLD_STAGE_TIMEOUT_MS : command === 'B' ? PF_APP_RESUME_TIMEOUT_MS : 15000,
+      command === 'L' ? PF_APP_COLD_STAGE_TIMEOUT_MS : command === 'B' ? PF_APP_RESUME_TIMEOUT_MS :
+      command === 'S' && entry.failure?.reason === 'NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED' ? PF_APP_PREPARATION_STOP_TIMEOUT_MS : 15000,
       /* S and R previously shared a null timeout code, so an ACK that never
        * arrived was indistinguishable from any other cleanup fault. */
       command === 'L' ? 'APPLICATION_APP_STAGE_TIMEOUT' : command === 'B' ? 'APPLICATION_APP_RESUME_TIMEOUT' :
@@ -1360,7 +1498,9 @@ export class MacOSPFExecutor {
       waiting.then(settle, settle);
     }
     if (!waiting) return { acknowledged: false, ...appFlags() };
-    const event = await waiting;
+    let event;
+    try { event = await waiting; }
+    finally { if (command === 'S' && entry.pendingStopAttempt === cleanupAttempt) entry.pendingStopAttempt = null; }
     /* An ACK can resolve through entry.wait before the main loop's own pass, so
      * the profile it fixes is recorded here too. The resume ACK is what actually
      * establishes which profile the run is running under. */
@@ -1374,7 +1514,8 @@ export class MacOSPFExecutor {
       const keys = ['schema', 'event', 'runId', 'environmentId', 'keeperPID', 'keeperBirth', 'childReaped', 'childAbsent', 'scopeQuiescentObserved', 'persistentDenyObserved', 'ready', 'protected'];
       if (Object.keys(event).sort().join('|') !== keys.sort().join('|') || event.keeperBirth !== entry.ack.keeperBirth ||
           ['scopeQuiescentObserved', 'persistentDenyObserved'].some(key => event[key] !== true) ||
-          typeof event.childReaped !== 'boolean' || typeof event.childAbsent !== 'boolean' || event.childReaped === event.childAbsent) {
+          typeof event.childReaped !== 'boolean' || typeof event.childAbsent !== 'boolean' || event.childReaped === event.childAbsent ||
+          entry.preparationId && (event.childAbsent !== true || event.childReaped !== false)) {
         entry.poison(); throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
       }
     }
@@ -1391,7 +1532,8 @@ export class MacOSPFExecutor {
     if (command === 'R') {
       const keys = ['schema', 'event', 'runId', 'environmentId', 'keeperPID', 'ready', 'protected', 'childAbsent', ...APP_RELEASE_FACTS];
       if (Object.keys(event).sort().join('|') !== keys.sort().join('|') || !appReleasedFactsVerified(event) ||
-          entry.guardianArmed === true && entry.guardianReleased !== true) {
+          entry.guardianArmed === true && entry.guardianReleased !== true ||
+          entry.preparationId && (event.childAbsent !== true || event.childReaped !== false)) {
         entry.poison(); throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
       }
     }
@@ -2068,17 +2210,22 @@ export class MacOSPFController {
     if (selected) { selected.active = false; selected.proxy = null; this.routes.delete(run.routeId); }
   }
   publicApplication(run) {
+    const entry = this.executor.appTransports?.get(run.runId);
+    const cleanupPending = entry?.cleanupOnly === true && entry.phase === 'cleanup-pending';
+    const cleanupUncertain = run.cleanupUncertain === true || cleanupPending;
     return { ...appFlags(), runId: run.runId, environmentId: run.environmentId, routeId: run.routeId,
-      phase: run.phase, staged: run.staged === true, resumed: run.resumed === true,
+      phase: cleanupPending ? 'cleanup-required' : run.phase, staged: run.staged === true, resumed: run.resumed === true,
       prestageAborted: run.prestageAbort != null,
       preflightAborted: run.preflightAbort != null,
-      cleanupUncertain: run.cleanupUncertain === true, cleanupComplete: appCleanPhase(run.phase) && run.cleanupUncertain === false,
+      cleanupUncertain, cleanupComplete: appCleanPhase(run.phase) && !cleanupUncertain,
       // Capability to ask this original keeper for cleanup, never cleanup
       // evidence and never permission to launch. A poisoned channel is false.
-      cleanupRetryable: run.cleanupUncertain === true && this.executor.applicationCleanupAvailable?.(run.runId) === true,
+      cleanupRetryable: cleanupUncertain && this.executor.applicationCleanupAvailable?.(run.runId) === true,
       failure: projectAppFailure(run.initialFailure),
       initialFailure: projectAppFailure(run.initialFailure),
       cleanupFailure: projectAppFailure(run.cleanupFailure),
+      ...(entry?.firstCleanupPending ? { cleanupPending: { first: { ...entry.firstCleanupPending }, latest: { ...entry.latestCleanupPending } } } : {}),
+      ...(entry?.firstPreparationPending ? { preparationCleanupPending: { first: { ...entry.firstPreparationPending }, latest: { ...entry.latestPreparationPending } } } : {}),
       cleanupEvidence: appCleanPhase(run.phase) && run.cleanupUncertain === false && run.cleanupEvidence ? structuredClone(run.cleanupEvidence) : null };
   }
   applicationSnapshot(input = {}) {
@@ -2294,7 +2441,7 @@ export class MacOSPFController {
         if (!['staged', 'running'].includes(run.phase)) return;
         await this.executor.verifyApplicationLease(run.runId);
         const entry = this.executor.appTransports?.get(run.runId);
-        if (!entry?.ack || entry.uncertain || entry.exited || entry.refusalPending) throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
+        if (!entry?.ack || entry.uncertain || entry.exited || entry.refusalPending || entry.cleanupOnly) throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
         const keeper = await this.executor.identify(entry.ack.keeperPID);
         if (!nativeBirth(keeper.birth) || keeper.birth !== entry.ack.keeperBirth || keeper.path !== `${PF_INSTALL_ROOT}/envara-pf-native`)
           throw failure('APPLICATION_APP_TRANSPORT_UNCONFIRMED');
@@ -2510,6 +2657,7 @@ export class MacOSPFController {
         return this.publicApplication(run);
       } catch (error) { run.cleanupUncertain = true; run.phase = 'cleanup-required'; rememberAppFailure(run, 'cleanup', error, true);
         const entry = this.executor.appTransports?.get(run.runId);
+        if (this.executor.applicationCleanupAvailable?.(run.runId) === true) run.cleanupMode = 'native-refusal';
         run.cleanupRetryable = completed.transportExited === true || completed.transportReleased === true && entry?.uncertain !== true ||
           this.executor.applicationCleanupAvailable?.(run.runId) === true;
         if (run.lockAcquired) try { await this.persistApplicationCleanupRun(run); } catch {} throw outwardAppFailure(run, 'APPLICATION_APP_CLEANUP_UNCONFIRMED'); }

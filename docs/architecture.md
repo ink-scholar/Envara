@@ -1,4 +1,4 @@
-# Envara 0.5.24 架构
+# Envara 0.5.25 架构
 
 Envara 是本机单用户桌面工作区，组合浏览器环境、终端和附加软件。当前发布目标为 **macOS Apple Silicon（arm64）**；其他平台的构建入口不代表已经完成实机验收。功能范围见[能力矩阵](capability-matrix.md)。
 

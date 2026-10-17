@@ -14,11 +14,12 @@ Envara is a lightweight desktop workspace for browser environments, terminals an
 
 ## Interface
 
-- Preserve the dark three-column workspace. Navigation order: Environment, Network egress, Browser, Terminal, Attached applications, Runtime monitor. Settings stays at the bottom.
+- Preserve the established three-column workspace and the existing dark visual language. Support light, dark and follow-system appearance modes without changing the host appearance. Navigation order: Environment, Network egress, Browser, Terminal, Attached applications, Runtime monitor. Settings stays at the bottom.
 - Keep primary actions concise and unique. Put detailed network, fingerprint and diagnostic controls under Advanced or collapsible sections.
 - Support Simplified Chinese, Traditional Chinese, English, Japanese, Korean, Spanish, French, German and Brazilian Portuguese. First launch recommends the system language and asks for confirmation. Preserve saved language choices.
 - Interface language is separate from browser locale. Never apply environment locale/timezone changes to the host.
 - Establish a current Product Design reference before a substantial redesign. A selected mockup defines layout, density, spacing and visual hierarchy.
+- On 2026-10-17 the user prioritized the frontend polish pass before returning to the current attached-application issues. Treat visual quality as a core requirement for a global open-source product: natural, consistent component styles; carefully reviewed fonts, spacing and layouts; clear hierarchy and selective highlighting; and checks across all nine interface languages. Preserve the current product structure while refining it, and keep unresolved functional acceptance gates explicit.
 
 ## Network and browsers
 

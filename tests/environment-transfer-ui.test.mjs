@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { browserExportActive, environmentTransferModalPending, importedDataLabel } from '../src/environment-transfer-ui.mjs';
+import { browserExportActive, environmentTransferModalPending, importedDataLabel, cancelEnvironmentImportModal } from '../src/environment-transfer-ui.mjs';
+import { discardPendingEnvironmentImport } from '../electron/environment-import-lifecycle.mjs';
 import { translationCatalog } from '../src/i18n.mjs';
 
 test('only an active browser or its own start/stop blocks the browser export state', () => {
@@ -63,10 +64,43 @@ test('decrypted manifest scope determines the displayed category and all categor
   }
 });
 
+test('a refused import cancellation preserves its UI retry handle and can be retried after recovery', async () => {
+  const modal = { type: 'importMapping', session: { importId: 'retry_1' } }, pending = new Set();
+  const entry = { createdResult: { actionResult: { createdIds: ['created_1'] } } };
+  const imports = new Map([['retry_1', entry]]);
+  const options = { modal, pending, cancel: importId => discardPendingEnvironmentImport({ imports, importId,
+    removeStaging: () => assert.fail('no staged data in this fixture') }) };
+  let dismissed = false;
+  await assert.rejects(async () => { dismissed = await cancelEnvironmentImportModal(options); }, { code: 'IMPORT_ROLLBACK_INCOMPLETE' });
+  assert.equal(dismissed, false);
+  assert.equal(imports.get(modal.session.importId), entry);
+  assert.equal(pending.size, 0, 'a failed cancellation does not lock out retry');
+  delete entry.createdResult;
+  assert.equal(await cancelEnvironmentImportModal(options), true);
+  assert.equal(imports.has('retry_1'), false);
+});
+
+test('pending import cancellation coalesces dismissal and blocks concurrent restoration', async () => {
+  const modal = { type: 'importPassword', session: { importId: 'pending_1' } }, pending = new Set();
+  let finish, calls = 0;
+  const cancellation = new Promise(resolve => { finish = resolve; });
+  const options = { modal, pending, cancel: async () => { calls++; await cancellation; } };
+  const first = cancelEnvironmentImportModal(options);
+  assert.equal(environmentTransferModalPending(modal, pending), true);
+  assert.equal(await cancelEnvironmentImportModal(options), false);
+  assert.equal(calls, 1);
+  finish();
+  assert.equal(await first, true);
+  assert.equal(environmentTransferModalPending(modal, pending), false);
+});
+
 test('UI connects all dismissal paths to the reservation and three export entries retain distinct scopes', async () => {
   const source = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
   const close = source.slice(source.indexOf('const closeModal = useCallback('), source.indexOf('const perform = async'));
-  assert.ok(close.indexOf('environmentTransferModalPending(modalRef.current, pendingRef.current)') < close.indexOf('setModal(null)'));
+  assert.ok(close.indexOf('environmentTransferModalPending(modalRef.current, pendingRef.current)') < close.indexOf('setModal(value =>'));
+  assert.match(close, /await cancelEnvironmentImportModal/);
+  assert.match(close, /value === current \? null : value/);
+  assert.match(source, /pendingRef\.current\.has\(`cancelImport:\$\{args\.importId\}`\)/);
   const modal = source.slice(source.indexOf('function Modal('), source.indexOf('function Field('));
   assert.match(modal, /event\.key === "Escape"[\s\S]*?onClose\(\)/);
   assert.match(modal, /event\.target === event\.currentTarget\) onClose\(\)/);

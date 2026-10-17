@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <limits.h>
 
 #define INSTALL "/Library/PrivilegedHelperTools/io.envara.pf-routing"
 #define RUNTIME "/Library/PrivilegedHelperTools/io.envara.pf-runtime"
@@ -703,6 +704,76 @@ static int exact_stop(struct envara_identity *identity, int *reaped) {
     }
     if (pid != identity->pid) return refuse(ECHILD); *reaped = 1; return 0;
 }
+struct frontend_stop_context {
+    pid_t owner;
+    int *input, *reaped;
+    struct envara_identity *frontend;
+    struct stat writer;
+    int kill_sent, wait_unknown;
+};
+/* The original direct child can exit after a zero WNOHANG result but before
+ * its identity read or signal. Only a terminal wait for that still-unreaped
+ * child resolves this race; absent/unknown evidence never means stopped. */
+static int frontend_exit_after_race(struct frontend_stop_context *context, int operation_error) {
+    int status = 0; pid_t pid = waitpid(context->frontend->pid, &status, WNOHANG);
+    if (pid == context->frontend->pid && (WIFEXITED(status) || WIFSIGNALED(status))) {
+        *context->reaped = 1; return 0;
+    }
+    if (!pid || (pid < 0 && errno == EINTR)) return refuse(operation_error ? operation_error : EIO);
+    context->wait_unknown = 1;
+    return pid < 0 ? -1 : refuse(ECHILD);
+}
+static int bounded_front_stop(struct frontend_stop_context *context) {
+    if (!context || context->owner != getpid() || !context->reaped || !context->frontend) return refuse(EACCES);
+    if (*context->reaped) return 0;
+    struct envara_identity *identity = context->frontend;
+    if (context->wait_unknown || identity->pid < 2 || identity->parent_pid != getpid()) return refuse(ECHILD);
+    uint64_t now = milliseconds(); if (!now || now > UINT64_MAX - 2000) return refuse(EIO);
+    uint64_t deadline = now + 2000;
+    for (;;) {
+        now = milliseconds(); if (!now) return refuse(EIO); if (now >= deadline) return refuse(ETIMEDOUT);
+        int status = 0; pid_t pid = waitpid(identity->pid,&status,WNOHANG);
+        if (pid == identity->pid) {
+            if (WIFEXITED(status) || WIFSIGNALED(status)) { *context->reaped = 1; return 0; }
+            context->wait_unknown = 1; return refuse(ECHILD);
+        }
+        if (pid < 0) {
+            if (errno == EINTR) continue;
+            context->wait_unknown = 1; return -1;
+        }
+        if (pid != 0) { context->wait_unknown = 1; return refuse(ECHILD); }
+        if (!context->kill_sent) {
+            struct envara_identity actual;
+            if (envara_identity_read(identity->pid, &actual)) return frontend_exit_after_race(context, errno);
+            /* An observed different generation or credential is a refusal,
+             * never an exit race and never authority to signal or reap. */
+            if (actual.pid != identity->pid || actual.parent_pid != identity->parent_pid ||
+                actual.birth_seconds != identity->birth_seconds || actual.birth_microseconds != identity->birth_microseconds ||
+                actual.uid != identity->uid || actual.ruid != identity->ruid || actual.saved_uid != identity->saved_uid ||
+                actual.gid != identity->gid || actual.rgid != identity->rgid || actual.saved_gid != identity->saved_gid) return refuse(EACCES);
+            if (kill(identity->pid,SIGKILL)) return frontend_exit_after_race(context, errno);
+            context->kill_sent = 1;
+        }
+        struct timespec delay = {0,10000000}; (void)nanosleep(&delay,NULL);
+    }
+}
+static int stop_owned_frontend(void *opaque) {
+    struct frontend_stop_context *context = opaque;
+    if (!context || context->owner != getpid() || !context->input || !context->reaped || !context->frontend) return 0;
+    int closed = *context->input == -1;
+    if (!closed) {
+        struct stat current;
+        if (*context->input >= 3 && !fstat(*context->input, &current) && S_ISFIFO(current.st_mode) &&
+            current.st_dev == context->writer.st_dev && current.st_ino == context->writer.st_ino &&
+            current.st_uid == context->writer.st_uid && current.st_nlink == 0) {
+            if (!close(*context->input)) { *context->input = -1; closed = 1; }
+        }
+    }
+    /* This is the original unreaped direct frontend, not the application or a
+     * discovered descendant. Its PID cannot be recycled before our waitpid. */
+    int stopped_front = bounded_front_stop(context) == 0;
+    return closed && stopped_front;
+}
 static int spawn_front(const struct envara_app_listener *listener, int *input, int *output,
                        struct envara_identity *identity) {
     const char *node = INSTALL "/node", *service = INSTALL "/notion-front-service.mjs";
@@ -818,6 +889,54 @@ static int cleanup_stopping_event(const struct envara_app_native_preflight *p,in
         (unsigned long long)keeper.birth_microseconds,child_reaped?"true":"false",child_absent?"true":"false");
     if(n<=0||n>=(int)sizeof(frame))return refuse(EOVERFLOW);return write_bounded(1,frame,(size_t)n);
 }
+/* The relay is our direct, unreaped fork. A successful signal or ECHILD is
+ * not retirement. Until terminal wait, its original pipes remain the sole
+ * command path and the main transport must not compete for stdin. */
+static int preparation_relay_retire(pid_t *relay,int stop,int *wait_unknown) {
+    if (!wait_unknown || *wait_unknown) return 0;
+    if (*relay <= 1) return *relay == -1;
+    int wait_for_exit = stop;
+    uint64_t now = milliseconds(), deadline = now ? now + 2000 : 0;
+    for (;;) {
+        int status = 0; pid_t got = waitpid(*relay,&status,WNOHANG);
+        if (got == *relay && (WIFEXITED(status) || WIFSIGNALED(status))) { *relay = -1; return 1; }
+        if (got > 0 || (got < 0 && errno != EINTR)) { *wait_unknown = 1; return 0; }
+        if (got == 0 && stop) { (void)kill(*relay,SIGTERM); stop = 0; }
+        if (!wait_for_exit) return 0;
+        if (!deadline || !(now = milliseconds()) || now >= deadline) return 0;
+        struct timespec pause = {0,10000000}; (void)nanosleep(&pause,NULL);
+    }
+}
+static int preparation_command(pid_t relay,int lease,int recovery,unsigned *drained,char command[40]) {
+    /* A reaped relay can still have commands buffered in its pipes. Consume
+     * both through EOF before stdin takes over; otherwise a retry S is lost. */
+    int pipes = relay > 1 || *drained != 3;
+    struct pollfd inputs[2] = {{pipes ? (*drained & 1 ? -1 : lease) : 0,POLLIN | POLLHUP,0},
+        {*drained & 2 ? -1 : recovery,POLLIN | POLLHUP,0}};
+    int ready = poll(inputs,pipes ? 2 : 1,250);
+    if (ready <= 0) return ready < 0 && errno != EINTR ? -1 : 0;
+    if (!pipes) return line(0,command,40,1000) ? -1 : 1;
+    for (int i = 0; i < 2; i++) {
+        if (!(inputs[i].revents & (POLLIN | POLLHUP))) continue;
+        ssize_t n = read(inputs[i].fd,command,1);
+        if (n == 0) { *drained |= 1U << i; continue; }
+        if (n < 0) return errno == EINTR || errno == EAGAIN ? 0 : -1;
+        command[1] = 0;
+        if ((i == 1 && command[0] != 'R') || (i == 0 && command[0] == 'R')) return refuse(EINVAL);
+        return 1;
+    }
+    if ((inputs[0].revents | inputs[1].revents) & (POLLHUP | POLLERR | POLLNVAL)) poll(NULL,0,50);
+    return 0;
+}
+static int preparation_handoff_stop(const struct envara_app_native_preflight *plan,
+    envara_app_native_factory *factory,struct frontend_stop_context *frontend,
+    pid_t relay,struct envara_app_preparation_report *preparation) {
+    int denied = envara_app_native_factory_cleanup_deny(factory) == 1;
+    int closed = stop_owned_frontend(frontend) == 1;
+    if (relay == -1 && denied && closed && envara_app_native_factory_cleanup_binding(factory) == 1 &&
+        cleanup_stopping_event(plan,0,1) == 0) return 1;
+    (void)envara_app_preparation_pending_event(preparation,"S",denied,closed,1); return 0;
+}
 static int run(const struct envara_app_native_preflight *plan) {
     envara_app_native_failure_begin();
     struct envara_gui_session graphics;
@@ -862,9 +981,12 @@ static int run(const struct envara_app_native_preflight *plan) {
     /* Control relay is created only when L is accepted. Before that, the
      * original native parent reads K/S/R itself and retains both sockets. */
     if (pipe_private(lease) || pipe_private(recovery)) goto early;
+    struct frontend_stop_context frontend_stop = {.owner = getpid(), .input = &front_input, .reaped = &front_reaped, .frontend = &front};
+    if (fstat(front_input, &frontend_stop.writer)) goto early;
     struct envara_app_native_owned_context owned = {.original_utun_fd = session.original_utun_fd,
         .original_listener_fd = listener.fd, .lease_read_fd = lease[0], .recovery_read_fd = recovery[0],
-        .controller = plan->controller, .core = session.core, .frontend = front};
+        .controller = plan->controller, .core = session.core, .frontend = front,
+        .stop_frontend = stop_owned_frontend, .frontend_context = &frontend_stop};
     strcpy(owned.run_id, plan->run_id); strcpy(owned.environment_id, plan->environment_id);
     if (strlen(session.interface_name) >= sizeof(owned.tunnel_name)) goto early;
     strcpy(owned.tunnel_name, session.interface_name);
@@ -885,6 +1007,10 @@ static int run(const struct envara_app_native_preflight *plan) {
 #define RUN_FAULT(value,reason) do {if(!fault){fault_error=(value)>0?(value):EIO;fault_reason=(reason);fault_stage=stage;}fault=1;}while(0)
     if(!fault){stage="transport-ack";if(transport_event(plan,&session,&listener,&front))RUN_FAULT(errno,"NATIVE_OPERATION_REFUSED");else transport_acked=1;}
     int stage_used=0,diagnosed=0,child_reaped=0,child_absent=1,scope_quiescent=0;
+    int preparation_handoff=0,preparation_stop_confirmed=0;
+    int preparation_relay_wait_unknown=0;
+    unsigned preparation_pipes_drained=0;
+    struct envara_app_preparation_report preparation={0};
     for(;;){
         /* Capture a failure before process/lease queries or any cleanup can
          * change errno. A valid refusal permanently burns all launch paths. */
@@ -900,13 +1026,26 @@ static int run(const struct envara_app_native_preflight *plan) {
             if(!deny_confirmed&&!deny_attempted){deny_attempted=1;deny_confirmed=envara_app_native_factory_cleanup_deny(factory)==1;}
             stopped=0;
         }
-        struct pollfd input={0,POLLIN|POLLHUP,0};int ready=poll(&input,1,250);
-        if(ready<0&&errno==EINTR)continue;if(ready<0){RUN_FAULT(errno,"NATIVE_OPERATION_REFUSED");continue;}if(!ready)continue;
+        if(preparation_handoff&&relay>1)(void)preparation_relay_retire(&relay,0,&preparation_relay_wait_unknown);
         char command[40];
-        if(line(0,command,sizeof(command),1000)){int read_error=errno;RUN_FAULT(read_error,"NATIVE_OPERATION_REFUSED");poll(NULL,0,250);continue;}
+        if(preparation_handoff){
+            int got=preparation_command(relay,lease[0],recovery[0],&preparation_pipes_drained,command);
+            if(got<0){RUN_FAULT(errno,"NATIVE_OPERATION_REFUSED");poll(NULL,0,250);}if(got<=0)continue;
+        }else{
+            struct pollfd input={0,POLLIN|POLLHUP,0};int ready=poll(&input,1,250);
+            if(ready<0&&errno==EINTR)continue;if(ready<0){RUN_FAULT(errno,"NATIVE_OPERATION_REFUSED");continue;}if(!ready)continue;
+            if(line(0,command,sizeof(command),1000)){int read_error=errno;RUN_FAULT(read_error,"NATIVE_OPERATION_REFUSED");poll(NULL,0,250);continue;}
+        }
         if(!strcmp(command,"K")){if(!fault)continue;RUN_FAULT(ECANCELED,"NATIVE_OPERATION_REFUSED");continue;}
         if(!strcmp(command,"S")){
             RUN_FAULT(ECANCELED,"NATIVE_OPERATION_REFUSED");
+            if(preparation_handoff){
+                if(preparation.cleanup_attempt==INT_MAX)continue;
+                preparation.cleanup_attempt++;
+                preparation_stop_confirmed=preparation_handoff_stop(plan,factory,&frontend_stop,relay,&preparation);
+                if(preparation_stop_confirmed)scope_quiescent=1;
+                continue;
+            }
             deny_confirmed=envara_app_native_factory_cleanup_deny(factory)==1;
             if(deny_confirmed&&envara_app_scope_gid_absent(plan->realm_gid)==1&&(child_reaped||child_absent)){
                 scope_quiescent=1;(void)cleanup_stopping_event(plan,child_reaped,child_absent);
@@ -914,6 +1053,9 @@ static int run(const struct envara_app_native_preflight *plan) {
             continue;
         }
         if(!strcmp(command,"R")){
+            if(preparation_handoff&&!preparation_stop_confirmed){
+                (void)envara_app_preparation_pending_event(&preparation,"R",0,front_reaped,1);continue;
+            }
             if((child_reaped||child_absent)&&envara_app_native_factory_release_safe(factory)==1&&
                 !envara_transport_session_stop(&session)&&!exact_stop(&front,&front_reaped))break;
             RUN_FAULT(errno,"NATIVE_OPERATION_REFUSED");continue;
@@ -964,7 +1106,18 @@ static int run(const struct envara_app_native_preflight *plan) {
         envara_gui_steps_end();errno=supervisor_error;
         child_absent=report.child.phase==ENVARA_GUI_EMPTY;child_reaped=report.guardian.child_reaped;scope_quiescent=report.guardian.scope_quiescent_observed;
         /* Save the supervisor's first refusal BEFORE terminate/wait/query. */
+        if(report.preparation_refusal_emitted){
+            supervisor_error=report.preparation.original_error;supervisor_reason="NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED";diagnosed=1;
+        }
         if(status||!report.released)RUN_FAULT(supervisor_error,supervisor_reason);
+        if(report.preparation_cleanup_confirmed){
+            preparation_handoff=1;preparation=report.preparation;
+            child_absent=1;child_reaped=0;scope_quiescent=0;
+            (void)preparation_relay_retire(&relay,1,&preparation_relay_wait_unknown);
+            preparation_stop_confirmed=preparation_handoff_stop(plan,factory,&frontend_stop,relay,&preparation);
+            if(preparation_stop_confirmed)scope_quiescent=1;
+            continue;
+        }
         kill(relay,SIGTERM);while(waitpid(relay,NULL,0)<0&&errno==EINTR){}relay=-1;
         if(status||!report.released)continue;
         if(envara_app_native_factory_release_safe(factory)==1&&!envara_transport_session_stop(&session)&&!exact_stop(&front,&front_reaped))break;

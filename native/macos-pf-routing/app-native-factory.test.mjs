@@ -12,7 +12,7 @@ test('native factory uses bounded manifest JSON, the real hook parser and zero-s
     const root = path.dirname(fileURLToPath(import.meta.url));
     const temporary = realpathSync(mkdtempSync('/private/tmp/envara-factory-preparation-')); chmodSync(temporary, 0o700);
     const linked = ['launcher.c', 'tunnel.c', 'transport.c', 'gui-launch.m', 'app-registry.c', 'app-ticket.c',
-      'app-supervisor.c', 'launch-guardian.c', 'notion-launch.m', 'app-scope-proof.c', 'pf-run-ledger.c',
+      'app-supervisor.c', 'launch-guardian.c', 'notion-launch.m', 'app-keychain.m', 'app-scope-proof.c', 'pf-run-ledger.c',
       'pf-production-filter.c', 'app-transport.c', 'app-native-factory-fixture.m', 'app-native-factory-parser-fixture.c'];
     const sources = [...linked, 'app-native-factory.m', 'pf-hook.c'];
     const hashes = () => sources.map(name => createHash('sha256').update(readFileSync(path.join(root, name))).digest('hex'));
@@ -47,9 +47,23 @@ test('native factory uses bounded manifest JSON, the real hook parser and zero-s
         assert.equal(result.status, 0, result.stderr + result.stdout);
         const proof = JSON.parse(result.stdout);
         assert.equal(proof.actualC37SourceCount, 65);
-        for (const key of ['ok', 'oldBoundRefused', 'manifestAccepted', 'manifest128Accepted129Refused',
+        for (const key of ['ok', 'oldBoundRefused', 'manifestAccepted', 'manifest129And131Accepted', 'manifest256Accepted257Refused',
           'leaseAndRegistry64Retained', 'duplicatesRefused', 'arraysNodesBytesDepthRetained']) assert.equal(proof[key], true, key);
         for (const key of ['root', 'pf', 'ready', 'protected']) assert.equal(proof[key], false, key);
+      });
+      // Explicit local opt-in only; default CI uses the portable synthetic fixtures.
+      const publicManifest = process.env.ENVARA_FACTORY_PUBLIC_MANIFEST;
+      if (publicManifest) await t.test('explicit public manifest parses read-only without expanding private record bounds', () => {
+        const bytes = readFileSync(publicManifest);
+        const sourceCount = Object.keys(JSON.parse(bytes).nativeSourceFiles).length;
+        const result = spawnSync(executable, ['manifest-file', publicManifest], { encoding: 'utf8', timeout: 10_000 });
+        assert.equal(result.status, 0, result.stderr + result.stdout);
+        const proof = JSON.parse(result.stdout);
+        assert.equal(proof.sourceCount, sourceCount);
+        for (const key of ['ok', 'manifestAccepted', 'privateDecoderRefused', 'readOnly']) assert.equal(proof[key], true, key);
+        for (const key of ['root', 'pf', 'ready', 'protected']) assert.equal(proof[key], false, key);
+        assert.deepEqual(readFileSync(publicManifest), bytes, 'public manifest must remain unchanged');
+        t.diagnostic(`Public manifest input count: ${sourceCount}`);
       });
       await t.test('Foundation serialization reaches the production lease parser without loosening its refusal', () => {
         const result = spawnSync(executable, ['json'], { encoding: 'utf8', timeout: 10_000 });

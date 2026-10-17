@@ -1,4 +1,5 @@
 import { isInterfaceLanguage } from '../shared/interface-languages.mjs';
+import { isAppearancePreference, workspaceAppearance } from '../shared/appearance.mjs';
 import { parseGoogleMapsLocation } from '../shared/network-location.mjs';
 
 const now = new Date().toISOString();
@@ -25,12 +26,14 @@ const initialProfiles = [
 ];
 let state;
 try { state = JSON.parse(localStorage.getItem('envara.preview.v1')); } catch {}
-state ||= { profiles: initialProfiles, proxies: [{ id: 'preview-proxy', name: '本地代理', protocol: 'socks5', host: '127.0.0.1', port: 1080, username: '', password: '' }], settings: { closeBrowsersOnExit: true }, events: [] };
+if (state) state.settings = { ...state.settings, appearance: workspaceAppearance(state.settings) };
+state ||= { profiles: initialProfiles, proxies: [{ id: 'preview-proxy', name: '本地代理', protocol: 'socks5', host: '127.0.0.1', port: 1080, username: '', password: '' }], settings: { closeBrowsersOnExit: true, appearance: 'system' }, events: [] };
 state.applications ||= [];
 const listeners = new Set();
 const snapshot = () => structuredClone({ ...state, applicationRouting: { ready: false, installed: false, authorized: false, status: 'unavailable', message: '本地软件需要桌面应用。' }, engines, engine: engines[0], runtime: { message: catalogNotice }, system: { platform: 'darwin', appVersion: '0.5.0', dataDir: '桌面 App 中查看本地数据目录', preview: true } });
-function commit() {
-  localStorage.setItem('envara.preview.v1', JSON.stringify(state));
+function commit(next = state) {
+  localStorage.setItem('envara.preview.v1', JSON.stringify(next));
+  state = next;
   const value = snapshot();
   listeners.forEach(listener => listener(value));
   return value;
@@ -76,7 +79,8 @@ const preview = {
         state.proxies = state.proxies.filter(item => item.id !== args.id); break;
       case 'saveSettings':
         if (args.settings?.language != null && !isInterfaceLanguage(args.settings.language)) throw new Error('界面语言无效。');
-        Object.assign(state.settings, args.settings); break;
+        if (args.settings && Object.hasOwn(args.settings, 'appearance') && !isAppearancePreference(args.settings.appearance)) throw new Error('无法保存外观，请重试。');
+        return commit({ ...state, settings: { ...state.settings, ...args.settings } });
       case 'exportProfiles': {
         const rows = args.id ? state.profiles.filter(item => item.id === args.id) : state.profiles;
         const profiles = rows.map(({ name, group, notes, engine, platform, seed, locale, timezone, width, height, startUrl, privacy }) => ({ name, group, notes, engine, platform, seed, locale, timezone, width, height, startUrl, privacy, proxyId: null }));

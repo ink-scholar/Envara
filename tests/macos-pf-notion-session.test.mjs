@@ -5,7 +5,9 @@ import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { randomUUID, createHash } from 'node:crypto';
 import { createPersistentPFNotionSessionClient, PF_NOTION_CHANNEL_LIFETIME_MS,
+  PF_NOTION_STOP_TIMEOUT_MS, PF_NOTION_PREPARATION_STOP_TIMEOUT_MS,
   validatePFNotionCallTimingDiagnostic,
+  safePFNotionCleanupPending, projectPFNotionResponseDiagnostic, validatePFNotionResponseDiagnostic,
   validatePFNotionCleanupReceipt, validatePFNotionPrestageCleanupReceipt, validatePFNotionPreflightCleanupReceipt } from '../electron/macos-pf-notion-session.mjs';
 import { servePFHelper } from '../native/macos-pf-routing/helper.mjs';
 import { runPFNotionAcceptance } from '../scripts/accept-macos-pf-notion.mjs';
@@ -53,16 +55,17 @@ const status = { ready: false, protectedLaunchAllowed: false, anchor: null, owne
 const selectedStatus = (runId, changes = {}) => ({ ...status, anchor: pfRoutingAnchor(runId), ownedRootHookCanCreate: true, ...changes });
 
 function peer(t, replies, { fragment = false, suffix = '', exitCode = 0, delayIndex = -1, delayMs = 0,
-  duplicateIndex = -1, errorIndex = -1, stderr = '', now, credentialHash = null, initialFrame = null } = {}) {
+  duplicateIndex = -1, duplicateKeyIndex = -1, errorIndex = -1, errorReply = { code: 'APPLICATION_ROUTING_NOT_READY' }, stderr = '', now, credentialHash = null, initialFrame = null } = {}) {
   const source = `import readline from 'node:readline'; import {createHash} from 'node:crypto'; const replies=${JSON.stringify(replies)}; let index=0;
     if (${JSON.stringify(stderr)}) process.stderr.write(${JSON.stringify(stderr)});
     if (${JSON.stringify(initialFrame)}) process.stdout.write(JSON.stringify(${JSON.stringify(initialFrame)})+'\\n');
     readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line); const i=index++;
       if (r.method==='prepareRoute' && ${JSON.stringify(credentialHash)} &&
         createHash('sha256').update(r.params.route.password).digest('hex')!==${JSON.stringify(credentialHash)}) process.exit(91);
-      const result=replies.shift()??{}; const value=JSON.stringify(i===${errorIndex}
-        ? {protocol:r.protocol,version:r.version,ok:false,id:r.id,error:{code:'APPLICATION_ROUTING_NOT_READY'}}
+      const result=replies.shift()??{}; let value=JSON.stringify(i===${errorIndex}
+        ? {protocol:r.protocol,version:r.version,ok:false,id:r.id,error:${JSON.stringify(errorReply)}}
         : {protocol:r.protocol,version:r.version,ok:true,id:r.id,result})+'\\n';
+      if(i===${duplicateKeyIndex}) value=value.replace('"ok":true','"ok":false,"ok":true');
       const send=()=>{if (${fragment}) {process.stdout.write(value.slice(0,13)); process.stdout.write(value.slice(13));}
         else process.stdout.write(value); if (i===${duplicateIndex}) process.stdout.write(value);};
       if (i===${delayIndex}) setTimeout(send,${delayMs}); else send();
@@ -673,4 +676,188 @@ test('routine observations are counted, so a long run still records the stop seq
   assert.equal(diagnostics.callTimings.length, diagnostics.callHistory.length);
   assert.deepEqual(diagnostics.callTimings.map(timing => timing.sequence), [1, 2, 3, 4, 5]);
   assert.equal(diagnostics.observationPolls, polls); assert.equal(diagnostics.observationPollFailures, 0);
+});
+
+test('a failed stop invalidates older cleanup proof and preserves first-operation diagnostics through a fresh retry', async t => {
+  const value = request(), initialFailure = structuredClone(retryableNativeFailure);
+  const cleanupFailure = { stage: 'cleanup', code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' };
+  const clean = { ...cleanup(value), initialFailure, cleanupFailure };
+  const { call } = peer(t, [routed, stage(value), clean, clean, {}, clean, clean, clean], {
+    errorIndex: 4, errorReply: { code: cleanupFailure.code, initialFailure, cleanupFailure, message: 'INERT_STOP_SECRET' },
+  });
+  await prepare(call, value); await stopAndSnapshot(call, value);
+  assert.equal(call.snapshot().cleanupUncertain, false);
+  await assert.rejects(call('stopNotionApplication', { runId: value.runId }), error => {
+    assert.equal(error.code, cleanupFailure.code); assert.deepEqual(error.initialFailure, initialFailure);
+    assert.deepEqual(error.cleanupFailure, cleanupFailure); assert.equal(error.message.includes('INERT_STOP_SECRET'), false); return true;
+  });
+  assert.equal(call.snapshot().cleanupUncertain, true); assert.equal(call.snapshot().cleanupKind, null);
+  assert.equal(call.snapshot().diagnostics.uncertaintyLatched, false);
+  // A positive snapshot alone cannot revive a stop proof from before failure.
+  await call('applicationSnapshot', { runId: value.runId }); assert.equal(call.snapshot().cleanupUncertain, true);
+  await assert.rejects(call('resumeNotionApplication', { runId: value.runId, activationAuthorized: true }), { code: 'PF_HELPER_CLEANUP_UNCERTAIN' });
+  const retried = await stopAndSnapshot(call, value);
+  assert.deepEqual(retried.snapshot.initialFailure, initialFailure); assert.deepEqual(retried.snapshot.cleanupFailure, cleanupFailure);
+  assert.equal(call.snapshot().cleanupUncertain, false); assert.equal((await call.close()).cleanupUncertain, false);
+});
+
+test('a duplicate JSON key cannot turn a contradictory session response into admission or cleanup evidence', async t => {
+  const value = request(); const { call } = peer(t, [routed, stage(value)], { duplicateKeyIndex: 1 });
+  await call('prepareRoute', route());
+  await assert.rejects(call('prepareNotionApplication', value), { code: 'PF_HELPER_RESPONSE_INVALID' });
+  assert.equal(call.snapshot().diagnostics.uncertaintyLatched, true); assert.equal(call.snapshot().cleanupUncertain, true);
+});
+
+const pendingFact = (attempt = 1, changes = {}) => ({ cleanupAttempt: attempt, denyVerified: false, frontClosedVerified: false,
+  familyStoppedVerified: false, familyFailureReason: 'token', familyFailureErrno: 13, familyFailureMach: 5, ...changes });
+test('the cleanup-pending projection accepts only exact bounded first/latest diagnostic facts and clones them', () => {
+  const first = pendingFact(0, { familyFailureReason: 'unknown', familyFailureErrno: null, familyFailureMach: null });
+  const payload = { first, latest: pendingFact(2, { denyVerified: true, frontClosedVerified: true }) };
+  const projected = safePFNotionCleanupPending(payload); assert.deepEqual(projected, payload);
+  projected.first.familyFailureReason = 'token'; assert.equal(payload.first.familyFailureReason, 'unknown');
+  for (const invalid of [null, [], { first }, { ...payload, extra: 'INERT_DIAG_SECRET' },
+    { first: pendingFact(3), latest: pendingFact(2) }, { first: pendingFact(1), latest: pendingFact(1, { denyVerified: true }) },
+    ...[{ cleanupAttempt: -1 }, { cleanupAttempt: 2147483648 }, { cleanupAttempt: true }, { denyVerified: 1 },
+      { familyFailureReason: 'unknown' }, { familyFailureReason: 'none' },
+      { familyFailureReason: 'none', familyFailureErrno: 0, familyFailureMach: 1 }, { familyFailureErrno: 0 },
+      { familyFailureErrno: 1025 }, { familyFailureMach: null }, { familyFailureMach: 2147483648 },
+      { familyFailureMach: -2147483649 }, { privateToken: 'INERT_DIAG_SECRET' }].map(change => ({ first: pendingFact(), latest: pendingFact(2, change) }))]) {
+    assert.equal(safePFNotionCleanupPending(invalid), null, JSON.stringify(invalid));
+  }
+  for (const boundary of [-2147483648, 0, 2147483647]) assert.notEqual(safePFNotionCleanupPending({ first: pendingFact(), latest: pendingFact(2, { familyFailureMach: boundary }) }), null);
+});
+
+test('first/latest cleanup diagnostics survive public results, exact response diagnostics and session history without becoming cleanup proof', async t => {
+  const value = request(), first = pendingFact(0, { familyFailureReason: 'unknown', familyFailureErrno: null, familyFailureMach: null });
+  const one = { first, latest: pendingFact() }, two = { first, latest: pendingFact(2, { denyVerified: true, frontClosedVerified: true, familyStoppedVerified: true,
+    familyFailureReason: 'stop-timeout', familyFailureErrno: 110, familyFailureMach: 0 }) };
+  const initialFailure = structuredClone(retryableNativeFailure), cleanupFailure = { stage: 'cleanup', code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' };
+  const initial = { ...retryableCleanup(value), cleanupPending: one, cleanupFailure };
+  const later = { ...initial, cleanupPending: two };
+  const clean = { ...cleanup(value), staged: true, resumed: false, initialFailure, cleanupFailure, cleanupPending: two };
+  const { call } = peer(t, [routed, initial, later, clean, clean]); await call('prepareRoute', route());
+  const prepared = await call('prepareNotionApplication', value); assert.deepEqual(prepared.cleanupPending, one);
+  assert.equal(prepared.cleanupComplete, false); assert.deepEqual(prepared.initialFailure, initialFailure);
+  const snapshot = await call('applicationSnapshot', { runId: value.runId }); assert.deepEqual(snapshot.cleanupPending, two);
+  assert.equal(call.snapshot().cleanupUncertain, true); assert.deepEqual(call.snapshot().diagnostics.cleanupPending, two);
+  const diagnostic = projectPFNotionResponseDiagnostic('applicationSnapshot', { ...later, staged: true, resumed: false, cleanupComplete: false }, value.runId, value.environmentId);
+  assert.equal(validatePFNotionResponseDiagnostic(diagnostic, 'applicationSnapshot', value.runId, value.environmentId), true);
+  assert.deepEqual(diagnostic.cleanupPending, two);
+  await stopAndSnapshot(call, value); assert.equal(call.snapshot().cleanupUncertain, false);
+  assert.deepEqual(call.snapshot().diagnostics.cleanupPending, two); assert.deepEqual(call.snapshot().diagnostics.lastApplicationSnapshot.cleanupPending, two);
+});
+
+test('session snapshots reject changed first diagnostics, rewound latest counters and malformed proof details', async t => {
+  for (const kind of ['first', 'counter', 'same-counter', 'extra']) {
+    const value = request(), first = pendingFact(1), original = { first, latest: pendingFact(2) };
+    const changed = structuredClone(original);
+    if (kind === 'first') changed.first.familyFailureReason = 'identity';
+    if (kind === 'counter') changed.latest.cleanupAttempt = 1;
+    if (kind === 'same-counter') changed.latest.denyVerified = true;
+    if (kind === 'extra') changed.latest.privatePath = 'INERT_DIAG_SECRET';
+    const { call } = peer(t, [routed, { ...retryableCleanup(value), cleanupPending: original }, { ...retryableCleanup(value), cleanupPending: changed }]);
+    await prepare(call, value);
+    await assert.rejects(call('applicationSnapshot', { runId: value.runId }), { code: 'PF_HELPER_RESPONSE_INVALID' });
+    assert.equal(call.snapshot().diagnostics.uncertaintyLatched, true);
+    assert.equal(JSON.stringify(call.snapshot()).includes('INERT_DIAG_SECRET'), false);
+  }
+});
+
+const preparationNativeFailure = { stage: 'guardian', reason: 'NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED', error: 13 };
+function preparationBudgetFixture({ now, cause = 'preparation', stop = null } = {}) {
+  const value = request(), input = new PassThrough(), child = new EventEmitter(), phases = [];
+  const first = { preparationId: randomUUID(), generation: 1, command: 'automatic', cleanupAttempt: 0,
+    childState: 'unreaped', denyVerified: false, frontClosedVerified: false };
+  let includePreparation = false;
+  const initialFailure = cause === 'preparation'
+    ? { stage: 'cold-stage', code: 'APPLICATION_APP_NATIVE_REFUSED', native: preparationNativeFailure }
+    : { stage: 'cold-stage', code: 'APPLICATION_APP_STAGE_TIMEOUT' };
+  const pending = () => ({ ...flags, runId: value.runId, environmentId: value.environmentId, phase: 'cleanup-required',
+    staged: false, resumed: false, cleanupUncertain: true, cleanupComplete: false, cleanupRetryable: true,
+    failure: initialFailure, initialFailure,
+    ...(includePreparation ? { preparationCleanupPending: { first, latest: first } } : {}) });
+  const clean = () => { const result = cleanup(value);
+    return { ...result, staged: false, resumed: false, failure: initialFailure, initialFailure,
+      cleanupEvidence: { ...result.cleanupEvidence, childReaped: false, childAbsent: true } }; };
+  const controller = { closed: false, prepareRoute: async () => routed,
+    prepareNotionApplication: async () => { throw Object.assign(new Error('INERT_BUDGET_SECRET'), {
+      code: initialFailure.code, failureStage: initialFailure.stage, initialFailure,
+      ...(initialFailure.native ? { nativeFailure: initialFailure.native } : {}) }); },
+    applicationSnapshot: async () => phases.includes('complete') ? clean() : pending(),
+    stopNotionApplication: async () => { if (stop) return stop({ clean, phases }); phases.push('complete'); return clean(); },
+    shutdown: async () => ({ closed: true, cleanupRequired: false }) };
+  child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true;
+  child.stdin = new Writable({ write(bytes, encoding, done) { input.write(Buffer.from(bytes)); done(); }, final(done) { input.end(); done(); } });
+  const call = createPersistentPFNotionSessionClient({ now, spawnRootControlledLifecycle: () => {
+    servePFHelper({ controller, input, output: child.stdout, signalSource: null }).then(() => {
+      child.stdout.end(); setImmediate(() => child.emit('close', 0, null)); }); return child;
+  } });
+  return { call, value, phases, showPreparation: () => { includePreparation = true; } };
+}
+async function refusedBudgetFixture(f) {
+  await f.call('prepareRoute', route());
+  await assert.rejects(f.call('prepareNotionApplication', f.value));
+}
+
+test('a verified preparation stop budget leaves real wire time for slow S, R and the owned tail', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] }); let current = 0;
+  const f = preparationBudgetFixture({ now: () => current, stop: async ({ clean, phases }) => {
+    phases.push('S'); await new Promise(resolve => setTimeout(resolve, 59000));
+    phases.push('R'); await new Promise(resolve => setTimeout(resolve, 14000));
+    phases.push('tail'); await new Promise(resolve => setTimeout(resolve, 20000)); phases.push('complete'); return clean();
+  } });
+  await refusedBudgetFixture(f);
+  assert.equal(f.call.stopTimeoutMs(f.value.runId), PF_NOTION_PREPARATION_STOP_TIMEOUT_MS);
+  assert.equal(f.call.stopTimeoutMs(randomUUID()), PF_NOTION_STOP_TIMEOUT_MS);
+  let settled = false;
+  const stopping = f.call('stopNotionApplication', { runId: f.value.runId }, { timeoutMs: f.call.stopTimeoutMs(f.value.runId) })
+    .finally(() => { settled = true; });
+  while (!f.phases.includes('S')) await new Promise(resolve => setImmediate(resolve));
+  current = 59000; t.mock.timers.tick(59000); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.phases, ['S', 'R']);
+  current = 60000; t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false); assert.equal(f.call.snapshot().diagnostics.uncertaintyLatched, false);
+  current = 73000; t.mock.timers.tick(13000); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.phases, ['S', 'R', 'tail']);
+  current = 93000; t.mock.timers.tick(20000); const stopped = await stopping;
+  assert.equal(stopped.cleanupComplete, true); assert.equal(stopped.cleanupEvidence.childAbsent, true);
+  const timing = f.call.snapshot().diagnostics.callTimings.at(-1);
+  assert.equal(timing.requestedTimeoutMs, 110000); assert.equal(timing.effectiveTimeoutMs, 110000);
+  assert.equal(timing.elapsedMs, 93000); assert.equal(validatePFNotionCallTimingDiagnostic(timing), true);
+  await f.call('applicationSnapshot', { runId: f.value.runId });
+  assert.equal((await f.call.close()).cleanupUncertain, false);
+});
+
+test('only a later same-run validated preparation diagnostic extends an ordinary stage-timeout cleanup budget', async () => {
+  const f = preparationBudgetFixture({ cause: 'timeout' }); await refusedBudgetFixture(f);
+  assert.equal(f.call.stopTimeoutMs(f.value.runId), 60000);
+  await assert.rejects(f.call('stopNotionApplication', { runId: f.value.runId }, { timeoutMs: 60001 }));
+  await f.call('applicationSnapshot', { runId: f.value.runId }); assert.equal(f.call.stopTimeoutMs(f.value.runId), 60000);
+  f.showPreparation(); await f.call('applicationSnapshot', { runId: f.value.runId });
+  assert.equal(f.call.stopTimeoutMs(f.value.runId), 110000); assert.equal(f.call.stopTimeoutMs(randomUUID()), 60000);
+  await assert.rejects(f.call('stopNotionApplication', { runId: randomUUID() }, { timeoutMs: 110000 }));
+  await assert.rejects(f.call('stopNotionApplication', { runId: f.value.runId }, { timeoutMs: 110001 }));
+  await f.call('stopNotionApplication', { runId: f.value.runId }, { timeoutMs: f.call.stopTimeoutMs(f.value.runId) });
+  await f.call('applicationSnapshot', { runId: f.value.runId });
+  assert.equal((await f.call.close()).cleanupUncertain, false);
+});
+
+test('the extended preparation stop deadline remains hard and late cleanup cannot remove its uncertainty', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] }); let current = 0, finish;
+  const f = preparationBudgetFixture({ now: () => current, stop: async ({ clean, phases }) => {
+    phases.push('S'); await new Promise(resolve => { finish = resolve; }); phases.push('complete'); return clean();
+  } });
+  await refusedBudgetFixture(f);
+  const stopping = assert.rejects(f.call('stopNotionApplication', { runId: f.value.runId },
+    { timeoutMs: f.call.stopTimeoutMs(f.value.runId) }), { code: 'PF_HELPER_DEADLINE' });
+  while (!finish) await new Promise(resolve => setImmediate(resolve));
+  current = 110000; t.mock.timers.tick(110000); await stopping;
+  finish(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.call.snapshot().diagnostics.uncertaintyLatched, true);
+  const timing = f.call.snapshot().diagnostics.callTimings.at(-1);
+  assert.equal(timing.outcome, 'deadline'); assert.equal(timing.lateResponseObserved, true);
+  assert.equal(validatePFNotionCallTimingDiagnostic(timing), true);
+  await f.call('applicationSnapshot', { runId: f.value.runId });
+  assert.equal(f.call.snapshot().diagnostics.uncertaintyLatched, true);
+  assert.equal((await f.call.close()).cleanupUncertain, true);
 });

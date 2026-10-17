@@ -96,6 +96,14 @@ test('later updates accept only fixed reviewed priors and report private runtime
   'fa70a2ff212cf478f2165e086288815c9bd87c8c9538b40c5d75186a4398a7d4',
   '32811e9718b4c803c23b79f90828131709f6d0e139bc6713fd3482b0122214bb',
   '22a6f3ea8e9354c3b32b488c50e8ae6ab0d9c5aa565a80911b1848f40aea87de',
+  '78c3fcff00b6d66273290fb38e1bbfd14811b3ca6af81fe92baa87bd72e091e4',
+  'fb74d63e38710d8129e409cc72840b6a8bfc0ac3917de4905d7d5357e61c66f2',
+  '554c5ac706c108b7530842a4a5e156e095004ad0fb11e3fe821b255ac2ab6f2e',
+  '2af8c63918675c5ccca1d46fd763e462ea8cefabd6cc41ebdcefa85bc45049b6',
+  '005f91acca0cecfc7ef7c2f731e9a7e178a6a8268e88a048caf54ac762047dcc',
+  '88f8c7363d7b689829e712b39f26c09ca9856685cc71fd8b1e05cbeb43027715',
+  '0b6d9bffd6629d4855bf44b5d7f2e99b88e9732020cd84f72919dcae35020a13',
+  '03596ac0849e4e91a39367934e7555ab166eb9084a5ca2bb15a3a0230b9d0539',
   '43b392665e496cba2bc2675284fd2d03390ea92db85496d07e49ba696cd7c2a7',
   'acfc112b497c680001c7ce37dcdc99021b51de615072b15c096895900ecfa0c6',
   'c34cba313dad0712fc53eaea514d8466c6710eb70cc7840a1ca4238eea3817e4',
@@ -118,6 +126,27 @@ test('later updates accept only fixed reviewed priors and report private runtime
     /administrator inspection/);
   assert.throws(() => validateAuthorizationPlan({ ...inspected, priorManifestSHA256: `${priorManifestSHA256.slice(0, 63)}${priorManifestSHA256.endsWith('0') ? '1' : '0'}` }, value.options.expectedManifestSHA256),
     /fixed reviewed prior/);
+  }
+});
+
+test('authorization plans accept every exact installer prior and reject a changed manifest hash', async t => {
+  const value = await fixture(t), original = value.plan(value.payload);
+  const base = new URL('../native/macos-pf-routing/', import.meta.url);
+  const installer = await readFile(new URL('authorize-install.c', base), 'utf8');
+  const table = installer.match(/known_prior_snapshots\[\]\s*=\s*\{([^}]+)\}/)?.[1];
+  assert.ok(table, 'The installer must declare its fixed prior table');
+  const tags = [...table.matchAll(/&ENVARA_PF_UPGRADE_([A-Z0-9]+)_SNAPSHOT/g)].map(([, tag]) => tag.toLowerCase());
+  assert.ok(tags.includes('554c') && tags.includes('2af8') && tags.includes('005f') && tags.includes('88f8') && tags.includes('0b6d') && tags.includes('0359'));
+  assert.equal(new Set(tags).size, tags.length);
+  for (const tag of tags) {
+    const bytes = await readFile(new URL(`known-installations/${tag}.manifest.json`, base));
+    const header = await readFile(new URL(`installer-upgrade-${tag}.h`, base), 'utf8');
+    const priorManifestSHA256 = digest(bytes);
+    assert.equal(header.match(/#define ENVARA_PF_UPGRADE_[A-Z0-9]+_SHA256 "([0-9a-f]{64})"/)?.[1], priorManifestSHA256);
+    const plan = { ...original, priorManifestSHA256 };
+    assert.equal(validateAuthorizationPlan(plan, value.options.expectedManifestSHA256), plan);
+    const changed = `${priorManifestSHA256.slice(0, 63)}${priorManifestSHA256.endsWith('0') ? '1' : '0'}`;
+    assert.throws(() => validateAuthorizationPlan({ ...plan, priorManifestSHA256: changed }, value.options.expectedManifestSHA256), /fixed reviewed prior/);
   }
 });
 

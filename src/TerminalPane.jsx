@@ -4,6 +4,8 @@ import { FitAddon } from '@xterm/addon-fit';
 import { TerminalWindow, FolderOpen, Plus, X, CaretDown, ArrowsOutSimple, ArrowsInSimple, ArrowSquareOut, Copy, DotsThree, ArrowsClockwise } from '@phosphor-icons/react';
 import { api } from './client.js';
 import { useI18n } from './i18n.jsx';
+import { useAppearance } from './appearance.jsx';
+import { getTerminalTheme, terminalFontFamily } from './terminal-theme.mjs';
 import { SYSTEM_BROWSER, terminalNetworks } from './link-browser.mjs';
 import { CLAUDE_SESSION, sessionNetworks, sessionChoiceHost, changeSessionKind, terminalSessionOptions } from './terminal-session-choice.mjs';
 import { TerminalErrorNotices } from './terminal-error-notices.mjs';
@@ -12,6 +14,7 @@ import { terminalTimezonePresentation } from './network-flow-state.mjs';
 import { NEW_CLAUDE_ACCOUNT, validClaudeAccountChoice, claudeSessionForRequest, claudeInstallPresentation, claudeErrorMessage, validClaudeInstallationChoice, claudeInstallationOptions } from './claude-account-choice.mjs';
 import { TerminalDeviceIdentifierDetails } from './terminal-device-identifiers.mjs';
 import { reconcileTerminalProfile } from './terminal-profile-selection.mjs';
+import { invalidatePickedTerminalDirectory, terminalDirectoryChoice } from './terminal-directory-choice.mjs';
 import '@xterm/xterm/css/xterm.css';
 import './terminal.css';
 
@@ -25,6 +28,9 @@ const bounds = (value, low, high) => Math.max(low, Math.min(high, value));
 
 function TerminalSession({ session, active, visible, focusRequest, preserveTabFocusRef, register, onError }) {
   const { t } = useI18n();
+  const { effective } = useAppearance();
+  const themeRef = useRef(effective);
+  themeRef.current = effective;
   const translationRef = useRef(t);
   translationRef.current = t;
   const containerRef = useRef(null);
@@ -41,9 +47,9 @@ function TerminalSession({ session, active, visible, focusRequest, preserveTabFo
     const terminal = new Terminal({
       cols: bounds(session.columns || 100, 20, 400), rows: bounds(session.rows || 12, 5, 150),
       cursorBlink: true, fontSize: 13, lineHeight: 1.1, scrollback: 3000, screenReaderMode: true,
-      fontFamily: 'Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+      fontFamily: terminalFontFamily,
       disableStdin: session.status !== 'running' || !visibleRef.current,
-      theme: { background: '#19191c', foreground: '#d8d8df', cursor: '#e2e2e8', selectionBackground: '#334c68', black: '#25252b', brightBlack: '#737382', red: '#ed747c', green: '#8bcd9b', yellow: '#d9c58b', blue: '#71aaf5', magenta: '#be9add', cyan: '#83c9d1', white: '#d8d8df' },
+      theme: getTerminalTheme(themeRef.current),
       linkHandler: { activate: event => event.preventDefault(), allowNonHttpProtocols: false },
     });
     const fit = new FitAddon();
@@ -115,6 +121,12 @@ function TerminalSession({ session, active, visible, focusRequest, preserveTabFo
       controlRef.current = null; terminal.dispose();
     };
   }, [session.sessionId, register, onError]);
+
+  // Recolour the existing renderer. Its buffer, subscriptions and PTY stay intact.
+  useEffect(() => {
+    const terminal = controlRef.current?.terminal;
+    if (terminal) terminal.options.theme = getTerminalTheme(effective);
+  }, [effective]);
 
   useEffect(() => {
     controlRef.current?.terminal.textarea?.setAttribute('aria-label', t('环境终端输入'));
@@ -346,13 +358,13 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
     try {
       const result = await api.call('pickTerminalDirectory', { id: host.id });
       if (result?.canceled || !result?.path) return;
-      setNewSession(value => value ? { ...value, directory: { path: result.path, token: result.token }, error: '' } : value);
+      setNewSession(value => value ? { ...value, directory: { path: result.path, token: result.token }, directoryNeedsSelection: false, error: '' } : value);
     } catch (error) { setNewSession(value => value ? { ...value, error: error.message || String(error) } : value); }
     finally { if (mountedRef.current) setPending(''); }
   };
   const confirmNewSession = async () => {
     const host = chooserHost(newSession);
-    if (!host || pending) return;
+    if (!host || pending || !terminalDirectoryChoice(newSession).ready) return;
     let claudeAccountId;
     if (newSession.kind === CLAUDE_SESSION) {
       if (!validClaudeAccountChoice(claudeAccounts, host.id, newSession) || !validClaudeInstallationChoice(claudeInstallation, host.id, newSession.installSource)) return;
@@ -398,7 +410,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
         if (!session?.canceled && mountedRef.current) { acceptSession(session); await refresh(); }
         return true;
       } catch (error) {
-        if (requestId) setNewSession(value => value?.requestId === requestId ? { ...value, requestId: null, error: claudeErrorMessage(error.message, error.code) || '终端无法启动。', directory: value.directory ? { ...value.directory, token: null } : null } : value);
+        if (requestId) setNewSession(value => value?.requestId === requestId ? { ...invalidatePickedTerminalDirectory(value), requestId: null, error: claudeErrorMessage(error.message, error.code) || '终端无法启动。' } : value);
         reportError(claudeErrorMessage(error.message, error.code) || '终端无法启动。', error.code || (/^CLAUDE_CODE_[A-Z_]+$/.test(error.message) ? error.message : ''));
         return false;
       }
@@ -518,12 +530,12 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
       : `${t('有效语言')} · ${sessionLanguage.effective}`
     : '';
   /* The selected terminal's own route first: which network it leaves through,
-   * and whether the fence makes that the only way out. */
+   * and whether direct public connections are fenced. */
   const shownNetwork = selectedSession?.network ?? selectedMetadata?.network ?? null;
   const rawNetworkDescription = shownNetwork?.description || '启动后读取环境网络设置。';
   const proxyDescription = /^([A-Z0-9]+) 代理，仅支持代理配置的命令行工具生效；本机地址直连。$/.exec(rawNetworkDescription);
   const networkDescription = shownNetwork?.fenced
-    ? t('经「{name}」出网，已加网络围栏：不支持代理的程序会连不上，不会直连。', { name: shownNetwork.routeName || String(shownNetwork.mode || '').toUpperCase() })
+    ? t('经「{name}」代理访问公网，围栏阻止直接公网连接。本地开发服务仍可访问，其联网不受此围栏控制。', { name: shownNetwork.routeName || String(shownNetwork.mode || '').toUpperCase() })
     : proxyDescription
       ? t('{protocol} 代理，仅支持代理配置的命令行工具生效；本机地址直连。', { protocol: proxyDescription[1] })
       : t(rawNetworkDescription);
@@ -591,7 +603,8 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
         const availableNetworks = sessionNetworks(networks, newSession.kind);
         const network = availableNetworks.find(item => item.id === newSession.networkId);
         const host = chooserHost(newSession);
-        const folder = newSession.directory?.path ?? directoryFor(host?.id)?.cwd ?? null;
+        const directory = terminalDirectoryChoice(newSession, directoryFor(host?.id)?.cwd);
+        const folder = directory.path;
         const egress = network?.egress;
         const privacyMode = host?.privacy?.mode ?? 'standard';
         const startingSession = claudeSessionForRequest(terminalState.profiles, host?.id, newSession.requestId);
@@ -620,7 +633,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
           </dl><p>{t('MCP 与 Playwright 仅使用所选浏览器。会话内关闭自动更新。')}</p></details>}
           {newSession.error && <div className="terminal-new-session-error">{t(newSession.error)}</div>}
           {opening && <div className="terminal-install-progress" role="status"><div><ArrowsClockwise className="spin" size={14} /><span>{t(installation?.label || '准备中…')}</span>{installation?.percent != null && <strong>{installation.percent}%</strong>}</div>{installation?.percent != null && <progress max="100" value={installation.percent} />}</div>}
-          <div className="terminal-new-session-actions"><button className="terminal-text-button" disabled={!!pending && (!startingSession || !!cancellingSessionId)} onClick={cancelCreation}>{t(cancellingSessionId ? '关闭中…' : opening && claude ? '取消安装' : '取消')}</button><button className="terminal-text-button terminal-start-button" aria-busy={!!pending || undefined} disabled={!!pending || !host || (claude && (!validClaudeAccountChoice(claudeAccounts, host.id, newSession) || !validClaudeInstallationChoice(claudeInstallation, host.id, newSession.installSource)))} onClick={() => void confirmNewSession()}>{t(pending.startsWith('account:') ? '正在创建档案…' : opening ? '启动中…' : newSession.error ? '重试' : '打开终端')}</button></div>
+          <div className="terminal-new-session-actions"><button className="terminal-text-button" disabled={!!pending && (!startingSession || !!cancellingSessionId)} onClick={cancelCreation}>{t(cancellingSessionId ? '关闭中…' : opening && claude ? '取消安装' : '取消')}</button><button className="terminal-text-button terminal-start-button" aria-busy={!!pending || undefined} disabled={!!pending || !host || !directory.ready || (claude && (!validClaudeAccountChoice(claudeAccounts, host.id, newSession) || !validClaudeInstallationChoice(claudeInstallation, host.id, newSession.installSource)))} onClick={() => void confirmNewSession()}>{t(pending.startsWith('account:') ? '正在创建档案…' : opening ? '启动中…' : newSession.error ? '重试' : '打开终端')}</button></div>
         </div>;
       })()}
       <TerminalDeviceIdentifierDetails session={selectedSession} t={t} />

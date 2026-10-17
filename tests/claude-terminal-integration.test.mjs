@@ -74,6 +74,8 @@ test('dedicated session opens a shell with a manual Claude wrapper and pinned MC
   assert.deepEqual(session.language, { requested: 'en-PH', effective: 'en-PH', posix: 'en_PH.UTF-8', fallback: false });
   const settings = JSON.parse(await readFile(prepared.args[prepared.args.indexOf('--settings') + 1], 'utf8'));
   assert.equal(settings.env.LANG, 'en_PH.UTF-8'); assert.equal(settings.env.LC_ALL, 'en_PH.UTF-8');
+  assert.equal(launch.options.env.ANTHROPIC_CONFIG_DIR, path.join(launch.options.env.CLAUDE_CONFIG_DIR, 'anthropic'));
+  assert.equal(settings.env.ANTHROPIC_CONFIG_DIR, launch.options.env.ANTHROPIC_CONFIG_DIR);
   assert(launch.options.env.CLAUDE_CONFIG_DIR.startsWith(path.join(f.root, 'data/terminal/profiles/chosen')));
   assert.equal(launch.options.env.ENVARA_LINK_SOCKET, '/private/test.sock');
   assert.equal(launch.options.env.ENVARA_BROWSER_TOKEN, f.bindings[0].environment.ENVARA_BROWSER_TOKEN);

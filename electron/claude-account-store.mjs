@@ -127,14 +127,21 @@ export class ClaudeAccountStore {
   }
   /* An imported environment keeps its login profile ids and names; their
    * directories arrived with the export. Only a new environment adopts them. */
-  adopt(id, accounts) {
+  adopt(id, accounts, { defaultName = '默认' } = {}) {
     profileId(id);
-    const adopted = (Array.isArray(accounts) ? accounts : []).filter(account => account?.id !== DEFAULT_CLAUDE_ACCOUNT)
-      .slice(0, MAX_ACCOUNTS - 1).map(account => ({ id: claudeAccountId(account?.id), name: accountName(account?.name) }));
-    if (new Set(adopted.map(account => nameKey(account.name))).size !== adopted.length) throw fail('此 Claude 登录档案名称已存在。', 'CLAUDE_ACCOUNT_NAME_EXISTS');
+    const initial = { id: DEFAULT_CLAUDE_ACCOUNT, name: accountName(defaultName) };
+    if (!Array.isArray(accounts)) throw fail('Claude 登录档案元数据无效。');
+    if (accounts.length >= MAX_ACCOUNTS) throw fail('一个境舱最多保存 20 个 Claude 登录档案。', 'CLAUDE_ACCOUNT_LIMIT');
+    const adopted = accounts.map(account => ({ id: claudeAccountId(account?.id), name: accountName(account?.name) }));
+    const ids = new Set([initial.id]), names = new Set([nameKey(initial.name)]);
+    for (const account of adopted) {
+      if (ids.has(account.id)) throw fail('Claude 登录档案元数据无效。');
+      if (names.has(nameKey(account.name))) throw fail('此 Claude 登录档案名称已存在。', 'CLAUDE_ACCOUNT_NAME_EXISTS');
+      ids.add(account.id); names.add(nameKey(account.name));
+    }
     return this.mutate(profiles => {
       if (profiles.has(id)) throw fail('此境舱已有 Claude 登录档案。', 'CLAUDE_ACCOUNT_NAME_EXISTS');
-      if (adopted.length) profiles.set(id, [defaultAccount(), ...adopted]);
+      profiles.set(id, [initial, ...adopted]);
       return adopted.map(publicAccount);
     });
   }

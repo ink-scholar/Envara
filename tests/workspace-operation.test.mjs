@@ -48,3 +48,25 @@ test('ordinary metadata responses still trigger one best-effort state update', a
     refresh: async () => { refreshes++; return { profiles: [] }; } });
   assert.equal(refreshes, 1); assert.deepEqual(outcome, { result, refreshFailed: false });
 });
+
+test('a completed attached run is applied without a second full refresh that can leave it starting forever', async () => {
+  const { applyNotionTrialOperationResult, notionTrialControls, attachedApplicationStatus } = await import('../src/notion-trial-state.mjs');
+  const result = { applicationId: 'attached-code', runId: 'bb756095-daf2-4137-b7e6-f8714b0c9ad0', environmentId: '76e164dd-3827-4746-9e5d-43ae1f4219de',
+    phase: 'cleaned', active: false, cleanupComplete: true, cleanupUncertain: false, errorCode: 'APPLICATION_APP_NATIVE_REFUSED',
+    initialFailure: { stage: 'cold-stage', code: 'APPLICATION_APP_NATIVE_REFUSED' } };
+  for (const refresh of [() => new Promise(() => {}), async () => { throw new Error('unrelated workspace read failed'); }]) {
+    let snapshot = { profiles: [], proxies: [], system: {}, applications: [{ id: 'attached-code', identity: 'fixture-code', notionTrial: { ...result, active: true, phase: 'preparing' } }] };
+    let pending = true, refreshes = 0;
+    const operation = completeWorkspaceOperation({ execute: async () => result,
+      acceptSnapshot: value => {
+        const next = applyNotionTrialOperationResult(snapshot, value, { method: 'runNotionTrial', applicationId: result.applicationId });
+        if (!next) return false; snapshot = next; return true;
+      }, refresh: () => { refreshes++; return refresh(); } }).finally(() => { pending = false; });
+    let timer;
+    const outcome = await Promise.race([operation, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('completed trial waited for an unrelated refresh')), 100); })]).finally(() => clearTimeout(timer));
+    assert.equal(outcome.result, result); assert.equal(refreshes, 0); assert.equal(pending, false);
+    assert.equal(attachedApplicationStatus(notionTrialControls(snapshot.applications[0], { controlledNotionTrialAvailable: true }, true,
+      pending ? { 'runNotionTrial:attached-code': true } : {})), 'stopped');
+    assert.deepEqual(snapshot.applications[0].notionTrial.initialFailure, result.initialFailure);
+  }
+});

@@ -5,7 +5,7 @@
 <p align="center"><strong>Un environnement dédié à chaque contexte de travail.</strong><br />Votre navigateur, votre terminal et vos applications, dans un même environnement.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licence du code original : MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.24-475569" alt="Envara 0.5.24" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.25-475569" alt="Envara 0.5.25" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README en 9 langues" /></a>
 </p>
 <p align="center">
@@ -73,7 +73,7 @@ Les programmes eux-mêmes, caches, fichiers temporaires et données du trousseau
 
 ### 🗂️ Moins d’interruptions dans la gestion quotidienne
 
-L’interface sombre à trois colonnes donne une place claire aux environnements, réseaux, navigateurs, terminaux, applications associées et états d’exécution. Les actions courantes sont directement accessibles, les réglages détaillés se trouvent dans les options avancées et neuf langues d’interface vous permettent de commencer dans la vôtre.
+L’interface à trois colonnes propose un mode clair, sombre ou adapté au système, et donne une place claire aux environnements, réseaux, navigateurs, terminaux, applications associées et états d’exécution. Ce réglage s’applique uniquement à Envara et ne change pas l’apparence de votre ordinateur. Les actions courantes sont directement accessibles, les réglages détaillés se trouvent dans les options avancées et neuf langues d’interface vous permettent de commencer dans la vôtre.
 
 ## Que pouvez-vous faire avec Envara ?
 

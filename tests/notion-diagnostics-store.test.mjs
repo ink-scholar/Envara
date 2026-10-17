@@ -44,3 +44,25 @@ test('serialized updates remain readable and symlink history is rejected', async
     await assert.rejects(store.save({ ...record, runId: 'invalid' }));
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('cleanup facts retain only the bounded first/latest diagnostic across restart', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'envara-diagnostics-')));
+  try {
+    const first = { cleanupAttempt: 0, denyVerified: true, frontClosedVerified: true, familyStoppedVerified: false,
+      familyFailureReason: 'token', familyFailureErrno: 13, familyFailureMach: 5 };
+    const cleanupPending = { first, latest: { ...first, cleanupAttempt: 2 } };
+    const directory = path.join(root, 'history'), store = new NotionDiagnosticsStore(directory);
+    await store.save({ ...record, sessionDiagnostics: { cleanupPending } });
+    const restarted = new NotionDiagnosticsStore(directory), history = await restarted.read(record.applicationId);
+    assert.deepEqual(history.cleanupPending, cleanupPending);
+    assert.deepEqual(history.sessionDiagnostics.cleanupPending, cleanupPending);
+    assert.deepEqual(history.initialFailure, record.initialFailure); assert.deepEqual(history.cleanupFailure, record.cleanupFailure);
+    assert.equal(history.cleanupComplete, false); assert.equal(history.ready, false); assert.equal(history.protected, false);
+    await store.save({ ...record, cleanupPending: { ...cleanupPending, unboundedHistory: [first] },
+      sessionDiagnostics: { cleanupPending: { first, latest: { ...first, path: '/private/secret-sentinel' } } } });
+    const rejected = await restarted.read(record.applicationId);
+    assert.equal(Object.hasOwn(rejected, 'cleanupPending'), false);
+    assert.equal(Object.hasOwn(rejected.sessionDiagnostics, 'cleanupPending'), false);
+    assert.equal((await readFile(path.join(directory, 'app_fixture.json'), 'utf8')).includes('secret-sentinel'), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

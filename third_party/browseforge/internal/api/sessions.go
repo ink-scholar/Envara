@@ -55,10 +55,11 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 201, map[string]any{"data": map[string]any{
-		"session_id": sess.ID,
-		"profile_id": sess.ProfileID,
-		"runtime_id": sess.RuntimeID,
-		"privacy":    sess.Privacy.Snapshot(),
+		"session_id":  sess.ID,
+		"instance_id": sess.InstanceID,
+		"profile_id":  sess.ProfileID,
+		"runtime_id":  sess.RuntimeID,
+		"privacy":     sess.Privacy.Snapshot(),
 	}})
 }
 
@@ -87,10 +88,11 @@ func (h *handler) listSessions(w http.ResponseWriter, r *http.Request) {
 	var result []map[string]any
 	for _, s := range sessions {
 		result = append(result, map[string]any{
-			"session_id": s.ID,
-			"profile_id": s.ProfileID,
-			"runtime_id": s.RuntimeID,
-			"privacy":    s.Privacy.Snapshot(),
+			"session_id":  s.ID,
+			"instance_id": s.InstanceID,
+			"profile_id":  s.ProfileID,
+			"runtime_id":  s.RuntimeID,
+			"privacy":     s.Privacy.Snapshot(),
 		})
 	}
 	writeJSON(w, 200, map[string]any{"data": result, "total": len(result)})

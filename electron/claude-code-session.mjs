@@ -13,7 +13,7 @@ const invalidSettings = () => fail('此境舱的 Claude 设置无法安全读取
 const MAX_SETTINGS_BYTES = 1024 * 1024;
 const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`;
 
-function claudeShim({ node, resolver, home }, args) {
+function claudeShim({ node, resolver, home, runtime }, args) {
   // These options belong to the terminal's binding. Scalar option order and
   // variadic --mcp-config merging are not reliable override prevention.
   const reserved = ['--mcp-config', '--strict-mcp-config', '--no-strict-mcp-config', '--settings', '--setting-sources',
@@ -28,6 +28,11 @@ for envara_arg in "$@"; do
       exit 64 ;;
   esac
 done
+if [ -e ${shellQuote(path.join(home, '.config', 'anthropic'))} ] || [ -L ${shellQuote(path.join(home, '.config', 'anthropic'))} ]; then
+  if (umask 077; /bin/mkdir ${shellQuote(path.join(runtime, 'legacy-anthropic-notice'))} 2>/dev/null); then
+    printf '%s\\n' '旧版共用的 Console 登录资料仍保留，请在所选档案重新登录。' >&2
+  fi
+fi
 envara_claude=$(NODE_OPTIONS= BUN_OPTIONS= ${[node, resolver, '--resolve', home].map(shellQuote).join(' ')}) || exit 126
 exec "\${envara_claude}" ${args.map(shellQuote).join(' ')} "$@"
 `;
@@ -55,17 +60,18 @@ function accountValueActive(key, value) {
 }
 const CONTEXT_ENV = new Set([
   'HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME',
-  'CLAUDE_CONFIG_DIR', 'HISTFILE', 'ZDOTDIR', 'NPM_CONFIG_USERCONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM',
+  'CLAUDE_CONFIG_DIR', 'ANTHROPIC_CONFIG_DIR', 'HISTFILE', 'ZDOTDIR', 'NPM_CONFIG_USERCONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM',
   'TMPDIR', 'TMP', 'TEMP', 'TZ', 'LANG', 'LC_ALL', 'PATH', 'BROWSER', 'NODE_USE_ENV_PROXY', 'NO_PROXY', 'no_proxy',
   'ENVARA_LINK_SOCKET', 'ENVARA_BROWSER_SOCKET',
 ]);
 const PRIVATE_ENV = new Set(['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'ENVARA_LINK_TOKEN', 'ENVARA_BROWSER_TOKEN']);
 const SESSION_BREAKING_ENV = new Set(['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB', 'NODE_OPTIONS', 'BUN_OPTIONS', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES']);
 
-async function checkedDirectory(root) {
+async function checkedDirectory(root, { owned = false } = {}) {
   if (!absolute(root) || path.resolve(root) !== root) throw fail('Claude Code 会话目录无效。');
   const info = await lstat(root);
-  if (!info.isDirectory() || info.isSymbolicLink() || await realpath(root) !== root) throw fail('Claude Code 会话目录包含不安全的链接。', 'CLAUDE_CODE_UNSAFE_PATH');
+  if (!info.isDirectory() || info.isSymbolicLink() || owned && (info.mode & 0o022 || process.getuid && info.uid !== process.getuid())
+    || await realpath(root) !== root) throw fail('Claude Code 会话目录包含不安全的链接。', 'CLAUDE_CODE_UNSAFE_PATH');
 }
 
 async function readUserSettings(directory) {
@@ -102,6 +108,8 @@ async function sessionPolicy({ directories, environment, privacy }) {
   await checkedDirectory(directories?.home);
   const user = await readUserSettings(directories?.claude);
   if (environment.HOME !== directories.home || environment.USERPROFILE !== directories.home || environment.CLAUDE_CONFIG_DIR !== directories.claude) throw policyConflict();
+  if (directories.anthropic !== path.join(directories.claude, 'anthropic') || environment.ANTHROPIC_CONFIG_DIR !== directories.anthropic) throw policyConflict();
+  await checkedDirectory(directories.anthropic, { owned: true });
   const mode = typeof privacy === 'string' ? privacy : privacy?.mode ?? 'standard';
   if (!['off', 'standard', 'strict'].includes(mode)) throw fail('Claude Code 隐私设置无效。');
   const launch = { ...environment, DISABLE_AUTOUPDATER: '1', DO_NOT_TRACK: mode === 'off' ? '' : '1',
@@ -215,7 +223,7 @@ export async function prepareClaudeSession({ sessionId, directories, installatio
     await writeFile(settings, JSON.stringify(policy.settings), { mode: 0o600, flag: 'wx' });
     const args = ['--no-chrome', '--strict-mcp-config', '--mcp-config', mcp, '--setting-sources', 'user', '--settings', settings];
     await writeFile(resolver, await readFile(new URL('./claude-code-installation.mjs', import.meta.url)), { mode: 0o600, flag: 'wx' });
-    await writeFile(wrapperPath, claudeShim({ node, resolver, home: directories.home }, args), { mode: 0o700, flag: 'wx' });
+    await writeFile(wrapperPath, claudeShim({ node, resolver, home: directories.home, runtime }, args), { mode: 0o700, flag: 'wx' });
     return { executable: selected, installation, args, environment: policy.environment, binDirectory, wrapperPath, cleanup };
   } catch (error) {
     try { await cleanup(); }

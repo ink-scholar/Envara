@@ -72,14 +72,20 @@ bytes again. Root can bypass every one of these checks.
 
 ### Diagnostic step timing
 
-After `L` is accepted, the keeper writes at most 16 `stage-progress` frames on
+After `L` is accepted, the keeper writes at most 32 `stage-progress` frames on
 its own output: a fixed step name (`front-commit` … `stage-adopt`,
-`resume-verify`), its monotonic milliseconds, the total since `L`, and how many
+`resume-verify`, plus the fixed `keychain-*` preparation steps), its monotonic milliseconds, the total since `L`, and how many
 full inspections and identity re-proofs it ran. A frame is written whole only
 when the output can take it now; otherwise it is dropped and never delays
 staging. The controller keeps them with their receipt time and reports them
 only as `applicationSnapshot().nativeStageTimings`. They are diagnostics, never
 a receipt, readiness, protection or cleanup signal.
+
+Keychain preparation emits at most ten completed phases and one fixed failure
+gate per launch. Helper failure gates are reported by the parent only after its
+owned terminal-wait and fresh scope proof; they never attest preparation success
+or replace the generic operation refusal and cleanup protocol. The fixed gate
+name inventory can exceed the per-launch frame limit.
 
 `envara_gui_original_running()` refuses a registered running app with the same
 bundle identifier and any inspected executable under the original or sealed bundle for

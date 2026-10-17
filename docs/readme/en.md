@@ -5,7 +5,7 @@
 <p align="center"><strong>Give each workflow a place of its own.</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="MIT license for original code" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.24-475569" alt="Envara 0.5.24" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.25-475569" alt="Envara 0.5.25" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README in 9 languages" /></a>
 </p>
 <p align="center">
@@ -73,7 +73,7 @@ Application executables, caches, temporary files and Keychain are excluded. Some
 
 ### 🗂️ Keep everyday work close at hand
 
-The dark three-column workspace gives environments, networks, browsers, terminals, attached applications and runtime status a clear place. Common actions are within reach; detailed settings stay under Advanced. Nine interface languages let you start in a language you know.
+The three-column workspace supports light, dark and system appearance, giving environments, networks, browsers, terminals, attached applications and runtime status a clear place. Appearance settings apply only to Envara and do not change your computer’s appearance. Common actions are within reach; detailed settings stay under Advanced. Nine interface languages let you start in a language you know.
 
 ## What can you do with Envara?
 

@@ -1,4 +1,7 @@
+import { isAppearancePreference } from '../shared/appearance.mjs';
+
 const fail = (message, code) => Object.assign(new Error(message), { code });
+const networkLabel = value => typeof value === 'string' && value.trim() && value.length <= 200 && !/[\0\r\n]/.test(value) ? value : null;
 
 export function resolveTerminalView(args, workspace, terminalState) {
   if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.id !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(args.id)) throw fail('无效的环境标识。', 'VALIDATION_ERROR');
@@ -19,9 +22,14 @@ export function terminalViewSnapshot(value) {
   const fields = ['id', 'name', 'group', 'engine', 'status', 'timezone', 'resolvedTimezone', 'timezoneSource', 'timezoneOrigin'];
   return { profiles: value.profiles.map(row => {
     const profile = Object.fromEntries(fields.filter(key => Object.hasOwn(row, key)).map(key => [key, row[key]]));
+    if (row.proxyId === null || typeof row.proxyId === 'string' && /^[A-Za-z0-9_-]{1,96}$/.test(row.proxyId)) profile.proxyId = row.proxyId;
+    if (['off', 'standard', 'strict'].includes(row.privacy?.mode)) profile.privacy = { mode: row.privacy.mode };
+    const node = profile.proxyId && Array.isArray(value.proxies) ? value.proxies.find(item => item?.id === profile.proxyId) : null;
+    const name = networkLabel(row.networkName) || networkLabel(node?.name);
+    if (name) profile.networkName = name;
     const savedTimezone = row.selectedLocation?.timezone;
     if (row.selectedLocation?.confirmed === true && typeof savedTimezone === 'string' && savedTimezone.length <= 128) profile.savedNetworkTimezone = savedTimezone;
     if (row.network?.ok === false || row.networkLastError) profile.networkContextUnavailable = true;
     return profile;
-  }), proxies: [], engines: [], settings: { ...(value.settings?.language ? { language: value.settings.language } : {}) }, events: [], system: { appVersion: value.system.appVersion, platform: value.system.platform, terminal: value.system.terminal } };
+  }), proxies: [], engines: [], settings: { ...(value.settings?.language ? { language: value.settings.language } : {}), ...(isAppearancePreference(value.settings?.appearance) ? { appearance: value.settings.appearance } : {}) }, events: [], system: { appVersion: value.system.appVersion, platform: value.system.platform, terminal: value.system.terminal } };
 }

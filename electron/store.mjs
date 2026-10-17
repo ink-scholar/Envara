@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { workspaceAppearance } from '../shared/appearance.mjs';
 
 const copy = (value) => structuredClone(value);
 
@@ -25,7 +26,7 @@ export class EnvaraStore {
           !Array.isArray(value.events) || !value.settings || typeof value.settings !== 'object') {
         throw new Error('数据文件格式不受支持。');
       }
-      this.value = value;
+      this.value = { ...value, settings: { ...value.settings, appearance: workspaceAppearance(value.settings) } };
     } catch (error) {
       if (error.code !== 'ENOENT') {
         // JSON parser snippets can contain proxy credentials or account data.
@@ -35,7 +36,7 @@ export class EnvaraStore {
       }
       this.value = {
         schema: 'envara.workspace', version: 1,
-        profiles: [], proxies: [], settings: { closeBrowsersOnExit: true }, events: [],
+        profiles: [], proxies: [], settings: { closeBrowsersOnExit: true, appearance: 'system' }, events: [],
       };
       await this.write(this.value);
     }

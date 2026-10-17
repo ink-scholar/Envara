@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
+#define envara_app_keychain_prepare envara_notion_fixture_keychain_refused
 #include "notion-launch.m"
+#undef envara_app_keychain_prepare
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
@@ -16,6 +18,12 @@
 
 /* Standalone nonroot fixture. It never executes/copies/modifies Notion,
  * contacts a DNS broker, activates PF, or authorizes a protected launch. */
+int envara_notion_fixture_keychain_refused(envara_app_keychain_custody *slot,
+    const struct envara_app_registration *app, const struct envara_gui_request *request,
+    const char *home, const struct envara_gui_stage_authority *authority) {
+    (void)slot; (void)app; (void)request; (void)home; (void)authority;
+    errno = ENOTSUP; return -1;
+}
 static int deny(const struct envara_gui_request *request, void *context) {
     (void)request; (void)context; errno = ENOTSUP; return -1;
 }
@@ -124,20 +132,39 @@ static int metadata(const char *bundle) {
     NSData *data=[NSJSONSerialization dataWithJSONObject:value options:0 error:NULL];
     return !data || fwrite(data.bytes,1,data.length,stdout)!=data.length || putchar('\n')==EOF ? 109:0;
 }
-static int context_plan(const char *environment, const char *registration, const char *language) {
+static int context_plan(const char *environment, const char *registration, const char *language, const char *port) {
     struct envara_notion_plan plan={0}; struct envara_gui_request request={0};
     if(strlen(language)>=sizeof(request.browser_locale)) return 110;
     strcpy(request.browser_locale,language);strcpy(request.timezone,"Asia/Manila");
     if(plan_paths(environment,registration,&plan) || plan_locale(language,&plan)) return 111;
     struct envara_app_registration app={0};strcpy(app.snapshot.executable,"/owned/fixture");
     struct envara_notion_context context={.front_port=23456};
-    if(plan_arguments(&app,&request,&context,ENVARA_NOTION_ENGINE_VSCODE,&plan)) return 112;
+    int missing=port&&!strcmp(port,"null");
+    if(port&&!missing){char *end=NULL;errno=0;unsigned long value=strtoul(port,&end,10);
+        if(errno||!port[0]||!end||*end||value>65535)return 110;context.front_port=(uint16_t)value;}
+    /* Poison this disposable fixture process after startup, so the dynamic
+     * loader never handles the synthetic DYLD value. None may reach the
+     * production whitelist returned for an application or its CLI children. */
+    const char *proxy_keys[]={"ALL_PROXY","all_proxy","HTTP_PROXY","http_proxy","HTTPS_PROXY","https_proxy"};
+    for(unsigned i=0;i<sizeof(proxy_keys)/sizeof(proxy_keys[0]);i++)
+        if(setenv(proxy_keys[i],"socks5h://fixture-host-user:fixture-host-password@127.0.0.1:65432",1))return 113;
+    if(setenv("NO_PROXY","*",1)||setenv("no_proxy","*",1)||
+        setenv("DYLD_INSERT_LIBRARIES","/nonexistent/fixture-host-injected.dylib",1)||
+        setenv("AWS_SECRET_ACCESS_KEY","fixture-host-credential",1)||
+        setenv("OPENAI_API_KEY","fixture-host-credential",1)||
+        setenv("SSH_AUTH_SOCK","/nonexistent/fixture-host-agent.sock",1))return 113;
     struct notion_child_environment env;
-    if(child_environment(&plan,&request,"fixture",&env)) return 113;
+    if(child_environment(&plan,&request,missing?NULL:&context,"fixture",&env)){
+        NSDictionary *report=@{@"ok":@YES,@"environmentRefused":@YES,@"error":@(errno),@"environment":@[],
+            @"ready":@NO,@"protected":@NO,@"activatesSystem":@NO};
+        NSData *data=[NSJSONSerialization dataWithJSONObject:report options:0 error:NULL];
+        return !data||fwrite(data.bytes,1,data.length,stdout)!=data.length||putchar('\n')==EOF?114:0;
+    }
+    if(plan_arguments(&app,&request,&context,ENVARA_NOTION_ENGINE_VSCODE,&plan)) return 112;
     NSMutableArray *arguments=[NSMutableArray array],*values=[NSMutableArray array];
     for(int i=0;i<plan.argument_count;i++) [arguments addObject:@(plan.arguments[i])];
     for(unsigned i=0;env.values[i];i++) [values addObject:@(env.values[i])];
-    NSDictionary *report=@{@"ok":@YES,@"allocationVerified":@NO,@"UserData":@(plan.user_data),@"Home":@(plan.home),
+    NSDictionary *report=@{@"ok":@YES,@"environmentRefused":@NO,@"frontPort":@(context.front_port),@"allocationVerified":@NO,@"UserData":@(plan.user_data),@"Home":@(plan.home),
         @"Cache":@(plan.cache),@"Temp":@(plan.temp),@"Extensions":@(plan.extensions),@"SharedData":@(plan.shared_data),
         @"UserDataAlias":@(plan.user_data_alias),@"TempAlias":@(plan.temp_alias),
         @"posixLocale":@(plan.posix_locale),@"localeFallback":plan.locale_fallback?@YES:@NO,@"arguments":arguments,@"environment":values,
@@ -201,17 +228,25 @@ static int validation_scope_test(const char *bundle) {
 }
 /* Diagnostic step frames: bounded, whole lines, PID-bound, never blocking. */
 static int step_frames_test(void) {
+    _Static_assert(ENVARA_GUI_STEP_FRONT_COMMIT==0 && ENVARA_GUI_STEP_FRONT_ADMISSION==1 && ENVARA_GUI_STEP_TICKET_PREPARE==2 &&
+        ENVARA_GUI_STEP_RELAY_FORK==3 && ENVARA_GUI_STEP_TICKET_CLAIM==4 && ENVARA_GUI_STEP_STAGE_FRESH==5 &&
+        ENVARA_GUI_STEP_DATA_PREPARE==6 && ENVARA_GUI_STEP_STAGE_PLAN==7 && ENVARA_GUI_STEP_STAGE_RECHECK==8 &&
+        ENVARA_GUI_STEP_STAGE_SPAWN==9 && ENVARA_GUI_STEP_STAGE_STOPPED==10 && ENVARA_GUI_STEP_STAGE_ADOPT==11 &&
+        ENVARA_GUI_STEP_RESUME_VERIFY==12,"existing diagnostic step values stay fixed");
+    for(int step=ENVARA_GUI_STEP_FRONT_COMMIT;step<ENVARA_GUI_STEP_COUNT;step++)
+        if(!envara_gui_step_name((enum envara_gui_step)step)) return 150;
     const char *run="11111111-2222-4333-8444-555555555555",*environment="66666666-7777-4888-9999-aaaaaaaaaaaa";
     const char *schema="envara.macos-pf-app-transport/v1";int pair[2];if(pipe(pair)) return 140;
     envara_gui_step(ENVARA_GUI_STEP_FRONT_COMMIT);
     if(!envara_gui_steps_begin(pair[1],"Bad Schema",run,environment) || !envara_gui_steps_begin(pair[1],schema,"not-a-uuid",environment) ||
         !envara_gui_steps_begin(-1,schema,run,environment)) return 141;
     if(envara_gui_steps_begin(pair[1],schema,run,environment)) return 142;
-    envara_gui_step(ENVARA_GUI_STEP_FRONT_COMMIT);envara_gui_step((enum envara_gui_step)99);
+    envara_gui_step(ENVARA_GUI_STEP_FRONT_COMMIT);envara_gui_step(ENVARA_GUI_STEP_COUNT);
     pid_t child=fork();if(child<0) return 143;
     if(!child){envara_gui_step(ENVARA_GUI_STEP_RELAY_FORK);_exit(0);}
     int status;if(waitpid(child,&status,0)!=child || !WIFEXITED(status) || WEXITSTATUS(status)) return 144;
-    for(int i=0;i<20;i++) envara_gui_step(ENVARA_GUI_STEP_TICKET_PREPARE);
+    for(int step=ENVARA_GUI_STEP_FRONT_ADMISSION;step<ENVARA_GUI_STEP_COUNT;step++) envara_gui_step((enum envara_gui_step)step);
+    for(int i=0;i<ENVARA_GUI_STEP_FRAME_LIMIT+4;i++) envara_gui_step(ENVARA_GUI_STEP_TICKET_PREPARE);
     envara_gui_steps_end();envara_gui_step(ENVARA_GUI_STEP_STAGE_ADOPT);
     /* A full output drops the frame at once instead of writing part of it. */
     int full[2];if(pipe(full)) return 145;int flags=fcntl(full[1],F_GETFL);if(flags<0 || fcntl(full[1],F_SETFL,flags|O_NONBLOCK)) return 146;
@@ -235,7 +270,8 @@ int main(int argc, char **argv) {
         if (argc == 3 && !strcmp(argv[1], "metadata")) return metadata(argv[2]);
         if (argc == 3 && !strcmp(argv[1], "validation-scope")) return validation_scope_test(argv[2]);
         if (argc == 2 && !strcmp(argv[1], "step-frames")) return step_frames_test();
-        if (argc == 5 && !strcmp(argv[1], "context")) return context_plan(argv[2],argv[3],argv[4]);
+        if (argc == 5 && !strcmp(argv[1], "context")) return context_plan(argv[2],argv[3],argv[4],NULL);
+        if (argc == 6 && !strcmp(argv[1], "context-port")) return context_plan(argv[2],argv[3],argv[4],argv[5]);
         if ((argc == 3 || argc == 4) && !strcmp(argv[1], "scoped-profile")) {
             char profile[PATH_MAX]; int p = atoi(argv[2]);
             if (p < 1024 || p > 65535 || envara_notion_scoped_profile((uint16_t)p, argc == 4 ? argv[3] : NULL, profile, sizeof(profile))) return 106;

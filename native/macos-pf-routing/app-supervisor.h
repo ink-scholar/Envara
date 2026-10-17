@@ -2,6 +2,7 @@
 #define ENVARA_APP_SUPERVISOR_H
 #include "app-control.h"
 #include "launch-guardian.h"
+#include "app-keychain.h"
 
 #define ENVARA_APP_KEEPER_PROTOCOL "envara.pf-app-keeper/v1"
 #define ENVARA_APP_SUPERVISOR_READY 0
@@ -40,6 +41,17 @@ struct envara_app_supervisor_provider {
      * FRONT_ONLY describes its fixed sandbox-exec/observed sealed target
      * chain; it does not claim a public Seatbelt policy inspection result. */
     unsigned execution_profile;
+    /* Fixed factory-owned preparation slot; never a wire/PID adoption API. */
+    envara_app_keychain_custody *preparation;
+};
+/* Diagnostics copied only from the fixed preparation module and this keeper.
+ * None of these fields can authorize process adoption or resource release. */
+struct envara_app_preparation_report {
+    char ticket_id[37], registration_id[37], version_id[37], environment_id[37], run_id[37];
+    struct envara_identity keeper;
+    struct envara_app_keychain_snapshot snapshot;
+    unsigned cleanup_attempt;
+    int original_error;
 };
 struct envara_app_supervisor_context {
     int fixture_only;
@@ -50,7 +62,13 @@ struct envara_app_supervisor_report {
     int ready, protected_ready, resumed, armed, released, recovery_required;
     struct envara_gui_lifecycle child;
     struct envara_launch_guard_report guardian;
+    int preparation_cleanup_confirmed, preparation_refusal_emitted;
+    struct envara_app_preparation_report preparation;
 };
+/* Negative-only diagnostic frame, shared with the same native transport after
+ * supervisor handoff. It contains no application or release proof. */
+int envara_app_preparation_pending_event(const struct envara_app_preparation_report *report,
+    const char *command, int deny_verified, int front_closed, int output_fd);
 
 /* Fixed gui-launch-lease TICKET_UUID route. Missing compiled native authority
  * refuses before store creation or claim. A ticket cannot bypass fresh lease,

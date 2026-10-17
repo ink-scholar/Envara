@@ -77,13 +77,15 @@ function defaultPtyFactory(shell, args, options) {
     ? require(path.join(process.resourcesPath, 'app.asar.unpacked/node_modules/node-pty')) : require('node-pty');
   return module.spawn(shell, args, options);
 }
-async function privateDirectory(parent, name) {
+async function privateDirectory(parent, name, { owned = false } = {}) {
   const parentInfo = await lstat(parent);
-  if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink() || await realpath(parent) !== parent) throw codeError('终端配置目录包含不安全的链接。', 'TERMINAL_UNSAFE_PATH');
+  if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink() || owned && process.getuid && parentInfo.uid !== process.getuid()
+    || await realpath(parent) !== parent) throw codeError('终端配置目录包含不安全的链接。', 'TERMINAL_UNSAFE_PATH');
   const target = path.join(parent, name);
   try { await mkdir(target, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
   const info = await lstat(target);
-  if (!info.isDirectory() || info.isSymbolicLink() || await realpath(target) !== target) throw codeError('终端配置目录包含不安全的链接。', 'TERMINAL_UNSAFE_PATH');
+  if (!info.isDirectory() || info.isSymbolicLink() || owned && process.getuid && info.uid !== process.getuid()
+    || await realpath(target) !== target) throw codeError('终端配置目录包含不安全的链接。', 'TERMINAL_UNSAFE_PATH');
   await chmod(target, 0o700);
   return target;
 }
@@ -341,13 +343,16 @@ export class TerminalService {
       await this.claudeAccounts.get(id, accountId);
       claude = await privateDirectory(await privateDirectory(root, 'claude-accounts'), accountId);
     }
+    // Anthropic profiles use a separate directory contract from CLAUDE_CONFIG_DIR.
+    // Keep both within the selected account; never adopt the old shared HOME data.
+    const anthropic = await privateDirectory(claude, 'anthropic', { owned: true });
     const temp = await privateDirectory(root, 'tmp');
     const history = path.join(home, '.envara_history');
     const zshEnv = '# Envara: environment-local initialization; do not load host shell files.\nunsetopt GLOBAL_RCS\n';
     const zshRC = '# Envara: private interactive shell defaults.\nunsetopt GLOBAL_RCS\nHISTFILE="$HOME/.envara_history"\nHISTSIZE=1000\nSAVEHIST=1000\nsetopt APPEND_HISTORY INC_APPEND_HISTORY HIST_IGNORE_SPACE\nPROMPT=\'envara %~ %# \'\n';
     const bashRC = '# Envara: private interactive shell defaults.\nHISTFILE="$HOME/.envara_history"\nHISTSIZE=1000\nHISTFILESIZE=1000\nshopt -s histappend\nPROMPT_COMMAND=\'history -a\'\nPS1=\'envara \\w \\$ \'\n';
     for (const [file, source] of [[history, ''], [path.join(home, '.gitconfig'), '# Envara environment-local Git configuration\n'], [path.join(home, '.npmrc'), ''], [path.join(home, '.zshenv'), zshEnv], [path.join(home, '.zshrc'), zshRC], [path.join(home, '.bashrc'), bashRC]]) await ownedFile(file, source);
-    return { root, home, config, cache, data, state, claude, temp, history };
+    return { root, home, config, cache, data, state, claude, anthropic, temp, history };
   }
   languageFor(locale) { return resolveProcessLanguage(locale, this.availableLocales ?? ['C']); }
   childEnvironment(directories, timezone, proxyEndpoint, privacy = { mode: 'standard' }, linkShim = null, locale = null) {
@@ -362,7 +367,8 @@ export class TerminalService {
       PATH: [...new Set([...(linkShim ? [linkShim.directory] : []), ...this.additionalExecutablePaths, ...systemPaths])].join(path.delimiter),
       HOME: directories.home, USERPROFILE: directories.home,
       XDG_CONFIG_HOME: directories.config, XDG_CACHE_HOME: directories.cache, XDG_DATA_HOME: directories.data, XDG_STATE_HOME: directories.state,
-      CLAUDE_CONFIG_DIR: directories.claude, HISTFILE: directories.history, HISTSIZE: '1000', SAVEHIST: '1000',
+      CLAUDE_CONFIG_DIR: directories.claude, ANTHROPIC_CONFIG_DIR: directories.anthropic,
+      HISTFILE: directories.history, HISTSIZE: '1000', SAVEHIST: '1000',
       ZDOTDIR: directories.home, NPM_CONFIG_USERCONFIG: path.join(directories.home, '.npmrc'),
       GIT_CONFIG_GLOBAL: path.join(directories.home, '.gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
       TMPDIR: directories.temp, TMP: directories.temp, TEMP: directories.temp,
@@ -540,7 +546,7 @@ export class TerminalService {
           throw codeError('设备标识读取限制未确认，未启动 Claude 终端。', 'TERMINAL_DEVICE_IDENTIFIERS_UNAVAILABLE');
         session.deviceIdentifierRestrictions = kind === 'claude-code' && shell.deviceIdentifierRestrictions === true;
         session.networkFence = true;
-        session.network = { ...session.network, fenced: true, description: '已加网络围栏：终端里的程序只能经这条线路出网，不支持代理的程序会连不上，不会直连。' };
+        session.network = { ...session.network, fenced: true, description: '围栏阻止直接公网连接。本地开发服务仍可访问，其联网不受此围栏控制。' };
         const known = this.contexts.get(id);
         if (known) this.contexts.set(id, { ...known, network: session.network });
       }

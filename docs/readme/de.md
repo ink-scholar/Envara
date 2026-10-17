@@ -5,7 +5,7 @@
 <p align="center"><strong>Eine eigene Umgebung für jeden Arbeitskontext.</strong><br />Dein Browser, dein Terminal und deine Apps in einer gemeinsamen Umgebung.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Lizenz des Originalcodes: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.24-475569" alt="Envara 0.5.24" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.25-475569" alt="Envara 0.5.25" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README in 9 Sprachen" /></a>
 </p>
 <p align="center">
@@ -73,7 +73,7 @@ Die Programme selbst, Caches, temporäre Dateien und Schlüsselbunddaten werden 
 
 ### 🗂️ Weniger Unterbrechungen bei der täglichen Verwaltung
 
-Die dunkle Oberfläche mit drei Spalten ordnet Umgebungen, Netzwerke, Browser, Terminals, angebundene Anwendungen und Laufzeitstatus übersichtlich an. Häufige Aktionen sind direkt erreichbar, detaillierte Einstellungen stehen unter den erweiterten Optionen. Neun Oberflächensprachen erleichtern den Einstieg in deiner vertrauten Sprache.
+Die Oberfläche mit drei Spalten unterstützt einen hellen und dunklen Modus oder folgt der Systemeinstellung. Sie ordnet Umgebungen, Netzwerke, Browser, Terminals, angebundene Anwendungen und Laufzeitstatus übersichtlich an. Die Darstellung gilt nur für Envara und ändert nicht das Erscheinungsbild deines Computers. Häufige Aktionen sind direkt erreichbar, detaillierte Einstellungen stehen unter den erweiterten Optionen. Neun Oberflächensprachen erleichtern den Einstieg in deiner vertrauten Sprache.
 
 ## Wofür kannst du Envara nutzen?
 

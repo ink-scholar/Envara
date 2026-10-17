@@ -120,8 +120,10 @@ static int manifest_fixture(const char *path) {
        [manifest[@"nativeSourceFiles"] count]!=65||[manifest[@"files"] count]!=18||
        ![manifest[@"files"][@"envara-pf-native"] isEqual:@"f8631ecf1421c5a5fdb644400a895e4a42f9ee24b23051c10ed607d817aa6399"])return 31;
     NSMutableDictionary *candidate=[manifest mutableCopy];
-    candidate[@"nativeSourceFiles"]=members(128);if(!roundtrip(candidate,1))return 32;
-    candidate[@"nativeSourceFiles"]=members(129);if(roundtrip(candidate,1))return 33;
+    for(NSNumber *count in @[@129,@131,@256]){
+        candidate[@"nativeSourceFiles"]=members(count.unsignedIntValue);if(!roundtrip(candidate,1))return 32;
+    }
+    candidate[@"nativeSourceFiles"]=members(257);if(roundtrip(candidate,1))return 33;
     /* Both private record families retain the old limit, including nested objects. */
     for(NSString *family in @[@"lease",@"registry"]){
         if(!roundtrip(@{family:members(64)},0)||roundtrip(@{family:members(65)},0))return 34;
@@ -146,7 +148,17 @@ static int manifest_fixture(const char *path) {
     int refused=decode_manifest(oversized,RECORD_LIMIT+1)==nil;free(oversized);if(!refused)return 42;
     id nested=@0;for(unsigned i=0;i<21;i++)nested=@{@"nested":nested};
     if(roundtrip(nested,1))return 43;
-    puts("{\"ok\":true,\"actualC37SourceCount\":65,\"oldBoundRefused\":true,\"manifestAccepted\":true,\"manifest128Accepted129Refused\":true,\"leaseAndRegistry64Retained\":true,\"duplicatesRefused\":true,\"arraysNodesBytesDepthRetained\":true,\"root\":false,\"pf\":false,\"ready\":false,\"protected\":false}");
+    puts("{\"ok\":true,\"actualC37SourceCount\":65,\"oldBoundRefused\":true,\"manifestAccepted\":true,\"manifest129And131Accepted\":true,\"manifest256Accepted257Refused\":true,\"leaseAndRegistry64Retained\":true,\"duplicatesRefused\":true,\"arraysNodesBytesDepthRetained\":true,\"root\":false,\"pf\":false,\"ready\":false,\"protected\":false}");
+    return 0;
+}
+static int public_manifest_fixture(const char *path) {
+    NSData *bytes=[NSData dataWithContentsOfFile:[NSString stringWithUTF8String:path]];
+    if(!bytes||decode(bytes.bytes,bytes.length))return 44;
+    NSDictionary *manifest=decode_manifest(bytes.bytes,bytes.length);
+    if(!manifest||![manifest[@"schema"] isEqual:@"envara.macos-pf-installation/v1"]||
+       ![manifest[@"nativeSourceFiles"] isKindOfClass:[NSDictionary class]]||
+       [manifest[@"nativeSourceFiles"] count]<=64||[manifest[@"nativeSourceFiles"] count]>256)return 45;
+    printf("{\"ok\":true,\"sourceCount\":%lu,\"manifestAccepted\":true,\"privateDecoderRefused\":true,\"readOnly\":true,\"root\":false,\"pf\":false,\"ready\":false,\"protected\":false}\n",(unsigned long)[manifest[@"nativeSourceFiles"] count]);
     return 0;
 }
 static int application_fixture(const char *cwd) {
@@ -171,6 +183,7 @@ int main(int argc, char **argv) {
         if (argc == 2 && !strcmp(argv[1], "diagnostic-recovery")) return diagnostic_recovery_fixture();
         if (argc == 2 && !strcmp(argv[1], "json")) return json_fixture();
         if (argc == 3 && !strcmp(argv[1], "manifest")) return manifest_fixture(argv[2]);
+        if (argc == 3 && !strcmp(argv[1], "manifest-file")) return public_manifest_fixture(argv[2]);
         if (argc == 3 && !strcmp(argv[1], "application")) return application_fixture(argv[2]);
     }
     return 91;

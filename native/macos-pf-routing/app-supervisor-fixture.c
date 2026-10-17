@@ -135,6 +135,7 @@ static int prepare_guard(const struct envara_app_registration *app, const struct
         guard->verify_resume = fixture_resume; guard->verify_executed = fixture_executed; guard->resume_context = f;
     }
     authority->verify_persistent_deny = fixture_deny;
+    authority->revoke_owned_network = fixture_deny; /* inert; no actual PF/front */
     authority->verify_scope_quiescent = !strcmp(f->mode, "missing-guardian") ? NULL : fixture_scope;
     authority->context = f; f->transferred = 1; return 0;
 }
@@ -341,9 +342,10 @@ int main(int argc, char **argv) {
     }
     if (!okay) {
         (void)write(f.lease[1], "S", 1);
-        if (child.pid > 1 && envara_same_process(&child)) kill(child.pid, SIGKILL);
         /* Signal cancellation must still complete custody recovery. The
-         * interrupted reader flag applies only to the normal wait above. */
+         * interrupted reader flag applies only to the normal wait above.
+         * Let the keeper revoke network authority and stop its observed
+         * family before any exceptional fixture-only force cleanup. */
         manager_interrupted = 0;
         for (int i = 0; i < 20; i++) {
             (void)write(f.recovery[1], "R", 1); struct pollfd p = {output[0], POLLIN | POLLHUP, 0};
@@ -352,6 +354,7 @@ int main(int argc, char **argv) {
                 released = !ack(frame, "released", keeper, &child); if (released) break;
             }
         }
+        if (!released && child.pid > 1 && envara_same_process(&child)) kill(child.pid, SIGKILL);
     }
     int status = 0, reaped = 0;
     /* EOF on the ACK pipe can precede the keeper's final _exit. Do not spin

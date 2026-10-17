@@ -5,7 +5,7 @@
 <p align="center"><strong>给每一套工作，一个独立的境舱。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原创代码许可证：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.24-475569" alt="Envara 0.5.24" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.25-475569" alt="Envara 0.5.25" /></a>
   <a href="docs/readme/en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 种 README 语言" /></a>
 </p>
 <p align="center">
@@ -73,7 +73,7 @@ Claude Code 是其中一个集成场景：每环境独立安装**原样的官方
 
 ### 🗂️ 日常管理，尽量少一点打断
 
-深色三栏工作区把环境、网络、浏览器、终端、附加软件和运行状态放在清晰的位置。常用操作直接可达，细节配置收进高级选项；九种界面语言，让你用熟悉的语言开始。
+三栏工作区支持浅色、深色和跟随系统外观，把环境、网络、浏览器、终端、附加软件和运行状态放在清晰的位置。外观设置仅影响境舱，不会更改主机外观。常用操作直接可达，细节配置收进高级选项；九种界面语言，让你用熟悉的语言开始。
 
 ## 可以用境舱做什么？
 

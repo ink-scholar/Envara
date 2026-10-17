@@ -36,11 +36,17 @@ const upgradeInputs = ['installer-upgrade-f8.h', 'known-installations/f8.manifes
   'installer-upgrade-43392e.h', 'known-installations/43392e.manifest.json', 'installer-upgrade-03245359.h', 'known-installations/03245359.manifest.json',
   'installer-upgrade-2059a0.h', 'known-installations/2059a0.manifest.json',
   'installer-upgrade-127e83.h', 'known-installations/127e83.manifest.json',
-  'installer-upgrade-010117.h', 'known-installations/010117.manifest.json', 'installer-upgrade-9b51cf.h', 'known-installations/9b51cf.manifest.json', 'installer-upgrade-91b62a.h', 'known-installations/91b62a.manifest.json', 'installer-upgrade-7c91a1.h', 'known-installations/7c91a1.manifest.json', 'installer-upgrade-af79b1.h', 'known-installations/af79b1.manifest.json', 'installer-upgrade-dceba9.h', 'known-installations/dceba9.manifest.json', 'installer-upgrade-fa70a2.h', 'known-installations/fa70a2.manifest.json', 'installer-upgrade-32811e.h', 'known-installations/32811e.manifest.json', 'installer-upgrade-22a6f3.h', 'known-installations/22a6f3.manifest.json',
+  'installer-upgrade-010117.h', 'known-installations/010117.manifest.json', 'installer-upgrade-9b51cf.h', 'known-installations/9b51cf.manifest.json', 'installer-upgrade-91b62a.h', 'known-installations/91b62a.manifest.json', 'installer-upgrade-7c91a1.h', 'known-installations/7c91a1.manifest.json', 'installer-upgrade-af79b1.h', 'known-installations/af79b1.manifest.json', 'installer-upgrade-dceba9.h', 'known-installations/dceba9.manifest.json', 'installer-upgrade-fa70a2.h', 'known-installations/fa70a2.manifest.json', 'installer-upgrade-32811e.h', 'known-installations/32811e.manifest.json', 'installer-upgrade-22a6f3.h', 'known-installations/22a6f3.manifest.json', 'installer-upgrade-78c3.h', 'known-installations/78c3.manifest.json', 'installer-upgrade-fb74.h', 'known-installations/fb74.manifest.json',
   'installer-upgrade-f0b99f.h', 'known-installations/f0b99f.manifest.json',
   'installer-upgrade-f39101.h', 'known-installations/f39101.manifest.json',
   'installer-upgrade-a8bd00.h', 'known-installations/a8bd00.manifest.json',
-  'installer-upgrade-da6e7c.h', 'known-installations/da6e7c.manifest.json'];
+  'installer-upgrade-da6e7c.h', 'known-installations/da6e7c.manifest.json',
+  'installer-upgrade-554c.h', 'known-installations/554c.manifest.json',
+  'installer-upgrade-2af8.h', 'known-installations/2af8.manifest.json',
+  'installer-upgrade-005f.h', 'known-installations/005f.manifest.json',
+  'installer-upgrade-88f8.h', 'known-installations/88f8.manifest.json',
+  'installer-upgrade-0b6d.h', 'known-installations/0b6d.manifest.json',
+  'installer-upgrade-0359.h', 'known-installations/0359.manifest.json'];
 const linkedAppFilterInputs = [
   'pf-filter-command.c', 'pf-filter-command.h',
   'pf-filter-transaction.c', 'pf-filter-transaction.h',
@@ -51,8 +57,10 @@ const linkedAppFilterInputs = [
   'app-supervisor.c', 'app-supervisor.h',
   'gui-launch.m', 'gui-launch.h',
   'launch-guardian.c', 'launch-guardian.h',
+  'app-family.c', 'app-family.h',
   'pf-production-filter.c', 'pf-production-filter.h',
   'app-native-factory.m', 'app-native-factory.h',
+  'app-keychain.m', 'app-keychain.h',
   'journal-retirement.c', 'journal-retirement.h',
   'app-scope-proof.c', 'app-scope-proof.h',
   'app-transport.c', 'app-transport.h', 'transport-session.h',
@@ -246,6 +254,6 @@ test('PF acceptance fixture inputs must match the current dedicated source inven
 
 test('a self-authored complete manifest cannot replace the pinned source build', { skip }, async t => {
   const value = await fixture(t);
-  assert.equal(Object.keys(value.manifest.nativeSourceFiles).length, 119);
+  assert.equal(Object.keys(value.manifest.nativeSourceFiles).length, 139);
   await assert.rejects(value.inspect(), { code: 'ENOENT' });
 });

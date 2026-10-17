@@ -8,6 +8,7 @@ import { ProxyNetworkProbe, proxyFingerprint } from './proxy-network.mjs';
 import { normalizePrivacy } from './privacy-policy.mjs';
 import { localeForCountry } from './workspace-context.mjs';
 import { isInterfaceLanguage } from '../shared/interface-languages.mjs';
+import { isAppearancePreference } from '../shared/appearance.mjs';
 import { browseForgeRegionFor } from '../shared/engine-choice.mjs';
 import { assertNetworkLocationMatchesEgress, confirmNetworkLocation, networkLocationGeolocation, normalizeNetworkLocation, recommendNetworkLocation } from '../shared/network-location.mjs';
 import { browserContextSignature } from './terminal-browser-broker.mjs';
@@ -26,6 +27,17 @@ const BOUND_BROWSER_ARGUMENTS = Object.freeze({ form_fill: ['fields'], press_key
 function browserProfileSignature(profile) {
   const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
   return createHash('sha256').update(JSON.stringify(canonical(Object.fromEntries(['runtime_id', 'fingerprint_seed', 'fingerprint_generation', 'identity', 'fingerprint', 'launch_overrides', 'group', 'proxy', 'managed_proxy_required'].map(key => [key, profile?.[key] ?? null]))))).digest('hex');
+}
+// Private launch-route contract shared with browser.SessionRouteDigest. It is
+// never included in snapshots or exports and contains no plaintext credentials.
+function launchRouteDigest(proxy) {
+  // Unicode case conversion differs across Go and JavaScript. Fold ASCII only
+  // for this private digest; preserve the actual proxy host and Unicode bytes.
+  const host = proxy?.host.replace(/^\[|\]$/g, '').replace(/[A-Z]/g, letter => letter.toLowerCase());
+  const fields = proxy ? [(proxy.protocol ?? proxy.type).toLowerCase(), host, String(proxy.port), proxy.username ?? '', proxy.password ?? ''] : ['direct', '', '0', '', ''];
+  const digest = createHash('sha256').update('envara-browser-route-v1\0');
+  for (const field of fields) digest.update(`${Buffer.byteLength(field)}:`).update(field);
+  return digest.digest('hex');
 }
 function boundBrowserArguments(name, args) {
   const keys = Object.hasOwn(BOUND_BROWSER_ARGUMENTS, name) ? BOUND_BROWSER_ARGUMENTS[name] : null;
@@ -444,43 +456,72 @@ export class BrowseForgeService {
   async clearProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); await this.assertStopped(remote, profileId); const directory = await this.checkedDirectory(profile); await rm(path.join(directory, 'browser-data'), { recursive: true, force: true }); await rm(path.join(directory, 'cookies-backup.json'), { force: true }); await mkdir(path.join(directory, 'browser-data'), { recursive: true, mode: 0o700 }); await this.store.transaction((next) => event(next, 'profile', `清理环境「${profile.name}」的完整浏览资料，保留下载文件`, profileId)); this.lastErrors.delete(profileId); this.resetPreview(profileId); }
   // A new tab preserves the user's current page. If it fails, leave that page
   // intact and let the caller handle the refusal instead of navigating it.
-  async openProfileLink({ id: profileId, url }) {
+  linkNetworkSelection(profile, workspace) {
+    const proxy = profile.proxyId ? workspace.proxies.find(item => item.id === profile.proxyId) : null;
+    if (profile.proxyId && !proxy) throw error('链接所属的网络不可用。', 'LINK_BROWSER_CHANGED');
+    return { group: profile.group ?? '', proxyId: profile.proxyId ?? null, signature: rawProxyFingerprint(proxy) };
+  }
+  async openProfileLink({ id: profileId, url, sourceProfileId = profileId, expectedNetwork }) {
     const target = linkURL(url);
-    const remote = await this.remote();
-    const profile = this.find(remote, profileId);
-    const session = remote.sessions.find(item => item.profile_id === profileId);
-    if (!session || (await this.health(session)).alive !== true) {
-      await this.startProfile({ id: profileId });
-      const started = (await this.remote()).sessions.find(item => item.profile_id === profileId);
-      if (!started) throw error('浏览器没有启动。', 'LINK_BROWSER_UNAVAILABLE');
-      await this.request('POST', `/api/sessions/${encoded(started.session_id)}/navigate`, { url: target, wait_until: 'domcontentloaded' });
-      return { profileId, profile: profile.name, opened: 'loaded', url: target };
-    }
-    const script = `(() => { const opened = window.open(${JSON.stringify(target)}, '_blank'); const handle = opened && opened !== window ? opened : null; if (handle) { try { handle.opener = null; } catch {} } return handle ? 'tab' : 'blocked'; })()`;
-    let opened = null;
-    try { const result = await this.request('POST', `/api/sessions/${encoded(session.session_id)}/eval`, { script }, { timeoutMs: 15000 });
-      opened = result?.data === 'tab' ? 'tab' : result?.data === 'blocked' ? 'blocked' : null; } catch { opened = null; }
-    if (opened !== 'tab') { try { await this.focusProfile({ id: profileId }); } catch {} }
-    return { profileId, profile: profile.name, opened: opened ?? 'unknown', url: target };
+    await this.ready;
+    // Serialize configuration only until a launch and its exact route are bound.
+    // Navigation happens afterwards, so a slow page cannot prevent Stop.
+    const selected = await this.profileSerialize(profileId, () => this.serializeMutation(async () => {
+      let remote = await this.remote();
+      const workspace = await this.store.read();
+      const network = (id, native, local) => {
+        const profile = this.find(native, id);
+        const effective = this.effectiveProxy(profile, native.groups, local);
+        const proxies = this.proxies(local, native);
+        const proxyId = effective.proxy ? proxies.find(proxy => proxy.id === effective.proxy.id)?.id ?? proxies.find(proxy => sameProxy(proxy, effective.proxy))?.id ?? null : null;
+        return { group: profile.group ?? '', proxyId, signature: rawProxyFingerprint(effective.proxy) };
+      };
+      const source = network(sourceProfileId, remote, workspace), destination = network(profileId, remote, workspace);
+      if (expectedNetwork && (source.group !== expectedNetwork.group || source.proxyId !== expectedNetwork.proxyId
+          || expectedNetwork.signature != null && source.signature !== expectedNetwork.signature)
+          || source.group !== destination.group || source.proxyId !== destination.proxyId || source.signature !== destination.signature) {
+        throw error('链接所属的网络已改变，请重新打开链接。', 'LINK_BROWSER_CHANGED');
+      }
+      const reservation = await this.reserveProfileStart(profileId);
+      if (!reservation.focus) await this.launchReservedProfile(reservation);
+      remote = await this.remote();
+      // REST clients bypass the desktop queue: re-read the stored selections,
+      // then bind the live launch's own nonce and actual route at the backend.
+      const currentWorkspace = await this.store.read();
+      const currentSource = network(sourceProfileId, remote, currentWorkspace), currentTarget = network(profileId, remote, currentWorkspace);
+      if ([currentSource, currentTarget].some(current => current.group !== source.group || current.proxyId !== source.proxyId || current.signature !== source.signature)) {
+        throw error('链接所属的网络已改变，请重新打开链接。', 'LINK_BROWSER_CHANGED');
+      }
+      const context = await this.resolveWorkspaceContext(profileId, { remote });
+      const bound = await this.assertBoundBrowserReceipt(profileId, context, remote);
+      const receipt = this.browserLaunchReceipts.get(profileId);
+      return { profileId, profile: this.find(remote, profileId).name, sessionId: bound.session_id, instanceId: receipt.instanceId, routeDigest: launchRouteDigest(context.proxy) };
+    }));
+    await this.request('POST', `/api/sessions/${encoded(selected.sessionId)}/open-link`, { url: target, instance_id: selected.instanceId, route_digest: selected.routeDigest }, { timeoutMs: 20000 });
+    return { profileId, profile: selected.profile, opened: 'tab', url: target };
   }
   async startProfile({ id: profileId }) {
-    const reservation = await this.serialize(async () => {
-      if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
-      if (this.installingEngine) throw error('内核正在安装，请稍后启动。', 'ENGINE_INSTALL_BUSY');
-      const remote = await this.remote(); const profile = this.find(remote, profileId); const previous = remote.sessions.find((item) => item.profile_id === profileId);
-      const metadata = (await this.store.read()).profiles.find(item => item.id === profileId) ?? {};
-      const deviceProfileId = metadata.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID;
-      validateBrowserDeviceProfileInput({ deviceProfileId, platform: profile.launch_overrides?.target_os ?? profile.identity?.target_os,
-        fingerprint: Object.fromEntries(Object.keys(deviceProfileFingerprint(deviceProfileId)).map(key => [key, profile.fingerprint?.[key]])) },
-      profile.runtime_id, this.system.platform);
-      if (previous && (await this.health(previous)).alive === true) return { profile, focus: true };
-      const engine = (await this.engines(remote.descriptors)).find((item) => item.id === profile.runtime_id);
-      if (!engine?.installed || !engine.enabled) throw error('请先安装并启用该环境的浏览器内核。', 'ENGINE_NOT_INSTALLED');
-      this.starting.add(profileId); this.lastErrors.delete(profileId); this.resetPreview(profileId);
-      return { profile, remote };
-    });
-    const { profile } = reservation;
+    const reservation = await this.serialize(() => this.reserveProfileStart(profileId));
     if (reservation.focus) return this.focusProfile({ id: profileId });
+    return this.launchReservedProfile(reservation);
+  }
+  async reserveProfileStart(profileId) {
+    if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
+    if (this.installingEngine) throw error('内核正在安装，请稍后启动。', 'ENGINE_INSTALL_BUSY');
+    const remote = await this.remote(); const profile = this.find(remote, profileId); const previous = remote.sessions.find((item) => item.profile_id === profileId);
+    const metadata = (await this.store.read()).profiles.find(item => item.id === profileId) ?? {};
+    const deviceProfileId = metadata.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID;
+    validateBrowserDeviceProfileInput({ deviceProfileId, platform: profile.launch_overrides?.target_os ?? profile.identity?.target_os,
+      fingerprint: Object.fromEntries(Object.keys(deviceProfileFingerprint(deviceProfileId)).map(key => [key, profile.fingerprint?.[key]])) },
+    profile.runtime_id, this.system.platform);
+    if (previous && (await this.health(previous)).alive === true) return { profile, focus: true };
+    const engine = (await this.engines(remote.descriptors)).find((item) => item.id === profile.runtime_id);
+    if (!engine?.installed || !engine.enabled) throw error('请先安装并启用该环境的浏览器内核。', 'ENGINE_NOT_INSTALLED');
+    this.starting.add(profileId); this.lastErrors.delete(profileId); this.resetPreview(profileId);
+    return { profile, remote };
+  }
+  async launchReservedProfile(reservation) {
+    const { profile } = reservation, profileId = profile.id;
     this.changed();
     try {
       const context = await this.resolveWorkspaceContext(profileId, { remote: reservation.remote, force: true });
@@ -492,8 +533,9 @@ export class BrowseForgeService {
         // LaunchSession may reuse a healthy backend browser even when its active
         // page failed our health check. That is not proof of a fresh launch.
         if (reservation.remote.sessions.some(item => item.profile_id === profileId)) throw error('浏览器启动来源尚未确认。', 'CLAUDE_BROWSER_ROUTE_UNVERIFIED');
+        const identity = await this.browserSessionIdentity(session, context);
         const endpoint = await this.boundBrowserEndpoint(session);
-        this.browserLaunchReceipts.set(profileId, { sessionId: session.session_id, runtimeId: session.runtime_id, endpoint,
+        this.browserLaunchReceipts.set(profileId, { sessionId: session.session_id, runtimeId: session.runtime_id, instanceId: identity.instance_id, endpoint,
           profileSignature: browserProfileSignature({ ...profile, ...(context.managedProxy ? { managed_proxy_required: true } : {}) }),
           signature: browserContextSignature(context), context: structuredClone({ proxyId: context.proxyId, timezone: context.timezone, locale: context.locale, geolocation: context.geolocation, network: context.network }) });
       } catch { /* Normal browser launch remains usable; bound automation refuses. */ }
@@ -505,6 +547,13 @@ export class BrowseForgeService {
     finally { this.starting.delete(profileId); this.changed(); }
   }
   async stopProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); const session = remote.sessions.find((item) => item.profile_id === profileId); if (session) await this.request('DELETE', `/api/sessions/${encoded(session.session_id)}`); this.browserLaunchReceipts.delete(profileId); this.resetPreview(profileId); this.lastErrors.delete(profileId); await this.store.transaction((next) => event(next, 'browser', `停止环境「${profile.name}」`, profileId)); }
+  async browserSessionIdentity(session, context) {
+    const identity = unwrap(await this.request('GET', `/api/sessions/${encoded(session.session_id)}/identity`));
+    if (!/^[a-f0-9]{32}$/.test(session.instance_id ?? '') || identity?.instance_id !== session.instance_id || identity?.route_digest !== launchRouteDigest(context.proxy)) {
+      throw error('当前浏览器的实际启动线路已改变，请停止后重新启动。', 'CLAUDE_BROWSER_ROUTE_UNVERIFIED');
+    }
+    return identity;
+  }
   async boundBrowserEndpoint(session) {
     const endpoints = array(await this.request('GET', '/api/playwright/endpoint'));
     const endpoint = endpoints.find(item => item.profile_id === session.profile_id && item.session_id === session.session_id && item.runtime_id === session.runtime_id)?.endpoint;
@@ -516,9 +565,11 @@ export class BrowseForgeService {
     const receipt = this.browserLaunchReceipts.get(profileId);
     if (!session || !receipt || receipt.sessionId !== session.session_id || receipt.runtimeId !== session.runtime_id
       || receipt.profileSignature !== browserProfileSignature(remote.profiles.find(item => item.id === profileId))
-      || receipt.signature !== browserContextSignature(context) || receipt.endpoint !== await this.boundBrowserEndpoint(session)) {
+      || receipt.signature !== browserContextSignature(context) || receipt.instanceId !== session.instance_id
+      || receipt.endpoint !== await this.boundBrowserEndpoint(session)) {
       throw error('当前浏览器的网络启动凭据不匹配，请在境舱中停止后重新启动。', 'CLAUDE_BROWSER_ROUTE_UNVERIFIED');
     }
+    await this.browserSessionIdentity(session, context);
     if ((await this.health(session)).alive !== true) throw error('当前浏览器没有响应，未改用其他浏览器。', 'CLAUDE_BROWSER_UNAVAILABLE');
     return { session_id: session.session_id, profile_id: profileId };
   }
@@ -858,9 +909,10 @@ export class BrowseForgeService {
   async saveSettings({ settings }) {
     object(settings, '设置');
     if (settings.closeBrowsersOnExit === false) throw error('当前版本退出会关闭托管会话。');
-    if (Object.keys(settings).some((key) => !['closeBrowsersOnExit', 'language'].includes(key))) throw error('不支持的设置。');
+    if (Object.keys(settings).some((key) => !['closeBrowsersOnExit', 'language', 'appearance'].includes(key))) throw error('不支持的设置。');
     if (settings.language != null && !isInterfaceLanguage(settings.language)) throw error('界面语言无效。');
-    await this.store.transaction((next) => { next.settings.closeBrowsersOnExit = true; if (settings.language != null) next.settings.language = settings.language; });
+    if (Object.hasOwn(settings, 'appearance') && !isAppearancePreference(settings.appearance)) throw error('无法保存外观，请重试。');
+    await this.store.transaction((next) => { next.settings.closeBrowsersOnExit = true; if (settings.language != null) next.settings.language = settings.language; if (settings.appearance != null) next.settings.appearance = settings.appearance; });
   }
   async installEngine({ id: engineId, engine, runtimeId }) {
     const selected = runtimeId ?? engineId ?? engine;

@@ -5,7 +5,7 @@
 <p align="center"><strong>讓每一套工作，都有獨立的境艙。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原創程式碼授權：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.24-475569" alt="Envara 0.5.24" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.25-475569" alt="Envara 0.5.25" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 種 README 語言" /></a>
 </p>
 <p align="center">
@@ -73,7 +73,7 @@ Claude Code 是其中一項整合：每個環境獨立安裝**未經修改的官
 
 ### 🗂️ 日常管理，盡量少一點打斷
 
-深色三欄工作區，讓環境、網路、瀏覽器、終端、附加軟體與執行狀態都有清楚的位置。常用操作直接可達，細節設定收進進階選項；九種介面語言，讓你用熟悉的語言開始。
+三欄工作區支援淺色、深色與跟隨系統外觀，讓環境、網路、瀏覽器、終端、附加軟體與執行狀態都有清楚的位置。外觀設定僅影響 Envara，不會變更主機外觀。常用操作直接可達，細節設定收進進階選項；九種介面語言，讓你用熟悉的語言開始。
 
 ## 可以用境艙做什麼？
 

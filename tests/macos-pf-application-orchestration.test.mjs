@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { MacOSPFController, MacOSPFExecutor, validatePFAppBoundLease, validatePFRootHookLease, validatePFApplicationPrestageAbort, validatePFApplicationPreflightAbort, PF_APP_BOUND_LEASE_SCHEMA, PF_APP_SESSION_LEASE_MS, PF_APP_RELEASE_RETRY_MS, PF_APP_STAGE_CLEANUP_WAIT_MS, PF_ROOT_HOOK_LEASE_SCHEMA, PF_INSTALL_ROOT, PF_RUNTIME_ROOT, dispatchPFRequest, APP_STAGE_PROGRESS_LIMIT, projectStageProgress } from '../native/macos-pf-routing/controller.mjs';
+import { MacOSPFController, MacOSPFExecutor, validatePFAppBoundLease, validatePFRootHookLease, validatePFApplicationPrestageAbort, validatePFApplicationPreflightAbort, PF_APP_BOUND_LEASE_SCHEMA, PF_APP_SESSION_LEASE_MS, PF_APP_RELEASE_RETRY_MS, PF_APP_STAGE_CLEANUP_WAIT_MS, PF_APP_PREPARATION_STOP_TIMEOUT_MS, PF_ROOT_HOOK_LEASE_SCHEMA, PF_INSTALL_ROOT, PF_RUNTIME_ROOT, dispatchPFRequest, APP_STAGE_PROGRESS_LIMIT, projectStageProgress } from '../native/macos-pf-routing/controller.mjs';
 import { pfApplicationRegistrationId } from '../native/macos-pf-routing/policy.mjs';
 import { pfRoutingAnchor } from '../native/macos-pf-routing/policy.mjs';
 import * as fs from 'node:fs/promises';
@@ -269,7 +269,8 @@ test('production sealed-file writer detects same-size content, replaced inode, h
 });
 function streamFixture({ forked = false, wrongParent = false, malformed = false, missingListener = false, nativeRefusal = null,
   cleanupReady = null, cleanupStopping = null, cleanupRelease = null, controlRefusal = null, controlRefusalCommand = 'L', coldStageDelay = 0, resumeDelay = 0,
-  coldStageStoppedChanges = null, coldStageRefusal = null, coldStageNoAck = false, stopNoAck = false,
+  coldStageStoppedChanges = null, coldStageRefusal = null, coldStageNoAck = false, stopNoAck = false, cleanupPendingStops = [],
+  preparationFailure = false, preparationAutomatic = {}, preparationPendingStops = [],
   /* revokeAfterResume: the guardian revokes on its own while the application
    * runs, exactly as a crashed child makes it do. This is the case that left
    * the trial showing 'running' for 44 s after the child had stopped. */
@@ -325,17 +326,34 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
     if (fragmentAbort) { child.stdout.write(output.slice(0, 53)); child.stdout.write(output.slice(53)); } else child.stdout.write(output);
     setImmediate(() => child.emit('close', abortExit, abortSignal));
   };
-  let commands = '', ticket, guardianArmed = false, guardianRevoked = false, completeColdStage;
+  let commands = '', ticket, guardianArmed = false, guardianRevoked = false, completeColdStage, stopAttempts = 0;
   const controlCommands = [];
   const emitKeeper = (event, changes = {}) => emit({ schema: 'envara.pf-app-keeper/v1', event, ticketId: ticket,
     registrationId: context.registrationId, versionId: context.versionId, environmentId: context.environmentId, runId: context.runId,
     pid: 8994, birth: '8994:000001', keeperPID, profile, persistentDenyObserved: true,
     stoppedBeforeExec: false, childReaped: false, scopeQuiescentObserved: false, resumeSent: false, resumed: false, cancelSent: true,
     executedIdentityVerified: false, seatbeltAppliedByFixedExec: false, frontAdmissionVerified: false, ready: false, protected: false, ...changes });
+  const cleanupPending = (cleanupAttempt, changes = {}) => ({ schema: 'envara.pf-app-keeper/v1', event: 'cleanup-pending', ticketId: ticket,
+    registrationId: context.registrationId, versionId: context.versionId, environmentId: context.environmentId, runId: context.runId,
+    pid: 8994, birth: '8994:000001', keeperPID, keeperBirth: `${keeperPID}:000001`, profile, cleanupAttempt,
+    launchAuthorityBurned: true, custodyHeld: true, denyVerified: false, frontClosedVerified: false, familyStoppedVerified: false,
+    ready: false, protected: false, ...changes });
+  const preparationId = randomUUID();
+  const preparationPending = (command, cleanupAttempt, changes = {}) => ({ schema: 'envara.pf-app-preparation/v1', event: 'cleanup-pending',
+    ticketId: ticket, registrationId: context.registrationId, versionId: context.versionId, environmentId: context.environmentId, runId: context.runId,
+    keeperPID, keeperBirth: `${keeperPID}:000001`, preparationId, generation: 1, command, cleanupAttempt, childState: 'unreaped',
+    launchAuthorityBurned: true, custodyHeld: true, denyVerified: false, frontClosedVerified: false, ready: false, protected: false, ...changes });
   child.stdin.on('data', bytes => { commands += bytes; let newline;
     while ((newline = commands.indexOf('\n')) >= 0) {
       const command = commands.slice(0, newline); commands = commands.slice(newline + 1);
       if (!command.startsWith('{')) controlCommands.push(command);
+      if (command === 'S') {
+        stopAttempts++;
+        const preparation = preparationPendingStops.shift();
+        if (preparation) { emit(preparationPending('S', stopAttempts, preparation)); continue; }
+        const changes = cleanupPendingStops.shift();
+        if (changes) { emit(cleanupPending(stopAttempts, changes)); continue; }
+      }
       if (controlRefusal && command.split(' ')[0] === controlRefusalCommand) {
         emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-refused', runId: context.runId,
           environmentId: context.environmentId, stage: 'guardian', reason: 'NATIVE_OPERATION_REFUSED', error: 13, ready: false, protected: false, ...controlRefusal });
@@ -373,6 +391,13 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
         keeperPID, pid: 8994, birth: '8994:000001', profile, persistentDenyObserved: true, stoppedBeforeExec: true,
         ...Object.fromEntries(['childReaped', 'scopeQuiescentObserved', 'resumeSent', 'resumed', 'cancelSent', 'executedIdentityVerified', 'seatbeltAppliedByFixedExec', 'frontAdmissionVerified'].map(key => [key, false])), ready: false, protected: false, ...coldStageStoppedChanges };
         const completeStage = () => {
+          if (preparationFailure) {
+            emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-refused', runId: context.runId,
+              environmentId: context.environmentId, stage: 'guardian', reason: 'NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED', error: 13,
+              ready: false, protected: false });
+            if (preparationAutomatic) emit(preparationPending('automatic', 0, preparationAutomatic));
+            return;
+          }
           if (coldStageRefusal) { emit({ schema: 'envara.macos-pf-app-transport/v1', event: 'transport-refused', runId: context.runId,
             environmentId: context.environmentId, stage: 'guardian', reason: 'NATIVE_NOTION_STAGE_REFUSED', error: 13,
             ready: false, protected: false, ...coldStageRefusal }); return; }
@@ -426,7 +451,9 @@ function streamFixture({ forked = false, wrongParent = false, malformed = false,
         childAbsent: executor.appTransports.get(context.runId).cleanupOnly ? !executor.appTransports.get(context.runId).stoppedIdentity : false, ...cleanupRelease }); setImmediate(() => child.emit('close', 0, null)); }
     }
   });
-  return { executor, child, context, binding, emitKeeper, controlCommands, completeColdStage: () => completeColdStage() };
+  return { executor, child, context, binding, emitKeeper, cleanupPending, emitCleanupPending: (attempt, changes) => emit(cleanupPending(attempt, changes)),
+    preparationPending, emitPreparationPending: (command, attempt, changes) => emit(preparationPending(command, attempt, changes)),
+    controlCommands, completeColdStage: () => completeColdStage() };
 }
 test('a one-shot keeper revocation emitted before the stop request still satisfies the later S', async t => {
   /* The fixed guardian records its reason once and returns for every later
@@ -545,6 +572,8 @@ const progressFrame = (f, changes = {}) => ({ schema: 'envara.macos-pf-app-trans
   environmentId: f.context.environmentId, step: 'stage-plan', stepMs: 5, totalMs: 9, fullChecks: 0, identityChecks: 4, ready: false, protected: false, ...changes });
 test('native stage-progress frames are recorded as bounded diagnostics and never settle the stage', async () => {
   const steps = ['front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'ticket-claim', 'stage-fresh', 'data-prepare', 'stage-plan',
+    'keychain-begin', 'keychain-scoped', 'keychain-normal', 'keychain-stage-ready', 'keychain-select', 'keychain-published',
+    'keychain-stage-cleaned', 'keychain-verify', 'keychain-host-verify', 'keychain-complete',
     'stage-recheck', 'stage-spawn', 'stage-stopped', 'stage-adopt'];
   const f = streamFixture({ stageProgress: steps.map((step, index) => ({ step, stepMs: index, totalMs: index * 2 })) });
   await startStream(f);
@@ -562,6 +591,25 @@ test('native stage-progress frames are recorded as bounded diagnostics and never
   await f.executor.applicationTransportControl(f.context.runId, 'S');
   await f.executor.applicationTransportControl(f.context.runId, 'R');
   assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+});
+test('all fixed native diagnostic names cross the controller in bounded batches', async () => {
+  const enumeration = readFileSync(new URL('../native/macos-pf-routing/gui-launch.h', import.meta.url), 'utf8')
+    .match(/enum envara_gui_step \{([^}]+)\}/s)[1];
+  const steps = [...enumeration.matchAll(/ENVARA_GUI_STEP_([A-Z_]+)/g)]
+    .map(match => match[1]).filter(name => name !== 'COUNT').map(name => name.toLowerCase().replaceAll('_', '-'));
+  assert.equal(steps.length, 81);
+  for (let offset = 0; offset < steps.length; offset += APP_STAGE_PROGRESS_LIMIT) {
+    const batch = steps.slice(offset, offset + APP_STAGE_PROGRESS_LIMIT);
+    const f = streamFixture({ stageProgress: batch.map(step => ({ step })) });
+    await startStream(f);
+    assert.equal((await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID())).event, 'stopped');
+    const entry = f.executor.appTransports.get(f.context.runId);
+    assert.equal(entry.uncertain, false);
+    assert.deepEqual(projectStageProgress(entry.stageProgress).map(item => item.step), batch);
+    await f.executor.applicationTransportControl(f.context.runId, 'S');
+    await f.executor.applicationTransportControl(f.context.runId, 'R');
+    assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+  }
 });
 test('stage-progress frames beyond the bound are dropped, while malformed or pre-launch ones are unknown output', async () => {
   const many = streamFixture({ stageProgress: Array.from({ length: APP_STAGE_PROGRESS_LIMIT + 4 }, () => ({})) });
@@ -585,6 +633,26 @@ test('stage-progress frames beyond the bound are dropped, while malformed or pre
   early.child.stdout.write(`${JSON.stringify(progressFrame(early))}\n`);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(early.executor.appTransports.get(early.context.runId).uncertain, true, 'no step can precede the launch command');
+});
+test('a fixed Keychain failure timing cannot settle launch or grant cleanup authority', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  const f = streamFixture({ coldStageDelay: 1000, stageProgress: [{ step: 'keychain-helper-set-default', stepMs: 1, totalMs: 2 }] });
+  await startStream(f);
+  let settled = false;
+  const launch = f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  launch.then(() => { settled = true; }, () => { settled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(settled, false);
+  assert.equal(Boolean(entry.stoppedIdentity), false);
+  assert.equal(entry.uncertain, false);
+  assert.equal(entry.events.some(event => event.event === 'stage-progress'), false);
+  assert.deepEqual(projectStageProgress(entry.stageProgress).map(item => item.step), ['keychain-helper-set-default']);
+  t.mock.timers.tick(1000);
+  assert.equal((await launch).event, 'stopped', 'only the subsequent original stopped frame settles L');
+  await f.executor.applicationTransportControl(f.context.runId, 'S');
+  await f.executor.applicationTransportControl(f.context.runId, 'R');
+  assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
 });
 test('late stage-progress after the stage timeout is kept for diagnosis and leaves the cleanup-only channel intact', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
@@ -1380,4 +1448,381 @@ test('every failed fresh preflight cleanup check and an unproven error flag reta
   f.executor.confirmApplicationPreflightAborted = async () => ({ transportExitConfirmed: true });
   await assert.rejects(f.controller.prepareNotionApplication(request)); await assert.rejects(f.controller.stopNotionApplication({ runId: request.runId }));
   assert.equal(f.calls.includes('release-reference'), false); assert.equal((await f.controller.shutdown()).cleanupRequired, true);
+});
+
+test('automatic cleanup-pending burns launch without claiming exit or answering the next S', async () => {
+  const f = streamFixture({ cleanupPendingStops: [{ denyVerified: true, frontClosedVerified: true, familyStoppedVerified: true }] }); await startStream(f);
+  await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  f.emitCleanupPending(0);
+  const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(entry.cleanupOnly, true); assert.equal(entry.uncertain, false);
+  assert.equal(entry.applicationEnded, undefined); assert.equal(entry.stopAttempts, undefined);
+  assert.equal(entry.events.some(event => event.event === 'cleanup-pending'), false);
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'B'), { code: 'APPLICATION_APP_RESUME_UNCONFIRMED' });
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'R'), { code: 'APPLICATION_APP_TRANSPORT_UNCONFIRMED' });
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+  assert.equal(entry.lastCleanupPendingAttempt, 1); assert.equal(entry.waiters.length, 0);
+  assert.equal(entry.phase, 'cleanup-pending'); assert.equal(entry.uncertain, false);
+  assert.equal(f.executor.applicationCleanupAvailable(f.context.runId), true);
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'R'));
+  const stopped = await f.executor.applicationTransportControl(f.context.runId, 'S');
+  assert.equal(stopped.event, 'stopping'); assert.equal(entry.stopAttempts, 2);
+  const released = await f.executor.applicationTransportControl(f.context.runId, 'R');
+  assert.equal(released.event, 'transport-released'); assert.equal(entry.uncertain, false);
+  assert.deepEqual(f.controlCommands.filter(command => ['S', 'R'].includes(command)), ['S', 'S', 'R']);
+});
+
+test('a cleanup-only guardian accepts a fresh S negative then retries with the original stopping proof shape', async () => {
+  const f = streamFixture({ cleanupPendingStops: [{}] }); await startStream(f);
+  await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  // An established native refusal already burned launch authority.
+  f.executor.appTransports.get(f.context.runId).denyLaunch();
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+  const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(entry.uncertain, false); assert.equal(f.child.stdin.writableEnded, false);
+  assert.equal((await f.executor.applicationTransportControl(f.context.runId, 'S')).event, 'stopping');
+  assert.equal((await f.executor.applicationTransportControl(f.context.runId, 'R')).event, 'transport-released');
+});
+
+test('cleanup-pending validates every binding, exact shape and strict boolean before preserving the channel', async () => {
+  const changes = [{ ticketId: randomUUID() }, { registrationId: randomUUID() }, { versionId: randomUUID() },
+    { environmentId: randomUUID() }, { runId: randomUUID() }, { keeperPID: 8999 }, { keeperBirth: '8990:000002' },
+    { pid: 8995 }, { birth: '8994:000002' }, { profile: 'cold' }, { cleanupAttempt: 0 }, { cleanupAttempt: 2 },
+    { cleanupAttempt: true }, { cleanupAttempt: -1 }, { cleanupAttempt: Number.MAX_SAFE_INTEGER + 1 },
+    { launchAuthorityBurned: false }, { custodyHeld: false }, { denyVerified: 1 }, { frontClosedVerified: 'false' },
+    { familyStoppedVerified: null }, { ready: true }, { protected: true }, { extra: 'INERT_NEGATIVE_SECRET' }];
+  for (const change of changes) {
+    const f = streamFixture({ stopNoAck: true }); await startStream(f);
+    await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+    const stopping = f.executor.applicationTransportControl(f.context.runId, 'S');
+    const rejected = assert.rejects(stopping);
+    await new Promise(resolve => setImmediate(resolve));
+    let frame = f.cleanupPending(1, change);
+    // A first auto0 is legal but cannot answer S; exercise its replay instead.
+    if (change.cleanupAttempt === 0) { f.emitCleanupPending(0); frame = f.cleanupPending(0); }
+    f.child.stdout.write(`${JSON.stringify(frame)}\n`); await rejected;
+    const entry = f.executor.appTransports.get(f.context.runId);
+    assert.equal(entry.uncertain, true, JSON.stringify(change)); assert.equal(f.child.stdin.writableEnded, true);
+    assert.equal(entry.events.some(event => event.event === 'cleanup-pending'), false);
+    assert.equal(JSON.stringify(entry.events).includes('INERT_NEGATIVE_SECRET'), false);
+  }
+});
+
+test('a negative is not buffered and repeated, skipped, unsolicited or duplicate-key responses poison', async () => {
+  for (const variant of ['same', 'skip', 'unsolicited', 'duplicate-key']) {
+    const f = streamFixture({ cleanupPendingStops: [{}], stopNoAck: true }); await startStream(f);
+    await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+    let rejected;
+    if (variant !== 'unsolicited') {
+      rejected = assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'));
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    let line = JSON.stringify(f.cleanupPending(variant === 'same' || variant === 'unsolicited' ? 1 : variant === 'skip' ? 3 : 2));
+    if (variant === 'duplicate-key') line = line.replace('"denyVerified":false', '"denyVerified":true,"denyVerified":false');
+    f.child.stdout.write(`${line}\n`); if (rejected) await rejected;
+    assert.equal(f.executor.appTransports.get(f.context.runId).uncertain, true, variant);
+  }
+});
+
+test('late cleanup-pending cannot repair a stop timeout or become release evidence even when all flags are true', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ stopNoAck: true }); await startStream(f);
+  await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  const stopping = f.executor.applicationTransportControl(f.context.runId, 'S');
+  const rejected = assert.rejects(stopping, { code: 'APPLICATION_APP_STOP_TIMEOUT' });
+  await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(15000); await rejected;
+  f.emitCleanupPending(1, { denyVerified: true, frontClosedVerified: true, familyStoppedVerified: true });
+  assert.equal(f.executor.appTransports.get(f.context.runId).uncertain, true);
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'R'));
+  assert.equal(f.controlCommands.includes('R'), false);
+});
+
+test('an auto0 consumed while S1 is pending cannot settle it and a real stopping still can', async () => {
+  const f = streamFixture({ stopNoAck: true }); await startStream(f);
+  await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  let settled = false;
+  const stopping = f.executor.applicationTransportControl(f.context.runId, 'S').then(value => { settled = true; return value; });
+  await new Promise(resolve => setImmediate(resolve)); f.emitCleanupPending(0);
+  await new Promise(resolve => setImmediate(resolve));
+  const entry = f.executor.appTransports.get(f.context.runId);
+  assert.equal(settled, false); assert.equal(entry.pendingStopAttempt, 1); assert.equal(entry.uncertain, false);
+  f.emitKeeper('stopping', { childReaped: true, persistentDenyObserved: true });
+  assert.equal((await stopping).event, 'stopping'); assert.equal(entry.phase, 'stopping'); assert.equal(entry.uncertain, false);
+});
+
+test('a failed stop of a previously healthy run keeps the same cleanup channel retryable and records no false release', async () => {
+  const f = fixture({ applicationCleanupAvailable: () => true });
+  const original = f.executor.applicationTransportControl; let stops = 0;
+  f.executor.applicationTransportControl = async (runId, command) => {
+    if (command === 'S' && ++stops === 1) {
+      f.calls.push('negative:S1'); throw Object.assign(new Error('INERT_CLEANUP_SECRET'), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+    }
+    return original(runId, command);
+  };
+  const route = await f.prepareRoute(), request = input(route.routeId); await f.controller.prepareNotionApplication(request);
+  await assert.rejects(f.controller.stopNotionApplication({ runId: request.runId }), error => {
+    assert.deepEqual(error.cleanupFailure, { stage: 'cleanup', code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' }); return true;
+  });
+  const snapshot = f.controller.applicationSnapshot({ runId: request.runId });
+  assert.equal(snapshot.cleanupRetryable, true); assert.equal(snapshot.cleanupComplete, false);
+  assert.equal(f.calls.includes('control:R'), false); assert.equal(f.calls.includes('release-reference'), false);
+  assert.equal(JSON.stringify(snapshot).includes('INERT_CLEANUP_SECRET'), false);
+  const clean = await f.controller.stopNotionApplication({ runId: request.runId });
+  assert.equal(clean.cleanupComplete, true); assert.equal(stops, 2);
+  assert.deepEqual(clean.cleanupFailure, snapshot.cleanupFailure);
+  await f.controller.shutdown();
+});
+
+test('a verified cleanup-pending snapshot reports required cleanup without claiming an ended application', async () => {
+  const f = fixture({ applicationCleanupAvailable: () => true, appTransports: new Map() });
+  const route = await f.prepareRoute(), request = input(route.routeId); await f.controller.prepareNotionApplication(request);
+  f.executor.appTransports.set(request.runId, { cleanupOnly: true, phase: 'cleanup-pending' });
+  const snapshot = f.controller.applicationSnapshot({ runId: request.runId });
+  assert.equal(snapshot.phase, 'cleanup-required'); assert.equal(snapshot.cleanupUncertain, true);
+  assert.equal(snapshot.cleanupRetryable, true); assert.equal(snapshot.applicationEnded, false); assert.equal(snapshot.cleanupComplete, false);
+  assert.equal(f.controller.appRuns.get(request.runId).phase, 'staged', 'the read-only snapshot does not mutate native/run state');
+  f.executor.appTransports.clear(); await f.controller.stopNotionApplication({ runId: request.runId }); await f.controller.shutdown();
+});
+
+test('a fresh cleanup refusal remains separate from the first launch refusal through successful retry', async () => {
+  const f = fixture({ applicationCleanupAvailable: () => true });
+  const original = f.executor.applicationTransportControl;
+  const native = { stage: 'guardian', reason: 'NATIVE_NOTION_STAGE_REFUSED', error: 13 }; let stops = 0;
+  f.executor.applicationTransportControl = async (runId, command) => {
+    if (command === 'L') throw Object.assign(new Error(), { code: 'APPLICATION_APP_NATIVE_REFUSED', nativeFailure: native });
+    if (command === 'S' && ++stops === 1) throw Object.assign(new Error(), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+    return original(runId, command);
+  };
+  const route = await f.prepareRoute(), request = input(route.routeId);
+  await assert.rejects(f.controller.prepareNotionApplication(request), { code: 'APPLICATION_APP_NATIVE_REFUSED' });
+  await assert.rejects(f.controller.stopNotionApplication({ runId: request.runId }), error => {
+    assert.deepEqual(error.initialFailure, { stage: 'cold-stage', code: 'APPLICATION_APP_NATIVE_REFUSED', native });
+    assert.deepEqual(error.cleanupFailure, { stage: 'cleanup', code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' }); return true;
+  });
+  const failed = f.controller.applicationSnapshot({ runId: request.runId });
+  assert.deepEqual(failed.failure, failed.initialFailure); assert.equal(failed.cleanupRetryable, true);
+  assert.equal(f.calls.includes('control:R'), false);
+  const clean = await f.controller.stopNotionApplication({ runId: request.runId });
+  assert.equal(clean.cleanupComplete, true); assert.deepEqual(clean.initialFailure, failed.initialFailure);
+  assert.deepEqual(clean.cleanupFailure, failed.cleanupFailure); await f.controller.shutdown();
+});
+
+const familyFailure = (reason = 'token', error = 13, mach = 5) => ({ familyFailureReason: reason, familyFailureErrno: error, familyFailureMach: mach });
+test('legacy and diagnostic cleanup negatives preserve bounded first/latest facts without changing stop authority', async () => {
+  const f = streamFixture({ cleanupPendingStops: [familyFailure(), { ...familyFailure('stop-timeout', 110, 0), denyVerified: true,
+    frontClosedVerified: true, familyStoppedVerified: true }] }); await startStream(f);
+  await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+  f.emitCleanupPending(0);
+  const entry = f.executor.appTransports.get(f.context.runId);
+  const first = { cleanupAttempt: 0, denyVerified: false, frontClosedVerified: false, familyStoppedVerified: false,
+    familyFailureReason: 'unknown', familyFailureErrno: null, familyFailureMach: null };
+  assert.deepEqual(entry.firstCleanupPending, first);
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+  assert.deepEqual(entry.latestCleanupPending, { cleanupAttempt: 1, denyVerified: false, frontClosedVerified: false,
+    familyStoppedVerified: false, ...familyFailure() });
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+  assert.deepEqual(entry.firstCleanupPending, first);
+  const latest = { cleanupAttempt: 2, denyVerified: true, frontClosedVerified: true, familyStoppedVerified: true,
+    ...familyFailure('stop-timeout', 110, 0) };
+  assert.deepEqual(entry.latestCleanupPending, latest);
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'R'));
+  assert.equal(entry.applicationEnded, undefined); assert.equal(entry.events.some(event => event.event === 'cleanup-pending'), false);
+  const controller = new MacOSPFController({ executor: f.executor });
+  const projected = controller.publicApplication({ runId: f.context.runId, environmentId: f.context.environmentId, phase: 'staged', staged: true });
+  assert.deepEqual(projected.cleanupPending, { first, latest }); assert.equal(projected.cleanupComplete, false);
+  projected.cleanupPending.first.denyVerified = true; assert.deepEqual(entry.firstCleanupPending, first);
+  assert.equal((await f.executor.applicationTransportControl(f.context.runId, 'S')).event, 'stopping');
+  assert.equal((await f.executor.applicationTransportControl(f.context.runId, 'R')).event, 'transport-released');
+});
+
+test('all diagnostic family reasons accept only their exact numeric contract', async () => {
+  for (const reason of ['none', 'identity', 'token', 'inventory', 'churn', 'capacity', 'signal', 'stop-timeout', 'unavailable']) {
+    const f = streamFixture(); await startStream(f); await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+    f.emitCleanupPending(0, familyFailure(reason, reason === 'none' ? 0 : 13, 0));
+    const entry = f.executor.appTransports.get(f.context.runId);
+    assert.equal(entry.uncertain, false); assert.equal(entry.firstCleanupPending.familyFailureReason, reason);
+    assert.equal(entry.firstCleanupPending.familyFailureMach, 0);
+    await f.executor.applicationTransportControl(f.context.runId, 'S'); await f.executor.applicationTransportControl(f.context.runId, 'R');
+  }
+  for (const change of [familyFailure('unknown', 13, 0), familyFailure('INERT_DIAG_SECRET', 13, 0), familyFailure('none', 13, 0),
+    familyFailure('none', 0, 5), familyFailure('token', 0, 5), familyFailure('token', 1025, 5), familyFailure('token', -1, 5),
+    familyFailure('token', true, 5), familyFailure('token', 13, null), familyFailure('token', 13, true),
+    familyFailure('token', 13, 2147483648), familyFailure('token', 13, -2147483649), { familyFailureReason: 'token' },
+    { ...familyFailure(), privatePID: 42 }, { ...familyFailure(), familyFailureErrno: null }]) {
+    const f = streamFixture({ stopNoAck: true }); await startStream(f); await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+    const rejected = assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'));
+    await new Promise(resolve => setImmediate(resolve)); f.emitCleanupPending(1, change); await rejected;
+    const entry = f.executor.appTransports.get(f.context.runId);
+    assert.equal(entry.uncertain, true, JSON.stringify(change)); assert.equal(entry.firstCleanupPending, undefined);
+    assert.equal(JSON.stringify(entry.events).includes('INERT_DIAG_SECRET'), false);
+  }
+});
+
+async function refusePreparation(f) {
+  await startStream(f);
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID()), error => {
+    assert.deepEqual(error.nativeFailure, { stage: 'guardian', reason: 'NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED', error: 13 });
+    return error.code === 'APPLICATION_APP_NATIVE_REFUSED';
+  });
+  return f.executor.appTransports.get(f.context.runId);
+}
+
+test('preparation negatives retain only prep custody and retry through real S then R without inventing an application', async () => {
+  for (const childState of ['unreaped', 'reaped', 'launcher-clear', 'unknown']) {
+    const f = streamFixture({ preparationFailure: true, preparationPendingStops: [{ childState, denyVerified: true, frontClosedVerified: true }] });
+    const entry = await refusePreparation(f), initial = { ...entry.failure };
+    assert.equal(entry.stoppedIdentity, undefined); assert.notEqual(entry.guardianArmed, true);
+    assert.equal(entry.applicationEnded, undefined); assert.equal(entry.resumeAttempted, undefined);
+    assert.equal(entry.firstPreparationPending.command, 'automatic'); assert.equal(entry.uncertain, false);
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'B'));
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID()));
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'R'));
+    await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+    assert.equal(entry.phase, 'cleanup-pending'); assert.equal(entry.latestPreparationPending.childState, childState);
+    assert.equal(entry.uncertain, false); assert.equal(f.executor.applicationCleanupAvailable(f.context.runId), true);
+    assert.equal(entry.events.some(event => event.schema === 'envara.pf-app-preparation/v1'), false);
+    const stopped = await f.executor.applicationTransportControl(f.context.runId, 'S');
+    assert.equal(stopped.event, 'transport-cleanup-stopping'); assert.equal(stopped.childAbsent, true); assert.equal(stopped.childReaped, false);
+    const released = await f.executor.applicationTransportControl(f.context.runId, 'R');
+    assert.equal(released.event, 'transport-released'); assert.equal(released.childAbsent, true); assert.equal(released.childReaped, false);
+    assert.deepEqual(entry.failure, initial); assert.equal(entry.stoppedIdentity, undefined); assert.notEqual(entry.guardianArmed, true);
+    assert.notEqual(entry.guardianReleased, true); assert.equal(entry.applicationEnded, undefined); assert.equal(entry.uncertain, false);
+    assert.deepEqual(f.controlCommands.filter(command => ['S', 'R'].includes(command)), ['S', 'S', 'R']);
+  }
+});
+
+test('preparation launch failure and a failed cleanup attempt remain separate through complete controller cleanup', async () => {
+  const f = fixture({ applicationCleanupAvailable: () => true });
+  const original = f.executor.applicationTransportControl;
+  const native = { stage: 'guardian', reason: 'NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED', error: 13 }; let attempts = 0;
+  f.executor.applicationTransportControl = async (runId, command) => {
+    if (command === 'L') throw Object.assign(new Error('INERT_PREPARATION_SECRET'), { code: 'APPLICATION_APP_NATIVE_REFUSED', nativeFailure: native });
+    if (command === 'S' && ++attempts === 1) throw Object.assign(new Error(), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+    const result = await original(runId, command);
+    return command === 'R' ? { ...result, childAbsent: true, childReaped: false } : result;
+  };
+  const route = await f.prepareRoute(), request = input(route.routeId);
+  await assert.rejects(f.controller.prepareNotionApplication(request), { code: 'APPLICATION_APP_NATIVE_REFUSED' });
+  const run = f.controller.appRuns.get(request.runId);
+  assert.equal(run.staged, false); assert.equal(run.applicationChild, undefined); assert.equal(run.resumed, false);
+  await assert.rejects(f.controller.stopNotionApplication({ runId: request.runId }), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+  const failed = f.controller.applicationSnapshot({ runId: request.runId });
+  assert.deepEqual(failed.initialFailure, { stage: 'cold-stage', code: 'APPLICATION_APP_NATIVE_REFUSED', native });
+  assert.deepEqual(failed.cleanupFailure, { stage: 'cleanup', code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+  assert.equal(failed.applicationEnded, false); assert.equal(failed.cleanupComplete, false); assert.equal(failed.cleanupRetryable, true);
+  assert.equal(f.calls.includes('control:R'), false); assert.equal(JSON.stringify(failed).includes('INERT_PREPARATION_SECRET'), false);
+  const clean = await f.controller.stopNotionApplication({ runId: request.runId });
+  assert.equal(clean.cleanupComplete, true); assert.equal(clean.staged, false); assert.equal(clean.resumed, false);
+  assert.equal(clean.cleanupEvidence.childAbsent, true); assert.equal(clean.cleanupEvidence.childReaped, false);
+  assert.deepEqual(clean.initialFailure, failed.initialFailure); assert.deepEqual(clean.cleanupFailure, failed.cleanupFailure);
+  await f.controller.shutdown();
+});
+
+test('preparation diagnostics are bounded copies and never report an ended application or completed cleanup', async () => {
+  const f = streamFixture({ preparationFailure: true, preparationPendingStops: [{ childState: 'reaped' }] }); const entry = await refusePreparation(f);
+  await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'));
+  const controller = new MacOSPFController({ executor: f.executor });
+  const snapshot = controller.publicApplication({ runId: f.context.runId, environmentId: f.context.environmentId, phase: 'preparing', staged: false, resumed: false });
+  assert.equal(snapshot.phase, 'cleanup-required'); assert.equal(snapshot.staged, false); assert.equal(snapshot.resumed, false);
+  assert.equal(snapshot.cleanupComplete, false); assert.equal(snapshot.cleanupRetryable, true);
+  assert.equal(snapshot.preparationCleanupPending.first.command, 'automatic');
+  assert.equal(snapshot.preparationCleanupPending.latest.childState, 'reaped');
+  snapshot.preparationCleanupPending.latest.childState = 'unknown'; assert.equal(entry.latestPreparationPending.childState, 'reaped');
+  await f.executor.applicationTransportControl(f.context.runId, 'S'); await f.executor.applicationTransportControl(f.context.runId, 'R');
+});
+
+test('an inactive preparation failure cleans through the original no-application path without a prep slot frame', async () => {
+  const f = streamFixture({ preparationFailure: true, preparationAutomatic: null }); const entry = await refusePreparation(f);
+  assert.equal(entry.preparationId, undefined); assert.equal(entry.firstPreparationPending, undefined);
+  assert.equal(entry.stoppedIdentity, undefined); assert.notEqual(entry.guardianArmed, true);
+  const stopped = await f.executor.applicationTransportControl(f.context.runId, 'S');
+  assert.equal(stopped.childAbsent, true); assert.equal(stopped.childReaped, false);
+  const released = await f.executor.applicationTransportControl(f.context.runId, 'R');
+  assert.equal(released.childAbsent, true); assert.equal(released.childReaped, false);
+  assert.equal(entry.uncertain, false); assert.equal(await f.executor.confirmApplicationTransportExited(f.context.runId), true);
+  assert.deepEqual(f.controlCommands.filter(command => ['S', 'R'].includes(command)), ['S', 'R']);
+});
+
+test('preparation messages validate exact binding, shape, bounded diagnostics and the outstanding S ordinal', async () => {
+  const mutations = [{ ticketId: randomUUID() }, { registrationId: randomUUID() }, { versionId: randomUUID() },
+    { environmentId: randomUUID() }, { runId: randomUUID() }, { keeperPID: 8999 }, { keeperBirth: '8990:000002' },
+    { preparationId: randomUUID() }, { generation: 2 }, { generation: 0 }, { generation: 6 }, { generation: true },
+    { command: 'automatic', cleanupAttempt: 0 }, { command: 'R' }, { command: 'B' }, { cleanupAttempt: 0 }, { cleanupAttempt: 2 },
+    { cleanupAttempt: true }, { cleanupAttempt: -1 }, { cleanupAttempt: 2147483648 }, { childState: 'absent' },
+    { launchAuthorityBurned: false }, { custodyHeld: false }, { denyVerified: 1 }, { frontClosedVerified: null },
+    { ready: true }, { protected: true }, { pid: 8994 }, { birth: '8994:000001' }, { armed: true }, { extra: 'INERT_PREPARATION_SECRET' }];
+  for (const mutation of mutations) {
+    const f = streamFixture({ preparationFailure: true, stopNoAck: true }); const entry = await refusePreparation(f);
+    const rejected = assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'));
+    await new Promise(resolve => setImmediate(resolve)); f.emitPreparationPending('S', 1, mutation); await rejected;
+    assert.equal(entry.uncertain, true, JSON.stringify(mutation)); assert.equal(f.child.stdin.writableEnded, true);
+    assert.equal(entry.latestPreparationPending.command, 'automatic');
+    assert.equal(JSON.stringify(entry.events).includes('INERT_PREPARATION_SECRET'), false);
+  }
+});
+
+test('preparation auto0 never answers S and the same consumed negative cannot answer another S', async () => {
+  const f = streamFixture({ preparationFailure: true, preparationAutomatic: null, stopNoAck: true }); const entry = await refusePreparation(f);
+  let settled = false;
+  const stopping = f.executor.applicationTransportControl(f.context.runId, 'S').finally(() => { settled = true; });
+  const rejected = assert.rejects(stopping, { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+  await new Promise(resolve => setImmediate(resolve)); f.emitPreparationPending('automatic', 0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false); assert.equal(entry.pendingStopAttempt, 1); assert.equal(entry.uncertain, false);
+  f.emitPreparationPending('S', 1); await rejected;
+  const second = assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'));
+  await new Promise(resolve => setImmediate(resolve)); f.emitPreparationPending('S', 1); await second;
+  assert.equal(entry.uncertain, true); assert.equal(f.controlCommands.includes('R'), false);
+});
+
+test('preparation auto0 requires the original preparation refusal and cannot replace a real application identity', async () => {
+  for (const mode of ['no-launch', 'ordinary-child', 'duplicate-auto', 'bad-generation', 'duplicate-key']) {
+    const f = streamFixture({ preparationFailure: mode !== 'no-launch' && mode !== 'ordinary-child' }); await startStream(f);
+    if (mode === 'ordinary-child') await f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID());
+    else if (mode !== 'no-launch') await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID()));
+    let line = JSON.stringify(f.preparationPending('automatic', 0, mode === 'bad-generation' ? { generation: 6 } : {}));
+    if (mode === 'duplicate-key') line = line.replace('"custodyHeld":true', '"custodyHeld":false,"custodyHeld":true');
+    f.child.stdout.write(`${line}\n`);
+    assert.equal(f.executor.appTransports.get(f.context.runId).uncertain, true, mode);
+  }
+});
+
+test('preparation S uses its own deadline and a late negative cannot repair an actual S timeout', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ preparationFailure: true, stopNoAck: true }); const entry = await refusePreparation(f);
+  let settled = false;
+  const stopping = f.executor.applicationTransportControl(f.context.runId, 'S').finally(() => { settled = true; });
+  const rejected = assert.rejects(stopping, { code: 'APPLICATION_APP_STOP_TIMEOUT' });
+  await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(15000);
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(settled, false); assert.equal(entry.uncertain, false);
+  t.mock.timers.tick(PF_APP_PREPARATION_STOP_TIMEOUT_MS - 15000); await rejected;
+  f.emitPreparationPending('S', 1, { childState: 'reaped', denyVerified: true, frontClosedVerified: true });
+  assert.equal(entry.uncertain, true); await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'R'));
+});
+
+test('a preparation refusal after the L deadline settles only the cleanup state and retains the original failure', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const f = streamFixture({ preparationFailure: true, coldStageNoAck: true, preparationPendingStops: [{ childState: 'reaped' }] }); await startStream(f);
+  const launched = assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'L', randomUUID()), { code: 'APPLICATION_APP_STAGE_TIMEOUT' });
+  await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(60000); await launched;
+  const entry = f.executor.appTransports.get(f.context.runId);
+  const stopping = assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'), { code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(f.controlCommands.includes('S'), false);
+  f.completeColdStage(); await stopping;
+  assert.equal(entry.stageOutcomePending, false); assert.equal(entry.waitFailure, 'APPLICATION_APP_STAGE_TIMEOUT');
+  assert.equal(entry.failure.reason, 'NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED'); assert.equal(entry.uncertain, false);
+  await f.executor.applicationTransportControl(f.context.runId, 'S'); await f.executor.applicationTransportControl(f.context.runId, 'R');
+});
+
+test('preparation success cannot fabricate a reaped application or skip final transport resource gates', async () => {
+  for (const variant of ['stopping-child', 'release-child', 'release-resource']) {
+    const f = streamFixture({ preparationFailure: true,
+      ...(variant === 'stopping-child' ? { cleanupStopping: { childReaped: true, childAbsent: false } } :
+        { cleanupRelease: variant === 'release-child' ? { childReaped: true, childAbsent: false } : { originalUTunClosed: false } }) });
+    const entry = await refusePreparation(f);
+    if (variant === 'stopping-child') await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'S'));
+    else { await f.executor.applicationTransportControl(f.context.runId, 'S'); await assert.rejects(f.executor.applicationTransportControl(f.context.runId, 'R')); }
+    assert.equal(entry.uncertain, true); assert.equal(entry.stoppedIdentity, undefined); assert.notEqual(entry.guardianArmed, true);
+  }
 });

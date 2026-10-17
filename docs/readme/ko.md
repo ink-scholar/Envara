@@ -5,7 +5,7 @@
 <p align="center"><strong>작업마다, 하나의 독립된 환경을.</strong><br />브라우저도, 터미널도, 앱도. 하나의 작업 환경에서.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="자체 코드 라이선스: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.24-475569" alt="Envara 0.5.24" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.25-475569" alt="Envara 0.5.25" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9개 언어의 README" /></a>
 </p>
 <p align="center">
@@ -73,7 +73,7 @@ Claude Code는 여러 통합 기능 중 하나입니다. 환경마다 **수정�
 
 ### 🗂️ 일상적인 관리는 간결하게
 
-어두운 테마의 3열 작업 공간에 환경, 네트워크, 브라우저, 터미널, 연결된 앱과 실행 상태를 보기 쉽게 배치했습니다. 자주 쓰는 작업은 바로 접근하고 세부 설정은 고급 옵션에서 조절할 수 있습니다. 9개 인터페이스 언어 중 익숙한 언어로 시작하세요.
+라이트·다크 모드와 시스템 설정 따르기를 지원하는 3열 작업 공간에 환경, 네트워크, 브라우저, 터미널, 연결된 앱과 실행 상태를 보기 쉽게 배치했습니다. 화면 모드 설정은 Envara에만 적용되며 컴퓨터의 화면 모드를 변경하지 않습니다. 자주 쓰는 작업은 바로 접근하고 세부 설정은 고급 옵션에서 조절할 수 있습니다. 9개 인터페이스 언어 중 익숙한 언어로 시작하세요.
 
 ## Envara로 무엇을 할 수 있나요?
 

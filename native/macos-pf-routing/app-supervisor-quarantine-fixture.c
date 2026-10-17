@@ -42,7 +42,7 @@ static ssize_t fixture_read(int fd, void *bytes, size_t size) {
     if (fixture_mode == 3) { errno = EIO; return -1; }
     return read(fd, bytes, size);
 }
-static int fixture_cancel(struct envara_gui_lifecycle *child) {
+static int __attribute__((unused)) fixture_cancel(struct envara_gui_lifecycle *child) {
     (void)child; state->cancels++;
     /* Explicit cancellation-refused seam: an actual own direct child remains
      * alive until the parent fixture lets it exit, then actual waitpid proves
@@ -73,6 +73,7 @@ static int fixture_verify(const struct envara_app_registration *app,
     (void)app; (void)request; (void)run; (void)hash; (void)context; return 0;
 }
 static int fixture_deny(void *context) { (void)context; state->denied++; return state->deny_allowed; }
+static int fixture_network_revoke(void *context) { (void)context; return state->deny_allowed; } /* inert only */
 static int fixture_scope(void *context) { (void)context; state->scopes++; return state->scope_allowed; }
 static void still_held(pid_t worker, int peer) {
     struct envara_identity identity; assert(!envara_identity_read(worker, &identity));
@@ -84,11 +85,12 @@ int main(int argc, char **argv) {
     assert(getuid() != 0 && getuid() == geteuid() && getgid() == getegid());
     struct sigaction own_child = {0}; own_child.sa_handler = SIG_DFL;
     assert(!sigemptyset(&own_child.sa_mask) && !sigaction(SIGCHLD, &own_child, NULL));
-    assert(argc == 2); fixture_mode = atoi(argv[1]); assert(fixture_mode >= 1 && fixture_mode <= 5);
+    assert(argc == 2); fixture_mode = atoi(argv[1]); assert(fixture_mode >= 1 && fixture_mode <= 7);
     state = mmap(NULL, sizeof(*state), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
     assert(state != MAP_FAILED); memset(state, 0, sizeof(*state));
     int commands[2], retained[2], output[2]; assert(!pipe(commands) && !socketpair(AF_UNIX, SOCK_STREAM, 0, retained) && !pipe(output));
     recovery_reader = commands[0]; if (fixture_mode == 1) { close(commands[1]); commands[1] = -1; }
+    else if (fixture_mode >= 6) assert(write(commands[1], "R", 1) == 1);
     else if (fixture_mode != 4) assert(write(commands[1], "X", 1) == 1);
     pid_t worker = fork(); assert(worker >= 0);
     if (!worker) {
@@ -101,9 +103,19 @@ int main(int argc, char **argv) {
             if (!direct) { close(retained[0]); close(commands[0]); close(output[1]); while (!state->child_exit) pause_ms(10); _exit(0); }
             assert(!envara_identity_read(direct, &child.child.identity)); child.leader_reaped = 0; child.phase = ENVARA_GUI_UNCERTAIN;
         }
+        if (fixture_mode >= 6) {
+            pid_t direct = fork(); assert(direct >= 0);
+            if (!direct) { while (1) pause(); }
+            assert(!envara_identity_read(direct, &child.child.identity));
+            assert(!kill(direct, SIGKILL)); int terminal; assert(waitpid(direct, &terminal, 0) == direct);
+            assert(WIFSIGNALED(terminal) && WTERMSIG(terminal) == SIGKILL);
+            child.leader_reaped = 1; report.guardian.child_reaped = fixture_mode == 6;
+            state->deny_allowed = state->scope_allowed = 1;
+        }
         struct keeper k = {.provider = &provider, .report = &report, .child = &child, .output = output[1], .prepared = 1,
             .guard = {.recovery_fd = commands[0], .retained_fd = retained[0]},
-            .authority = {.verify_persistent_deny = fixture_deny, .verify_scope_quiescent = fixture_scope}};
+            .authority = {.verify_persistent_deny = fixture_deny, .verify_scope_quiescent = fixture_scope,
+                .revoke_owned_network = fixture_network_revoke}};
         state->held = 1; assert(!quarantine(&k));
         assert(child.leader_reaped && report.released && !report.recovery_required && child.scope_quiescent);
         assert(fcntl(retained[0], F_GETFD) >= 0); state->child_reaped = child.leader_reaped;
@@ -114,12 +126,32 @@ int main(int argc, char **argv) {
     if (fixture_mode == 4) {
         assert(write(commands[1], "R", 1) == 1); pause_ms(100); still_held(worker, retained[1]); assert(!state->denied && !state->scopes);
         state->child_exit = 1; pause_ms(150);
-        assert(write(commands[1], "R", 1) == 1); pause_ms(100); still_held(worker, retained[1]); assert(state->denied && !state->scopes);
+        assert(write(commands[1], "R", 1) == 1); pause_ms(100); still_held(worker, retained[1]);
+#ifdef ENVARA_QUARANTINE_LEGACY
+        assert(state->denied && !state->scopes);
+#else
+        assert(!state->denied && !state->scopes); /* DENY/front authority still refused */
+#endif
         state->deny_allowed = 1; assert(write(commands[1], "R", 1) == 1); pause_ms(100); still_held(worker, retained[1]); assert(state->scopes);
         state->scope_allowed = 1; assert(write(commands[1], "X", 1) == 1); pause_ms(100); still_held(worker, retained[1]);
         assert(write(commands[1], "R", 1) == 1); int status; assert(waitpid(worker, &status, 0) == worker && WIFEXITED(status) && WEXITSTATUS(status) == 0);
-        assert(state->released && state->child_reaped && state->cancels == 1);
+        assert(state->released && state->child_reaped);
+#ifdef ENVARA_QUARANTINE_LEGACY
+        assert(state->cancels == 1);
+#else
+        assert(state->cancels == 0); /* no pre-DENY cancellation; actual child exited itself */
+#endif
         printf("{\"mode\":4,\"heldUntilAuthorizedR\":true,\"actualChildReaped\":true,\"ready\":false,\"protected\":false}\n");
+    } else if (fixture_mode >= 6) {
+        if (fixture_mode == 6) {
+            int status; assert(waitpid(worker, &status, 0) == worker && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+            assert(state->released && state->child_reaped);
+        } else {
+            pause_ms(150); still_held(worker, retained[1]);
+            assert(!state->released); assert(!kill(worker, SIGKILL)); int status; assert(waitpid(worker, &status, 0) == worker);
+        }
+        printf("{\"mode\":%d,\"positivePriorReapReleased\":%s,\"unknownPriorReapHeld\":%s,\"ready\":false,\"protected\":false}\n",
+            fixture_mode, fixture_mode == 6 ? "true" : "false", fixture_mode == 7 ? "true" : "false");
     } else {
         if (fixture_mode == 5) {
             assert(fcntl(commands[1], F_SETFL, O_NONBLOCK) == 0);

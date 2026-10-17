@@ -15,7 +15,7 @@ class TestRouting {
   constructor() { this.state = { installed: true, authorized: true, ready: true, capabilities: capabilities(), verification: verified() }; this.children = new Map(); this.routes = new Map(); this.calls = []; }
   async status() { return { ...this.state, sessions: [...this.children].map(([sessionId, item]) => ({ sessionId, pid: item.child.pid, status: item.exited ? 'exited' : 'running', exitCode: item.exitCode })) }; }
   async setup() { return this.status(); }
-  async prepareRoute(params) { this.calls.push(['prepareRoute', params]); const routeId = `route_${this.routes.size}`; this.routes.set(routeId, params); return { routeId, ready: true, failClosed: true, capabilities: capabilities(), verification: verified() }; }
+  async prepareRoute(params) { this.calls.push(['prepareRoute', params]); const routeId = `route_${this.routes.size}`; this.routes.set(routeId, params); return { routeId, ready: true, failClosed: true, capabilities: capabilities(), verification: verified(), udpPolicy: params.route.udpPolicy }; }
   async launch(params) {
     this.calls.push(['launch', params]);
     const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { cwd: params.cwd, env: params.env, stdio: 'ignore', shell: false });
@@ -128,6 +128,27 @@ test('UDP is explicitly blocked when the chosen node has no confirmed datagram s
   assert.equal(f.routing.calls.find(([method]) => method === 'prepareRoute')[1].route.udpPolicy, 'block');
 });
 
+test('UDP metadata follows effective native receipts rather than the requested route policy', async t => {
+  for (const [name, preparedPolicy, launchedPolicy, expected] of [
+    ['prepared block', 'block', undefined, 'block'],
+    ['prepared proxy', 'proxy', undefined, 'proxy'],
+    ['runtime block overrides prepared proxy', 'proxy', 'block', 'block'],
+    ['missing effective policy', undefined, undefined, null],
+    ['unknown effective policy', 'unknown', undefined, null],
+    ['runtime unknown stays unknown', 'proxy', null, null],
+  ]) await t.test(name, async t => {
+    const f = await fixture(t), prepare = f.routing.prepareRoute.bind(f.routing), launch = f.routing.launch.bind(f.routing);
+    f.routing.prepareRoute = async params => { const result = await prepare(params); delete result.udpPolicy;
+      return preparedPolicy === undefined ? result : { ...result, udpPolicy: preparedPolicy }; };
+    f.routing.launch = async params => { const result = await launch(params);
+      return launchedPolicy === undefined ? result : { ...result, udpPolicy: launchedPolicy }; };
+    const item = await add(f);
+    const result = await f.service.startApplication({ id: item.id });
+    assert.equal(f.routing.calls.find(([method]) => method === 'prepareRoute')[1].route.udpPolicy, 'proxy');
+    assert.equal(result.applications[0].udpPolicy, expected);
+  });
+});
+
 test('ambiguous native launch failure is reclaimed by route, and failed cleanup retains blocking ownership', async t => {
   const f = await fixture(t), item = await add(f);
   f.routing.launch = async () => { throw Object.assign(new Error('runtime-secret must not escape'), { code: 'APPLICATION_ROUTING_TIMEOUT' }); };
@@ -238,6 +259,26 @@ test('configuration symlinks are never followed or replaced', async t => {
   await assert.rejects(add(f), { code: 'APPLICATION_STORAGE_UNAVAILABLE' }); assert.equal(await readFile(target, 'utf8'), 'protected');
 });
 
+test('application metadata decodes valid XML entities and rejects ambiguous or unresolved metadata', async t => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'envara-app-xml-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bundle = path.join(root, 'Owned Fixture.app'); await mkdir(path.join(bundle, 'Contents/MacOS'), { recursive: true });
+  const filename = path.join(bundle, 'Contents/Info.plist'), executable = path.join(bundle, 'Contents/MacOS', 'Main & Literal');
+  await writeFile(executable, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  const fields = '<key>CFBundleIdentifier</key><string>owned.fixture</string><key>CFBundleExecutable</key><string>Main &amp; Literal</string><key>CFBundleDisplayName</key><string>Owned &amp; Test</string>';
+  await writeFile(filename, `<?xml version="1.0"?><plist version="1.0"><dict>${fields}</dict></plist>`);
+  const local = await inspectLocalApplication(bundle, { platform: 'darwin' });
+  assert.equal(local.executablePath, executable); assert.equal(local.name, 'Owned & Test');
+  for (const document of [
+    `<plist><dict>${fields}<key>CFBundleExecutable</key><string>Main &amp; Literal</string></dict></plist>`,
+    `<plist><dict>${fields.replace('Owned &amp; Test', 'Owned &unknown; Test')}</dict></plist>`,
+    `<!DOCTYPE plist [<!ENTITY executable "Main &amp; Literal">]><plist><dict>${fields.replace('Main &amp; Literal', '&executable;')}</dict></plist>`,
+  ]) {
+    await writeFile(filename, document);
+    await assert.rejects(inspectLocalApplication(bundle, { platform: 'darwin' }), { code: 'APPLICATION_INVALID_PATH' });
+  }
+});
+
 test('the designated link browser is stored on the binding, changed without a restart, and cleared explicitly', async t => {
   const f = await fixture(t), item = await add(f, 'profile_a', { browserProfileId: 'profile_ph2' });
   assert.equal(item.browserProfileId, 'profile_ph2');
@@ -259,6 +300,60 @@ test('the designated link browser is stored on the binding, changed without a re
   t.after(() => reloaded.shutdown());
   await reloaded.ready;
   assert.equal((await reloaded.snapshot()).applications[0].browserProfileId, 'profile_ph3');
+});
+
+test('link browser writes finish during a long application run without losing concurrent binding changes', { timeout: 5000 }, async t => {
+  const f = await fixture(t, { inspectApplication: async filename => ({ path: filename, executablePath: filename,
+    identity: `path:${filename.includes('second') ? 'second' : 'first'}`, name: 'Owned fixture' }) });
+  const item = await add(f), other = await add(f, 'profile_b', { path: '/owned-second-fixture' });
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { entered = resolve; });
+  const run = f.service.serialized(async () => { entered(); await gate; });
+  await started;
+  try {
+    const save = f.service.saveApplication({ application: { id: item.id, profileId: item.profileId, path: item.path, name: 'Updated name' } });
+    const remove = f.service.deleteApplication({ id: other.id });
+    const choice = f.service.setApplicationLinkBrowser({ id: item.id, browserProfileId: 'chosen_browser' });
+    const changed = await Promise.race([choice, new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('browser selection waited for application exit')), 1500); timer.unref();
+      choice.finally(() => clearTimeout(timer)).catch(() => {});
+    })]);
+    assert.equal(changed.applications.find(value => value.id === item.id).browserProfileId, 'chosen_browser');
+    release(); await run; await Promise.all([save, remove]);
+    const [saved] = (await f.service.snapshot()).applications;
+    assert.equal(saved.name, 'Updated name'); assert.equal(saved.browserProfileId, 'chosen_browser');
+    assert.equal((await f.service.store.read())[0].browserProfileId, 'chosen_browser');
+  } finally { release(); await run; }
+});
+
+test('a failed browser choice write preserves the previous in-memory and saved binding', async t => {
+  const f = await fixture(t), item = await add(f, 'profile_a', { browserProfileId: 'original_browser' });
+  const before = await readFile(f.service.store.filename, 'utf8'), write = f.service.store.write.bind(f.service.store);
+  f.service.store.write = async () => { throw Object.assign(new Error('owned write refusal'), { code: 'EACCES' }); };
+  await assert.rejects(f.service.setApplicationLinkBrowser({ id: item.id, browserProfileId: 'changed_browser' }), { code: 'EACCES' });
+  assert.equal((await f.service.snapshot()).applications[0].browserProfileId, 'original_browser');
+  assert.equal(await readFile(f.service.store.filename, 'utf8'), before);
+  f.service.store.write = write;
+  await f.service.setApplicationLinkBrowser({ id: item.id, browserProfileId: 'retry_browser' });
+  assert.equal((await f.service.store.read())[0].browserProfileId, 'retry_browser');
+});
+
+test('shutdown drains an in-flight browser choice write and refuses later binding changes', async t => {
+  const f = await fixture(t), item = await add(f);
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; }), writing = new Promise(resolve => { entered = resolve; });
+  const write = f.service.store.write.bind(f.service.store);
+  f.service.store.write = async values => { entered(); await gate; return write(values); };
+  const choice = f.service.setApplicationLinkBrowser({ id: item.id, browserProfileId: 'saved_browser' });
+  await writing;
+  let stopped = false; const closing = f.service.shutdown().then(() => { stopped = true; });
+  const late = f.service.setApplicationLinkBrowser({ id: item.id, browserProfileId: 'late_browser' });
+  const rejected = assert.rejects(late, { code: 'APP_CLOSING' });
+  try {
+    await new Promise(resolve => setImmediate(resolve)); assert.equal(stopped, false);
+  } finally { release(); }
+  await choice; await rejected; await closing;
+  assert.equal((await f.service.store.read())[0].browserProfileId, 'saved_browser');
 });
 
 test('quitting asks a running attached application to stop instead of waiting behind its start', { timeout: 5000 }, async t => {

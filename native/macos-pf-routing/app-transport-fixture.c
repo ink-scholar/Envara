@@ -39,6 +39,25 @@ static int listener(void) {
     printf("{\"ok\":%s,\"heldAfterFrontExit\":%s,\"unsealedRefused\":%s,\"reuseRefused\":%s,\"ready\":false,\"protected\":false}\n",
         okay?"true":"false",pinned?"true":"false",unsealed_refused?"true":"false",reuse_refused?"true":"false"); return okay?0:19;
 }
+static int frontend_stop_fixture(void) {
+    int channel[2], stream[2]; if (pipe_private(channel) || socketpair(AF_UNIX, SOCK_STREAM, 0, stream)) return 101;
+    pid_t child = fork(); if (child < 0) return 102;
+    if (!child) { close(channel[1]); close(stream[1]); char byte; while (read(channel[0], &byte, 1) > 0) {} close(stream[0]); _exit(0); }
+    close(channel[0]); close(stream[0]); struct envara_identity front;
+    if (envara_identity_read(child, &front)) return 103;
+    int writer = channel[1], original = writer, reaped = 0;
+    struct frontend_stop_context context = {.owner = getpid(), .input = &writer, .reaped = &reaped, .frontend = &front};
+    if (fstat(writer, &context.writer) || stop_owned_frontend(&context) != 1 || writer != -1 || !reaped) return 104;
+    errno = 0; int closed = fcntl(original, F_GETFD) == -1 && errno == EBADF;
+    struct pollfd item = {stream[1], POLLIN | POLLHUP, 0}; char byte;
+    int stream_closed = poll(&item, 1, 1000) > 0 && read(stream[1], &byte, 1) == 0; close(stream[1]);
+    int replacement = open("/dev/null", O_RDONLY); if (replacement < 0) return 105;
+    if (replacement != original) { if (dup2(replacement, original) < 0) return 106; close(replacement); replacement = original; }
+    int repeat = stop_owned_frontend(&context) == 1 && fcntl(replacement, F_GETFD) >= 0; close(replacement);
+    int ok = closed && stream_closed && repeat;
+    printf("{\"ok\":%s,\"originalWriterClosed\":%s,\"actualFrontendReaped\":%s,\"actualStreamClosed\":%s,\"repeatPreservesReusedFD\":%s,\"root\":false,\"pf\":false,\"ready\":false,\"protected\":false}\n",
+        ok?"true":"false",closed?"true":"false",reaped?"true":"false",stream_closed?"true":"false",repeat?"true":"false"); return ok?0:107;
+}
 static int relay(int malformed) {
     int input[2], lease[2], recovery[2]; if (pipe(input) || pipe(lease) || pipe(recovery)) return 20;
     pid_t parent = getpid(), child = fork(); if (child < 0) return 21;
@@ -382,6 +401,7 @@ int main(int argc,char **argv) {
     if(argc!=2)return 30;
     if (!strcmp(argv[1],"bounded-diagnostic")) return bounded_diagnostic();
     if (!strcmp(argv[1],"listener")) return listener();
+    if (!strcmp(argv[1],"frontend-stop")) return frontend_stop_fixture();
     if (!strcmp(argv[1],"relay")) return relay(0);
     if (!strcmp(argv[1],"malformed")) return relay(1);
     if (!strcmp(argv[1],"refused")) return refused();

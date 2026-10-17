@@ -1,4 +1,5 @@
 #include "app-supervisor.h"
+#include "app-family.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/proc.h>
@@ -14,6 +15,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <limits.h>
 
 struct keeper {
     const struct envara_app_supervisor_provider *provider;
@@ -23,6 +25,8 @@ struct keeper {
     struct envara_app_supervisor_report *report;
     struct envara_gui_lifecycle *child;
     int output, prepared, output_failed, stopped_before_exec, validation_scope_open;
+    envara_app_family *family;
+    struct envara_identity own;
 };
 /* Installed before any descriptor transfer/claim/fork and retained across the
  * guardian's handler restoration. Catchable signals cannot drop socket custody
@@ -59,7 +63,7 @@ static int guard_preflight(struct keeper *k, int fixture) {
     if (g->fixture_only != fixture || g->dependency_count < 1 || g->dependency_count > 3 ||
         (!fixture && g->dependency_count != 3) || !g->lease_milliseconds || g->lease_milliseconds > ENVARA_LAUNCH_GUARDIAN_MAX_LEASE_MS ||
         (!fixture && !g->heartbeat_timeout_milliseconds) ||
-        !k->authority.verify_persistent_deny || !k->authority.verify_scope_quiescent ||
+        !k->authority.verify_persistent_deny || !k->authority.verify_scope_quiescent || !k->authority.revoke_owned_network ||
         g->lease_fd == g->recovery_fd || g->lease_fd == g->retained_fd || g->recovery_fd == g->retained_fd ||
         !reader(g->lease_fd, &a) || !reader(g->recovery_fd, &b) || (a.st_dev == b.st_dev && a.st_ino == b.st_ino) ||
         g->retained_fd < 3 || fcntl(g->retained_fd, F_GETFD) < 0 || fstat(g->retained_fd, &socket) || !S_ISSOCK(socket.st_mode)) return reject(EACCES);
@@ -102,6 +106,10 @@ static int scope(void *context) {
     struct keeper *k = context;
     return k->authority.verify_scope_quiescent(k->authority.context) == 1;
 }
+static int revoke_network(void *context) {
+    struct keeper *k = context;
+    return k->authority.revoke_owned_network && k->authority.revoke_owned_network(k->authority.context) == 1;
+}
 static int emit(struct keeper *k, const char *event, const struct envara_launch_guard_report *report) {
     const struct envara_app_ticket *t = &k->ticket;
     int front_profile = !t->app.fixture_only && k->provider->execution_profile == ENVARA_APP_EXECUTION_NOTION_FRONT_ONLY;
@@ -125,6 +133,32 @@ static int emit(struct keeper *k, const char *event, const struct envara_launch_
         front_executed ? "true" : "false", profile);
     if (length <= 0 || length >= (int)sizeof(bytes)) return reject(EOVERFLOW);
     /* One atomic bounded frame. A stuck/detached reader cannot block denial. */
+    ssize_t count; do { count = write(k->output, bytes, (size_t)length); } while (count < 0 && errno == EINTR);
+    return count == length ? 0 : reject(count < 0 ? errno : EIO);
+}
+static int emit_cleanup_pending(struct keeper *k, const struct envara_launch_guard_report *report) {
+    const struct envara_app_ticket *t = &k->ticket; struct envara_identity own;
+    if (envara_identity_read(getpid(), &own)) return reject(ESTALE);
+    const char *profile = t->app.fixture_only ? "fixture" :
+        k->provider->execution_profile == ENVARA_APP_EXECUTION_NOTION_FRONT_ONLY ? "seatbelt-front-only" : "cold";
+    int stopped = report->child_reaped && scope(k);
+    const char *family_failure = envara_app_family_failure_name(report->family_failure.reason);
+    if (!family_failure || report->family_failure.os_error < 0 || report->family_failure.os_error > 1024 ||
+        (report->family_failure.reason == ENVARA_APP_FAMILY_FAILURE_NONE ?
+            report->family_failure.os_error != 0 || report->family_failure.mach_error != 0 : report->family_failure.os_error == 0))
+        return reject(EINVAL);
+    char bytes[1536]; int length = snprintf(bytes, sizeof(bytes),
+        "{\"schema\":\"%s\",\"event\":\"cleanup-pending\",\"ticketId\":\"%s\",\"registrationId\":\"%s\",\"versionId\":\"%s\","
+        "\"environmentId\":\"%s\",\"runId\":\"%s\",\"pid\":%d,\"birth\":\"%llu:%06llu\",\"keeperPID\":%d,"
+        "\"keeperBirth\":\"%llu:%06llu\",\"profile\":\"%s\",\"cleanupAttempt\":%u,\"launchAuthorityBurned\":true,\"custodyHeld\":true,"
+        "\"denyVerified\":%s,\"frontClosedVerified\":%s,\"familyStoppedVerified\":%s,\"familyFailureReason\":\"%s\",\"familyFailureErrno\":%d,\"familyFailureMach\":%d,\"ready\":false,\"protected\":false}\n",
+        ENVARA_APP_KEEPER_PROTOCOL, t->ticket_id, t->app.registration_id, t->app.version_id,
+        t->environment_id, t->run_id, k->child->child.identity.pid,
+        (unsigned long long)k->child->child.identity.birth_seconds, (unsigned long long)k->child->child.identity.birth_microseconds,
+        getpid(), (unsigned long long)own.birth_seconds, (unsigned long long)own.birth_microseconds, profile, report->cleanup_attempt,
+        report->network_revoked && report->persistent_deny_observed ? "true" : "false", report->network_revoked ? "true" : "false", stopped ? "true" : "false", family_failure,
+        report->family_failure.os_error, report->family_failure.mach_error);
+    if (length <= 0 || length >= (int)sizeof(bytes)) return reject(EOVERFLOW);
     ssize_t count; do { count = write(k->output, bytes, (size_t)length); } while (count < 0 && errno == EINTR);
     return count == length ? 0 : reject(count < 0 ? errno : EIO);
 }
@@ -165,6 +199,9 @@ static void observe(enum envara_launch_guard_event event, const struct envara_la
     } else if (event == ENVARA_GUARD_RELEASED) {
         k->report->released = 1;
         if (emit(k, "released", report)) k->output_failed = 1;
+    } else if (event == ENVARA_GUARD_CLEANUP_PENDING) {
+        k->stopped_before_exec = 0;
+        if (emit_cleanup_pending(k, report)) k->output_failed = 1;
     }
     if (k->authority.observe) k->authority.observe(event, report, k->authority.context);
 }
@@ -177,7 +214,24 @@ static int quarantine(struct keeper *k) {
      * merely because a dependent birth/FD changed. Exact child cancel is once;
      * fixed native denial and complete scope proof are still required. */
     k->report->recovery_required = 1;
-    (void)envara_gui_cancel(k->child);
+    /* Only the guardian's positive direct-child wait result permits this
+     * already-terminal entry. ECHILD/unavailable identity is never promoted. */
+    int prior_reaped = k->report->guardian.child_reaped && k->child->leader_reaped;
+    /* Pre-arm refusal obeys the same order as a running guardian. Never cancel
+     * the application before fresh DENY plus original frontend shutdown. */
+    k->report->guardian.network_revoked = revoke_network(k);
+    if (!k->family && !prior_reaped) {
+        struct envara_app_family_failure failure;
+        k->family = envara_app_family_create_diagnosed(&k->child->child.identity, &failure);
+        if (k->report->guardian.family_failure.reason == ENVARA_APP_FAMILY_FAILURE_NONE)
+            k->report->guardian.family_failure = failure;
+    }
+    if (prior_reaped) k->report->guardian.family_stop_confirmed = 1;
+    if (k->report->guardian.network_revoked && k->family) {
+        int sent = 0;
+        k->report->guardian.family_stop_confirmed = envara_app_family_stop(k->family, &sent);
+        k->report->guardian.child_signal_sent |= sent;
+    }
     for (;;) {
         if (!k->child->leader_reaped) { int status; (void)envara_gui_poll(k->child, &status); }
         struct pollfd item = {k->guard.recovery_fd, POLLIN, 0};
@@ -188,7 +242,15 @@ static int quarantine(struct keeper *k) {
         }
         char command[32]; ssize_t amount = read(item.fd, command, sizeof(command));
         if (amount <= 0) { quarantine_refusal_delay(); continue; }
-        for (ssize_t i = 0; i < amount; i++) if (command[i] == 'R' && k->child->leader_reaped && deny(k) && scope(k)) {
+        for (ssize_t i = 0; i < amount; i++) if (command[i] == 'R') {
+            if (!k->report->guardian.network_revoked) k->report->guardian.network_revoked = revoke_network(k);
+            if (k->report->guardian.network_revoked && k->family && !k->report->guardian.family_stop_confirmed) {
+                int sent = 0; k->report->guardian.family_stop_confirmed = envara_app_family_stop(k->family, &sent);
+                k->report->guardian.child_signal_sent |= sent;
+            }
+            if (!k->report->guardian.network_revoked || !k->report->guardian.family_stop_confirmed ||
+                (!prior_reaped && (!k->family || !envara_app_family_quiescent(k->family))) ||
+                !k->child->leader_reaped || !deny(k) || !scope(k)) continue;
             struct envara_launch_guard_report report = k->report->guardian;
             report.child_reaped = report.persistent_deny_observed = report.scope_quiescent_observed = 1;
             report.owns_retained_fd = 0;
@@ -205,10 +267,100 @@ static int quarantine(struct keeper *k) {
 static void staging_scope_end(struct keeper *k) {
     if (k->validation_scope_open) { envara_gui_validation_scope_end(); k->validation_scope_open = 0; }
 }
+/* Preparation quarantine is deliberately separate from application custody.
+ * The only wait/signalling authority lives inside the fixed opaque module. */
+int envara_app_preparation_pending_event(const struct envara_app_preparation_report *p,
+    const char *command, int denied, int front_closed, int output) {
+    if (!p || !command || (strcmp(command,"automatic") && strcmp(command,"S") && strcmp(command,"R")) ||
+        !uuid(p->ticket_id) || !uuid(p->registration_id) || !uuid(p->version_id) || !uuid(p->environment_id) ||
+        !uuid(p->run_id) || !uuid(p->snapshot.slot_id) || p->snapshot.generation < 1 || p->snapshot.generation > 5 ||
+        p->cleanup_attempt > INT_MAX || (!strcmp(command,"automatic") && p->cleanup_attempt) ||
+        (!strcmp(command,"S") && !p->cleanup_attempt) || p->keeper.pid != getpid() || !p->keeper.birth_seconds ||
+        p->keeper.birth_microseconds >= 1000000) return reject(EINVAL);
+    const char *state = p->snapshot.child_state == ENVARA_APP_KEYCHAIN_LAUNCHER_CLEAR ? "launcher-clear" :
+        p->snapshot.child_state == ENVARA_APP_KEYCHAIN_UNWAITED ? "unreaped" :
+        p->snapshot.child_state == ENVARA_APP_KEYCHAIN_REAPED ? "reaped" :
+        p->snapshot.child_state == ENVARA_APP_KEYCHAIN_UNKNOWN ? "unknown" : NULL;
+    if (!state) return reject(EINVAL);
+    char bytes[1536]; int n = snprintf(bytes,sizeof(bytes),
+        "{\"schema\":\"envara.pf-app-preparation/v1\",\"event\":\"cleanup-pending\",\"ticketId\":\"%s\","
+        "\"registrationId\":\"%s\",\"versionId\":\"%s\",\"environmentId\":\"%s\",\"runId\":\"%s\","
+        "\"keeperPID\":%d,\"keeperBirth\":\"%llu:%06llu\",\"preparationId\":\"%s\",\"generation\":%llu,"
+        "\"command\":\"%s\",\"cleanupAttempt\":%u,\"childState\":\"%s\",\"launchAuthorityBurned\":true,"
+        "\"custodyHeld\":true,\"denyVerified\":%s,\"frontClosedVerified\":%s,\"ready\":false,\"protected\":false}\n",
+        p->ticket_id,p->registration_id,p->version_id,p->environment_id,p->run_id,p->keeper.pid,
+        (unsigned long long)p->keeper.birth_seconds,(unsigned long long)p->keeper.birth_microseconds,p->snapshot.slot_id,
+        (unsigned long long)p->snapshot.generation,command,p->cleanup_attempt,state,denied?"true":"false",front_closed?"true":"false");
+    if (n <= 0 || n >= (int)sizeof(bytes)) return reject(EOVERFLOW);
+    ssize_t wrote = write(output,bytes,(size_t)n);
+    return wrote == n ? 0 : reject(wrote < 0 ? errno : EIO);
+}
+static int preparation_snapshot(struct keeper *k) {
+    struct envara_app_keychain_snapshot next;
+    if (envara_app_keychain_custody_snapshot(k->provider->preparation,&k->ticket.app,&k->ticket.request,k->ticket.run_id,&next)) return -1;
+    struct envara_app_preparation_report *p = &k->report->preparation;
+    if (p->snapshot.generation && (strcmp(p->snapshot.slot_id,next.slot_id) || p->snapshot.generation != next.generation)) return reject(ESTALE);
+    p->snapshot = next; return 0;
+}
+static int preparation_attempt(struct keeper *k, int *denied, int *closed) {
+    /* persistent_deny permits a live mode during staging. Only this fresh
+     * revocation establishes DENY and frontend closure before cancellation. */
+    *closed = revoke_network(k); *denied = *closed && k->authority.verify_persistent_deny(k->authority.context) == 1;
+    if (!*denied) return 0;
+    int clear = envara_app_keychain_custody_cleanup(k->provider->preparation,&k->ticket.app,&k->ticket.request,k->ticket.run_id);
+    int snapshot_valid = preparation_snapshot(k) == 0;
+    return clear == 1 && snapshot_valid && scope(k);
+}
+static int preparation_quarantine(struct keeper *k, int original_error) {
+    staging_scope_end(k); k->report->recovery_required = 1;
+    struct envara_app_preparation_report *p = &k->report->preparation;
+    strcpy(p->ticket_id,k->ticket.ticket_id); strcpy(p->registration_id,k->ticket.app.registration_id);
+    strcpy(p->version_id,k->ticket.app.version_id); strcpy(p->environment_id,k->ticket.environment_id); strcpy(p->run_id,k->ticket.run_id);
+    p->keeper = k->own; p->original_error = original_error > 0 && original_error <= 1024 ? original_error : EIO;
+    (void)preparation_snapshot(k);
+    char bytes[768]; int n = snprintf(bytes,sizeof(bytes),
+        "{\"schema\":\"envara.macos-pf-app-transport/v1\",\"event\":\"transport-refused\",\"runId\":\"%s\",\"environmentId\":\"%s\","
+        "\"stage\":\"guardian\",\"reason\":\"NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED\",\"error\":%d,\"ready\":false,\"protected\":false}\n",
+        p->run_id,p->environment_id,p->original_error);
+    if (n > 0 && n < (int)sizeof(bytes) && write(k->output,bytes,(size_t)n) == n) k->report->preparation_refusal_emitted = 1;
+    else k->output_failed = 1;
+    /* The controller may send S as soon as it reads the original refusal.
+     * Do not queue that S behind full preparation/scope inventories here. */
+    int closed = revoke_network(k);
+    int denied = closed && k->authority.verify_persistent_deny(k->authority.context) == 1;
+    (void)preparation_snapshot(k);
+    if (k->report->preparation_refusal_emitted && envara_app_preparation_pending_event(p,"automatic",denied,closed,k->output)) k->output_failed = 1;
+    for (;;) {
+        struct pollfd inputs[2] = {{k->guard.lease_fd,POLLIN,0},{k->guard.recovery_fd,POLLIN,0}};
+        int ready = poll(inputs,2,250);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0) { if (ready < 0) quarantine_refusal_delay(); continue; }
+        for (int i = 0; i < 2; i++) {
+            if (!(inputs[i].revents & POLLIN)) continue;
+            char command; if (read(inputs[i].fd,&command,1) != 1) continue;
+            if (i == 0 && command == 'S') {
+                if (p->cleanup_attempt == INT_MAX) { k->output_failed = 1; continue; }
+                p->cleanup_attempt++;
+                if (preparation_attempt(k,&denied,&closed) && !k->output_failed && k->report->preparation_refusal_emitted) {
+                    k->report->preparation_cleanup_confirmed = 1; k->report->recovery_required = 0;
+                    return reject(p->original_error); /* Transport must retire its relay before ACK. */
+                }
+                if (envara_app_preparation_pending_event(p,"S",denied,closed,k->output)) k->output_failed = 1;
+            } else if (i == 1 && command == 'R') {
+                /* Before an S handoff, R is diagnostic-only, never release. */
+                if (envara_app_preparation_pending_event(p,"R",denied,closed,k->output)) k->output_failed = 1;
+            }
+            /* K/B, malformed input and signals cannot renew spent authority. */
+        }
+        /* EOF/error cannot spin or surrender original descriptor custody. */
+        if ((inputs[0].revents | inputs[1].revents) & (POLLHUP | POLLERR | POLLNVAL)) quarantine_refusal_delay();
+    }
+}
 static int adopt(const struct envara_app_ticket *ticket, struct envara_gui_lifecycle *child, void *context) {
     struct keeper *k = context; staging_scope_end(k);
     k->ticket = *ticket; k->child = child; k->guard.child = child->child;
-    struct envara_launch_guard_authority authority = {deny, scope, observe, k};
+    struct envara_launch_guard_authority authority = {.verify_persistent_deny = deny, .verify_scope_quiescent = scope,
+        .observe = observe, .context = k, .revoke_owned_network = revoke_network};
     if (envara_launch_guard_run(&k->guard, &authority, &k->report->guardian)) {
         if (k->report->guardian.child_reaped) {
             /* Only guardian's exact direct-child waitpid result is evidence;
@@ -269,8 +421,11 @@ static int adapter_stage(struct keeper *k, struct envara_app_ticket_store *store
     if (adapter_fresh(&k->ticket.request, &context)) return -1;
     envara_gui_step(ENVARA_GUI_STEP_STAGE_FRESH);
     struct envara_gui_lifecycle *child = &k->report->child;
+    if (k->provider->preparation && envara_identity_read(getpid(),&k->own)) return reject(ESTALE);
     int result = k->provider->stage(&k->ticket.app, &k->ticket.request, &fresh, child, k->provider->context);
     int error = result ? (errno ? errno : EIO) : EACCES;
+    if (envara_app_keychain_custody_pending(k->provider->preparation,&k->ticket.app,&k->ticket.request,k->ticket.run_id) != 0)
+        return preparation_quarantine(k,error);
     struct envara_identity actual;
     int ownership = direct_child(&child->child, &actual);
     if (!ownership && child->child.identity.pid <= 1 && child->phase != ENVARA_GUI_EMPTY) ownership = -1;
@@ -352,6 +507,7 @@ done:
         }
     }
     envara_app_ticket_store_close(&store); envara_app_registry_close(&registry);
+    envara_app_family_destroy(k.family);
     for (int i = 0; i < 3; i++) (void)sigaction(signals[i], &previous_signals[i], NULL);
     (void)fcntl(output, F_SETFL, flags); (void)sigaction(SIGPIPE, &previous_pipe, NULL);
     out->recovery_required = out->child.phase != ENVARA_GUI_EMPTY && !out->released;

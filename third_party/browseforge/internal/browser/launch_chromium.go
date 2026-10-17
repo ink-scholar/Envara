@@ -382,6 +382,7 @@ func (m *Manager) launchChromium(p *profile.Profile) (*Session, error) {
 
 	return &Session{
 		ID:             fmt.Sprintf("sess_%s", p.ID),
+		routeDigest:    SessionRouteDigest(effectiveProxy.Proxy),
 		ProfileID:      p.ID,
 		RuntimeID:      string(desc.ID),
 		Context:        ctx,

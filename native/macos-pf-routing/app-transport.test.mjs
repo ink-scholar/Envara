@@ -12,7 +12,7 @@ test('same native transport retains listener custody, strictly relays controls a
     const root=path.dirname(fileURLToPath(import.meta.url));
     const temporary=realpathSync(mkdtempSync('/private/tmp/envara-app-transport-')); chmodSync(temporary,0o700);
     const names=['launcher.c','tunnel.c','transport.c','gui-launch.m','app-registry.c','app-ticket.c','app-supervisor.c','launch-guardian.c',
-      'notion-launch.m','app-native-factory.m','app-scope-proof.c','pf-hook.c','pf-run-ledger.c','pf-production-filter.c','app-transport.c','app-transport-fixture.c'];
+      'notion-launch.m','app-keychain.m','app-native-factory.m','app-scope-proof.c','pf-hook.c','pf-run-ledger.c','pf-production-filter.c','app-transport.c','app-transport-fixture.c'];
     const hash=()=>names.map(name=>createHash('sha256').update(readFileSync(path.join(root,name))).digest('hex'));
     const before=hash();
     try {
@@ -21,7 +21,7 @@ test('same native transport retains listener custody, strictly relays controls a
         '-target',`${process.arch==='arm64'?'arm64':'x86_64'}-apple-macos13.0`,...names.filter(name=>name!=='app-transport.c').map(name=>path.join(root,name)),
         '-framework','Foundation','-framework','AppKit','-framework','Security','-lbsm','-o',executable],{encoding:'utf8',timeout:60000});
       assert.equal(result.status,0,result.stderr);
-      for (const mode of ['bounded-diagnostic','listener','relay','malformed','refused','cold-fds','abort-proofs','preflight-proofs','listener-protocol']) await t.test(mode,()=>{
+      for (const mode of ['bounded-diagnostic','listener','frontend-stop','relay','malformed','refused','cold-fds','abort-proofs','preflight-proofs','listener-protocol']) await t.test(mode,()=>{
         const result=spawnSync(executable,[mode],{encoding:'utf8',timeout:10000});
         assert.equal(result.signal,null,result.stderr); assert.equal(result.status,0,result.stderr+'\n'+result.stdout);
         const report=JSON.parse(result.stdout); assert.equal(report.ok,true); assert.equal(report.ready,false); assert.equal(report.protected,false);

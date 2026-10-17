@@ -332,7 +332,29 @@ static uint64_t step_clock(void) {
 const char *envara_gui_step_name(enum envara_gui_step step) {
     static const char *const names[ENVARA_GUI_STEP_COUNT] = {"front-commit", "front-admission", "ticket-prepare",
         "relay-fork", "ticket-claim", "stage-fresh", "data-prepare", "stage-plan", "stage-recheck",
-        "stage-spawn", "stage-stopped", "stage-adopt", "resume-verify"};
+        "stage-spawn", "stage-stopped", "stage-adopt", "resume-verify",
+        "keychain-begin", "keychain-scoped", "keychain-normal", "keychain-stage-ready", "keychain-select", "keychain-published",
+        "keychain-stage-cleaned", "keychain-verify", "keychain-host-verify", "keychain-complete",
+        "keychain-parent-context", "keychain-parent-session", "keychain-parent-deny",
+        "keychain-parent-holds", "keychain-parent-selector", "keychain-parent-deadline",
+        "keychain-parent-wait-policy", "keychain-parent-stage", "keychain-parent-account",
+        "keychain-parent-identity", "keychain-parent-environment", "keychain-parent-pipes",
+        "keychain-parent-spawn", "keychain-parent-child", "keychain-parent-write",
+        "keychain-parent-resume", "keychain-parent-read", "keychain-parent-reply",
+        "keychain-parent-wait-scope", "keychain-parent-exit", "keychain-parent-trailing",
+        "keychain-parent-stage-open", "keychain-parent-publish", "keychain-parent-stage-close",
+        "keychain-parent-verify", "keychain-parent-host-changed", "keychain-parent-final",
+        "keychain-helper-entry", "keychain-helper-pipes", "keychain-helper-request-read",
+        "keychain-helper-request-shape", "keychain-helper-self-identity", "keychain-helper-parent-identity",
+        "keychain-helper-executable", "keychain-helper-pipe-binding", "keychain-helper-session",
+        "keychain-helper-home", "keychain-helper-holds-open", "keychain-helper-holds-binding",
+        "keychain-helper-selector", "keychain-helper-stage-load", "keychain-helper-sandbox",
+        "keychain-helper-interaction", "keychain-helper-select-recheck", "keychain-helper-keychain-open",
+        "keychain-helper-set-default", "keychain-helper-select-postcheck", "keychain-helper-copy-default",
+        "keychain-helper-default-path", "keychain-helper-default-owner", "keychain-helper-default-status",
+        "keychain-helper-search-list", "keychain-helper-domain-search", "keychain-helper-search-digest",
+        "keychain-helper-search-missing", "keychain-helper-metadata-postcheck", "keychain-helper-reply-write",
+        "keychain-helper-timeout"};
     return step >= 0 && step < ENVARA_GUI_STEP_COUNT ? names[step] : NULL;
 }
 int envara_gui_steps_begin(int fd, const char *schema, const char *run_id, const char *environment_id) {

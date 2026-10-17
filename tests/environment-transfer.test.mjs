@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { ClaudeAccountStore } from '../electron/claude-account-store.mjs';
-import { EXPORT_SCHEMA, readEnvironmentExport } from '../electron/environment-export.mjs';
+import { EXPORT_SCHEMA, readEnvironmentExport, writeEnvironmentExport } from '../electron/environment-export.mjs';
 import { applyPendingApplicationData, assertEnvironmentIdle, checkedExportManifest, exportEnvironment, restoreEnvironment } from '../electron/environment-transfer.mjs';
 import { finishPendingEnvironmentImport } from '../electron/environment-import-lifecycle.mjs';
 import { pfApplicationRegistrationId, pfAttachEnvironmentId } from '../native/macos-pf-routing/policy.mjs';
@@ -91,6 +91,7 @@ test('exportEnvironment refuses invalid passwords and live environments before r
 
 test('an encrypted environment transfer preserves browser sign-ins, terminal/Claude profiles and scoped application data without programs, caches or another environment', async t => {
   const f = await fixture(t), account = await f.terminal.claudeAccounts.create(PROFILE_ID, 'Work login');
+  await f.terminal.claudeAccounts.rename(PROFILE_ID, 'default', 'Primary login');
   const sourceBrowser = path.join(await f.service.checkedDirectory({ id: PROFILE_ID }), 'browser-data');
   const sourceTerminal = path.join(f.profilesDir, PROFILE_ID), sourceApplication = f.registration();
   const browserFiles = { 'Default/Cookies': 'browser-auth', 'Default/Local Storage/site.db': 'site-state', 'Default/Service Worker/offline': 'offline-document' };
@@ -119,6 +120,7 @@ test('an encrypted environment transfer preserves browser sign-ins, terminal/Cla
   assert.ok(!Number.isNaN(Date.parse(manifest.createdAt)));
   assert.deepEqual(manifest.profile, profileDocument());
   assert.deepEqual(manifest.terminal.accounts, [{ id: account.id, name: 'Work login' }]);
+  assert.equal(manifest.terminal.defaultAccountName, 'Primary login');
   assert.deepEqual(manifest.applications, [applicationManifest()]);
   for (const [section, files] of [['browser', browserFiles], ['terminal', terminalFiles], ['app-0', appFiles]])
     for (const [name, data] of Object.entries(files)) assert.equal(await readFile(path.join(staging, section, name), 'utf8'), data);
@@ -129,6 +131,7 @@ test('an encrypted environment transfer preserves browser sign-ins, terminal/Cla
   for (const [name, data] of Object.entries(browserFiles)) assert.equal(await readFile(path.join(importedBrowser, name), 'utf8'), data);
   for (const [name, data] of Object.entries(terminalFiles)) assert.equal(await readFile(path.join(f.profilesDir, IMPORTED_ID, name), 'utf8'), data);
   assert.deepEqual((await f.terminal.claudeAccounts.list(IMPORTED_ID)).filter(item => !item.default), [{ id: account.id, name: 'Work login', default: false }]);
+  assert.equal((await f.terminal.claudeAccounts.get(IMPORTED_ID, 'default')).name, 'Primary login');
   assert.deepEqual(f.bound, [{ application: { profileId: IMPORTED_ID, path: TARGET_APP.path, name: TARGET_APP.name } }]);
   assert.deepEqual(f.inspected, [{ filename: TARGET_APP.path, options: { platform: 'darwin' } }]);
   await absent(f.registration(IMPORTED_ID)); // Import never creates the privileged application's directories.
@@ -439,4 +442,146 @@ test('application-data restoration refuses a symlinked ancestor and leaves both 
   await rm(environment);
   await rename(outside, environment);
   assert.deepEqual(await applyPendingApplicationData({ ...f, root: f.appRoot }), { applied: true }, 'the intact pending data can be applied after the unsafe ancestor is fixed');
+});
+
+const LOCAL_SELECTOR = 'Home/Library/Preferences/com.apple.security.plist';
+const LOCAL_KEYCHAIN = 'Home/Library/Keychains/synthetic/local.keychain-db';
+const PORTABLE_PREFERENCE = 'Home/Library/Preferences/portable.plist';
+async function pendingApplicationDirectory(f) {
+  const parent = path.join(f.dataDir, 'imports', 'applications', IMPORTED_ID);
+  const [name] = await readdir(parent);
+  return path.join(parent, name);
+}
+
+test('application exports filter machine-local security data from bound and legacy pending sources in every application scope', async t => {
+  for (const pending of [false, true]) for (const scope of ['environment', 'application']) await t.test(`${pending ? 'pending' : 'bound'} ${scope}`, async t => {
+    const f = pending ? await pendingFixture(t) : await fixture(t);
+    const id = pending ? IMPORTED_ID : PROFILE_ID;
+    const source = pending ? await pendingApplicationDirectory(f) : f.registration();
+    await put(source, LOCAL_SELECTOR, 'source-machine-selector');
+    await put(source, LOCAL_KEYCHAIN, 'source-machine-keychain');
+    await put(source, PORTABLE_PREFERENCE, 'portable-preference');
+    await put(source, 'Home/Library/Application Support/offline/document', 'offline-content');
+    await put(source, 'UserData/Library/Preferences/com.apple.security.plist', 'ordinary-application-document');
+    const applications = { ...f.applications, async snapshot() { return { applications: [{ ...TARGET_APP, profileId: id }] }; } };
+    const service = { ...f.service, async call() { return { ...profileDocument(), profiles: [{ id, name: 'Synthetic application' }] }; } };
+    const file = path.join(f.root, 'security-filter.envara');
+    await exportEnvironment({ ...f, profile: { id, status: 'stopped' }, applications, service, scope, applicationId: TARGET_APP.id,
+      root: f.appRoot, platform: 'darwin', file, password: PASSWORD });
+    const staging = path.join(f.root, 'security-filter-staging');
+    await readEnvironmentExport({ file, password: PASSWORD, staging });
+    for (const relative of [LOCAL_SELECTOR, 'Home/Library/Keychains']) await absent(path.join(staging, 'app-0', relative));
+    assert.equal(await readFile(path.join(staging, 'app-0', PORTABLE_PREFERENCE), 'utf8'), 'portable-preference');
+    assert.equal(await readFile(path.join(staging, 'app-0', 'Home/Library/Application Support/offline/document'), 'utf8'), 'offline-content');
+    assert.equal(await readFile(path.join(staging, 'app-0', 'UserData/Library/Preferences/com.apple.security.plist'), 'utf8'), 'ordinary-application-document');
+    assert.equal(await readFile(path.join(source, LOCAL_SELECTOR), 'utf8'), 'source-machine-selector', 'export never edits local selection');
+  });
+  await t.test('unbound legacy pending re-export', async t => {
+    const f = await pendingFixture(t), source = await pendingApplicationDirectory(f);
+    await put(source, LOCAL_SELECTOR, 'unbound-old-selector'); await put(source, LOCAL_KEYCHAIN, 'unbound-old-keychain');
+    await put(source, PORTABLE_PREFERENCE, 'unbound-portable');
+    const applications = { ...f.applications, async snapshot() { return { applications: [] }; } };
+    const service = { async call() { return { ...profileDocument(), profiles: [{ id: IMPORTED_ID, name: 'Synthetic unbound application' }] }; } };
+    const file = path.join(f.root, 'unbound-security.envara');
+    await exportEnvironment({ ...f, profile: { id: IMPORTED_ID, status: 'stopped' }, applications, service,
+      root: f.appRoot, platform: 'darwin', file, password: PASSWORD });
+    const staging = path.join(f.root, 'unbound-security-staging'); await readEnvironmentExport({ file, password: PASSWORD, staging });
+    await absent(path.join(staging, 'app-0', LOCAL_SELECTOR)); await absent(path.join(staging, 'app-0', 'Home/Library/Keychains'));
+    assert.equal(await readFile(path.join(staging, 'app-0', PORTABLE_PREFERENCE), 'utf8'), 'unbound-portable');
+  });
+});
+
+test('legacy encrypted application imports discard machine-local entries before pending storage, and apply filters tampered old pending data again', async t => {
+  for (const scoped of [false, true]) await t.test(scoped ? 'scoped archive' : 'whole archive', async t => {
+    const f = await fixture(t), source = path.join(f.root, 'legacy-application');
+    await put(source, LOCAL_SELECTOR, 'foreign-machine-selector'); await put(source, LOCAL_KEYCHAIN, 'foreign-keychain');
+    await put(source, PORTABLE_PREFERENCE, 'portable-pref');
+    const manifest = { ...manifestFor([applicationManifest()]), ...(scoped ? { scope: 'application' } : {}) };
+    const file = path.join(f.root, 'legacy-security.envara');
+    await writeEnvironmentExport({ file, password: PASSWORD, manifest, sources: [{ section: 'app-0', root: source }] });
+    const staging = path.join(f.root, 'legacy-security-staging');
+    const decoded = await readEnvironmentExport({ file, password: PASSWORD, staging });
+    assert.equal(await readFile(path.join(staging, 'app-0', LOCAL_SELECTOR), 'utf8'), 'foreign-machine-selector', 'fixture represents an older unfiltered archive');
+    await restoreEnvironment({ ...f, staging, manifest: decoded, profileId: IMPORTED_ID, platform: 'darwin' });
+    const pending = await pendingApplicationDirectory(f), registration = f.registration(IMPORTED_ID);
+    await absent(path.join(pending, LOCAL_SELECTOR)); await absent(path.join(pending, 'Home/Library/Keychains'));
+    await put(pending, LOCAL_SELECTOR, 'tampered-pending-selector'); await put(pending, LOCAL_KEYCHAIN, 'tampered-pending-keychain');
+    for (const name of ['UserData', 'Home', 'Extensions']) await mkdir(path.join(registration, name), { recursive: true });
+    await put(registration, LOCAL_SELECTOR, 'new-machine-selector');
+    assert.deepEqual(await applyPendingApplicationData({ ...f, application: { ...TARGET_APP, profileId: IMPORTED_ID }, root: f.appRoot }), { applied: true });
+    assert.equal(await readFile(path.join(registration, LOCAL_SELECTOR), 'utf8'), 'new-machine-selector');
+    assert.equal(await readFile(path.join(registration, PORTABLE_PREFERENCE), 'utf8'), 'portable-pref');
+    await absent(path.join(registration, 'Home/Library/Keychains'));
+  });
+});
+
+test('pending Home replacement refuses existing nonempty local Keychains before altering any leaf', async t => {
+  const f = await pendingFixture(t), pending = await pendingApplicationDirectory(f);
+  await put(f.registration, LOCAL_SELECTOR, 'keep-local-selector');
+  await put(f.registration, LOCAL_KEYCHAIN, 'keep-local-keychain');
+  await assert.rejects(applyPendingApplicationData({ ...f, root: f.appRoot }), { code: 'IMPORT_TARGET_NOT_EMPTY' });
+  assert.equal(await readFile(path.join(f.registration, LOCAL_SELECTOR), 'utf8'), 'keep-local-selector');
+  assert.equal(await readFile(path.join(f.registration, LOCAL_KEYCHAIN), 'utf8'), 'keep-local-keychain');
+  for (const name of ['UserData', 'Home', 'Extensions']) assert.equal(await readFile(path.join(f.registration, name, 'existing'), 'utf8'), `${name}-existing`);
+  assert.equal(await readFile(path.join(pending, 'Home/imported'), 'utf8'), 'Home-import');
+});
+
+test('an unsafe local selector is rejected without touching its target or consuming pending data', async t => {
+  const f = await pendingFixture(t), outside = await put(f.root, 'outside-selector', 'outside-must-remain');
+  const selector = path.join(f.registration, LOCAL_SELECTOR); await mkdir(path.dirname(selector), { recursive: true }); await symlink(outside, selector);
+  await assert.rejects(applyPendingApplicationData({ ...f, root: f.appRoot }), { code: 'IMPORT_TARGET_UNSAFE' });
+  assert.equal(await readFile(outside, 'utf8'), 'outside-must-remain');
+  assert.equal(await readFile(path.join(f.registration, 'UserData/existing'), 'utf8'), 'UserData-existing');
+  assert.equal(await readFile(path.join(await pendingApplicationDirectory(f), 'Home/imported'), 'utf8'), 'Home-import');
+});
+
+test('local selector directory checks reject writable or root-owned chains without altering data', async t => {
+  for (const relative of ['Home/Library', 'Home/Library/Preferences']) await t.test(`${relative} writable`, async t => {
+    const f = await pendingFixture(t), pending = await pendingApplicationDirectory(f);
+    await put(f.registration, LOCAL_SELECTOR, 'keep-selector');
+    await fs.promises.chmod(path.join(f.registration, relative), 0o775);
+    await assert.rejects(applyPendingApplicationData({ ...f, root: f.appRoot }), { code: 'IMPORT_TARGET_UNSAFE' });
+    assert.equal(await readFile(path.join(f.registration, LOCAL_SELECTOR), 'utf8'), 'keep-selector');
+    assert.equal(await readFile(path.join(f.registration, 'UserData/existing'), 'utf8'), 'UserData-existing');
+    assert.equal(await readFile(path.join(pending, 'Home/imported'), 'utf8'), 'Home-import');
+  });
+  await t.test('root-owned chain metadata', async t => {
+    const f = await pendingFixture(t), pending = await pendingApplicationDirectory(f);
+    await put(f.registration, LOCAL_SELECTOR, 'keep-selector');
+    const directory = path.join(f.registration, 'Home/Library'), original = fs.promises.lstat;
+    fs.promises.lstat = async (...args) => {
+      const info = await original(...args);
+      if (args[0] === directory) info.uid = (process.getuid?.() ?? 1) === 0 ? 1 : 0;
+      return info;
+    };
+    syncBuiltinESMExports();
+    try { await assert.rejects(applyPendingApplicationData({ ...f, root: f.appRoot }), { code: 'IMPORT_TARGET_UNSAFE' }); }
+    finally { fs.promises.lstat = original; syncBuiltinESMExports(); }
+    assert.equal(await readFile(path.join(f.registration, LOCAL_SELECTOR), 'utf8'), 'keep-selector');
+    assert.equal(await readFile(path.join(f.registration, 'UserData/existing'), 'utf8'), 'UserData-existing');
+    assert.equal(await readFile(path.join(pending, 'Home/imported'), 'utf8'), 'Home-import');
+  });
+});
+
+test('a later transaction failure restores the original local selector and every old application leaf', async t => {
+  const f = await pendingFixture(t), pending = await pendingApplicationDirectory(f);
+  await put(f.registration, LOCAL_SELECTOR, 'rollback-local-selector');
+  await put(pending, LOCAL_SELECTOR, 'must-never-replace-selector');
+  const originalRename = fs.promises.rename;
+  let failed = false;
+  fs.promises.rename = async (source, destination) => {
+    if (!failed && String(source).includes(`${path.sep}incoming${path.sep}`) && String(destination).startsWith(path.join(f.registration, 'Extensions') + path.sep)) {
+      failed = true; throw Object.assign(new Error('synthetic commit failure'), { code: 'EIO' });
+    }
+    return originalRename(source, destination);
+  };
+  syncBuiltinESMExports();
+  try { await assert.rejects(applyPendingApplicationData({ ...f, root: f.appRoot }), { code: 'EIO' }); }
+  finally { fs.promises.rename = originalRename; syncBuiltinESMExports(); }
+  assert.equal(failed, true, 'failure happens after the Home replacement');
+  assert.equal(await readFile(path.join(f.registration, LOCAL_SELECTOR), 'utf8'), 'rollback-local-selector');
+  for (const name of ['UserData', 'Home', 'Extensions']) assert.equal(await readFile(path.join(f.registration, name, 'existing'), 'utf8'), `${name}-existing`);
+  assert.equal(await readFile(path.join(pending, LOCAL_SELECTOR), 'utf8'), 'must-never-replace-selector', 'failed apply retains its source without using the foreign selection');
+  assert.deepEqual(await applyPendingApplicationData({ ...f, root: f.appRoot }), { applied: true });
+  assert.equal(await readFile(path.join(f.registration, LOCAL_SELECTOR), 'utf8'), 'rollback-local-selector');
 });

@@ -1,8 +1,8 @@
-# Envara 0.5.24 能力矩阵
+# Envara 0.5.25 能力矩阵
 
 当前发布目标为 **macOS Apple Silicon（arm64）**。下表区分源码能力、桌面入口和验收边界，不表示所有 provider、网站或原生软件都已逐项通过。
 
-三内核随机身份与最终包资料迁移的受控结果已补入下表，具体覆盖见[验证范围](verification.md)。
+下表中的三内核随机身份与资料迁移实测记录归属已发布 0.5.24 的验证基线；0.5.25 的实测范围单独列于[验证说明](verification.md)。
 
 ## 与固定 BrowseForge 基线的关系
 
@@ -40,15 +40,17 @@ Envara 纳入 BrowseForge **v2.1.15 / `fa9e0bb670e749706a9c8f2d4095333347d6c521`
 
 | 范围 | 当前边界 |
 | --- | --- |
-| macOS arm64 浏览器与数据 | 当前发布目标；受控回环验收覆盖持久 Cookie/HttpOnly、localStorage、IndexedDB、独立导出/恢复及原档案保留。会话 Cookie 不保证恢复，真实 Gmail 登录及跨 Mac 登录未验收；本轮最终包状态见[验证范围](verification.md) |
-| macOS 终端与 Claude | 托管回环路线使用 Seatbelt 围栏；受控夹具可验证 PTY、浏览器绑定和清理。真实认证、token 刷新、模型推理及模型主动调用工具需独立验收 |
-| macOS 附加软件 | PF/进程身份/自有 utun 路线及独立 NE 路线；按实际安装、目标身份和运行条件决定准入。任意软件、DNS代发、外部 helper、整个 guard 故障与无关应用仍需对应验收 |
+| macOS arm64 浏览器与数据 | 当前发布目标；受控回环验收覆盖持久 Cookie/HttpOnly、localStorage、IndexedDB、独立导出/恢复及原档案保留。会话 Cookie 不保证恢复，真实 Gmail 登录及跨 Mac 登录未验收；相应版本的实测范围见[验证说明](verification.md) |
+| macOS 终端与 Claude | 托管回环路线使用 Seatbelt 围栏；受控夹具验证 PTY、原生语言/时区、浏览器绑定和清理。直接公网与外部 DNS 被拒绝，允许的本地服务及本地 IPC 的后续联网不受此围栏控制。真实认证、token 刷新、模型推理及模型主动调用工具需独立验收 |
+| macOS 附加软件 | PF/进程身份/自有 utun 路线及独立 NE 路线；按实际安装、目标身份和运行条件决定准入。任意软件、DNS代发、外部 helper、整个 guard 故障与无关应用仍需对应验收；版本基线与实测范围见[验证说明](verification.md) |
 | Windows x64 | 有桌面准备、WinDivert capture 与 helper 源码；未完成实机 GUI/PTY/浏览器/驱动与路由验收，不能当作已支持发布平台 |
 | macOS Intel、Linux、Windows ARM64 | provider 或 helper 的构建目标不等于 Envara 原生验收；不在当前发布承诺内 |
 
 GPU、字体、硬件身份、所有 UA/Client Hints 表面和完整网站检测不是一个统一的已通过项目。选择坐标不证明住宅地址；隔离配置或网络不保证避免服务端限制。详见[设备边界](browser-device-profiles.md)、[网络环境](network-context.md)、[附加软件路由](application-routing-options.md)和[Claude 会话](claude-code-sessions.md)。
 
 Chromium 已配置非代理 UDP 限制，但尚无有效 WebRTC 正对照验收；Camoufox 的 WebRTC 防泄漏效力也未验收。旧 BrowseForge Chromium 零种子档案若依赖原 profile ID，导入到新 ID 后不能承诺完整派生身份保持；这与新生成身份、非零旧种子的保留规则不同。
+
+终端和 Claude CLI 本身没有网页 WebRTC 或网页定位接口；这些能力属于实际调用的浏览器。终端的 `TZ`、locale 与工具隐私开关不等于模拟系统位置或全流量追踪过滤。附加软件也不自动获得浏览器指纹、网页坐标或 EasyPrivacy 规则；当前 PF 受控路线阻断 UDP，不能把节点支持 UDP 转发当作软件已获同等支持。
 
 ## 复核与许可
 

@@ -49,6 +49,14 @@ const KNOWN_PRIORS = new Set([
   'fa70a2ff212cf478f2165e086288815c9bd87c8c9538b40c5d75186a4398a7d4',
   '32811e9718b4c803c23b79f90828131709f6d0e139bc6713fd3482b0122214bb',
   '22a6f3ea8e9354c3b32b488c50e8ae6ab0d9c5aa565a80911b1848f40aea87de',
+  '78c3fcff00b6d66273290fb38e1bbfd14811b3ca6af81fe92baa87bd72e091e4',
+  'fb74d63e38710d8129e409cc72840b6a8bfc0ac3917de4905d7d5357e61c66f2',
+  '554c5ac706c108b7530842a4a5e156e095004ad0fb11e3fe821b255ac2ab6f2e',
+  '2af8c63918675c5ccca1d46fd763e462ea8cefabd6cc41ebdcefa85bc45049b6',
+  '005f91acca0cecfc7ef7c2f731e9a7e178a6a8268e88a048caf54ac762047dcc',
+  '88f8c7363d7b689829e712b39f26c09ca9856685cc71fd8b1e05cbeb43027715',
+  '0b6d9bffd6629d4855bf44b5d7f2e99b88e9732020cd84f72919dcae35020a13',
+  '03596ac0849e4e91a39367934e7555ab166eb9084a5ca2bb15a3a0230b9d0539',
 ]);
 const LEAVES = [...Object.keys(PF_MANIFEST_FILES), 'manifest.json', 'EnvaraPFInstall'].sort();
 const within = (base, target) => target === base || (!path.relative(base, target).startsWith('../') && !path.isAbsolute(path.relative(base, target)));

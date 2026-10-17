@@ -5,6 +5,7 @@ import { pfAttachEnvironmentId } from '../native/macos-pf-routing/policy.mjs';
 export const ATTACHED_APPLICATION_DATA_ROOT = '/Library/PrivilegedHelperTools/io.envara.pf-app-data';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const defaultFs = { readdir, lstat, rm };
+const TREE_ENTRY_BUDGET = 200000;
 export const APPLICATION_DATA_DIRECTORIES = Object.freeze(['UserData', 'Home', 'Cache', 'Temp', 'Extensions']);
 /* These named Chromium caches are regenerable. Service Worker and blob_storage
  * may hold offline documents, so they are deliberately not in this list. */
@@ -13,16 +14,24 @@ export const REGENERABLE_CACHE_ENTRIES = Object.freeze(['Cache', 'Code Cache', '
   'extensions_crx_cache', 'Shared Dictionary']);
 
 const owned = (info, uid) => info.isDirectory() && !info.isSymbolicLink() && info.uid === uid;
+const notCleared = (erased = [], incomplete = []) => Object.assign(new Error('应用数据没有全部清除，请退出这个软件后重试。'),
+  { code: 'APPLICATION_DATA_NOT_CLEARED', erased, incomplete });
 // The production layout is root-owned; fixture layouts belong to the user.
 // Check every layout component before reading descendants, not just the leaf.
-async function safeLayout(root, components, { uid, fs }) {
+async function safeLayout(root, components, { uid, fs, strict = false }) {
   let target = root;
   for (const component of ['', ...components]) {
     if (component) target = path.join(target, component);
     try {
       const info = await fs.lstat(target);
-      if (!info.isDirectory() || info.isSymbolicLink() || (info.uid !== 0 && info.uid !== uid)) return null;
-    } catch { return null; }
+      if (!info.isDirectory() || info.isSymbolicLink() || (info.uid !== 0 && info.uid !== uid)) {
+        if (strict) throw notCleared();
+        return null;
+      }
+    } catch (error) {
+      if (strict && error.code !== 'ENOENT') throw notCleared();
+      return null;
+    }
   }
   return target;
 }
@@ -43,13 +52,18 @@ async function applicationDataLeaves(environmentId, registrationId, options) {
 }
 /* Allocated size of a tree, never following a link; bounded so a huge or
  * hostile tree cannot stall the caller. */
-async function treeBytes(target, fs, budget = { entries: 200000 }) {
+async function treeBytes(target, fs, budget = { entries: TREE_ENTRY_BUDGET }, visit, depth = 0) {
+  if (budget.entries <= 0) return 0;
+  budget.entries -= 1;
   let info; try { info = await fs.lstat(target); } catch { return 0; }
-  if (--budget.entries < 0) return 0;
+  visit?.(info, depth);
   // A folder's own entry is not data: an emptied sign-in folder measures zero.
   let total = info.isDirectory() && !info.isSymbolicLink() ? 0 : (info.blocks ?? 0) * 512 || info.size || 0;
-  if (info.isDirectory() && !info.isSymbolicLink())
-    for (const name of await fs.readdir(target).catch(() => [])) total += await treeBytes(path.join(target, name), fs, budget);
+  if (info.isDirectory() && !info.isSymbolicLink() && budget.entries > 0)
+    for (const name of await fs.readdir(target).catch(() => [])) {
+      if (budget.entries <= 0) break;
+      total += await treeBytes(path.join(target, name), fs, budget, visit, depth + 1);
+    }
   return total;
 }
 
@@ -67,9 +81,11 @@ export async function eraseEnvironmentData(environmentId, { registrationId = nul
   uid = process.getuid?.(), platform = process.platform, fs = defaultFs } = {}) {
   if (platform !== 'darwin' || !UUID.test(environmentId ?? '')) return [];
   const options = { root, uid, fs }, erased = [], incomplete = [];
-  const environment = await safeLayout(root, [environmentId], options);
+  const environment = await safeLayout(root, [environmentId], { ...options, strict: true });
   if (!environment) return erased;
-  let registrations; try { registrations = await fs.readdir(environment); } catch { return erased; }
+  let registrations;
+  try { registrations = await fs.readdir(environment); }
+  catch (error) { if (error.code === 'ENOENT') return erased; throw notCleared(); }
   for (const registration of registrations) {
     if (registrationId && registration !== registrationId) continue;
     if (!UUID.test(registration)) continue;
@@ -88,7 +104,7 @@ export async function eraseEnvironmentData(environmentId, { registrationId = nul
     }
     (complete ? erased : incomplete).push(registration);
   }
-  if (incomplete.length) throw Object.assign(new Error('应用数据没有全部清除，请退出这个软件后重试。'), { code: 'APPLICATION_DATA_NOT_CLEARED', erased, incomplete });
+  if (incomplete.length) throw notCleared(erased, incomplete);
   return erased;
 }
 
@@ -141,11 +157,12 @@ export async function attachedApplicationDataInventory({ root = ATTACHED_APPLICA
       const { leaves } = await applicationDataLeaves(environmentId, registrationId, options);
       if (!leaves.length) continue;
       let modified = 0, bytes = 0;
+      // At the limit, size and time describe only the visited entries.
+      const budget = { entries: TREE_ENTRY_BUDGET };
+      const visit = (info, depth) => { if (depth === 1) modified = Math.max(modified, info.mtimeMs ?? 0); };
       for (const { path: leaf } of leaves) {
-        for (const name of await fs.readdir(leaf).catch(() => [])) {
-          try { modified = Math.max(modified, (await fs.lstat(path.join(leaf, name))).mtimeMs ?? 0); } catch {}
-        }
-        bytes += await treeBytes(leaf, fs);
+        if (budget.entries <= 0) break;
+        bytes += await treeBytes(leaf, fs, budget, visit);
       }
       items.push({ environmentId, registrationId, dataScope: 'environment', hasDataDirectory: true, bytes,
         modifiedAt: modified ? new Date(modified).toISOString() : null });

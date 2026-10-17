@@ -5,7 +5,7 @@
 <p align="center"><strong>作業ごとに、独立したひとつの環境を。</strong><br />ブラウザーも、ターミナルも、アプリも。同じ作業環境で。</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="独自コードのライセンス：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.24-475569" alt="Envara 0.5.24" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-0.5.25-475569" alt="Envara 0.5.25" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 言語の README" /></a>
 </p>
 <p align="center">
@@ -73,7 +73,7 @@ Claude Code は、その統合機能のひとつです。環境ごとに**改変
 
 ### 🗂️ 日々の管理を、できるだけスムーズに
 
-ダークテーマの 3 カラム画面に、環境、ネットワーク、ブラウザー、ターミナル、追加アプリ、実行状況を整理。よく使う操作はすぐ手が届く場所に、細かな設定は詳細オプションにまとめています。9 種類の表示言語から、使い慣れた言語で始められます。
+ライト・ダーク・システム設定に合わせた外観を選べる 3 カラム画面に、環境、ネットワーク、ブラウザー、ターミナル、追加アプリ、実行状況を整理。外観の設定は Envara にのみ適用され、コンピューターの外観は変更しません。よく使う操作はすぐ手が届く場所に、細かな設定は詳細オプションにまとめています。9 種類の表示言語から、使い慣れた言語で始められます。
 
 ## Envara でできること
 

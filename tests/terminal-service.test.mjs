@@ -551,7 +551,8 @@ test('a SOCKS bridge route starts only inside the network fence and Node uses th
   assert.equal(session.networkFence, true);
   // What the terminal says about its network is what the fence enforces.
   assert.equal(session.network.fenced, true);
-  assert.match(session.network.description, /不会直连/);
+  assert.match(session.network.description, /阻止直接公网连接/);
+  assert.match(session.network.description, /本地开发服务仍可访问/);
   assert.doesNotMatch(session.network.description, /本机地址直连/);
   assert.equal(launches.length, 1);
   const shell = f.service.shell({});

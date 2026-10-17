@@ -1,6 +1,8 @@
 package browser
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,6 +22,8 @@ import (
 // Session represents a running browser profile
 type Session struct {
 	ID             string
+	InstanceID     string // Random for this launch; deterministic session IDs may be reused.
+	routeDigest    string // Actual launch route, never profile metadata or diagnostics.
 	ProfileID      string
 	RuntimeID      string
 	Browser        playwright.Browser
@@ -167,6 +171,13 @@ func (m *Manager) LaunchSession(p *profile.Profile) (*Session, error) {
 		}
 		if err == nil {
 			if session != nil {
+				var nonce [16]byte
+				if _, nonceErr := rand.Read(nonce[:]); nonceErr != nil {
+					m.driverMu.RUnlock()
+					m.closeSessionResources(session, "launch identity unavailable")
+					return nil, fmt.Errorf("browser launch identity unavailable")
+				}
+				session.InstanceID = hex.EncodeToString(nonce[:])
 				m.observeSession(session)
 			}
 			err = m.prepareSessionEndpoint(p, session, attempt)

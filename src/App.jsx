@@ -9,8 +9,9 @@ import { googleMapsLocationURL, normalizeNetworkLocation } from "../shared/netwo
 import { browseForgeRegionFor, preferredEngine } from "../shared/engine-choice.mjs";
 import { BROWSER_DEVICE_PROFILES, PROVIDER_DEFAULT_DEVICE_PROFILE_ID, defaultBrowserDeviceProfileId, getBrowserDeviceProfile, supportsBrowserDeviceProfiles } from "../shared/browser-device-profile.mjs";
 import { initialBrowserDeviceFields, selectBrowserDeviceProfile, changeBrowserDeviceEngine, browserDimensionValue, validBrowserDimension } from "./browser-device-form.mjs";
-import { safeNotionTrial, notionTrialLocksConfiguration } from "./notion-trial-state.mjs";
+import { safeNotionTrial, notionTrialLocksConfiguration, applyNotionTrialOperationResult } from "./notion-trial-state.mjs";
 import { useI18n } from "./i18n.jsx";
+import { useAppearance } from "./appearance.jsx";
 import { SYSTEM_BROWSER, linkBrowsersFor as linkBrowsersOf, linkBrowserChoice } from "./link-browser.mjs";
 import { LanguageWelcome } from "./LanguageWelcome.jsx";
 import { languageOptions, localeForInterfaceLanguage } from "../shared/interface-languages.mjs";
@@ -18,8 +19,8 @@ import { BrowserWorkspace } from "./BrowserWorkspace.jsx";
 import { ApplicationsWorkspace, ContextDetail, EnvironmentOverview, MonitorWorkspace } from "./workspace-pages.jsx";
 import { ApplicationIcon } from "./ApplicationIcon.jsx";
 import { supportsAttachedApplication } from "./application-capability.mjs";
-import { browserExportActive, environmentTransferModalPending, importedDataLabel } from "./environment-transfer-ui.mjs";
-import { completeWorkspaceOperation } from "./workspace-operation.mjs";
+import { browserExportActive, environmentTransferModalPending, importedDataLabel, cancelEnvironmentImportModal } from "./environment-transfer-ui.mjs";
+import { completeWorkspaceOperation, workspaceOperationWarning } from "./workspace-operation.mjs";
 const initialSnapshot = {
   profiles: [],
   proxies: [],
@@ -849,6 +850,7 @@ export function App() {
   return <><div className="workspace-content" inert={initializing ? true : undefined} aria-hidden={initializing ? true : undefined}><WorkspaceApp /></div><LanguageWelcome /></>;
 }
 function WorkspaceApp() {
+  const { preference: appearance, setPreference: setAppearance, saving: savingAppearance } = useAppearance();
   const {
     t,
     language,
@@ -942,28 +944,39 @@ function WorkspaceApp() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [modal, languagePhase]);
-  const closeModal = useCallback(() => {
+  const closeModal = useCallback(async () => {
     if (pendingRef.current.has("attachApplication:")) return;
     if (environmentTransferModalPending(modalRef.current, pendingRef.current)) return;
-    const session = ["importMapping", "importPassword"].includes(modalRef.current?.type) ? modalRef.current.session : null;
-    if (session?.importId) api.call("cancelImport", {
-      importId: session.importId
-    }).catch(() => {});
-    setModal(null);
-  }, []);
+    const current = modalRef.current;
+    try {
+      const canceled = await cancelEnvironmentImportModal({ modal: current, pending: pendingRef.current,
+        cancel: importId => api.call("cancelImport", { importId }) });
+      if (canceled) setModal(value => value === current ? null : value);
+    } catch (error) {
+      setToast({ type: "error", message: error.message || t("操作未完成，请重试。") });
+    }
+  }, [t]);
   const perform = async (method, args = {}, success, key = `${method}:${args.id || args.runtimeId || ""}`, quiet = false) => {
     if (pendingRef.current.has(key)) return {
       ok: false,
       message: t("此操作正在进行中。")
     };
     pendingRef.current.add(key);
+    const previousRunId = safeNotionTrial(snapshotRef.current.applications?.find(item => item.id === args.id))?.runId ?? null;
     setPending(value => ({
       ...value,
       [key]: true
     }));
     try {
-      const { result, refreshFailed } = await completeWorkspaceOperation({ execute: () => api.call(method, args), acceptSnapshot, refresh });
-      if (success && !result?.canceled && !quiet) setToast({
+      const acceptOperationResult = value => {
+        if (acceptSnapshot(value)) return true;
+        const next = applyNotionTrialOperationResult(snapshotRef.current, value, { method, applicationId: args.id, previousRunId });
+        return next ? acceptSnapshot(next) : false;
+      };
+      const { result, refreshFailed } = await completeWorkspaceOperation({ execute: () => api.call(method, args), acceptSnapshot: acceptOperationResult, refresh });
+      const warning = workspaceOperationWarning(result);
+      if (warning && !quiet) setToast({ type: "error", message: t(warning) });
+      else if (success && !result?.canceled && !quiet) setToast({
         type: "success",
         message: success
       });
@@ -1083,6 +1096,7 @@ function WorkspaceApp() {
     }
   };
   const importProfiles = async (args = {}) => {
+    if (args.importId && pendingRef.current.has(`cancelImport:${args.importId}`)) return;
     const before = new Set(profiles.map(profile => profile.id));
     const response = await perform("importProfiles", args, undefined, `importProfiles:${args.importId || ""}`);
     if (!response.ok || response.result?.canceled) return;
@@ -1483,8 +1497,8 @@ function WorkspaceApp() {
           id,
           label,
           icon: Icon
-        }) => <button key={id} className={`nav-item ${page === id ? "active" : ""}`} onClick={() => navigate(id)}><Icon size={20} weight={page === id ? "fill" : "regular"} /><span>{t(label)}</span>{id === "profiles" && <span className="nav-count">{profiles.length}</span>}</button>)}</nav>
-      <div className="sidebar-bottom"><button className={`nav-item settings-navigation ${page === "settings" ? "active" : ""}`} onClick={() => navigate("settings")}><Gear size={20} weight={page === "settings" ? "fill" : "regular"} /><span>{t("设置")}</span></button><div className="owner" title={t("本地工作区 · 设备所有者")}><div className="owner-avatar">{t("境")}</div><div><strong>{t("本地工作区")}</strong><span>{totalBytes > 0 ? `${t("环境数据")} ${bytes(totalBytes)}` : t("设备所有者")}</span></div><span className="local-dot" /></div></div>
+        }) => <button key={id} className={`nav-item ${page === id ? "active" : ""}`} aria-current={page === id ? "page" : undefined} onClick={() => navigate(id)}><Icon size={20} weight={page === id ? "fill" : "regular"} /><span>{t(label)}</span>{id === "profiles" && <span className="nav-count">{profiles.length}</span>}</button>)}</nav>
+      <div className="sidebar-bottom"><button className={`nav-item settings-navigation ${page === "settings" ? "active" : ""}`} aria-current={page === "settings" ? "page" : undefined} onClick={() => navigate("settings")}><Gear size={20} weight={page === "settings" ? "fill" : "regular"} /><span>{t("设置")}</span></button><div className="owner" title={`${t("本地工作区")} · ${t("设备所有者")}`}><div className="owner-avatar">{t("境")}</div><div><strong>{t("本地工作区")}</strong><span>{totalBytes > 0 ? `${t("环境数据")} ${bytes(totalBytes)}` : t("设备所有者")}</span></div><span className="local-dot" /></div></div>
     </aside>
     <main className="main-panel">
       <header className="page-header"><div className="page-heading"><div className="heading-line"><h1 tabIndex={-1}>{t(page === "settings" ? "设置" : navItems.find(item => item.id === page)?.label)}</h1>{!api.isDesktop && <span className="preview-badge">{t("界面预览")}</span>}</div><p>{t(subtitle)}</p></div>
@@ -1573,14 +1587,14 @@ function WorkspaceApp() {
       {page === "monitor" && <MonitorWorkspace profiles={profiles} terminalProfiles={terminalProfiles} applications={applications} events={events} onNavigate={navigate} t={t} language={language} />}
       {page === "settings" && <div className="page-content settings-content">
         <div className="section-heading first"><h2>{t("偏好设置")}</h2></div>
-        <div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("界面语言")}</strong></div><select className="language-select" value={language} disabled={savingLanguage} onChange={event => void setLanguage(event.target.value).catch(() => setToast({ type: "error", message: t("无法保存语言，请重试。") }))} aria-label={t("界面语言")}>{languageOptions.map(option => <option key={option.code} value={option.code} lang={option.code}>{option.nativeName}</option>)}</select></div><div className="settings-row"><div><strong>{t("退出时关闭浏览器")}</strong></div><input type="checkbox" className="row-checkbox" aria-label={t("退出时关闭浏览器")} checked={snapshot.settings?.closeBrowsersOnExit !== false} onChange={event => perform("saveSettings", {
+        <div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("界面外观")}</strong><span>{t("仅改变境舱界面，不影响环境内的软件。")}</span></div><select className="appearance-select" value={appearance} disabled={savingAppearance} onChange={event => void setAppearance(event.target.value).catch(() => setToast({ type: "error", message: t("无法保存外观，请重试。") }))} aria-label={t("界面外观")}><option value="system">{t("跟随系统")}</option><option value="light">{t("浅色")}</option><option value="dark">{t("深色")}</option></select></div><div className="settings-row"><div><strong>{t("界面语言")}</strong></div><select className="language-select" value={language} disabled={savingLanguage} onChange={event => void setLanguage(event.target.value).catch(() => setToast({ type: "error", message: t("无法保存语言，请重试。") }))} aria-label={t("界面语言")}>{languageOptions.map(option => <option key={option.code} value={option.code} lang={option.code}>{option.nativeName}</option>)}</select></div><div className="settings-row"><div><strong>{t("退出时关闭浏览器")}</strong></div><input type="checkbox" className="row-checkbox" aria-label={t("退出时关闭浏览器")} checked={snapshot.settings?.closeBrowsersOnExit !== false} onChange={event => perform("saveSettings", {
               settings: {
                 ...snapshot.settings,
                 closeBrowsersOnExit: event.target.checked
               }
             })} /></div><div className="settings-row"><div><strong>{t("本地数据")}</strong><span className="path-label">{t(system.dataDir)}</span></div><Button icon={FolderOpen} disabled={!api.isDesktop} onClick={() => perform("openDataDirectory")}>{t("打开目录")}</Button></div></div>
         {api.isDesktop && snapshot.legacyMigration?.available && <div className="settings-card settings-rows migration-settings"><div className="settings-row"><div><strong>{t("旧版本工作区")}</strong></div><Button onClick={previewMigration} disabled={pending["previewLegacyMigration:"]}>{t("迁移旧环境")}</Button></div></div>}
-        {api.isDesktop && linkRouter && <><div className="section-heading"><h2>{t("打开链接")}</h2></div><div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("链接由境舱浏览器打开")}</strong><span>{t("终端和附加软件的链接用境舱里的浏览器打开；关闭后改用本机浏览器，不经过境舱网络。")}</span></div>
+        {api.isDesktop && linkRouter && <><div className="section-heading"><h2>{t("打开链接")}</h2></div><div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("链接由境舱浏览器打开")}</strong><span>{t("普通终端和附加软件的链接使用境舱浏览器；关闭后改用本机浏览器。Claude 会话的链接与浏览器工具仍使用绑定的境舱浏览器。")}</span></div>
           <label className="proxy-check-option settings-switch"><input type="checkbox" checked={linkRouter.preference !== false} disabled={pending["setLinkRouter:"]} onChange={async event => { const result = await perform("setLinkRouter", { enabled: event.target.checked }); if (result.ok && result.result) setLinkRouter(result.result); }} /><span>{t(linkRouter.preference !== false ? "已开启" : "已关闭")}</span></label></div>
           {linkRouter.preference !== false && linkRouter.available && !linkRouter.enabled && <div className="settings-row"><div><strong>{t("等待 macOS 允许")}</strong><span>{t("附加软件自己打开的链接（例如登录）要 macOS 允许后才能交给境舱浏览器；终端里的链接不受影响。")}</span></div><Button onClick={async () => { const result = await perform("setLinkRouter", { enabled: true }); if (result.ok && result.result) setLinkRouter(result.result); }} disabled={pending["setLinkRouter:"]}>{t("允许")}</Button></div>}</div></>}
         <div className="section-heading"><h2>{t("关于")}</h2></div><div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("Envara 境舱")}</strong><span>{t("开源的本地独立工作空间")}</span></div><span className="version-label">{system.appVersion || "—"}</span></div><div className="settings-row"><div><strong>{t("浏览器内核许可")}</strong></div><Button onClick={() => perform("openDocumentation", {

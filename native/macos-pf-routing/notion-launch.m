@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #include "notion-launch.h"
+#include "app-keychain.h"
 #include <Security/Security.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -59,6 +60,7 @@ const char *envara_notion_suboperation_name(EnvaraNotionSuboperation sub) {
         case ENVARA_NOTION_SUBOP_STAGE_ACCOUNT: return "STAGE_ACCOUNT";
         case ENVARA_NOTION_SUBOP_STAGE_ENVIRONMENT: return "STAGE_ENVIRONMENT";
         case ENVARA_NOTION_SUBOP_STAGE_DATA: return "STAGE_DATA";
+        case ENVARA_NOTION_SUBOP_STAGE_KEYCHAIN: return "STAGE_KEYCHAIN";
         case ENVARA_NOTION_SUBOP_STAGE_RECHECK: return "STAGE_RECHECK";
         case ENVARA_NOTION_SUBOP_STAGE_SPAWN: return "STAGE_SPAWN";
         case ENVARA_NOTION_SUBOP_STAGE_STOPPED: return "STAGE_STOPPED";
@@ -598,10 +600,12 @@ static int data_holds_unchanged(const struct envara_notion_plan *plan, uid_t uid
     return alias_current(plan->user_data_alias,plan->user_data) || alias_current(plan->temp_alias,plan->temp) ? reject(ESTALE) : 0;
 }
 struct notion_child_environment {char home[PATH_MAX+32],user[256],login[256],timezone[132],browser_locale[96],
-    lang[96],ctype[96],all[96],tempdir[PATH_MAX+32],tmp[PATH_MAX+32],temp[PATH_MAX+32],cache[PATH_MAX+32],config[PATH_MAX+32]; char *values[16];};
+    lang[96],ctype[96],all[96],tempdir[PATH_MAX+32],tmp[PATH_MAX+32],temp[PATH_MAX+32],cache[PATH_MAX+32],config[PATH_MAX+32];
+    char proxies[6][64]; char *values[24];};
 static int child_environment(const struct envara_notion_plan *plan, const struct envara_gui_request *request,
-                             const char *account, struct notion_child_environment *out) {
-    if(!plan || !request || !account || !out || !plan->home[0] || !plan->posix_locale[0]) return reject(EINVAL);
+                             const struct envara_notion_context *context, const char *account, struct notion_child_environment *out) {
+    if(!plan || !request || !context || !account || !out || context->front_port<1024 ||
+        !plan->home[0] || !plan->posix_locale[0]) return reject(EINVAL);
     memset(out,0,sizeof(*out));
 #define ENV_FIELD(field,format,value) if(snprintf(out->field,sizeof(out->field),format,value)>=(int)sizeof(out->field)) return reject(EOVERFLOW)
     ENV_FIELD(home,"HOME=%s",plan->home); ENV_FIELD(user,"USER=%s",account); ENV_FIELD(login,"LOGNAME=%s",account);
@@ -610,8 +614,18 @@ static int child_environment(const struct envara_notion_plan *plan, const struct
     ENV_FIELD(tempdir,"TMPDIR=%s/",plan->temp_alias); ENV_FIELD(tmp,"TMP=%s",plan->temp_alias); ENV_FIELD(temp,"TEMP=%s",plan->temp_alias);
     ENV_FIELD(cache,"XDG_CACHE_HOME=%s",plan->cache); ENV_FIELD(config,"XDG_CONFIG_HOME=%s",plan->user_data);
 #undef ENV_FIELD
+    /* Cooperative CLI clients resolve destination names through the same
+     * already-attested front as the engine. These secretless settings grant
+     * no routing authority: clients that ignore them remain fenced. */
+    const char *proxy_keys[]={"ALL_PROXY","all_proxy","HTTP_PROXY","http_proxy","HTTPS_PROXY","https_proxy"};
+    for(unsigned i=0;i<sizeof(proxy_keys)/sizeof(proxy_keys[0]);i++) {
+        int n=snprintf(out->proxies[i],sizeof(out->proxies[i]),"%s=socks5h://127.0.0.1:%u",proxy_keys[i],(unsigned)context->front_port);
+        if(n<0||n>=(int)sizeof(out->proxies[i]))return reject(EOVERFLOW);
+    }
     char *values[]={out->home,out->user,out->login,"PATH=/usr/bin:/bin:/usr/sbin:/sbin",out->lang,out->ctype,out->all,
-        out->timezone,out->browser_locale,out->tempdir,out->tmp,out->temp,out->cache,out->config,NULL};
+        out->timezone,out->browser_locale,out->tempdir,out->tmp,out->temp,out->cache,out->config,
+        out->proxies[0],out->proxies[1],out->proxies[2],out->proxies[3],out->proxies[4],out->proxies[5],
+        "NO_PROXY=","no_proxy=",NULL};
     memcpy(out->values,values,sizeof(values)); return 0;
 }
 static int finish_stopped_stage(const struct envara_app_registration *app, const struct envara_gui_request *request,
@@ -654,7 +668,7 @@ static int envara_notion_stage_in_scope(const struct envara_app_registration *ap
     struct passwd *account = getpwuid(request->console_uid);
     if (!account || !account->pw_name || !account->pw_dir) return reject_at(EACCES, ENVARA_NOTION_SUBOP_STAGE_ACCOUNT);
     struct notion_child_environment environment;
-    if(child_environment(&plan,request,account->pw_name,&environment)) return reject_at(errno?errno:EINVAL,ENVARA_NOTION_SUBOP_STAGE_ENVIRONMENT);
+    if(child_environment(&plan,request,context,account->pw_name,&environment)) return reject_at(errno?errno:EINVAL,ENVARA_NOTION_SUBOP_STAGE_ENVIRONMENT);
     if(plan.argument_count<10 || plan.argument_count>13) return reject_at(EINVAL,ENVARA_NOTION_SUBOP_STAGE_ARGUMENT);
     char *arguments[14]; for (int i = 0; i < plan.argument_count; i++) arguments[i] = plan.arguments[i]; arguments[plan.argument_count] = NULL;
     struct notion_data_holds holds;
@@ -662,6 +676,24 @@ static int envara_notion_stage_in_scope(const struct envara_app_registration *ap
     if (envara_gui_manifest_unchanged(&app->original) || envara_gui_manifest_unchanged(&app->snapshot) ||
         data_holds_unchanged(&plan,request->console_uid,&holds) ||
         authority->verify_committed_deny(request, authority->context)) { close_data_holds(&holds); return reject_at(EAGAIN, ENVARA_NOTION_SUBOP_STAGE_RECHECK); }
+    enum envara_notion_engine engine;
+    if(envara_notion_engine(&app->snapshot,&engine)){close_data_holds(&holds);return reject_at(EACCES,ENVARA_NOTION_SUBOP_STAGE_RECHECK);}
+    if(engine==ENVARA_NOTION_ENGINE_VSCODE){
+        if(envara_app_keychain_prepare(context->preparation,app,request,plan.home,authority)){
+            int error=errno;close_data_holds(&holds);return reject_at(error?error:EACCES,ENVARA_NOTION_SUBOP_STAGE_KEYCHAIN);
+        }
+        /* Preparation has its own exact process custody. The application has
+         * not been forked, and every stage predicate must still hold now. */
+        struct envara_gui_session current;
+        scan=envara_gui_original_running(&app->original,request->console_uid,&running);
+        if(!scan)scan=envara_gui_original_running(&app->snapshot,request->console_uid,&running);
+        if(scan||envara_gui_session_read(&current)||current.console_uid!=request->console_uid||
+            current.audit_session!=request->gui_audit_session||!current.audit_has_console_graphics||!current.security_has_graphics||
+            envara_gui_manifest_unchanged(&app->original)||envara_gui_manifest_unchanged(&app->snapshot)||
+            data_holds_unchanged(&plan,request->console_uid,&holds)||authority->verify_committed_deny(request,authority->context)){
+            close_data_holds(&holds);return reject_at(EAGAIN,ENVARA_NOTION_SUBOP_STAGE_RECHECK);
+        }
+    }
     envara_gui_step(ENVARA_GUI_STEP_STAGE_RECHECK);
     envara_gui_lifecycle_init(out);
     int result = envara_spawn_suspended_io(request->console_uid, request->realm_gid, request->cwd,

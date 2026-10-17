@@ -102,7 +102,11 @@ export async function createNotionSOCKSFront({ routeContext, upstream, authorize
         await authorize(session, 'accepted'); counters.authorized++
         const reader = session.clientReader = new NotionSOCKSReader(client, { signal: session.abort.signal })
         const greeting = await reader.read(2, timeoutMs)
-        if (greeting[0] !== 5 || greeting[1] !== 1 || (await reader.read(1, timeoutMs))[0] !== 0) throw fail('FRONT_METHOD')
+        if (greeting[0] !== 5 || greeting[1] === 0) throw fail('FRONT_METHOD')
+        // Choose no-auth only when offered. Other methods are client offers,
+        // not a different identity or permission to bypass native admission.
+        const methods = await reader.read(greeting[1], timeoutMs)
+        if (!methods.includes(0)) throw fail('FRONT_METHOD')
         await authorize(session, 'before-method-reply'); client.write(Buffer.from([5, 0]))
         const header = await reader.read(4, timeoutMs)
         if (header[0] !== 5 || header[1] !== 1 || header[2] !== 0 || ![1, 3, 4].includes(header[3])) throw fail('FRONT_REQUEST')

@@ -56,7 +56,8 @@ test('sign-in data is cleared for one application or a whole environment, only i
   assert.deepEqual(await eraseAttachedApplicationData('prof_fixture_owner', { registrationId: registration, root, uid, platform: 'darwin' }), [registration]);
   assert.deepEqual(await readdir(path.join(environment, registration, 'UserData')), []);
   assert.deepEqual((await readdir(path.join(environment, other, 'UserData'))).sort(), ['Cookies', 'Local Storage'], 'another application keeps its data');
-  assert.deepEqual(await eraseAttachedApplicationData('prof_fixture_owner', { root, uid: uid + 1, platform: 'darwin' }), [], 'data owned by someone else is never touched');
+  await assert.rejects(eraseAttachedApplicationData('prof_fixture_owner', { root, uid: uid + 1, platform: 'darwin' }), { code: 'APPLICATION_DATA_NOT_CLEARED' }, 'foreign-owned layout must be reported, never treated as absent');
+  assert.deepEqual((await readdir(path.join(environment, other, 'UserData'))).sort(), ['Cookies', 'Local Storage'], 'foreign-owned data remains untouched');
   assert.deepEqual((await eraseAttachedApplicationData('prof_fixture_owner', { root, uid, platform: 'darwin' })).sort(), [other, registration].sort());
   assert.deepEqual(await readdir(path.join(environment, other, 'UserData')), []);
   assert.deepEqual(await eraseAttachedApplicationData('prof_missing', { root, uid, platform: 'darwin' }), []);

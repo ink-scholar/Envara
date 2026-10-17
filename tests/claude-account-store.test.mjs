@@ -93,6 +93,50 @@ test('duplicate labels are rejected within an environment without losing existin
   assert.equal((await store.create('env_two', first.name)).name, first.name);
 });
 
+test('adoption atomically preserves a renamed default beside a named account using the old default label', async t => {
+  const f = await fixture(t), store = await openStore(f.root);
+  const account = { id: `account_${'a'.repeat(32)}`, name: '默认' };
+  await store.adopt('env_imported', [account], { defaultName: '主档案' });
+  const expected = [{ id: 'default', name: '主档案', default: true }, { ...account, default: false }];
+  assert.deepEqual(await store.list('env_imported'), expected);
+  assert.deepEqual(await (await openStore(f.root)).list('env_imported'), expected);
+  await store.adopt('env_default_only', [], { defaultName: '个人主档案' });
+  assert.deepEqual(await (await openStore(f.root)).list('env_default_only'), [{ id: 'default', name: '个人主档案', default: true }]);
+  await assert.rejects(store.adopt('env_imported', [], { defaultName: '覆盖' }), hasCode('CLAUDE_ACCOUNT_NAME_EXISTS'));
+  assert.deepEqual(await store.list('env_imported'), expected);
+});
+
+test('adoption validates every id and normalized name before persisting any account', async t => {
+  const f = await fixture(t), store = await openStore(f.root);
+  const existing = await store.create('env_existing', '已有');
+  const before = await readFile(f.filename, 'utf8');
+  const one = { id: `account_${'a'.repeat(32)}`, name: 'Work' };
+  const two = { id: `account_${'b'.repeat(32)}`, name: 'Personal' };
+  const cases = [
+    [null, {}, 'CLAUDE_ACCOUNT_INVALID'],
+    [[one], { defaultName: null }, 'CLAUDE_ACCOUNT_INVALID'],
+    [[one], { defaultName: 'Work\n' }, 'CLAUDE_ACCOUNT_INVALID'],
+    [[one], { defaultName: 'ｗｏｒｋ' }, 'CLAUDE_ACCOUNT_NAME_EXISTS'],
+    [[one, { ...two, name: 'ｗｏｒｋ' }], {}, 'CLAUDE_ACCOUNT_NAME_EXISTS'],
+    [[one, { ...two, id: one.id }], {}, 'CLAUDE_ACCOUNT_INVALID'],
+    [[{ id: 'default', name: 'Other default' }], {}, 'CLAUDE_ACCOUNT_INVALID'],
+    [Array.from({ length: 20 }, (_, index) => ({ id: `account_${index.toString(16).padStart(32, '0')}`, name: `Account ${index}` })), {}, 'CLAUDE_ACCOUNT_LIMIT'],
+  ];
+  for (const [accounts, options, code] of cases) {
+    await assert.rejects(async () => store.adopt('env_imported', accounts, options), hasCode(code));
+    assert.deepEqual(await store.list('env_imported'), [DEFAULT]);
+    assert.equal(await readFile(f.filename, 'utf8'), before);
+  }
+  const save = store.save;
+  store.save = async () => { throw Object.assign(new Error('Synthetic write failure'), { code: 'EIO' }); };
+  await assert.rejects(store.adopt('env_imported', [one], { defaultName: '主档案' }), { code: 'EIO' });
+  store.save = save;
+  assert.deepEqual(await store.list('env_imported'), [DEFAULT]);
+  assert.deepEqual(await store.list('env_existing'), [DEFAULT, existing]);
+  assert.equal(await readFile(f.filename, 'utf8'), before);
+  assert.deepEqual(await (await openStore(f.root)).list('env_imported'), [DEFAULT]);
+});
+
 test('empty names, malformed identifiers and missing accounts fail before changing metadata', async t => {
   const f = await fixture(t);
   const store = await openStore(f.root);

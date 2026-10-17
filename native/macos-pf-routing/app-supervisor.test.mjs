@@ -43,7 +43,7 @@ test('standalone supervisor verifies inert guardian custody, manager cancellatio
     try {
       const fixture = path.join(temporary, 'app-supervisor-fixture');
       const standalone = path.join(temporary, 'app-supervisor-main');
-      const common = ['app-command.c', 'app-supervisor.c', 'app-control.c', 'app-ticket.c', 'app-registry.c',
+      const common = ['app-command.c', 'app-supervisor.c', 'app-keychain.m', 'app-scope-proof.c', 'app-control.c', 'app-ticket.c', 'app-registry.c',
         'gui-launch.m', 'launcher.c', 'launch-guardian.c'].map(name => path.join(directory, name));
       const inputs = [...common, ...['app-supervisor-fixture.c', 'app-supervisor-main.c', 'app-supervisor.h',
         'launch-guardian.h', 'gui-launch.h', 'notion-launch.m', 'notion-launch.h'].map(name => path.join(directory, name))];

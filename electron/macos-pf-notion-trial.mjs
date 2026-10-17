@@ -9,8 +9,9 @@ import { pfRoutingAnchor, pfAttachEnvironmentId, pfApplicationRegistrationId } f
 import { pruneAttachedApplicationCache } from './application-data.mjs';
 import { createPFAuthorizedChannelMux } from './macos-pf-channel-mux.mjs';
 import { createPersistentPFNotionSessionClient, validatePFNotionSessionRequest,
-  PF_NOTION_RESUME_TIMEOUT_MS, PF_SESSION_CHANNEL_LIFETIME_MS, validatePFNotionCallTimingDiagnostic,
-  validatePFNotionStatusOnlyCloseEvidence,
+  PF_NOTION_RESUME_TIMEOUT_MS, PF_NOTION_STOP_TIMEOUT_MS, PF_NOTION_PREPARATION_STOP_TIMEOUT_MS,
+  PF_SESSION_CHANNEL_LIFETIME_MS, validatePFNotionCallTimingDiagnostic,
+  validatePFNotionStatusOnlyCloseEvidence, safePFNotionCleanupPending, safePFNotionPreparationPending,
   validatePFNotionResponseDiagnostic, projectPFNotionResponseDiagnostic, projectPFNotionFailureDiagnostic,
   validatePFNotionCleanupReceipt, validatePFNotionPrestageCleanupReceipt,
   validatePFNotionPreflightCleanupReceipt } from './macos-pf-notion-session.mjs';
@@ -20,8 +21,8 @@ import { createPersistentPFNotionSessionClient, validatePFNotionSessionRequest,
 export const PF_ATTACH_POLL_INTERVAL_MS = 2000;
 
 export const PF_NOTION_TRIAL_CANDIDATE = Object.freeze({
-  authorizerSHA256: '0c5b27600b82aa1bed58649663ce2789db24c88a9f1b8faf1b26cd85b31baa35',
-  manifestSHA256: 'e3c598d15104ebc32e1e5d21d295d396eb3f85c7f2e13fd653de9c2828b8add1',
+  authorizerSHA256: 'a82c26c75c2603cade7ca6d8f60aa3e417dab756dfc98bbc29e8f3eec91383fa',
+  manifestSHA256: '6e95b89a2a3ca407abf6b80591d03c9b7581db32103f51e3f6db29b3cf726f7c',
 });
 /* The bundled carrier is named after the manifest it carries. Deriving the path
  * from the pin keeps a single source of truth: a pinned candidate with a stale
@@ -43,11 +44,13 @@ const safeCode = value => codes.has(value?.code) ? value.code : 'PF_NOTION_TRIAL
 const nativeStages = new Set(['register', 'preflight', 'gui-session', 'route-read', 'transport-start', 'front-listen', 'front-spawn',
   'front-handshake', 'factory-open', 'deny-commit', 'transport-ack', 'front-commit', 'front-admission', 'ticket-prepare', 'relay-fork', 'guardian']);
 const registerReasons = new Set(['INVALID_NATIVE_APP_REQUEST', 'FIXED_ROOT_NATIVE_ENTRY_REQUIRED', 'APP_REGISTRY_UNAVAILABLE', 'NATIVE_APP_OPERATION_REFUSED']);
-const operationReasons = new Set(['NATIVE_OPERATION_REFUSED', 'NATIVE_CONTEXT_LOAD_REFUSED', 'NATIVE_CONTROLLER_BINDING_REFUSED', 'NATIVE_ORIGINAL_SOCKET_REFUSED', 'NATIVE_LISTENER_CREDENTIAL_REFUSED', 'NATIVE_PIPE_BINDING_REFUSED', 'NATIVE_GUI_SESSION_REFUSED', 'NATIVE_APP_IDENTITY_REFUSED', 'NATIVE_HOOK_LEASE_REFUSED', 'NATIVE_PF_OPEN_REFUSED', 'NATIVE_PF_GUARD_REFUSED', 'NATIVE_FILTER_READBACK_REFUSED', 'NATIVE_FILTER_TRANSACTION_REFUSED', 'NATIVE_JOURNAL_REFUSED', 'NATIVE_TICKET_BINDING_REFUSED', 'NATIVE_TICKET_FILTER_REFUSED', 'NATIVE_SCOPE_CHECK_REFUSED', 'NATIVE_GUARD_DESCRIPTOR_REFUSED', 'NATIVE_LEASE_EXPIRED_REFUSED', 'NATIVE_NOTION_DATA_PREPARE_REFUSED', 'NATIVE_NOTION_STAGE_REFUSED', 'NATIVE_NOTION_SUPPORTED_ARGUMENT_REFUSED', 'NATIVE_NOTION_SUPPORTED_PLIST_REFUSED', 'NATIVE_NOTION_SUPPORTED_VERSION_REFUSED', 'NATIVE_NOTION_SUPPORTED_SIGNATURE_REFUSED', 'NATIVE_NOTION_PLAN_ARGUMENT_REFUSED', 'NATIVE_NOTION_PLAN_REGISTRY_REFUSED', 'NATIVE_NOTION_PLAN_CONTEXT_REFUSED', 'NATIVE_NOTION_PLAN_REQUEST_REFUSED', 'NATIVE_NOTION_PLAN_SEALED_REFUSED', 'NATIVE_NOTION_PLAN_SUPPORTED_REFUSED', 'NATIVE_NOTION_PLAN_DIGEST_REFUSED', 'NATIVE_NOTION_PLAN_CDHASH_REFUSED', 'NATIVE_NOTION_PLAN_REQUIREMENT_REFUSED', 'NATIVE_NOTION_PLAN_DATA_REFUSED', 'NATIVE_NOTION_PLAN_ALLOCATION_REFUSED', 'NATIVE_NOTION_DATA_ARGUMENT_REFUSED', 'NATIVE_NOTION_DATA_ENTRY_REFUSED', 'NATIVE_NOTION_DATA_ANCESTOR_REFUSED', 'NATIVE_NOTION_DATA_LEAF_REFUSED', 'NATIVE_NOTION_DATA_DENY_REFUSED', 'NATIVE_NOTION_STAGE_ARGUMENT_REFUSED', 'NATIVE_NOTION_STAGE_AUTHORITY_REFUSED', 'NATIVE_NOTION_STAGE_ENTRY_REFUSED', 'NATIVE_NOTION_STAGE_SESSION_REFUSED', 'NATIVE_NOTION_STAGE_ORIGINAL_RUNNING_REFUSED', 'NATIVE_NOTION_STAGE_ACCOUNT_REFUSED', 'NATIVE_NOTION_STAGE_ENVIRONMENT_REFUSED', 'NATIVE_NOTION_STAGE_DATA_REFUSED', 'NATIVE_NOTION_STAGE_RECHECK_REFUSED', 'NATIVE_NOTION_STAGE_SPAWN_REFUSED', 'NATIVE_NOTION_STAGE_STOPPED_REFUSED', 'NATIVE_NOTION_STAGE_CHILD_REFUSED']);
+const operationReasons = new Set(['NATIVE_OPERATION_REFUSED', 'NATIVE_CONTEXT_LOAD_REFUSED', 'NATIVE_CONTROLLER_BINDING_REFUSED', 'NATIVE_ORIGINAL_SOCKET_REFUSED', 'NATIVE_LISTENER_CREDENTIAL_REFUSED', 'NATIVE_PIPE_BINDING_REFUSED', 'NATIVE_GUI_SESSION_REFUSED', 'NATIVE_APP_IDENTITY_REFUSED', 'NATIVE_HOOK_LEASE_REFUSED', 'NATIVE_PF_OPEN_REFUSED', 'NATIVE_PF_GUARD_REFUSED', 'NATIVE_FILTER_READBACK_REFUSED', 'NATIVE_FILTER_TRANSACTION_REFUSED', 'NATIVE_JOURNAL_REFUSED', 'NATIVE_TICKET_BINDING_REFUSED', 'NATIVE_TICKET_FILTER_REFUSED', 'NATIVE_SCOPE_CHECK_REFUSED', 'NATIVE_GUARD_DESCRIPTOR_REFUSED', 'NATIVE_LEASE_EXPIRED_REFUSED', 'NATIVE_NOTION_DATA_PREPARE_REFUSED', 'NATIVE_NOTION_STAGE_REFUSED', 'NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED', 'NATIVE_NOTION_SUPPORTED_ARGUMENT_REFUSED', 'NATIVE_NOTION_SUPPORTED_PLIST_REFUSED', 'NATIVE_NOTION_SUPPORTED_VERSION_REFUSED', 'NATIVE_NOTION_SUPPORTED_SIGNATURE_REFUSED', 'NATIVE_NOTION_PLAN_ARGUMENT_REFUSED', 'NATIVE_NOTION_PLAN_REGISTRY_REFUSED', 'NATIVE_NOTION_PLAN_CONTEXT_REFUSED', 'NATIVE_NOTION_PLAN_REQUEST_REFUSED', 'NATIVE_NOTION_PLAN_SEALED_REFUSED', 'NATIVE_NOTION_PLAN_SUPPORTED_REFUSED', 'NATIVE_NOTION_PLAN_DIGEST_REFUSED', 'NATIVE_NOTION_PLAN_CDHASH_REFUSED', 'NATIVE_NOTION_PLAN_REQUIREMENT_REFUSED', 'NATIVE_NOTION_PLAN_DATA_REFUSED', 'NATIVE_NOTION_PLAN_ALLOCATION_REFUSED', 'NATIVE_NOTION_DATA_ARGUMENT_REFUSED', 'NATIVE_NOTION_DATA_ENTRY_REFUSED', 'NATIVE_NOTION_DATA_ANCESTOR_REFUSED', 'NATIVE_NOTION_DATA_LEAF_REFUSED', 'NATIVE_NOTION_DATA_DENY_REFUSED', 'NATIVE_NOTION_STAGE_ARGUMENT_REFUSED', 'NATIVE_NOTION_STAGE_AUTHORITY_REFUSED', 'NATIVE_NOTION_STAGE_ENTRY_REFUSED', 'NATIVE_NOTION_STAGE_SESSION_REFUSED', 'NATIVE_NOTION_STAGE_ORIGINAL_RUNNING_REFUSED', 'NATIVE_NOTION_STAGE_ACCOUNT_REFUSED', 'NATIVE_NOTION_STAGE_ENVIRONMENT_REFUSED', 'NATIVE_NOTION_STAGE_DATA_REFUSED', 'NATIVE_NOTION_STAGE_RECHECK_REFUSED', 'NATIVE_NOTION_STAGE_SPAWN_REFUSED', 'NATIVE_NOTION_STAGE_STOPPED_REFUSED', 'NATIVE_NOTION_STAGE_CHILD_REFUSED']);
 const statusFacts = ['rootOwnedInstallationVerified', 'callerConsoleUIDVerified', 'privilegedOperationsAuthorized',
   'privilegedRuntimeVerified', 'ownedRootHookCanCreate', 'priorPFAnchorsCompatible', 'lo0FilteringVerified'];
 const canonicalUUID = value => /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value ?? '');
 const sessionMethods = new Set(['status', 'prepareRoute', 'prepareNotionApplication', 'resumeNotionApplication', 'stopNotionApplication', 'applicationSnapshot']);
+const stopTimeoutMs = (call, runId) => call.stopTimeoutMs?.(runId) === PF_NOTION_PREPARATION_STOP_TIMEOUT_MS
+  ? PF_NOTION_PREPARATION_STOP_TIMEOUT_MS : PF_NOTION_STOP_TIMEOUT_MS;
 function sessionDiagnostics(value, runId, environmentId) {
   if (!value || typeof value !== 'object') return null;
   const output = {};
@@ -73,6 +76,10 @@ function sessionDiagnostics(value, runId, environmentId) {
       Object.values(inventory).every(count => count === null || Number.isInteger(count) && count >= 0 && count <= 65536)) output.lastStatusInventory = { ...inventory };
   for (const [key, method] of [['lastLatePrepare', 'prepareNotionApplication'], ['lastApplicationSnapshot', 'applicationSnapshot']])
     output[key] = validatePFNotionResponseDiagnostic(value[key], method, runId, environmentId) ? structuredClone(value[key]) : null;
+  const pending = safePFNotionCleanupPending(value.cleanupPending);
+  if (pending) output.cleanupPending = pending;
+  const preparation = safePFNotionPreparationPending(value.preparationCleanupPending);
+  if (preparation) output.preparationCleanupPending = preparation;
   return output;
 }
 function nativeDiagnostic(value) {
@@ -111,6 +118,11 @@ export function exportPFNotionTrialDiagnostics(value) {
   const applicationSnapshot = validatePFNotionResponseDiagnostic(value.applicationSnapshotDiagnostic, 'applicationSnapshot', value.runId, value.environmentId)
     ? value.applicationSnapshotDiagnostic : null;
   const cached = [applicationSnapshot, diagnostics?.lastApplicationSnapshot, diagnostics?.lastLatePrepare];
+  const pending = diagnostics?.cleanupPending ?? cached.map(item => safePFNotionCleanupPending(item?.cleanupPending)).find(Boolean) ??
+    safePFNotionCleanupPending(value.cleanupPending);
+  const preparation = diagnostics?.preparationCleanupPending ??
+    cached.map(item => safePFNotionPreparationPending(item?.preparationCleanupPending)).find(Boolean) ??
+    safePFNotionPreparationPending(value.preparationCleanupPending);
   const first = safeTrialFailure(value.initialFailure) ?? cached.map(item => safeTrialFailure(item?.initialFailure ?? item?.failure)).find(Boolean) ?? null;
   const cleanup = safeTrialFailure(value.cleanupFailure) ?? cached.map(item => safeTrialFailure(item?.cleanupFailure)).find(Boolean) ?? null;
   return { schema: 'envara.macos-pf-notion-trial-diagnostics/v1', diagnosticOnly: true, applicationId: value.applicationId,
@@ -118,7 +130,8 @@ export function exportPFNotionTrialDiagnostics(value) {
     initialFailure: first, cleanupFailure: cleanup,
     active: value.active === true, staged: value.staged === true, resumed: value.resumed === true,
     cleanupComplete: value.cleanupComplete === true, cleanupUncertain: value.cleanupUncertain === true,
-    events, sessionDiagnostics: diagnostics,
+    events, sessionDiagnostics: diagnostics, ...(pending ? { cleanupPending: pending } : {}),
+    ...(preparation ? { preparationCleanupPending: preparation } : {}),
     ...fixedFlags };
 }
 async function hashFile(filename, refusal) {
@@ -403,7 +416,7 @@ export class MacOSPFNotionTrial {
     this.state.active = true; this.state.stopRequested = true; this.state.cleanupRetryable = false; this.state.phase = 'stopping'; this.emit('stopping');
     try {
       try {
-        const stopped = await call('stopNotionApplication', { runId }, { timeoutMs: 60000 });
+        const stopped = await call('stopNotionApplication', { runId }, { timeoutMs: stopTimeoutMs(call, runId) });
         stoppedKind = cleanKind(stopped, runId, environmentId); this.captureSnapshot(stopped);
         if (stopped.cleanupFailure) this.emit('stopping', stopped.cleanupFailure);
         else if (!stoppedKind && stopped.failure?.stage === 'cleanup') this.emit('stopping', stopped.failure);
@@ -507,7 +520,7 @@ export class MacOSPFNotionTrial {
     this.state = { applicationId, profileId: request.application.profileId, active: true, phase: 'verifying', staged: false, resumed: false,
       stopRequested: false, cleanupComplete: false, cleanupUncertain: false, cleanupRetryable: false, lifecyclePassed: false, errorCode: null,
       initialFailure: null, cleanupFailure: null, events: [], ...fixedFlags,
-      maximumLifetimeSeconds: PF_APP_SESSION_LEASE_SECONDS,
+      udpPolicy: 'block', maximumLifetimeSeconds: PF_APP_SESSION_LEASE_SECONDS,
       observationSeconds: this.observationSeconds };
     /* A start right after a stop waits for that stop's housekeeping, so the
      * removal of the old copy never races the registration of the new one. */
@@ -605,7 +618,7 @@ export class MacOSPFNotionTrial {
         advance('stopping');
         // A timed-out stage can still return its bound custody frame; allow
         // the controller's bounded stage grace, stop and release waits to finish.
-        try { const stopped = await call('stopNotionApplication', { runId }, { timeoutMs: 60000 }); stoppedKind = cleanKind(stopped, runId, environmentId);
+        try { const stopped = await call('stopNotionApplication', { runId }, { timeoutMs: stopTimeoutMs(call, runId) }); stoppedKind = cleanKind(stopped, runId, environmentId);
           this.captureSnapshot(stopped);
           if (stopped.cleanupFailure) this.emit('stopping', stopped.cleanupFailure);
           else if (!stoppedKind && stopped.failure?.stage === 'cleanup') this.emit('stopping', stopped.failure);

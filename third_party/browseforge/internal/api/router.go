@@ -75,6 +75,8 @@ func NewRouter(cfg *config.Config, store *profile.Store, mgr *browser.Manager, f
 		r.Delete("/api/sessions/{id}", h.deleteSession)
 		r.Post("/api/sessions/{id}/focus", h.focusSession)
 
+		r.Get("/api/sessions/{id}/identity", h.sessionLinkIdentity)
+		r.Post("/api/sessions/{id}/open-link", h.openSessionLink)
 		r.Post("/api/sessions/{id}/navigate", h.navigate)
 		r.Post("/api/sessions/{id}/click", h.click)
 		r.Post("/api/sessions/{id}/type", h.typeText)

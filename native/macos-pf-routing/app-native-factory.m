@@ -1,6 +1,7 @@
 #define _DARWIN_C_SOURCE
 #include "app-native-factory.h"
 #include "app-scope-proof.h"
+#include "app-family.h"
 #include "pf-hook.h"
 #include "app-transport.h"
 #include "notion-launch.h"
@@ -32,12 +33,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "app-keychain.h"
 #include <unistd.h>
 
 #define INSTALL "/Library/PrivilegedHelperTools/io.envara.pf-routing"
 #define RUNTIME "/Library/PrivilegedHelperTools/io.envara.pf-runtime"
 #define LEASE_LIMIT 16384U
 #define RECORD_LIMIT 65536U
+#define MANIFEST_OBJECT_LIMIT 256U
 #define UTUN_CONTROL_NAME "com.apple.net.utun_control"
 #define UTUN_OPT_IFNAME 2
 /* Only this compiled factory constructs authority. No root daemon invokes
@@ -48,7 +51,7 @@ struct envara_app_native_factory {
     pid_t owner;
     int lease_fd, lock_fd, run_fd, runtime_fd, pf_fd, journal_fd, poisoned;
     unsigned sequence;
-    int staged, journal_removed, guard_live;
+    int staged, journal_removed, guard_live, frontend_stopped;
     /* Selected once from the exact registered snapshot, never from a caller
      * field. 1 = the fixed Notion front profile (sandbox-exec + held loopback
      * SOCKS front, PF FRONT); 0 = the generic cold profile (direct sealed
@@ -73,6 +76,7 @@ struct envara_app_native_factory {
     struct envara_gui_request request;
     struct envara_app_registration app;
     struct envara_child stage_child;
+    envara_app_keychain_custody *preparation;
     char *lease_bytes, *hook_bytes;
     size_t lease_size, hook_size;
     uint64_t issued, expires, boot;
@@ -158,7 +162,7 @@ static int scan_string(Scan *d,int key,size_t *begin,size_t *end) {
 static int scan_value(Scan *d,unsigned depth) {
     ws(d);if(depth>20||d->p>=d->n||++d->nodes>4096)return 0;unsigned char c=d->s[d->p];size_t b,e;
     if(c=='"')return scan_string(d,0,&b,&e);
-    if(c=='{'||c=='['){d->p++;ws(d);unsigned char stop=c=='{'?'}':']';size_t starts[128],ends[128],count=0,limit=c=='{'?d->object_limit:64;
+    if(c=='{'||c=='['){d->p++;ws(d);unsigned char stop=c=='{'?'}':']';size_t starts[MANIFEST_OBJECT_LIMIT],ends[MANIFEST_OBJECT_LIMIT],count=0,limit=c=='{'?d->object_limit:64;
         if(d->p<d->n&&d->s[d->p]==stop){d->p++;return 1;}
         for(;;){if(count>=limit)return 0;if(c=='{'){ws(d);if(!scan_string(d,1,&b,&e))return 0;
             for(size_t i=0;i<count;i++)if(e-b==ends[i]-starts[i]&&!memcmp(d->s+b,d->s+starts[i],e-b))return 0;
@@ -169,14 +173,14 @@ static int scan_value(Scan *d,unsigned depth) {
     b=d->p;while(d->p<d->n&&!strchr(" \t\r\n,]}",d->s[d->p]))d->p++;return d->p>b;
 }
 static NSDictionary *decode_bounded(const char *bytes,size_t length,size_t object_limit) {
-    if(!bytes||!length||length>RECORD_LIMIT||memchr(bytes,0,length)||(object_limit!=64&&object_limit!=128))return nil;
+    if(!bytes||!length||length>RECORD_LIMIT||memchr(bytes,0,length)||(object_limit!=64&&object_limit!=MANIFEST_OBJECT_LIMIT))return nil;
     Scan d={(const unsigned char *)bytes,length,0,0,object_limit};if(!scan_value(&d,0))return nil;ws(&d);if(d.p!=length)return nil;
     id value=[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:bytes length:length] options:0 error:NULL];return [value isKindOfClass:[NSDictionary class]]?value:nil;
 }
 static NSDictionary *decode(const char *bytes,size_t length) {return decode_bounded(bytes,length,64);}
 /* Only the public installation manifest has a larger bounded source inventory.
  * Lease/registry parsing, array size, total nodes/depth and byte limits stay fixed. */
-static NSDictionary *decode_manifest(const char *bytes,size_t length) {return decode_bounded(bytes,length,128);}
+static NSDictionary *decode_manifest(const char *bytes,size_t length) {return decode_bounded(bytes,length,MANIFEST_OBJECT_LIMIT);}
 static int number(id value,uint64_t *out) {
     if(![value isKindOfClass:[NSNumber class]]||CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID())return 0;
     double x=[value doubleValue];uint64_t u=[value unsignedLongLongValue];if(x<0||x>9007199254740991.0||x!=(double)u)return 0;*out=u;return 1;
@@ -290,11 +294,16 @@ static int load_bound(struct envara_app_native_factory *f,const char *run,const 
     if(!registry_matches(f,l))return refuse(EACCES);return 0;
 }
 static int load(struct envara_app_native_factory *f,const char *run,const char *env) {
+    if(!envara_app_family_available())return refuse(ENOTSUP);
     if(load_bound(f,run,env))return -1;
     if(!registered_app(f)||!native_hash(f->plan.native_sha256))return refuse(EACCES);return 0;
 }
 static void dispose(struct envara_app_native_factory *f) {
-    if(!f)return;envara_journal_retirement_close(&f->retirement);envara_pf_hook_filter_close(f->hook);if(f->pf_fd>=0)close(f->pf_fd);if(f->journal_fd>=0)close(f->journal_fd);for(size_t i=0;i<f->journal_count;i++){if(f->journal_file_fds[i]>=0)close(f->journal_file_fds[i]);free(f->journal_file_bytes[i]);}if(f->lease_fd>=0)close(f->lease_fd);if(f->lock_fd>=0)close(f->lock_fd);if(f->run_fd>=0)close(f->run_fd);if(f->runtime_fd>=0)close(f->runtime_fd);free(f->lease_bytes);free(f->hook_bytes);free(f);
+    if(!f)return;
+    /* A pending preparation keeps all original factory resources. There is
+     * no destructor shortcut around its exact wait/scope recovery. */
+    if(envara_app_keychain_custody_destroy(f->preparation))return;
+    envara_journal_retirement_close(&f->retirement);envara_pf_hook_filter_close(f->hook);if(f->pf_fd>=0)close(f->pf_fd);if(f->journal_fd>=0)close(f->journal_fd);for(size_t i=0;i<f->journal_count;i++){if(f->journal_file_fds[i]>=0)close(f->journal_file_fds[i]);free(f->journal_file_bytes[i]);}if(f->lease_fd>=0)close(f->lease_fd);if(f->lock_fd>=0)close(f->lock_fd);if(f->run_fd>=0)close(f->run_fd);if(f->runtime_fd>=0)close(f->runtime_fd);free(f->lease_bytes);free(f->hook_bytes);free(f);
 }
 static struct envara_app_native_factory *allocate(void) {
     struct envara_app_native_factory *f=calloc(1,sizeof(*f));if(f){f->owner=getpid();f->lease_fd=f->lock_fd=f->run_fd=f->runtime_fd=f->pf_fd=f->journal_fd=-1;for(size_t i=0;i<32;i++)f->journal_file_fds[i]=-1;f->journal_entries_trusted=1;}return f;
@@ -546,6 +555,21 @@ static int persistent_deny(void *opaque) {
      * guard's pre-fork checks. Final release must remove the exception. */
     return verify_mode(f,live_mode(f),0);
 }
+static int revoke_owned_network(void *opaque) {
+    struct envara_app_native_factory *f = opaque;
+    if (!f || f->owner != getpid()) return 0;
+    /* Preserve the initiating operation's diagnostic across cleanup writes.
+     * Even a refused DENY must close this exact frontend, never leave admission
+     * alive merely because the controller birth or kernel readback was lost. */
+    const char *first_reason = native_failure_reason;
+    int first_error = native_failure_error, saved = errno;
+    int denied = envara_app_native_factory_cleanup_deny(f) == 1;
+    if (!f->frontend_stopped && f->owned.stop_frontend)
+        f->frontend_stopped = f->owned.stop_frontend(f->owned.frontend_context) == 1;
+    int confirmed = denied && f->frontend_stopped && verify_mode(f, ENVARA_PF_PRODUCTION_DENY, 0);
+    native_failure_reason = first_reason; native_failure_error = first_error; errno = saved;
+    return confirmed;
+}
 static int scope_absent(void *opaque){struct envara_app_native_factory *f=opaque;return immutable_lease(f,f->cleanup_only?-1:0)&&envara_app_scope_gid_absent(f->plan.realm_gid)==1;}
 static int ticket_verify(const struct envara_app_registration *app,const struct envara_gui_request *request,const char *run,const char *hash,void *opaque) {
     struct envara_app_native_factory *f=opaque;
@@ -646,7 +670,7 @@ static int prepare_guard(const struct envara_app_registration *app,const struct 
     guard->heartbeat_timeout_milliseconds=ENVARA_APP_HEARTBEAT_TIMEOUT_MS;
     guard->dependencies[0]=f->owned.controller;guard->dependencies[1]=f->owned.core;guard->dependencies[2]=f->owned.frontend;guard->dependency_count=3;
     guard->verify_resume=verify_resume;guard->verify_executed=verify_executed;guard->resume_context=f;
-    memset(authority,0,sizeof(*authority));authority->verify_persistent_deny=persistent_deny;authority->verify_scope_quiescent=scope_absent;authority->context=f;return 0;
+    memset(authority,0,sizeof(*authority));authority->verify_persistent_deny=persistent_deny;authority->verify_scope_quiescent=scope_absent;authority->context=f;authority->revoke_owned_network=revoke_owned_network;return 0;
 }
 /* Fixed sub-operation -> fixed refusal reason. Every value is a compile-time
  * string constant; no path, account, PID, node, credential or errno text is
@@ -683,6 +707,7 @@ static const char *notion_suboperation_reason(const char *fallback) {
         case ENVARA_NOTION_SUBOP_STAGE_ACCOUNT: return "NATIVE_NOTION_STAGE_ACCOUNT_REFUSED";
         case ENVARA_NOTION_SUBOP_STAGE_ENVIRONMENT: return "NATIVE_NOTION_STAGE_ENVIRONMENT_REFUSED";
         case ENVARA_NOTION_SUBOP_STAGE_DATA: return "NATIVE_NOTION_STAGE_DATA_REFUSED";
+        case ENVARA_NOTION_SUBOP_STAGE_KEYCHAIN: return "NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED";
         case ENVARA_NOTION_SUBOP_STAGE_RECHECK: return "NATIVE_NOTION_STAGE_RECHECK_REFUSED";
         case ENVARA_NOTION_SUBOP_STAGE_SPAWN: return "NATIVE_NOTION_STAGE_SPAWN_REFUSED";
         case ENVARA_NOTION_SUBOP_STAGE_STOPPED: return "NATIVE_NOTION_STAGE_STOPPED_REFUSED";
@@ -690,7 +715,7 @@ static const char *notion_suboperation_reason(const char *fallback) {
     }
 }
 static int notion_stage_in_scope(const struct envara_app_registration *app,const struct envara_gui_request *request,const struct envara_gui_stage_authority *authority,struct envara_gui_lifecycle *out,void *opaque) {
-    struct envara_app_native_factory *f=opaque;struct envara_notion_context c={.front_port=f->config.tcp_front_port};strcpy(c.registration_id,f->plan.registration_id);
+    struct envara_app_native_factory *f=opaque;struct envara_notion_context c={.front_port=f->config.tcp_front_port,.preparation=f->preparation};strcpy(c.registration_id,f->plan.registration_id);
     /* Each instrumented call resets the latch so a refusal is never attributed
      * to a sub-operation observed during a previous, separate invocation. */
     envara_notion_suboperation_begin();
@@ -719,6 +744,7 @@ static void provider_initialize(struct envara_app_native_factory *f) {
     f->provider.ticket.inspect=ticket_inspect;f->provider.ticket.verify=ticket_verify;
     f->provider.ticket.adopt=ticket_never_adopt;f->provider.ticket.context=f;
     f->provider.prepare_guard=prepare_guard;f->provider.context=f;
+    f->provider.preparation=f->preparation;
     /* Profile is fixed by the registered snapshot above, never a caller field.
      * Notion keeps its front-only adapter; every other app leaves stage NULL so
      * the supervisor uses the generic cold GUI launch (envara_gui_stage). */
@@ -727,7 +753,7 @@ static void provider_initialize(struct envara_app_native_factory *f) {
 }
 int envara_app_native_factory_open(const struct envara_app_native_owned_context *owned,envara_app_native_factory **out) {
     envara_app_native_failure_begin();
-    if(!owned||!out)return refuse(EINVAL);*out=NULL;@autoreleasepool {
+    if(!owned||!out||!owned->stop_frontend||!owned->frontend_context)return refuse(EINVAL);*out=NULL;@autoreleasepool {
         struct envara_app_native_factory *f=allocate();if(!f)return -1;int error=EACCES;
 #define OPEN_SYSCALL(reason,condition) do { if(condition){error=errno?errno:EIO;native_failure_reason=reason;goto failed;} } while(0)
 #define OPEN_REQUIRE(reason,condition) do { if(!(condition)){error=EACCES;native_failure_reason=reason;goto failed;} } while(0)
@@ -759,6 +785,7 @@ int envara_app_native_factory_open(const struct envara_app_native_owned_context 
         struct stat existing;int found=fstatat(f->run_fd,"app-filter-events",&existing,AT_SYMLINK_NOFOLLOW),lookup_error=errno;
         if(!found){error=EEXIST;native_failure_reason="NATIVE_JOURNAL_REFUSED";goto failed;}
         if(lookup_error!=ENOENT){error=lookup_error;native_failure_reason="NATIVE_JOURNAL_REFUSED";goto failed;}
+        if(f->notion_front)OPEN_SYSCALL("NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED",envara_app_keychain_custody_create(&f->app,&f->request,f->plan.run_id,&f->preparation));
         provider_initialize(f);*out=f;return 0;
 failed:dispose(f);return refuse(error);
 #undef OPEN_SYSCALL
@@ -780,7 +807,8 @@ static int retirement_guard(void *opaque) {
     return cleanup_owned(f)&&basic(f,0)&&scope_absent(f)&&verify_mode(f,ENVARA_PF_PRODUCTION_EMPTY,0);
 }
 int envara_app_native_factory_release_safe(envara_app_native_factory *f) {
-    if(!f||!cleanup_reconcile(f)||!scope_absent(f)||!basic(f,0))return 0;
+    if(!f||envara_app_keychain_custody_pending(f->preparation,&f->app,&f->request,f->plan.run_id)!=0||
+        !cleanup_reconcile(f)||!scope_absent(f)||!basic(f,0))return 0;
     if(mode_is_live(f->mode)){EnvaraPFProductionResult r;if(envara_app_native_factory_apply(f,ENVARA_PF_PRODUCTION_DENY,&r))return 0;}
     if(f->mode==ENVARA_PF_PRODUCTION_DENY){EnvaraPFProductionResult r;if(envara_app_native_factory_apply(f,ENVARA_PF_PRODUCTION_EMPTY,&r))return 0;}
     if(!verify_mode(f,ENVARA_PF_PRODUCTION_EMPTY,0)||!scope_absent(f))return 0;

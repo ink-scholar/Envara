@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { BrowseForgeService } from '../electron/browseforge-service.mjs';
@@ -21,8 +22,14 @@ async function fixture(t) {
       if (route === '/api/sessions' && method === 'GET') return { data: structuredClone(state.sessions) };
       if (route === '/api/sessions' && method === 'POST') {
         state.generation++;
-        const session = { profile_id: body.profile_id, session_id: 'sess_' + body.profile_id, runtime_id: 'cloakbrowser' };
+        const session = { profile_id: body.profile_id, session_id: 'sess_' + body.profile_id, runtime_id: 'cloakbrowser', instance_id: state.generation.toString(16).padStart(32, '0') };
         state.sessions.push(session); return { data: structuredClone(session) };
+      }
+      if (route.endsWith('/identity')) {
+        const proxy = state.context.proxy;
+        const digest = createHash('sha256').update('envara-browser-route-v1\0');
+        for (const field of [proxy.protocol, proxy.host, String(proxy.port), proxy.username, proxy.password]) digest.update(`${Buffer.byteLength(field)}:`).update(field);
+        return { data: { instance_id: state.sessions[0]?.instance_id, route_digest: digest.digest('hex') } };
       }
       if (route === '/api/playwright/endpoint') {
         if (state.endpointUnavailable) throw new Error('endpoint unavailable');

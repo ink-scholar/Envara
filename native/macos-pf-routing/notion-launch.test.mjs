@@ -113,12 +113,39 @@ test('Notion launch preparation refuses fixtures and preserves process-local Sea
         assert.ok(context.environment.includes(`TMPDIR=${context.TempAlias}/`));
         assert.ok(!context.arguments.includes(`--user-data-dir=${context.UserData}`));
         for (const key of ['LANG', 'LC_CTYPE', 'LC_ALL']) assert.ok(context.environment.includes(`${key}=${context.posixLocale}`));
-        assert.ok(!context.environment.some(item => /^(VSCODE_|HTTP_PROXY=|HTTPS_PROXY=|ALL_PROXY=|DYLD_)/.test(item)));
+        assert.ok(!context.environment.some(item => /^(VSCODE_|DYLD_)/.test(item)));
         const second = JSON.parse(await run(executable, ['context', '00000000-0000-4000-8000-000000000205', registration, 'unknown-ZZ']));
         for (const name of ['UserData', 'Home', 'Cache', 'Temp', 'Extensions', 'UserDataAlias', 'TempAlias']) assert.notEqual(second[name], context[name]);
         const again = JSON.parse(await run(executable, ['context', environment, registration, 'zh-CN']));
         assert.equal(again.UserDataAlias, context.UserDataAlias, 'an alias name is stable for one environment and application');
         assert.equal(second.posixLocale, 'en_US.UTF-8'); assert.equal(second.localeFallback, true);
+      });
+
+      await t.test('CLI proxy settings use only the selected front, clear bypasses and exclude inherited credentials', async () => {
+        const environment = '00000000-0000-4000-8000-000000000204', registration = '00000000-0000-4000-8000-000000000201';
+        const proxyKeys = ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy'];
+        const allowedKeys = ['HOME', 'USER', 'LOGNAME', 'PATH', 'LANG', 'LC_CTYPE', 'LC_ALL', 'TZ', 'ENVARA_BROWSER_LOCALE',
+          'TMPDIR', 'TMP', 'TEMP', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', ...proxyKeys, 'NO_PROXY', 'no_proxy'];
+        for (const port of [1024, 23457, 65535]) {
+          const context = JSON.parse(await run(executable, ['context-port', environment, registration, 'en-US', String(port)]));
+          inactive(context); assert.equal(context.environmentRefused, false); assert.equal(context.frontPort, port);
+          const entries = context.environment.map(value => { const index = value.indexOf('='); return [value.slice(0, index), value.slice(index + 1)]; });
+          const values = Object.fromEntries(entries);
+          assert.equal(entries.length, allowedKeys.length, 'only the fixed whitelist is passed to the application');
+          assert.deepEqual(Object.keys(values).sort(), allowedKeys.toSorted(), 'no duplicate or inherited host variables');
+          for (const key of proxyKeys) assert.equal(values[key], `socks5h://127.0.0.1:${port}`, key);
+          assert.equal(values.NO_PROXY, ''); assert.equal(values.no_proxy, '');
+          assert.ok(context.arguments.includes(`--proxy-server=socks5://127.0.0.1:${port}`));
+          assert.ok(context.arguments[2].includes(`(allow network-outbound (remote tcp4 "localhost:${port}"))`),
+            'CLI settings use the same exact front as the engine and its existing network fence');
+          assert.ok(!context.environment.some(value => /fixture-host-|@|65432/.test(value)), 'synthetic host credentials and bypasses do not escape');
+        }
+        for (const port of ['null', '0', '1', '1023']) {
+          const context = JSON.parse(await run(executable, ['context-port', environment, registration, 'en-US', port]));
+          inactive(context); assert.equal(context.environmentRefused, true, port);
+          assert.equal(context.error, 22, 'missing or invalid native front context refuses with EINVAL');
+          assert.deepEqual(context.environment, [], 'refusal returns no environment with a fallback route');
+        }
       });
 
       await t.test('engine capability follows framework metadata and defined Mach-O entry points, not application names', async () => {
@@ -190,8 +217,12 @@ test('Notion launch preparation refuses fixtures and preserves process-local Sea
       });
 
       await t.test('diagnostic step frames are fixed, bounded, whole lines from the beginning process only, and never block', async () => {
+        const enumeration = readFileSync(path.join(directory, 'gui-launch.h'), 'utf8').match(/enum envara_gui_step\s*\{([^}]+)\}/);
+        assert.ok(enumeration, 'the fixed native diagnostic step enum exists');
+        const steps = enumeration[1].match(/\bENVARA_GUI_STEP_(?!COUNT\b)[A-Z_]+\b/g)
+          .map(name => name.slice('ENVARA_GUI_STEP_'.length).toLowerCase().replaceAll('_', '-'));
         const lines = (await run(executable, ['step-frames'])).split('\n');
-        assert.equal(lines.length, 16);
+        assert.equal(lines.length, 32);
         const keys = ['schema', 'event', 'runId', 'environmentId', 'step', 'stepMs', 'totalMs', 'fullChecks', 'identityChecks', 'ready', 'protected'];
         lines.forEach((line, index) => {
           const frame = JSON.parse(line);
@@ -199,7 +230,7 @@ test('Notion launch preparation refuses fixtures and preserves process-local Sea
           assert.deepEqual(Object.keys(frame), keys);
           assert.equal(frame.schema, 'envara.macos-pf-app-transport/v1'); assert.equal(frame.event, 'stage-progress');
           assert.equal(frame.runId, '11111111-2222-4333-8444-555555555555'); assert.equal(frame.environmentId, '66666666-7777-4888-9999-aaaaaaaaaaaa');
-          assert.equal(frame.step, index === 0 ? 'front-commit' : 'ticket-prepare');
+          assert.equal(frame.step, steps[index] ?? 'ticket-prepare');
           assert.ok(Number.isSafeInteger(frame.stepMs) && Number.isSafeInteger(frame.totalMs) && frame.stepMs <= frame.totalMs);
           assert.equal(frame.fullChecks, 0); assert.equal(frame.identityChecks, 0);
           assert.equal(frame.ready, false); assert.equal(frame.protected, false);

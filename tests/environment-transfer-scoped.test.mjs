@@ -209,6 +209,56 @@ test('terminal export carries one selected Claude profile plus the exact shared-
   });
 });
 
+test('encrypted terminal roundtrips preserve a renamed default and a named account called 默认', async t => {
+  for (const selection of ['default', 'named']) await t.test(selection, async t => {
+    const f = await fixture(t), accounts = f.terminal.claudeAccounts;
+    await accounts.rename(SOURCE, 'default', '主档案');
+    const named = await accounts.rename(SOURCE, f.accountA.id, '默认');
+    const accountId = selection === 'default' ? 'default' : named.id;
+    const exported = await exportAndRead(f, { scope: 'terminal', accountId });
+    assert.equal(exported.manifest.terminal.defaultAccountName, '主档案');
+    assert.equal(exported.manifest.terminal.selectedAccountName, selection === 'default' ? '主档案' : '默认');
+    await restoreEnvironment({ ...f, ...exported, profileId: DESTINATION });
+    const expected = [{ id: 'default', name: '主档案', default: true }, ...(selection === 'named' ? [{ ...named, default: false }] : [])];
+    assert.deepEqual(await accounts.list(DESTINATION), expected);
+    const restarted = new ClaudeAccountStore({ root: accounts.root });
+    await restarted.ready;
+    assert.deepEqual(await restarted.list(DESTINATION), expected, 'restored metadata must remain readable after restart');
+    const relative = selection === 'default' ? 'claude/settings.json' : `claude-accounts/${named.id}/settings.json`;
+    assert.equal(await readFile(path.join(f.profilesDir, DESTINATION, relative), 'utf8'), selection === 'default' ? 'default-settings' : 'work-settings');
+    assert.equal((await accounts.get(SOURCE, 'default')).name, '主档案', 'export leaves source metadata intact');
+  });
+});
+
+test('old scoped archives recover a selected default name without the new optional field', async t => {
+  const f = await fixture(t);
+  await f.terminal.claudeAccounts.rename(SOURCE, 'default', '旧档案');
+  const exported = await exportAndRead(f, { scope: 'terminal' });
+  delete exported.manifest.terminal.defaultAccountName;
+  assert.equal(checkedExportManifest(exported.manifest), exported.manifest);
+  await restoreEnvironment({ ...f, ...exported, profileId: DESTINATION });
+  assert.equal((await f.terminal.claudeAccounts.get(DESTINATION, 'default')).name, '旧档案');
+});
+
+test('terminal account metadata survives an encrypted roundtrip before any session data exists', async t => {
+  for (const selection of ['default', 'named']) await t.test(selection, async t => {
+    const f = await fixture(t), accounts = f.terminal.claudeAccounts;
+    await accounts.rename(SOURCE, 'default', '主档案');
+    const named = await accounts.rename(SOURCE, f.accountA.id, '默认');
+    await rm(f.terminalData, { recursive: true });
+    const exported = await exportAndRead(f, { scope: 'terminal', accountId: selection === 'default' ? 'default' : named.id });
+    assert.deepEqual(await readdir(exported.staging), []);
+    const restored = await restoreEnvironment({ ...f, ...exported, profileId: DESTINATION });
+    assert.equal(restored.terminal, true);
+    const expected = [{ id: 'default', name: '主档案', default: true }, ...(selection === 'named' ? [named] : [])];
+    assert.deepEqual(await accounts.list(DESTINATION), expected);
+    const restarted = new ClaudeAccountStore({ root: accounts.root });
+    await restarted.ready;
+    assert.deepEqual(await restarted.list(DESTINATION), expected);
+    await absent(path.join(f.profilesDir, DESTINATION));
+  });
+});
+
 test('application export carries only the selected application and restores its data after a clean stop', async t => {
   const f = await fixture(t);
   f.profile.status = 'running';
@@ -261,6 +311,14 @@ test('scoped manifests reject mixed consumers and mismatched selected-account me
     ['named selection without metadata', () => ({ ...manifest('terminal'), terminal: { selectedAccountId: account.id, accounts: [] } })],
     ['named selection with another metadata', () => ({ ...manifest('terminal', { account }), terminal: { selectedAccountId: account.id, accounts: [another] } })],
     ['two named accounts', () => ({ ...manifest('terminal', { account }), terminal: { selectedAccountId: account.id, accounts: [account, another] } })],
+    ['invalid default label', () => ({ ...manifest('terminal'), terminal: { accounts: [], selectedAccountId: 'default', defaultAccountName: null } })],
+    ['control character in default label', () => ({ ...manifest('terminal'), terminal: { accounts: [], selectedAccountId: 'default', defaultAccountName: 'Primary\n' } })],
+    ['oversized default label', () => ({ ...manifest('terminal'), terminal: { accounts: [], selectedAccountId: 'default', defaultAccountName: 'x'.repeat(81) } })],
+    ['normalized collision with default label', () => ({ ...manifest('terminal', { account }), terminal: { accounts: [account], selectedAccountId: account.id, defaultAccountName: 'ｗｏｒｋ' } })],
+    ['different default selected label', () => ({ ...manifest('terminal'), terminal: { accounts: [], selectedAccountId: 'default', defaultAccountName: 'Primary', selectedAccountName: 'Other' } })],
+    ['different named selected label', () => ({ ...manifest('terminal', { account }), terminal: { accounts: [account], selectedAccountId: account.id, selectedAccountName: 'Other' } })],
+    ['orphan selected label', () => ({ ...manifest('browser'), terminal: { accounts: [], selectedAccountName: 'Work' } })],
+    ['browser carrying a default label', () => ({ ...manifest('browser'), terminal: { accounts: [], defaultAccountName: 'Primary' } })],
     ['application with account', () => ({ ...manifest('application'), terminal: { accounts: [account], selectedAccountId: account.id } })],
     ['multiple applications', () => ({ ...manifest('application'), applications: [appMetadata(), appMetadata(SECOND_APP, 'app-1')] })],
   ];
@@ -302,6 +360,21 @@ test('selected terminal metadata failure rolls back only its new target and pres
   assert.equal(await readFile(path.join(f.browserData, 'Default', 'Cookies'), 'utf8'), 'browser-sign-in');
   f.terminal.claudeAccounts.adopt = originalAdopt;
   assert.equal((await restoreEnvironment({ ...f, ...exported, profileId: DESTINATION, platform: 'darwin' })).scope, 'terminal');
+});
+
+test('a renamed default metadata failure rolls back copied data and remains retryable', async t => {
+  const f = await fixture(t), accounts = f.terminal.claudeAccounts;
+  await accounts.rename(SOURCE, 'default', '主档案');
+  const exported = await exportAndRead(f, { scope: 'terminal' });
+  const save = accounts.save;
+  accounts.save = async () => { throw Object.assign(new Error('Synthetic metadata failure'), { code: 'EIO' }); };
+  await assert.rejects(restoreEnvironment({ ...f, ...exported, profileId: DESTINATION }), { code: 'EIO' });
+  await absent(path.join(f.profilesDir, DESTINATION));
+  assert.equal(await readFile(path.join(exported.staging, 'terminal', 'claude', 'settings.json'), 'utf8'), 'default-settings');
+  assert.equal((await accounts.get(DESTINATION, 'default')).name, '默认');
+  accounts.save = save;
+  await restoreEnvironment({ ...f, ...exported, profileId: DESTINATION });
+  assert.equal((await accounts.get(DESTINATION, 'default')).name, '主档案');
 });
 
 test('a selected application re-export preserves pending imported sign-ins instead of its first-run data', async t => {

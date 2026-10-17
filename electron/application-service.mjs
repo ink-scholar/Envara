@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ApplicationStore } from './application-store.mjs';
+import { parseApplicationPlistXML } from './application-compatibility.mjs';
 import { NativeApplicationRouting, applicationRoutingReady, publicApplicationRoutingStatus, applicationRoutingError, APPLICATION_ROUTING_CHECKS } from './application-routing.mjs';
 
 const execute = promisify(execFile);
@@ -65,9 +66,7 @@ async function bundleMetadata(filename) {
     const result = await execute('/usr/bin/plutil', ['-convert', 'json', '-o', '-', filename], { timeout: 2500, maxBuffer: 1024 * 1024 });
     return JSON.parse(result.stdout);
   }
-  const xml = content.toString('utf8');
-  const string = key => new RegExp(`<key>\\s*${key}\\s*</key>\\s*<string>([^<]*)</string>`).exec(xml)?.[1];
-  return { CFBundleIdentifier: string('CFBundleIdentifier'), CFBundleExecutable: string('CFBundleExecutable'), CFBundleDisplayName: string('CFBundleDisplayName'), CFBundleName: string('CFBundleName') };
+  return parseApplicationPlistXML(content);
 }
 
 /** Inspect a local bundle/executable; shell expressions are never interpreted. */
@@ -98,7 +97,7 @@ export class ApplicationService {
     this.platform = platform; this.resolveContext = resolveContext; this.profileExists = profileExists;
     this.routing = routing ?? new NativeApplicationRouting({ platform }); this.onEvent = onEvent;
     this.inspectApplication = inspectApplication; this.store = new ApplicationStore(dataDir);
-    this.applications = new Map(); this.sessions = new Map(); this.queue = Promise.resolve(); this.closed = false;
+    this.applications = new Map(); this.sessions = new Map(); this.queue = Promise.resolve(); this.bindingWriteQueue = Promise.resolve(); this.closed = false;
     this.routingState = publicApplicationRoutingStatus(null, platform);
     this.pollIntervalMs = pollIntervalMs; this.pollTimer = null; this.polling = false;
     this.ready = this.initialize();
@@ -107,6 +106,10 @@ export class ApplicationService {
   serialized(operation) {
     const task = this.queue.then(async () => { await this.ready; return operation(); });
     this.queue = task.catch(() => {}); return task;
+  }
+  writeBindings(operation) {
+    const task = this.bindingWriteQueue.then(async () => { await this.ready; return operation(); });
+    this.bindingWriteQueue = task.catch(() => {}); return task;
   }
   notify(application, type = 'status') {
     try { Promise.resolve(this.onEvent({ type, applicationId: application?.id ?? null, profileId: application?.profileId ?? null })).catch(() => {}); } catch {}
@@ -140,7 +143,7 @@ export class ApplicationService {
     if (this.profileExists && !(await this.profileExists(profileId))) throw fail('APPLICATION_PROFILE_NOT_FOUND', '此境舱已不存在，请重新选择。');
   }
   async saveApplication({ application } = {}) {
-    return this.serialized(async () => {
+    return this.serialized(() => this.writeBindings(async () => {
       if (this.closed) throw fail('APP_CLOSING', '应用正在退出。');
       if (!application || typeof application !== 'object') throw fail('APPLICATION_VALIDATION_ERROR', '附加软件配置无效。');
       const profileId = validId(application.profileId); await this.checkProfile(profileId);
@@ -157,13 +160,13 @@ export class ApplicationService {
       const values = [...this.applications.values()].filter(item => item.id !== id); values.push(selected);
       await this.store.write(values); this.applications.set(id, selected); this.sessions.delete(id); this.notify(selected, 'saved');
       return this.snapshot();
-    });
+    }));
   }
   /* The browser this application's links open in, inside the same network
    * group. Changing it needs no restart and never touches the running process:
    * links resolve it when they are opened, not when the application starts. */
   async setApplicationLinkBrowser({ id, browserProfileId } = {}) {
-    return this.serialized(async () => {
+    return this.writeBindings(async () => {
       if (this.closed) throw fail('APP_CLOSING', '应用正在退出。');
       const application = this.applications.get(validId(id));
       if (!application) throw fail('APPLICATION_NOT_FOUND', '未找到此附加软件。');
@@ -222,8 +225,10 @@ export class ApplicationService {
           env: ownedEnvironment({ ...context, timezone }, application, session.routeId) });
         if (typeof launched?.sessionId === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(launched.sessionId)) session.sessionId = launched.sessionId;
         if (!session.sessionId || !Number.isSafeInteger(launched.pid) || launched.pid < 1) throw applicationRoutingError({ code: 'APPLICATION_ROUTING_PROTOCOL_ERROR' });
+        const udpPolicy = Object.hasOwn(launched, 'udpPolicy') ? launched.udpPolicy : prepared.udpPolicy;
         Object.assign(session, { status: 'running', pid: launched.pid, startedAt: typeof launched.startedAt === 'string' ? launched.startedAt : new Date().toISOString(),
-          timezone, timezoneSource: workspace.timezoneSource, geolocation, udpPolicy: route.udpPolicy,
+          timezone, timezoneSource: workspace.timezoneSource, geolocation,
+          udpPolicy: ['block', 'proxy'].includes(udpPolicy) ? udpPolicy : null,
           configScope: context.environment?.HOME ? 'workspace' : 'application-default',
           network: { ip: context.network.ip, country: typeof context.network.country === 'string' ? context.network.country.slice(0, 128) : null } });
         this.startPolling(); this.notify(application); return this.snapshot();
@@ -264,12 +269,13 @@ export class ApplicationService {
     });
   }
   async deleteApplication({ id } = {}) {
-    return this.serialized(async () => {
+    return this.serialized(() => this.writeBindings(async () => {
+      if (this.closed) throw fail('APP_CLOSING', '应用正在退出。');
       const application = this.find(id);
       if (this.activeSession(id)) throw fail('APPLICATION_RUNNING', '请先停止软件，再移除绑定。');
       await this.store.write([...this.applications.values()].filter(item => item.id !== id));
       this.applications.delete(id); this.sessions.delete(id); this.notify(application, 'deleted'); return this.snapshot();
-    });
+    }));
   }
   startPolling() {
     if (this.pollTimer || this.pollIntervalMs <= 0) return;
@@ -319,6 +325,7 @@ export class ApplicationService {
      * its stop is requested first; otherwise quitting waits behind it forever. */
     try { this.routing.beginShutdown?.(); } catch { /* the queued cleanup below reports it */ }
     await this.serialized(async () => {
+      await this.bindingWriteQueue;
       const failures = [];
       for (const [id, session] of this.sessions) {
         if (!this.activeSession(id)) continue;

@@ -17,6 +17,10 @@ struct envara_app_native_owned_context {
     char run_id[37], environment_id[37], tunnel_name[16];
     int original_utun_fd, original_listener_fd, lease_read_fd, recovery_read_fd;
     struct envara_identity controller, core, frontend;
+    /* Fixed native transport callback over its original writer and unreaped
+     * direct frontend child. Never decoded from RPC or a profile. */
+    int (*stop_frontend)(void *context);
+    void *frontend_context;
 };
 struct envara_app_native_preflight {
     char run_id[37], environment_id[37], realm_id[37], lease_id[37], generation[37];

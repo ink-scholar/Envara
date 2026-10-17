@@ -9,6 +9,7 @@ import { pfAttachEnvironmentId, pfApplicationRegistrationId } from '../native/ma
 import { ATTACHED_APPLICATION_DATA_ROOT, REGENERABLE_CACHE_ENTRIES } from './application-data.mjs';
 import { EXPORT_SCHEMA, checkedExportPassword, writeEnvironmentExport } from './environment-export.mjs';
 import { claudeAccountId } from './claude-account-store.mjs';
+import { APPLICATION_LOCAL_SELECTOR_PATH, APPLICATION_LOCAL_KEYCHAINS_PATH, machineLocalApplicationEntry } from './application-transfer-policy.mjs';
 
 const fail = (message, code) => Object.assign(new Error(message), { code });
 const LIVE_TERMINAL = new Set(['starting', 'running', 'closing']);
@@ -53,8 +54,59 @@ async function emptyTarget(target) {
 }
 /* Staging remains intact until the complete import succeeds. Copying rather
  * than consuming it makes a failed import genuinely retryable. */
-async function copyInto(source, target) {
-  await cp(source, target, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+async function copyInto(source, target, applicationLeaf) {
+  await cp(source, target, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true,
+    ...(applicationLeaf !== undefined ? { filter: filename => {
+      const relative = path.relative(source, filename).split(path.sep).join('/');
+      return !machineLocalApplicationEntry(applicationLeaf ? `${applicationLeaf}/${relative}` : relative);
+    } } : {}) });
+}
+const homeRelative = value => value.slice('Home/'.length).split('/');
+function sameSelector(a, b) {
+  return a.dev === b.dev && a.ino === b.ino && a.uid === b.uid && a.gid === b.gid && a.mode === b.mode &&
+    a.nlink === b.nlink && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
+}
+async function checkedSelectorDirectory(target, uid) {
+  await checkedDirectory(target, uid);
+  const info = await lstat(target);
+  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== uid || (info.mode & 0o022))
+    throw fail('附加软件数据目录不安全，未恢复。', 'IMPORT_TARGET_UNSAFE');
+}
+async function checkedLocalSelector(home, uid) {
+  const library = path.join(home, 'Library');
+  if (!await present(library)) return null;
+  await checkedSelectorDirectory(library, uid);
+  const keychains = path.join(home, ...homeRelative(APPLICATION_LOCAL_KEYCHAINS_PATH));
+  if (await present(keychains)) {
+    await checkedDirectory(keychains, uid);
+    // Existing local key material must not disappear with the old Home backup.
+    // Inspect entry names only; never copy or read the keychain files.
+    if ((await readdir(keychains)).length) throw fail('导入目标已有资料，未覆盖。', 'IMPORT_TARGET_NOT_EMPTY');
+  }
+  const preferences = path.join(library, 'Preferences');
+  if (!await present(preferences)) return null;
+  await checkedSelectorDirectory(preferences, uid);
+  const target = path.join(home, ...homeRelative(APPLICATION_LOCAL_SELECTOR_PATH)), info = await present(target);
+  if (!info) return null;
+  if (!info.isFile() || info.isSymbolicLink() || info.uid !== uid || info.nlink !== 1 || (info.mode & 0o022))
+    throw fail('附加软件数据目录不安全，未恢复。', 'IMPORT_TARGET_UNSAFE');
+  return { target, info };
+}
+async function checkSelectorUnchanged(home, selector, uid) {
+  const current = await checkedLocalSelector(home, uid);
+  if (Boolean(current) !== Boolean(selector) || current && !sameSelector(current.info, selector.info))
+    throw fail('附加软件数据目录不安全，未恢复。', 'IMPORT_TARGET_UNSAFE');
+}
+async function preserveLocalSelector(plan, uid) {
+  if (!plan.localSelector) return;
+  const library = path.join(plan.incoming, 'Library'), preferences = path.join(library, 'Preferences');
+  for (const target of [library, preferences]) {
+    await mkdir(target, { recursive: true, mode: 0o700 });
+    await checkedSelectorDirectory(target, uid);
+  }
+  await checkSelectorUnchanged(plan.leaf, plan.localSelector, uid);
+  await copyInto(plan.localSelector.target, path.join(plan.incoming, ...homeRelative(APPLICATION_LOCAL_SELECTOR_PATH)));
+  await checkSelectorUnchanged(plan.leaf, plan.localSelector, uid);
 }
 async function applicationsOf(applications, profileId) {
   return applications ? (await applications.snapshot()).applications.filter(item => item.profileId === profileId) : [];
@@ -120,6 +172,7 @@ export async function exportEnvironment({ profile, password, file, service, term
     root: path.join(await service.checkedDirectory({ id: profile.id }), 'browser-data'), exclude: (_relative, name) => TRANSIENT.has(name) });
   let accounts = [];
   let selectedAccount = null;
+  let defaultAccountName;
   if (scope === 'terminal') {
     claudeAccountId(accountId);
     selectedAccount = await terminal?.claudeAccounts?.get(profile.id, accountId);
@@ -133,6 +186,7 @@ export async function exportEnvironment({ profile, password, file, service, term
     } });
     accounts = selectedAccount ? (accountId === 'default' ? [] : [{ id: selectedAccount.id, name: selectedAccount.name }])
       : (await terminal.claudeAccounts?.list(profile.id) ?? []).filter(account => !account.default).map(({ id, name }) => ({ id, name }));
+    defaultAccountName = (await terminal.claudeAccounts?.get(profile.id, 'default'))?.name;
   }
   const exported = [];
   const includesApplications = scope === 'environment' || scope === 'application';
@@ -149,14 +203,28 @@ export async function exportEnvironment({ profile, password, file, service, term
     // data, rather than the empty first-run directories waiting to receive it.
     const pending = dataDir && pendingDirectory(dataDir, profile.id, application.identity);
     sources.push({ section, root: pending && await directory(pending) ? pending : registration,
-      exclude: (relative, name) => relative === name ? !APPLICATION_LEAVES.includes(name) : TRANSIENT.has(name) });
+      exclude: (relative, name) => relative === name ? !APPLICATION_LEAVES.includes(name)
+        : TRANSIENT.has(name) || machineLocalApplicationEntry(relative) });
   }
   const manifest = { schema: EXPORT_SCHEMA, version: 1, createdAt: new Date().toISOString(), envara: appVersion ?? null,
     ...(SCOPES.has(scope) ? { scope } : {}), profile: document,
-    terminal: { accounts, ...(selectedAccount ? { selectedAccountId: accountId, selectedAccountName: selectedAccount.name } : {}) },
+    terminal: { accounts, ...(defaultAccountName !== undefined ? { defaultAccountName } : {}),
+      ...(selectedAccount ? { selectedAccountId: accountId, selectedAccountName: selectedAccount.name } : {}) },
     applications: exported, keychainIncluded: false };
   const written = await writeEnvironmentExport({ file, password, manifest, sources });
   return { ...written, applications: exported.map(item => item.name) };
+}
+
+function checkedAccountName(value) {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > 80 || /[\x00-\x1f\x7f]/.test(value))
+    throw fail('文件不是有效的 Envara 环境导出。', 'EXPORT_FORMAT_INVALID');
+  return value.trim();
+}
+const accountNameKey = value => value.normalize('NFKC').toLocaleLowerCase('en-US');
+function importedDefaultAccountName(terminal) {
+  // Older scoped exports already carried the selected default's display name.
+  // Older whole-environment exports did not record it and retain the old label.
+  return terminal?.defaultAccountName ?? (terminal?.selectedAccountId === 'default' ? terminal.selectedAccountName : undefined) ?? '默认';
 }
 
 /** Validates an export's manifest before anything is imported. */
@@ -170,24 +238,35 @@ export function checkedExportManifest(manifest) {
       !manifest.profile.profiles[0] || typeof manifest.profile.profiles[0] !== 'object' || Array.isArray(manifest.profile.profiles[0]) ||
       new Set(manifest.applications.map(item => item.identity)).size !== manifest.applications.length)
     throw fail('文件不是有效的 Envara 环境导出。', 'EXPORT_FORMAT_INVALID');
-  const ids = new Set(), names = new Set(['默认'.normalize('NFKC').toLocaleLowerCase('en-US')]);
+  const terminalMetadata = manifest.terminal ?? {};
+  if (terminalMetadata.defaultAccountName !== undefined) checkedAccountName(terminalMetadata.defaultAccountName);
+  if (terminalMetadata.selectedAccountName !== undefined) checkedAccountName(terminalMetadata.selectedAccountName);
+  const defaultName = checkedAccountName(importedDefaultAccountName(terminalMetadata));
+  const ids = new Set(), names = new Set([accountNameKey(defaultName)]);
   const accounts = manifest.terminal?.accounts ?? [];
   if (accounts.length > 19) throw fail('文件不是有效的 Envara 环境导出。', 'EXPORT_FORMAT_INVALID');
   for (const account of accounts) {
     try { claudeAccountId(account?.id); } catch { throw fail('文件不是有效的 Envara 环境导出。', 'EXPORT_FORMAT_INVALID'); }
-    const name = account?.name;
-    const key = typeof name === 'string' ? name.trim().normalize('NFKC').toLocaleLowerCase('en-US') : '';
-    if (account.id === 'default' || ids.has(account.id) || !key || name.trim().length > 80 || /[\x00-\x1f\x7f]/.test(name) || names.has(key))
+    const key = accountNameKey(checkedAccountName(account?.name));
+    if (account.id === 'default' || ids.has(account.id) || names.has(key))
       throw fail('文件不是有效的 Envara 环境导出。', 'EXPORT_FORMAT_INVALID');
     ids.add(account.id); names.add(key);
   }
+  const selected = terminalMetadata.selectedAccountId, selectedName = terminalMetadata.selectedAccountName;
+  if (selected !== undefined) {
+    try { claudeAccountId(selected); } catch { throw fail('文件不是有效的 Envara 环境导出。', 'EXPORT_FORMAT_INVALID'); }
+    const expected = selected === 'default' ? defaultName : accounts.find(account => account.id === selected)?.name;
+    if (expected === undefined || selectedName !== undefined && checkedAccountName(selectedName) !== expected.trim())
+      throw fail('文件不是有效的 Envara 环境导出。', 'EXPORT_FORMAT_INVALID');
+  } else if (selectedName !== undefined) throw fail('文件不是有效的 Envara 环境导出。', 'EXPORT_FORMAT_INVALID');
   if (manifest.scope != null) {
-    const scope = manifest.scope, selected = manifest.terminal?.selectedAccountId;
+    const scope = manifest.scope;
     let valid = SCOPES.has(scope);
     if (scope === 'terminal') {
       try { claudeAccountId(selected); } catch { valid = false; }
       valid &&= manifest.applications.length === 0 && (selected === 'default' ? accounts.length === 0 : accounts.length === 1 && accounts[0].id === selected);
-    } else valid &&= accounts.length === 0 && selected == null && (scope === 'browser' ? manifest.applications.length === 0 : manifest.applications.length === 1);
+    } else valid &&= accounts.length === 0 && selected === undefined && terminalMetadata.defaultAccountName === undefined &&
+      (scope === 'browser' ? manifest.applications.length === 0 : manifest.applications.length === 1);
     if (!valid) throw fail('文件不是有效的 Envara 独立数据导出。', 'EXPORT_FORMAT_INVALID');
   }
   return manifest;
@@ -251,7 +330,7 @@ export async function restoreEnvironment({ staging, manifest, profileId, service
     // account-metadata error rolls the whole fresh environment back.
     for (const plan of plans) {
       plan.temporary = path.join(path.dirname(plan.target), `.envara-import-${randomUUID()}`);
-      await copyInto(plan.source, plan.temporary);
+      await copyInto(plan.source, plan.temporary, plan.application ? '' : undefined);
       if (plan.application) await writeFile(path.join(plan.temporary, 'pending.json'),
         JSON.stringify({ identity: plan.application.identity, name: plan.application.name, path: plan.application.path }), { mode: 0o600 });
     }
@@ -267,7 +346,13 @@ export async function restoreEnvironment({ staging, manifest, profileId, service
         throw error;
       }
     }
-    if (restored.terminal && manifest.terminal?.accounts?.length) await terminal.claudeAccounts?.adopt(profileId, manifest.terminal.accounts);
+    const hasAccountMetadata = manifest.terminal?.accounts?.length || manifest.terminal?.defaultAccountName !== undefined ||
+      manifest.terminal?.selectedAccountId === 'default' && manifest.terminal?.selectedAccountName !== undefined;
+    if (hasAccountMetadata && terminal?.claudeAccounts?.adopt) {
+      // Labels can exist before the first session has created a data directory.
+      await terminal.claudeAccounts.adopt(profileId, manifest.terminal.accounts ?? [], { defaultName: importedDefaultAccountName(manifest.terminal) });
+      restored.terminal = true;
+    }
   } catch (error) {
     for (const plan of committed.reverse()) await rm(plan.target, { recursive: true, force: true });
     for (const plan of plans) {
@@ -306,7 +391,7 @@ export async function applyPendingApplicationData({ application, dataDir, root =
     if (!await directory(source)) continue;
     const leaf = path.join(registration, name), info = await present(leaf);
     if (!info?.isDirectory() || info.isSymbolicLink() || info.uid !== uid) throw fail('附加软件数据目录不安全，未恢复。', 'IMPORT_TARGET_UNSAFE');
-    plans.push({ source, leaf, old: [], added: [] });
+    plans.push({ name, source, leaf, ...(name === 'Home' ? { localSelector: await checkedLocalSelector(leaf, uid) } : {}), old: [], added: [] });
   }
   try {
     for (const plan of plans) {
@@ -315,9 +400,11 @@ export async function applyPendingApplicationData({ application, dataDir, root =
       plan.backup = path.join(plan.work, 'backup');
       await mkdir(plan.backup, { mode: 0o700 });
       plan.incoming = path.join(plan.work, 'incoming');
-      await copyInto(plan.source, plan.incoming);
+      await copyInto(plan.source, plan.incoming, plan.name);
+      await preserveLocalSelector(plan, uid);
     }
     for (const plan of plans) {
+      if (plan.name === 'Home') await checkSelectorUnchanged(plan.leaf, plan.localSelector, uid);
       for (const child of await readdir(plan.leaf)) {
         if (path.join(plan.leaf, child) === plan.work) continue;
         await rename(path.join(plan.leaf, child), path.join(plan.backup, child)); plan.old.push(child);

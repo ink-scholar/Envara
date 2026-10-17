@@ -22,20 +22,22 @@ async function fixture(t) {
   const temp = path.join(root, 'runtime');
   const home = path.join(root, 'home');
   const claude = path.join(root, 'claude');
+  const anthropic = path.join(claude, 'anthropic');
   await mkdir(bin, { recursive: true }); await mkdir(versions, { recursive: true }); await mkdir(temp, { mode: 0o700 });
   await mkdir(home, { mode: 0o700 }); await mkdir(claude, { mode: 0o700 });
+  await mkdir(anthropic, { mode: 0o700 });
   const hostExecutable = path.join(versions, '2.1.296');
   await copyFile('/usr/bin/true', hostExecutable); await chmod(hostExecutable, 0o700);
   await symlink(hostExecutable, path.join(bin, 'claude'));
   const installation = await ensureClaudeInstallation({ home, findHostExecutable: async () => hostExecutable });
   const executable = await resolveClaudeInstallation(installation);
-  const environment = { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: claude, TMPDIR: temp, TZ: 'Asia/Manila', LANG: 'en_PH.UTF-8', LC_ALL: 'en_PH.UTF-8',
+  const environment = { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: claude, ANTHROPIC_CONFIG_DIR: anthropic, TMPDIR: temp, TZ: 'Asia/Manila', LANG: 'en_PH.UTF-8', LC_ALL: 'en_PH.UTF-8',
     PATH: '/owned/bin:/usr/bin:/bin', BROWSER: '/owned/bin/browser', ENVARA_LINK_SOCKET: '/owned/links.sock',
     ENVARA_BROWSER_SOCKET: '/owned/browser.sock', ENVARA_LINK_TOKEN: 'synthetic-link-secret', ENVARA_BROWSER_TOKEN: 'synthetic-browser-secret',
     HTTPS_PROXY: 'http://user:synthetic-proxy-secret@127.0.0.1:1234', HTTP_PROXY: 'http://user:synthetic-proxy-secret@127.0.0.1:1234',
     ALL_PROXY: 'http://user:synthetic-proxy-secret@127.0.0.1:1234', NO_PROXY: 'localhost,127.0.0.1,::1', NODE_USE_ENV_PROXY: '1' };
-  const request = { sessionId: 'term_one', directories: { temp, home, claude }, installation, environment, privacy: { mode: 'standard' }, mcpServer: { command: process.execPath, args: ['/owned/envara-browser-mcp.mjs'] } };
-  return { root, bin, temp, home, claude, executable, hostExecutable, installation, request };
+  const request = { sessionId: 'term_one', directories: { temp, home, claude, anthropic }, installation, environment, privacy: { mode: 'standard' }, mcpServer: { command: process.execPath, args: ['/owned/envara-browser-mcp.mjs'] } };
+  return { root, bin, temp, home, claude, anthropic, executable, hostExecutable, installation, request };
 }
 
 const settingsFile = launch => launch.args[launch.args.indexOf('--settings') + 1];
@@ -193,7 +195,7 @@ test('private settings pin context without persisting proxy credentials or MCP/l
   const serialized = await readFile(settingsFile(launch), 'utf8');
   for (const secret of ['synthetic-proxy-secret', 'synthetic-browser-secret', 'synthetic-link-secret']) assert.ok(!serialized.includes(secret));
   const pins = JSON.parse(serialized).env;
-  for (const key of ['HOME', 'USERPROFILE', 'CLAUDE_CONFIG_DIR', 'TMPDIR', 'TZ', 'LANG', 'LC_ALL', 'BROWSER', 'ENVARA_LINK_SOCKET', 'ENVARA_BROWSER_SOCKET', 'NODE_USE_ENV_PROXY', 'NO_PROXY']) assert.equal(pins[key], f.request.environment[key]);
+  for (const key of ['HOME', 'USERPROFILE', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_CONFIG_DIR', 'TMPDIR', 'TZ', 'LANG', 'LC_ALL', 'BROWSER', 'ENVARA_LINK_SOCKET', 'ENVARA_BROWSER_SOCKET', 'NODE_USE_ENV_PROXY', 'NO_PROXY']) assert.equal(pins[key], f.request.environment[key]);
   assert.equal(pins.PATH, launch.environment.PATH);
   for (const key of ['HTTPS_PROXY', 'ENVARA_LINK_TOKEN', 'ENVARA_BROWSER_TOKEN']) {
     assert.equal(pins[key], undefined);
@@ -227,13 +229,45 @@ test('refuses API keys, helpers, gateway and external tokens before launch witho
 test('rejects saved network, tool directory, link and subprocess-scrub overrides', async t => {
   const f = await fixture(t);
   for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'NO_PROXY', 'no_proxy', 'TZ', 'HOME',
-    'CLAUDE_CONFIG_DIR', 'LANG', 'LC_ALL', 'PATH', 'BROWSER', 'ENVARA_LINK_TOKEN', 'ENVARA_BROWSER_TOKEN', 'ENVARA_BROWSER_SOCKET', 'ENVARA_LINK_SOCKET', 'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB', 'NODE_OPTIONS']) {
+    'CLAUDE_CONFIG_DIR', 'ANTHROPIC_CONFIG_DIR', 'LANG', 'LC_ALL', 'PATH', 'BROWSER', 'ENVARA_LINK_TOKEN', 'ENVARA_BROWSER_TOKEN', 'ENVARA_BROWSER_SOCKET', 'ENVARA_LINK_SOCKET', 'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB', 'NODE_OPTIONS']) {
     await saveSettings(f, { env: { [key]: 'synthetic-conflicting-value' } });
     await assert.rejects(prepareClaudeSession(f.request), { code: 'CLAUDE_CODE_SESSION_POLICY_CONFLICT' });
   }
   await saveSettings(f, { proxyAuthHelper: 'echo synthetic-token' });
   await assert.rejects(prepareClaudeSession(f.request), { code: 'CLAUDE_CODE_SESSION_POLICY_CONFLICT' });
   assert.deepEqual(await readdir(f.temp), []);
+});
+
+test('requires the selected private Anthropic directory in both launch context and settings', async t => {
+  const f = await fixture(t);
+  for (const environment of [
+    { ...f.request.environment, ANTHROPIC_CONFIG_DIR: undefined },
+    { ...f.request.environment, ANTHROPIC_CONFIG_DIR: path.join(f.home, '.config', 'anthropic') },
+  ]) {
+    const request = { ...f.request, environment };
+    if (environment.ANTHROPIC_CONFIG_DIR === undefined) delete request.environment.ANTHROPIC_CONFIG_DIR;
+    await assert.rejects(prepareClaudeSession(request), { code: 'CLAUDE_CODE_SESSION_POLICY_CONFLICT' });
+  }
+  await assert.rejects(prepareClaudeSession({ ...f.request,
+    directories: { ...f.request.directories, anthropic: f.root },
+    environment: { ...f.request.environment, ANTHROPIC_CONFIG_DIR: f.root },
+  }), { code: 'CLAUDE_CODE_SESSION_POLICY_CONFLICT' });
+  await saveSettings(f, { env: { ANTHROPIC_CONFIG_DIR: f.anthropic } });
+  const launch = await prepareClaudeSession(f.request);
+  assert.equal(launch.environment.ANTHROPIC_CONFIG_DIR, f.anthropic);
+  assert.equal(JSON.parse(await readFile(settingsFile(launch))).env.ANTHROPIC_CONFIG_DIR, f.anthropic);
+});
+
+test('refuses an Anthropic directory replaced after terminal directory preparation', async t => {
+  const f = await fixture(t), outside = path.join(f.root, 'unrelated-auth');
+  await mkdir(outside, { mode: 0o700 });
+  const marker = path.join(outside, 'keep'); await writeFile(marker, 'synthetic-unrelated-state');
+  await rm(f.anthropic, { recursive: true });
+  await symlink(outside, f.anthropic);
+  await assert.rejects(prepareClaudeSession(f.request), { code: 'CLAUDE_CODE_UNSAFE_PATH' });
+  assert.equal(await readFile(marker, 'utf8'), 'synthetic-unrelated-state');
+  await rm(f.anthropic); await mkdir(f.anthropic, { mode: 0o777 }); await chmod(f.anthropic, 0o777);
+  await assert.rejects(prepareClaudeSession(f.request), { code: 'CLAUDE_CODE_UNSAFE_PATH' });
 });
 
 test('explicitly disabled provider switches do not block the account session', async t => {
@@ -294,6 +328,29 @@ test('manual wrapper preserves argv quoting and explicit permissions without ena
   assert.ok(!launch.args.some(value => value.includes('skip-permissions')));
   const { stdout } = await execute('/bin/sh', ['-c', 'command -v claude'], { env: launch.environment });
   assert.equal(stdout.trim(), launch.wrapperPath);
+});
+
+test('wrapper warns once per terminal about legacy shared Console data without using or changing it', async t => {
+  const f = await fixture(t);
+  const legacy = path.join(f.home, '.config', 'anthropic');
+  await mkdir(legacy, { recursive: true, mode: 0o700 });
+  const marker = path.join(legacy, 'synthetic-credentials.json');
+  const original = Buffer.from('synthetic legacy credentials stay byte-for-byte intact\n');
+  await writeFile(marker, original, { mode: 0o600 });
+  await compileClaudeFixture(f.executable);
+  const launch = await prepareClaudeSession(f.request);
+  const first = await execute(launch.wrapperPath, ['--version'], { env: launch.environment, timeout: 5000 });
+  assert.equal(first.stderr, '旧版共用的 Console 登录资料仍保留，请在所选档案重新登录。\n');
+  assert.equal(JSON.parse(first.stdout).config, f.claude);
+  const second = await execute(launch.wrapperPath, ['--help'], { env: launch.environment, timeout: 5000 });
+  assert.equal(second.stderr, '');
+  assert.deepEqual(await readFile(marker), original);
+  assert.deepEqual(await readdir(f.anthropic), [], 'The new account directory must not adopt shared credentials.');
+  await launch.cleanup();
+  assert.deepEqual(await readFile(marker), original);
+  const reopened = await prepareClaudeSession(f.request);
+  const next = await execute(reopened.wrapperPath, ['--version'], { env: reopened.environment, timeout: 5000 });
+  assert.equal(next.stderr, first.stderr, 'A new terminal should receive its own one-time notice.');
 });
 
 test('manual wrapper refuses binding overrides in exact and equals forms before the native CLI runs', async t => {

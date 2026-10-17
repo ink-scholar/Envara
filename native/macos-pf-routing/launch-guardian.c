@@ -18,6 +18,9 @@
 #include <time.h>
 #include <stdint.h>
 #include <stdlib.h>
+/* One native translation unit, like the factory's private journal module.
+ * Keeps existing native entry link lists valid; no runtime-loadable provider. */
+#include "app-family.c"
 
 static volatile sig_atomic_t requested_signal;
 static void revoke_signal(int number) { requested_signal = number; }
@@ -46,15 +49,6 @@ static int unchanged(const struct envara_identity *expected) {
         !envara_identity_read(expected->pid, &before) &&
         !envara_identity_read(expected->pid, &after) &&
         same_identity(expected, &before) && same_identity(&before, &after);
-}
-static int direct_birth_unchanged(const struct envara_identity *expected) {
-    struct envara_identity before, after;
-    return !envara_identity_read(expected->pid, &before) &&
-        !envara_identity_read(expected->pid, &after) &&
-        before.pid == expected->pid && after.pid == expected->pid &&
-        before.parent_pid == getpid() && after.parent_pid == getpid() &&
-        before.birth_seconds == expected->birth_seconds && before.birth_microseconds == expected->birth_microseconds &&
-        after.birth_seconds == expected->birth_seconds && after.birth_microseconds == expected->birth_microseconds;
 }
 static int live_unchanged(const struct envara_identity *expected) {
     struct proc_bsdinfo info;
@@ -140,22 +134,38 @@ static void observe(const struct envara_launch_guard_authority *authority,
                     enum envara_launch_guard_event event, const struct envara_launch_guard_report *report) {
     if (authority->observe) authority->observe(event, report, authority->context);
 }
+static void guardian_finish_revocation(const struct envara_launch_guard_request *request,
+                   const struct envara_launch_guard_authority *authority,
+                   struct envara_launch_guard_report *report, envara_app_family *family, int explicit_retry) {
+    struct envara_app_family_failure observed_failure;
+    envara_app_family_first_failure(family, &observed_failure);
+    if (report->family_failure.reason == ENVARA_APP_FAMILY_FAILURE_NONE && observed_failure.reason != ENVARA_APP_FAMILY_FAILURE_NONE)
+        report->family_failure = observed_failure;
+    if (explicit_retry) report->network_revoked = 0;
+    if (!report->network_revoked)
+        report->network_revoked = authority->revoke_owned_network && authority->revoke_owned_network(authority->context) == 1;
+    report->persistent_deny_observed = report->network_revoked && authority->verify_persistent_deny(authority->context) == 1;
+    if (!report->persistent_deny_observed || !family) return;
+    if (!report->family_stop_confirmed) {
+        int sent = 0;
+        int stopped = explicit_retry ? envara_app_family_retry_stop(family, &sent) : envara_app_family_stop(family, &sent);
+        envara_app_family_first_failure(family, &observed_failure);
+        if (report->family_failure.reason == ENVARA_APP_FAMILY_FAILURE_NONE && observed_failure.reason != ENVARA_APP_FAMILY_FAILURE_NONE)
+            report->family_failure = observed_failure;
+        if (!stopped) return;
+        report->child_signal_sent |= sent; report->family_stop_confirmed = 1;
+        (void)child_reap(request, report);
+        observe(authority, ENVARA_GUARD_REVOKED, report);
+    }
+}
 static void guardian_revoke(const struct envara_launch_guard_request *request,
                    const struct envara_launch_guard_authority *authority,
-                   struct envara_launch_guard_report *report, enum envara_launch_guard_reason reason, int dependency) {
+                   struct envara_launch_guard_report *report, enum envara_launch_guard_reason reason, int dependency,
+                   envara_app_family *family) {
     if (report->reason != ENVARA_GUARD_NONE) return;
     report->reason = reason; report->dependency_index = dependency;
-    report->persistent_deny_observed = authority->verify_persistent_deny(authority->context) == 1;
-    if (!report->persistent_deny_observed) report->reason = ENVARA_GUARD_DENY_UNCONFIRMED;
-    /* The guardian is the original parent and has not reaped this child.
-     * Its PID cannot be recycled between identity check and kill. Do not
-     * target PGIDs, descendants, delegated helpers, or a foreign child. */
-    int reaped = child_reap(request, report);
-    if (reaped == 0 && direct_birth_unchanged(&request->child.identity) &&
-        request->child.identity.parent_pid == getpid()) {
-        if (!kill(request->child.identity.pid, SIGKILL)) report->child_signal_sent = 1;
-    }
-    observe(authority, ENVARA_GUARD_REVOKED, report);
+    guardian_finish_revocation(request, authority, report, family, 0);
+    if (!report->family_stop_confirmed) observe(authority, ENVARA_GUARD_CLEANUP_PENDING, report);
 }
 int envara_launch_guard_isolate_descriptors(const int *held, size_t count) {
     return envara_close_inherited_descriptors(held, count);
@@ -164,7 +174,7 @@ int envara_launch_guard_run(const struct envara_launch_guard_request *request,
                            const struct envara_launch_guard_authority *authority,
                            struct envara_launch_guard_report *out) {
     if (!request || !authority || !out || !authority->verify_persistent_deny ||
-        !authority->verify_scope_quiescent || (request->fixture_only != 0 && request->fixture_only != 1) ||
+        !authority->verify_scope_quiescent || !authority->revoke_owned_network || (request->fixture_only != 0 && request->fixture_only != 1) ||
         request->dependency_count < 1 || request->dependency_count > ENVARA_LAUNCH_GUARDIAN_MAX_PEERS ||
         !request->lease_milliseconds || request->lease_milliseconds > ENVARA_LAUNCH_GUARDIAN_MAX_LEASE_MS ||
         (request->heartbeat_timeout_milliseconds && (request->heartbeat_timeout_milliseconds < ENVARA_LAUNCH_GUARDIAN_MIN_HEARTBEAT_MS ||
@@ -227,33 +237,36 @@ int envara_launch_guard_run(const struct envara_launch_guard_request *request,
         close(queue); close(custody); return -1; }
     const int64_t deadline = started + request->lease_milliseconds;
     report.owns_retained_fd = 1; report.persistent_deny_observed = 1;
+    envara_app_family *family = envara_app_family_create_diagnosed(&request->child.identity, &report.family_failure);
     observe(authority, ENVARA_GUARD_ARMED, &report);
     int lease_open = 1, recovery_open = 1, heartbeat_armed = 0;
     int64_t execution_deadline = -1, last_heartbeat = -1;
     for (;;) {
-        if (requested_signal) guardian_revoke(request, authority, &report, ENVARA_GUARD_SIGNAL, -1);
+        if (report.reason == ENVARA_GUARD_NONE && (!family || !envara_app_family_observe(family)))
+            guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1, family);
+        if (requested_signal) guardian_revoke(request, authority, &report, ENVARA_GUARD_SIGNAL, -1, family);
         int64_t now = monotonic_ms();
-        if (now < 0) guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1);
-        else if (now >= deadline) guardian_revoke(request, authority, &report, ENVARA_GUARD_LEASE_EXPIRED, -1);
+        if (now < 0) guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1, family);
+        else if (now >= deadline) guardian_revoke(request, authority, &report, ENVARA_GUARD_LEASE_EXPIRED, -1, family);
         if (heartbeat_armed) {
             int64_t awake = awake_ms();
-            if (awake < 0) guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1);
+            if (awake < 0) guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1, family);
             else if (awake - last_heartbeat >= (int64_t)request->heartbeat_timeout_milliseconds)
-                guardian_revoke(request, authority, &report, ENVARA_GUARD_HEARTBEAT_LOST, -1);
+                guardian_revoke(request, authority, &report, ENVARA_GUARD_HEARTBEAT_LOST, -1, family);
         }
         if (!report.child_reaped) {
             int reaped = child_reap(request, &report);
             if (reaped == 1) { observe(authority, ENVARA_GUARD_CHILD_REAPED, &report);
-                guardian_revoke(request, authority, &report, ENVARA_GUARD_CHILD_EXITED, -1); }
-            else if (reaped < 0) guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1);
-            else if (!unchanged(&request->child.identity)) guardian_revoke(request, authority, &report, ENVARA_GUARD_DEPENDENCY_CHANGED, -1);
+                guardian_revoke(request, authority, &report, ENVARA_GUARD_CHILD_EXITED, -1, family); }
+            else if (reaped < 0) guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1, family);
+            else if (!unchanged(&request->child.identity)) guardian_revoke(request, authority, &report, ENVARA_GUARD_DEPENDENCY_CHANGED, -1, family);
         }
         if (report.reason == ENVARA_GUARD_NONE) for (size_t i = 0; i < request->dependency_count; i++) {
-            if (!unchanged(&request->dependencies[i])) { guardian_revoke(request, authority, &report, ENVARA_GUARD_DEPENDENCY_CHANGED, (int)i); break; }
+            if (!unchanged(&request->dependencies[i])) { guardian_revoke(request, authority, &report, ENVARA_GUARD_DEPENDENCY_CHANGED, (int)i, family); break; }
         }
         if (report.reason == ENVARA_GUARD_NONE && report.resume_sent) {
             if (!peers_live(request) || authority->verify_persistent_deny(authority->context) != 1)
-                guardian_revoke(request, authority, &report, ENVARA_GUARD_DENY_UNCONFIRMED, -1);
+                guardian_revoke(request, authority, &report, ENVARA_GUARD_DENY_UNCONFIRMED, -1, family);
             else if (!report.resumed) {
                 int executed = request->verify_executed(&request->child, request->resume_context);
                 int verified = executed >= 0 && executed <= 1 && live_unchanged(&request->child.identity) &&
@@ -261,11 +274,11 @@ int envara_launch_guard_run(const struct envara_launch_guard_request *request,
                 int64_t observed = monotonic_ms();
                 if (!verified || observed < 0 || !live_unchanged(&request->child.identity) ||
                     !peers_live(request))
-                    guardian_revoke(request, authority, &report, ENVARA_GUARD_EXECUTION_UNVERIFIED, -1);
+                    guardian_revoke(request, authority, &report, ENVARA_GUARD_EXECUTION_UNVERIFIED, -1, family);
                 else if (requested_signal || observed >= deadline)
-                    guardian_revoke(request, authority, &report, requested_signal ? ENVARA_GUARD_SIGNAL : ENVARA_GUARD_LEASE_EXPIRED, -1);
+                    guardian_revoke(request, authority, &report, requested_signal ? ENVARA_GUARD_SIGNAL : ENVARA_GUARD_LEASE_EXPIRED, -1, family);
                 else if (observed >= execution_deadline)
-                    guardian_revoke(request, authority, &report, ENVARA_GUARD_EXECUTION_UNVERIFIED, -1);
+                    guardian_revoke(request, authority, &report, ENVARA_GUARD_EXECUTION_UNVERIFIED, -1, family);
                 else if (executed == 1) {
                     report.resumed = 1; observe(authority, ENVARA_GUARD_RESUMED, &report);
                 }
@@ -273,13 +286,13 @@ int envara_launch_guard_run(const struct envara_launch_guard_request *request,
         }
         struct kevent events[5]; struct timespec interval = {0, 50000000};
         int count = kevent(queue, NULL, 0, events, 5, &interval);
-        if (count < 0) { if (errno != EINTR) guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1); continue; }
+        if (count < 0) { if (errno != EINTR) guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1, family); continue; }
         for (int i = 0; i < count; i++) {
             struct kevent *event = &events[i];
-            if (event->flags & EV_ERROR) { guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1); continue; }
+            if (event->flags & EV_ERROR) { guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1, family); continue; }
             if (event->filter == EVFILT_PROC) {
                 guardian_revoke(request, authority, &report, event->fflags & NOTE_EXIT ? ENVARA_GUARD_DEPENDENCY_EXITED : ENVARA_GUARD_DEPENDENCY_CHANGED,
-                       (int)(uintptr_t)event->udata - 1); continue;
+                       (int)(uintptr_t)event->udata - 1, family); continue;
             }
             int fd = (int)event->ident;
             if ((fd == request->lease_fd && !lease_open) || (fd == request->recovery_fd && !recovery_open)) continue;
@@ -289,7 +302,7 @@ int envara_launch_guard_run(const struct envara_launch_guard_request *request,
                 if (fd == request->lease_fd) lease_open = 0; else recovery_open = 0;
                 struct kevent remove; EV_SET(&remove, fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
                 (void)kevent(queue, &remove, 1, NULL, 0, &zero);
-                guardian_revoke(request, authority, &report, ENVARA_GUARD_LEASE_CLOSED, -1); continue;
+                guardian_revoke(request, authority, &report, ENVARA_GUARD_LEASE_CLOSED, -1, family); continue;
             }
             for (ssize_t j = 0; j < amount; j++) {
                 if (fd == request->lease_fd) {
@@ -299,26 +312,26 @@ int envara_launch_guard_run(const struct envara_launch_guard_request *request,
                             !stopped_native(&request->child) || !peers_live(request) ||
                             authority->verify_persistent_deny(authority->context) != 1 ||
                             request->verify_resume(&request->child, request->resume_context) != 1) {
-                            guardian_revoke(request, authority, &report, ENVARA_GUARD_RESUME_REFUSED, -1); continue;
+                            guardian_revoke(request, authority, &report, ENVARA_GUARD_RESUME_REFUSED, -1, family); continue;
                         }
                         /* Callbacks do not grant PID custody. Re-read exact
                          * parent/birth/native SSTOP and every live dependency
                          * after the fixed authority's potentially slow work. */
                         if (!stopped_native(&request->child) || !peers_live(request) ||
                             authority->verify_persistent_deny(authority->context) != 1) {
-                            guardian_revoke(request, authority, &report, ENVARA_GUARD_RESUME_REFUSED, -1); continue;
+                            guardian_revoke(request, authority, &report, ENVARA_GUARD_RESUME_REFUSED, -1, family); continue;
                         }
                         int64_t resume_now = monotonic_ms();
                         if (requested_signal || resume_now < 0 || resume_now >= deadline ||
                             !stopped_native(&request->child) || !peers_live(request) ||
                             kill(request->child.identity.pid, SIGCONT)) {
-                            guardian_revoke(request, authority, &report, ENVARA_GUARD_RESUME_REFUSED, -1); continue;
+                            guardian_revoke(request, authority, &report, ENVARA_GUARD_RESUME_REFUSED, -1, family); continue;
                         }
                         report.resume_sent = 1;
                         int64_t execution_started = monotonic_ms();
                         if (requested_signal || execution_started < 0 || execution_started >= deadline) {
                             guardian_revoke(request, authority, &report, requested_signal ? ENVARA_GUARD_SIGNAL :
-                                execution_started < 0 ? ENVARA_GUARD_INSPECTION_UNAVAILABLE : ENVARA_GUARD_LEASE_EXPIRED, -1);
+                                execution_started < 0 ? ENVARA_GUARD_INSPECTION_UNAVAILABLE : ENVARA_GUARD_LEASE_EXPIRED, -1, family);
                             continue;
                         }
                         execution_deadline = execution_started + 5000;
@@ -326,17 +339,31 @@ int envara_launch_guard_run(const struct envara_launch_guard_request *request,
                         /* A heartbeat proves only that the fixed controller is
                          * still scheduling work. It never extends the lease. */
                         int64_t awake = awake_ms();
-                        if (awake < 0) guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1);
+                        if (awake < 0) guardian_revoke(request, authority, &report, ENVARA_GUARD_INSPECTION_UNAVAILABLE, -1, family);
                         else if (request->heartbeat_timeout_milliseconds) { last_heartbeat = awake; heartbeat_armed = 1; }
-                    } else guardian_revoke(request, authority, &report,
-                        bytes[j] == 'S' ? ENVARA_GUARD_LEASE_CLOSED : ENVARA_GUARD_INVALID_COMMAND, -1);
+                    } else {
+                        if (bytes[j] == 'S') {
+                            if (report.cleanup_attempt < 2147483647U) report.cleanup_attempt++;
+                            /* Every explicit Stop re-proves exact DENY/front,
+                             * including a known-family retry after deferral. */
+                            report.network_revoked = 0;
+                        }
+                        int already_revoked = report.reason != ENVARA_GUARD_NONE;
+                        guardian_revoke(request, authority, &report, bytes[j] == 'S' ? ENVARA_GUARD_LEASE_CLOSED : ENVARA_GUARD_INVALID_COMMAND, -1, family);
+                        if (bytes[j] == 'S' && already_revoked) {
+                            guardian_finish_revocation(request, authority, &report, family, 1);
+                            if (!report.family_stop_confirmed) observe(authority, ENVARA_GUARD_CLEANUP_PENDING, &report);
+                        }
+                    }
                 } else if (bytes[j] == 'R') {
+                    if (report.reason != ENVARA_GUARD_NONE) guardian_finish_revocation(request, authority, &report, family, 0);
                     /* 'R' carries no authority. Only the fixed native checks
                      * can confirm the complete scope plus denial/ownership. */
                     int reaped = child_reap(request, &report);
                     if (reaped == 1) observe(authority, ENVARA_GUARD_CHILD_REAPED, &report);
                     report.persistent_deny_observed = authority->verify_persistent_deny(authority->context) == 1;
-                    report.scope_quiescent_observed = report.child_reaped &&
+                    report.scope_quiescent_observed = report.network_revoked && report.family_stop_confirmed &&
+                        family && envara_app_family_quiescent(family) && report.child_reaped &&
                         authority->verify_scope_quiescent(authority->context) == 1;
                     if (!report.persistent_deny_observed || !report.scope_quiescent_observed) {
                         observe(authority, ENVARA_GUARD_RELEASE_REFUSED, &report); continue;
@@ -344,8 +371,8 @@ int envara_launch_guard_run(const struct envara_launch_guard_request *request,
                     close(custody); report.owns_retained_fd = 0;
                     observe(authority, ENVARA_GUARD_RELEASED, &report);
                     for (int k = 0; k < 3; k++) sigaction(signals[k], &previous[k], NULL);
-                    close(queue); *out = report; return 0;
-                } else guardian_revoke(request, authority, &report, ENVARA_GUARD_INVALID_COMMAND, -1);
+                    close(queue); envara_app_family_destroy(family); *out = report; return 0;
+                } else guardian_revoke(request, authority, &report, ENVARA_GUARD_INVALID_COMMAND, -1, family);
             }
         }
     }

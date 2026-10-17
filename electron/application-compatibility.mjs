@@ -30,7 +30,7 @@ function command(filename, args, { input, timeout = 5000, maxBuffer = METADATA_L
 
 // Parse XML ourselves for catalog scans rather than spawning one process per app.
 // This accepts only plist syntax and never resolves a DTD or external entity.
-function xmlPlist(content) {
+export function parseApplicationPlistXML(content) {
   const xml = content.toString('utf8');
   if (xml.includes('\ufffd')) throw new Error();
   const tokens = xml.match(/<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!DOCTYPE[^>]*>|<[^>]*>|[^<]+/g) ?? [];
@@ -108,7 +108,7 @@ async function metadata(root, filename) {
   const file = await fileWithin(root, filename, { limit: METADATA_LIMIT, readContent: true });
   const values = file.content.subarray(0, 6).toString() === 'bplist'
     ? JSON.parse(await command('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '-'], { input: file.content, timeout: 2500 }))
-    : xmlPlist(file.content);
+    : parseApplicationPlistXML(file.content);
   if (!values || typeof values !== 'object' || Array.isArray(values)) throw new Error();
   return { values, fingerprint: `${file.canonical}:${file.identity}:${createHash('sha256').update(file.content).digest('hex')}` };
 }

@@ -11,10 +11,13 @@
 /* Native private context only. The live factory binds this port to a held-open
  * unique front listener, exact realm socket-GID FILTER admission, no lo0 skip,
  * front process birth and this registration/environment/run. Not wire argv,
- * a proxy environment variable, a caller selected path, or a readiness proof. */
+ * a caller selected path, or a readiness proof. The child's secretless proxy
+ * variables reuse this verified port; they are not routing authority. */
 struct envara_notion_context {
     char registration_id[37];
     uint16_t front_port;
+    /* Fixed factory-owned opaque slot; never deserialized or a plan output. */
+    struct envara_app_keychain_custody *preparation;
 };
 struct envara_notion_plan {
     int ready, protected_ready, resumed;
@@ -112,6 +115,7 @@ typedef enum {
     ENVARA_NOTION_SUBOP_STAGE_ACCOUNT,
     ENVARA_NOTION_SUBOP_STAGE_ENVIRONMENT,
     ENVARA_NOTION_SUBOP_STAGE_DATA,
+    ENVARA_NOTION_SUBOP_STAGE_KEYCHAIN,
     ENVARA_NOTION_SUBOP_STAGE_RECHECK,
     ENVARA_NOTION_SUBOP_STAGE_SPAWN,
     ENVARA_NOTION_SUBOP_STAGE_STOPPED

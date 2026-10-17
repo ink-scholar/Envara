@@ -4,6 +4,7 @@
 #include "app-command.h"
 #include "app-native-factory.h"
 #include "app-transport.h"
+#include "app-keychain.h"
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -364,6 +365,7 @@ static int fixture(const char *self) {
 }
 
 int main(int argc, char **argv) {
+    if(argc>=2&&!strcmp(argv[1],"app-keychain-helper"))return envara_app_keychain_command(argc,argv);
     if(argc>=2&&!strcmp(argv[1],"app-context-clock"))return envara_app_native_context_clock(argc,argv);
     if(argc>=2&&(!strcmp(argv[1],"app-tunnel-bootstrap")||!strcmp(argv[1],"app-tunnel-run")||!strcmp(argv[1],"app-listener-create")))return envara_app_transport_command(argc,argv)?1:0;
     int app_status;

@@ -224,7 +224,13 @@ export async function closeTerminalProcess({ pty, identity, timeoutMs = 1500 } =
   if (!state || !pty || pty.pid !== state.root.pid) throw new TypeError('PTY and captured terminal identity must match');
   if (!state.closing) {
     const boundedTimeout = Number.isFinite(timeoutMs) ? Math.max(250, Math.min(5000, timeoutMs)) : 1500;
-    state.closing = cleanProcessTree(state, pty, boundedTimeout);
+    const attempt = cleanProcessTree(state, pty, boundedTimeout);
+    state.closing = attempt;
+    // Concurrent callers share this attempt. An uncertain result must allow a
+    // later explicit close to inspect the same captured identities again.
+    void attempt.then(result => {
+      if (result?.ok !== true && state.closing === attempt) state.closing = null;
+    }, () => { if (state.closing === attempt) state.closing = null; });
   }
   return state.closing;
 }

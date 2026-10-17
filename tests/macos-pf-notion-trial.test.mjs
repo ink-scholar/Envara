@@ -24,16 +24,21 @@ const request = () => ({ application: { id: 'notion_bound', profileId: 'owned_pr
   managedRoute: { profileId: 'owned_profile', proxyId: 'owned_node', nodeType: 'anytls', routeIdentity: randomUUID(), coreGeneration: randomUUID(), corePid: 999, coreVersion: 'v1.19.32' } });
 function fixture({ dirty = false, selectedRefused = false, missingEOF = false, foreignSnapshot = false, foreignStatus = false,
   resumeFailure = false, snapshotFailure = false, prepareDelayMs = 0, prepareTimeoutMs = null, resumeDelayMs = 0, now,
-  stageTimeout = false, stopInitialFailureOnly = false,
+  stageTimeout = false, stopInitialFailureOnly = false, preparationFailure = false, preparationAfterTimeout = false, stopDelayMs = 0,
   diagnosticOverride = null, onEvent = () => {}, watchMs = 0, applicationEndedAfterMs = null,
   verifyCandidate = async () => true, verifyNotion = async () => true } = {}) {
   const input = new PassThrough(), child = new EventEmitter(), calls = [], statusRequests = [], callOptions = []; let bound, stageResolve;
   const startedAt = Date.now();
   const running = new Promise(resolve => { stageResolve = resolve; });
   const state = phase => ({ ...flags, ...bound, profile: 'seatbelt-front-only', phase, staged: true, resumed: phase === 'running', cleanupComplete: false, cleanupUncertain: false });
-  const stageFailure = { stage: 'cold-stage', code: 'APPLICATION_APP_STAGE_TIMEOUT' };
+  const stageFailure = preparationFailure ? { stage: 'cold-stage', code: 'APPLICATION_APP_NATIVE_REFUSED',
+    native: { stage: 'guardian', reason: 'NATIVE_APP_KEYCHAIN_PREPARATION_REFUSED', error: 13 } }
+    : { stage: 'cold-stage', code: 'APPLICATION_APP_STAGE_TIMEOUT' };
+  const preparationFact = { preparationId: randomUUID(), generation: 1, command: 'automatic', cleanupAttempt: 0,
+    childState: 'unreaped', denyVerified: false, frontClosedVerified: false };
   const failedStage = () => ({ ...state('cleanup-required'), staged: false, cleanupUncertain: true, cleanupRetryable: true,
-    failure: stageFailure, initialFailure: stageFailure, cleanupFailure: null });
+    failure: stageFailure, initialFailure: stageFailure, cleanupFailure: null,
+    ...(preparationAfterTimeout ? { preparationCleanupPending: { first: preparationFact, latest: preparationFact } } : {}) });
   const cleanup = () => ({ ...state('cleaned'), cleanupComplete: true, cleanupEvidence: {
     schema: 'envara.macos-pf-notion-cleanup/v1', source: 'native-notion-controller', ...bound, profile: 'seatbelt-front-only', complete: true, cleanupUncertain: false,
     ...Object.fromEntries(facts.map(key => [key, true])) } });
@@ -44,21 +49,22 @@ function fixture({ dirty = false, selectedRefused = false, missingEOF = false, f
   if (dirty) statusController.runs.set('old', { runId: randomUUID(), phase: 'cleanup-required', cleanupUncertain: true });
   const controller = { closed: false,
     status: async params => { statusRequests.push(params); const result = await statusController.status(params);
-      if (stageTimeout && bound) { result.applications = [failedStage()]; result.routes = [{ routeId: 'route_owned' }]; }
+      if ((stageTimeout || preparationFailure) && bound) { result.applications = [failedStage()]; result.routes = [{ routeId: 'route_owned' }]; }
       if (foreignStatus) result.anchor = pfRoutingAnchor(randomUUID()); return result; },
     prepareRoute: async value => { calls.push('prepareRoute'); assert.equal(value.route.password, 'PRIVATE_TRIAL_PASSWORD');
       return { routeId: 'route_owned', profileId: value.application.profileId, ready: false, failClosed: false, guardArmed: false, managedRouteVerified: false }; },
     prepareNotionApplication: async value => { calls.push('prepare'); assert.equal(value.runId, statusRequests[0].runId);
       bound = { runId: value.runId, environmentId: value.environmentId };
-      if (stageTimeout) throw Object.assign(new Error('PRIVATE_TRIAL_PASSWORD'), { code: stageFailure.code,
-        failureStage: stageFailure.stage, initialFailure: stageFailure });
+      if (stageTimeout || preparationFailure) throw Object.assign(new Error('PRIVATE_TRIAL_PASSWORD'), { code: stageFailure.code,
+        failureStage: stageFailure.stage, initialFailure: stageFailure, ...(stageFailure.native ? { nativeFailure: stageFailure.native } : {}) });
       if (prepareDelayMs) await new Promise(resolve => setTimeout(resolve, prepareDelayMs)); return state('staged'); },
     resumeNotionApplication: async () => { calls.push('resume'); stageResolve();
       if (resumeDelayMs) await new Promise(resolve => setTimeout(resolve, resumeDelayMs));
       if (resumeFailure) throw Object.assign(new Error('PRIVATE_TRIAL_PASSWORD'), { code: 'APPLICATION_APP_RESUME_UNCONFIRMED' }); return state('running'); },
     stopNotionApplication: async () => { calls.push('stop');
+      if (stopDelayMs) await new Promise(resolve => setTimeout(resolve, stopDelayMs));
       if (stopInitialFailureOnly) return failedStage();
-      return stageTimeout ? { ...cleanup(), failure: stageFailure, initialFailure: stageFailure, cleanupFailure: null } : cleanup(); },
+      return stageTimeout || preparationFailure ? { ...cleanup(), failure: stageFailure, initialFailure: stageFailure, cleanupFailure: null } : cleanup(); },
     applicationSnapshot: async () => { calls.push('snapshot');
       /* The controller reports that the guardian already stopped the exact
        * child. The trial must end its observation window then instead of
@@ -90,6 +96,7 @@ function fixture({ dirty = false, selectedRefused = false, missingEOF = false, f
           ? { ...options, timeoutMs: prepareTimeoutMs } : options);
       };
       controlled.close = call.close;
+      controlled.stopTimeoutMs = call.stopTimeoutMs;
       controlled.snapshot = () => { const value = call.snapshot();
         if (diagnosticOverride) diagnosticOverride(value.diagnostics, bound); return value; };
       return controlled;
@@ -181,6 +188,7 @@ test('carrier availability and another selected application do not depend on Not
     ['candidate', { carrierOnly: true }], ['candidate', { applicationPath: target }], ['signature', target],
   ]);
   assert.equal(report.phase, 'cleaned'); assert.equal(report.lifecyclePassed, true); assert.equal(report.cleanupComplete, true);
+  assert.equal(report.udpPolicy, 'block'); assert.equal(report.udpSupported, false);
   assert.deepEqual(value.calls, ['prepareRoute', 'prepare', 'resume', 'stop', 'snapshot', 'shutdown']);
 });
 
@@ -386,6 +394,27 @@ test('a native stage timeout followed by bound retryable status can complete fre
   assert.equal(value.callOptions.find(item => item.method === 'stopNotionApplication').timeoutMs, 60000,
     'the stop RPC must cover the bounded stage-outcome wait and both native cleanup waits');
   assert.equal(JSON.stringify(report).includes('PRIVATE_TRIAL_PASSWORD'), false);
+});
+
+test('the trial selects the verified prep budget for both a direct refusal and later prep diagnostics after stage timeout', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const laterDiagnostic of [false, true]) {
+    let current = 0;
+    const value = fixture({ ...(laterDiagnostic ? { stageTimeout: true, preparationAfterTimeout: true } : { preparationFailure: true }),
+      stopDelayMs: 93000, now: () => current });
+    let settled = false;
+    const completion = run(value).finally(() => { settled = true; });
+    while (!value.calls.includes('stop')) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(value.callOptions.find(item => item.method === 'stopNotionApplication').timeoutMs, 110000);
+    current = 60000; t.mock.timers.tick(60000); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false); assert.equal(value.trial.snapshot().cleanupComplete, false);
+    current = 93000; t.mock.timers.tick(33000); const report = await completion;
+    assert.equal(report.cleanupComplete, true); assert.equal(report.cleanupUncertain, false);
+    assert.equal(report.initialFailure.code, laterDiagnostic ? 'APPLICATION_APP_STAGE_TIMEOUT' : 'APPLICATION_APP_NATIVE_REFUSED');
+    assert.equal(report.sessionDiagnostics.uncertaintyLatched, false);
+    const timing = report.sessionDiagnostics.callTimings.find(item => item.method === 'stopNotionApplication');
+    assert.equal(timing.requestedTimeoutMs, 110000); assert.equal(timing.elapsedMs, 93000);
+  }
 });
 
 test('an unresolved stop that repeats only the initial stage failure does not invent a cleanup failure', async () => {

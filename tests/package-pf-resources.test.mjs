@@ -47,7 +47,8 @@ const upgradeInputs = ['installer-upgrade-f8.h', 'known-installations/f8.manifes
   'installer-upgrade-88f8.h', 'known-installations/88f8.manifest.json',
   'installer-upgrade-0b6d.h', 'known-installations/0b6d.manifest.json',
   'installer-upgrade-0359.h', 'known-installations/0359.manifest.json',
-  'installer-upgrade-6e95.h', 'known-installations/6e95.manifest.json'];
+  'installer-upgrade-6e95.h', 'known-installations/6e95.manifest.json',
+  'installer-upgrade-9ff6.h', 'known-installations/9ff6.manifest.json'];
 const linkedAppFilterInputs = [
   'pf-filter-command.c', 'pf-filter-command.h',
   'pf-filter-transaction.c', 'pf-filter-transaction.h',
@@ -112,7 +113,8 @@ test('PF build pins the complete eight-module runtime including the Notion front
   assert.equal(PF_MANIFEST_FILES['stateless-verifier.mjs'], false);
   assert.deepEqual(PF_RUNTIME_MODULE_FILES, Object.keys(PF_MANIFEST_FILES).filter(name => name.endsWith('.mjs')));
   assert.equal(Object.isFrozen(PF_RUNTIME_MODULE_FILES), true);
-  assert.deepEqual(PF_BUILD_DEPENDENCY_INPUTS, ['scripts/prepare-playwright-driver.mjs', 'scripts/prepare-proxy-core.mjs']);
+  assert.deepEqual(PF_BUILD_DEPENDENCY_INPUTS, ['scripts/prepare-playwright-driver.mjs', 'scripts/prepare-proxy-core.mjs',
+    'scripts/create-source-archive.mjs', 'scripts/source-archive.mjs']);
   assert.equal(Object.isFrozen(PF_BUILD_DEPENDENCY_INPUTS), true);
 });
 
@@ -255,6 +257,6 @@ test('PF acceptance fixture inputs must match the current dedicated source inven
 
 test('a self-authored complete manifest cannot replace the pinned source build', { skip }, async t => {
   const value = await fixture(t);
-  assert.equal(Object.keys(value.manifest.nativeSourceFiles).length, 141);
+  assert.equal(Object.keys(value.manifest.nativeSourceFiles).length, 143);
   await assert.rejects(value.inspect(), { code: 'ENOENT' });
 });

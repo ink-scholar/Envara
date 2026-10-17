@@ -21,8 +21,8 @@ import { createPersistentPFNotionSessionClient, validatePFNotionSessionRequest,
 export const PF_ATTACH_POLL_INTERVAL_MS = 2000;
 
 export const PF_NOTION_TRIAL_CANDIDATE = Object.freeze({
-  authorizerSHA256: 'd7522341ce246d5f89902a3f3fbbd46513d980cc6f85cd7df8b601d07de5124f',
-  manifestSHA256: '9ff646e3ea1f2be1d70cad2c5e2457e8c9e0aa513a435f29a227f94b15b8b347',
+  authorizerSHA256: 'd3e559d33a353caefd78425f9d97ac7c045347da0b267afee361956f8af1a584',
+  manifestSHA256: '1c7f4b8a11cd437a194038e413fab45c8dfc9e7872f044f74b1e815d1105571a',
 });
 /* The bundled carrier is named after the manifest it carries. Deriving the path
  * from the pin keeps a single source of truth: a pinned candidate with a stale

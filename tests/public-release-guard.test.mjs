@@ -7,12 +7,34 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import * as asar from '@electron/asar';
-import { scanPublicSource, scanPublicApp } from '../scripts/verify-public-release.mjs';
+import { gzipSync } from 'node:zlib';
+import { scanPublicSource, scanPublicApp, scanPublicSourceArchive } from '../scripts/verify-public-release.mjs';
+import { inspectSourceArchive } from '../scripts/source-archive.mjs';
 
 const execute = promisify(execFile);
 const scannerPath = new URL('../scripts/verify-public-release.mjs', import.meta.url);
 const count = (report, file, rule) => report.findings.find(item => item.file === file && item.rule === rule)?.count ?? 0;
 const privateKey = () => generateKeyPairSync('ec', { namedCurve: 'prime256v1', privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } }).privateKey;
+function sourceTar(entries) {
+  const blocks = [];
+  for (const { name, type = '0', body = '', uname = '', uid = 0, mtime = 0, linkpath = '' } of entries) {
+    const header = Buffer.alloc(512), content = Buffer.from(body);
+    const octal = (at, length, value) => header.write(value.toString(8).padStart(length - 1, '0') + '\0', at, length);
+    header.write(name, 0, 100); octal(100, 8, 0o644); octal(108, 8, uid); octal(116, 8, 0);
+    octal(124, 12, content.length); octal(136, 12, mtime); header.fill(32, 148, 156);
+    header.write(type, 156, 1); header.write(linkpath, 157, 100); header.write('ustar\0', 257, 6); header.write('00', 263, 2); header.write(uname, 265, 32);
+    const sum = header.reduce((total, byte) => total + byte, 0); header.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8);
+    blocks.push(header, content, Buffer.alloc((512 - content.length % 512) % 512));
+  }
+  return gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]));
+}
+function pax(fields) {
+  return Object.entries(fields).map(([key, value]) => {
+    const text = `${key}=${value}\n`; let size = Buffer.byteLength(text) + 2;
+    while (Buffer.byteLength(`${size} ${text}`) !== size) size = Buffer.byteLength(`${size} ${text}`);
+    return `${size} ${text}`;
+  }).join('');
+}
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'envara-release-guard-'));
@@ -142,4 +164,62 @@ test('CLI findings fail the command and never print the private value', async t 
     assert.ok(!error.stdout.includes(key)); assert.equal(error.stderr, '');
     return true;
   });
+});
+
+test('known source tar metadata reports accounts, AppleDouble and PAX attributes without values', async t => {
+  const f = await fixture(t), account = 'private-build-account', attribute = 'private-quarantine-origin';
+  const apple = Buffer.alloc(26); apple.writeUInt32BE(0x00051607, 0); apple.writeUInt32BE(0x00020000, 4);
+  const archive = await f.put('mihomo-corresponding-source.tar.gz', sourceTar([
+    { name: 'source/LICENSE', uname: account, uid: 501, mtime: 123, body: 'upstream notice' },
+    { name: 'source/._LICENSE', body: apple },
+    { name: 'PaxHeaders/main.go', type: 'x', body: pax({ 'SCHILY.xattr.com.apple.quarantine': attribute }) },
+    { name: 'source/main.go', body: 'package main' },
+  ]));
+  const report = await scanPublicSourceArchive({ archive, home: f.home, repoRoot: f.repoRoot });
+  for (const rule of ['ARCHIVE_ACCOUNT_METADATA', 'ARCHIVE_APPLEDOUBLE', 'ARCHIVE_EXTENDED_ATTRIBUTES', 'ARCHIVE_HOST_METADATA']) assert.ok(count(report, 'mihomo-corresponding-source.tar.gz', rule));
+  assert.equal(JSON.stringify(report).includes(account), false); assert.equal(JSON.stringify(report).includes(attribute), false);
+  await assert.rejects(inspectSourceArchive(archive), { code: 'SOURCE_ARCHIVE_METADATA_REFUSED' });
+  assert.equal((await f.source()).ok, false, 'source inventory also checks known archive metadata');
+});
+
+test('clean portable source retains public upstream fixtures and valid PAX paths/relative links', async () => {
+  const archive = sourceTar([
+    { name: 'source/LICENSE', uname: 'root', body: 'public license' },
+    { name: 'PaxHeaders/long', type: 'x', body: pax({ path: `source/vendor/${'long-'.repeat(30)}.go` }) },
+    { name: 'source/placeholder', body: 'package vendor' },
+    { name: 'source/vendor/testdata/example.pem', body: privateKey() },
+    { name: 'source/vendor/license-link', type: '2', linkpath: '../LICENSE' },
+  ]);
+  const seen = [], result = await inspectSourceArchive(archive, { onEntry: entry => seen.push(entry) });
+  assert.equal(result.verified, true); assert.equal(result.entries, 4); assert.equal(result.headers, 5);
+  assert.equal(seen[1].name.startsWith('source/vendor/long-'), true); assert.equal(seen[3].linkpath, '../LICENSE');
+  assert.match(seen[2].bytes.toString(), /BEGIN PRIVATE KEY/, 'metadata inspection does not relabel public upstream test content');
+});
+
+test('nested source metadata is inspected in asar and external authorization resources', async t => {
+  const f = await fixture(t), dirty = sourceTar([{ name: 'source/file', uname: 'private-builder' }]);
+  const a = await application(f, { 'main.js': 'export {};', 'vendor/mihomo-corresponding-source.tar.gz': dirty });
+  const relative = 'Contents/Resources/local-authorization/Carrier.app/Contents/Resources/mihomo-corresponding-source.tar.gz';
+  await mkdir(path.dirname(path.join(a.app, relative)), { recursive: true }); await writeFile(path.join(a.app, relative), dirty);
+  const report = await a.scan();
+  assert.equal(count(report, 'Contents/Resources/app.asar:vendor/mihomo-corresponding-source.tar.gz', 'ARCHIVE_ACCOUNT_METADATA'), 1);
+  assert.equal(count(report, relative, 'ARCHIVE_ACCOUNT_METADATA'), 1);
+});
+
+test('source inspection refuses truncation, unsafe paths, excessive expansion and hidden gzip members', async () => {
+  const archive = sourceTar([{ name: 'source/one' }, { name: 'source/two' }]);
+  for (const limits of [{ compressedBytes: archive.length - 1 }, { expandedBytes: 512 }, { entries: 1 }]) {
+    await assert.rejects(inspectSourceArchive(archive, { limits }), { code: 'SOURCE_ARCHIVE_LIMIT_EXCEEDED' });
+  }
+  const extended = sourceTar([{ name: 'PaxHeader', type: 'x', body: pax({ path: 'source/file' }) }, { name: 'source/file' }]);
+  await assert.rejects(inspectSourceArchive(extended, { limits: { paxBytes: 1 } }), { code: 'SOURCE_ARCHIVE_LIMIT_EXCEEDED' });
+  const second = gzipSync(Buffer.alloc(0)); second[3] |= 8;
+  const namedSecond = Buffer.concat([second.subarray(0, 10), Buffer.from('private-host-name\0'), second.subarray(10)]);
+  for (const invalid of [archive.subarray(0, -2), Buffer.concat([archive, namedSecond]),
+    sourceTar([{ name: 'PaxHeader', type: 'x', body: pax({ path: '../outside' }) }, { name: 'source/file' }]),
+    sourceTar([{ name: 'source/link', type: '2', linkpath: '../../outside' }])]) {
+    await assert.rejects(inspectSourceArchive(invalid), { code: 'SOURCE_ARCHIVE_INVALID' });
+  }
+  const metadata = await inspectSourceArchive(sourceTar([{ name: 'source/._real-source', body: 'real source bytes' }]), { requireClean: false });
+  assert.equal(metadata.findings[0].rule, 'ARCHIVE_MACOS_METADATA_NAME', 'suspicious names are refused explicitly, never silently deleted');
 });

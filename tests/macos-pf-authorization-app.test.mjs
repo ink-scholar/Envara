@@ -105,6 +105,7 @@ test('later updates accept only fixed reviewed priors and report private runtime
   '0b6d9bffd6629d4855bf44b5d7f2e99b88e9732020cd84f72919dcae35020a13',
   '03596ac0849e4e91a39367934e7555ab166eb9084a5ca2bb15a3a0230b9d0539',
   '6e95b89a2a3ca407abf6b80591d03c9b7581db32103f51e3f6db29b3cf726f7c',
+  '9ff646e3ea1f2be1d70cad2c5e2457e8c9e0aa513a435f29a227f94b15b8b347',
   '43b392665e496cba2bc2675284fd2d03390ea92db85496d07e49ba696cd7c2a7',
   'acfc112b497c680001c7ce37dcdc99021b51de615072b15c096895900ecfa0c6',
   'c34cba313dad0712fc53eaea514d8466c6710eb70cc7840a1ca4238eea3817e4',
@@ -137,7 +138,7 @@ test('authorization plans accept every exact installer prior and reject a change
   const table = installer.match(/known_prior_snapshots\[\]\s*=\s*\{([^}]+)\}/)?.[1];
   assert.ok(table, 'The installer must declare its fixed prior table');
   const tags = [...table.matchAll(/&ENVARA_PF_UPGRADE_([A-Z0-9]+)_SNAPSHOT/g)].map(([, tag]) => tag.toLowerCase());
-  assert.ok(tags.includes('554c') && tags.includes('2af8') && tags.includes('005f') && tags.includes('88f8') && tags.includes('0b6d') && tags.includes('0359') && tags.includes('6e95'));
+  assert.ok(tags.includes('554c') && tags.includes('2af8') && tags.includes('005f') && tags.includes('88f8') && tags.includes('0b6d') && tags.includes('0359') && tags.includes('6e95') && tags.includes('9ff6'));
   assert.equal(new Set(tags).size, tags.length);
   for (const tag of tags) {
     const bytes = await readFile(new URL(`known-installations/${tag}.manifest.json`, base));

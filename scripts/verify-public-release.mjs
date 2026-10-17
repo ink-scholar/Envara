@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import * as asar from '@electron/asar';
+import { inspectSourceArchive, SOURCE_ARCHIVE_LIMITS } from './source-archive.mjs';
 
 const execute = promisify(execFile);
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -18,7 +19,8 @@ const localhostTLSFixtures = new Set(['tests/claude-download-fixture.mjs', 'test
 const localhostTLSKeySha256 = 'e15e1d35ce40272bdcaddc93ae92a29c09cbc9476f8181f24fc631571c475df4';
 const coverage = ['Current home/repository paths in UTF-8, UTF-16 and common escapes',
   'Complete PEM private keys and selected service-token formats',
-  'Credential-bearing URLs and proxy configuration', 'Local runtime, signing and evidence filenames'];
+  'Credential-bearing URLs and proxy configuration', 'Local runtime, signing and evidence filenames',
+  'Bounded tar/PAX metadata in known corresponding-source archives; no recursive content classification'];
 const exampleValue = value => /fixture|example|sample|placeholder|redacted|dummy|replace.?me|your[-_ ]|^\$\{|^<|^test[-_]/i.test(value)
   || /^(?:user(?:name)?|pw|pass(?:word)?|token|secret|changeme|user:pass(?:word)?)$/i.test(value)
   || /^(?:(?:stored|group|profile|session|proxy|node|test|fixture|dummy)[-_])+(?:password|secret|token|key|credential)$/i.test(value);
@@ -26,6 +28,7 @@ const reservedHost = host => /^(?:localhost|127\.|0\.|192\.0\.2\.|198\.51\.100\.
   || /(?:^|\.)(?:example\.(?:com|net|org)|invalid|test|example|localhost)$/i.test(host);
 const within = (root, target) => { const relative = path.relative(root, target); return !relative || !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative); };
 const posix = value => value.split(path.sep).join('/');
+const knownSourceArchive = label => /(?:^|[/:])mihomo-corresponding-source\.tar\.gz$/.test(label);
 
 function forbiddenFile(filename, mode) {
   filename = filename.replace(/^.*?\.asar:/, '');
@@ -128,6 +131,7 @@ function collector({ home, repoRoot, mode }) {
 }
 
 async function scanFile(filename, label, scan) {
+  if (knownSourceArchive(label)) return scanCorrespondingSource(filename, label, scan);
   const inspect = scan.scanner(label);
   let tail = Buffer.alloc(0), read = 0;
   try {
@@ -138,6 +142,23 @@ async function scanFile(filename, label, scan) {
     }
     inspect(tail, { offset: read - tail.length, final: true });
   } catch { scan.add(label, 'SCAN_READ_FAILED'); }
+}
+
+async function scanCorrespondingSource(input, label, scan) {
+  scan.scanner(label);
+  try {
+    const report = await inspectSourceArchive(input, { requireClean: false });
+    for (const finding of report.findings) scan.add(label, finding.rule, finding.count);
+  } catch (error) {
+    scan.add(label, ['SOURCE_ARCHIVE_INVALID', 'SOURCE_ARCHIVE_LIMIT_EXCEEDED'].includes(error.code) ? error.code : 'SCAN_SOURCE_ARCHIVE_FAILED');
+  }
+}
+
+/** The packaged source archive's metadata can be checked without rescanning an app. */
+export async function scanPublicSourceArchive({ archive, repoRoot = projectRoot, home = os.homedir() }) {
+  const scan = collector({ home, repoRoot: path.resolve(repoRoot), mode: 'source' });
+  await scanCorrespondingSource(archive, path.basename(archive), scan);
+  return scan.report();
 }
 
 async function scanLink(filename, label, root, scan) {
@@ -176,6 +197,9 @@ async function scanArchive(filename, label, scan) {
       if (info.link) {
         scan.scanner(name)(Buffer.from(info.link));
         if (path.posix.isAbsolute(info.link) || path.posix.normalize(info.link).startsWith('../')) scan.add(name, 'EXTERNAL_SYMLINK');
+      } else if (knownSourceArchive(name)) {
+        if (info.size > SOURCE_ARCHIVE_LIMITS.compressedBytes) scan.add(name, 'SOURCE_ARCHIVE_LIMIT_EXCEEDED');
+        else await scanCorrespondingSource(asar.extractFile(filename, relative), name, scan);
       } else scan.scanner(name)(asar.extractFile(filename, relative));
     }
   } catch { scan.add(label, 'SCAN_ARCHIVE_FAILED'); }

@@ -25,6 +25,10 @@ verbatim from the checksum-verified official executable, and recorded in source
 provenance. Dependency copyright and license files stay in their original source
 directories.
 
+The corresponding-source archive uses portable ownership and timestamps and
+excludes macOS resource-fork sidecars and extended attributes. Packaging checks
+the archive metadata when creating or reusing the source bundle.
+
 To rebuild, extract the source archive and run
 `node ENVARA_BUILD_FROM_SOURCE.mjs` inside the extracted directory with a
 compatible Go toolchain installed. This compiles the upstream `with_gvisor`

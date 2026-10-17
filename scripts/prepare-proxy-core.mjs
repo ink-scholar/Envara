@@ -7,12 +7,15 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { gunzipSync } from 'node:zlib';
 import { selectedZipFiles, tarGzFiles } from './prepare-playwright-driver.mjs';
+import { createSourceArchive } from './create-source-archive.mjs';
+import { inspectSourceArchive } from './source-archive.mjs';
 
 const execFile = promisify(execFileCallback);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const PROXY_CORE_VERSION = 'v1.19.32';
 export const PROXY_CORE_COMMIT = '88dcbf7f1614a67c3b36b848ee3592dfa92ada36';
 export const PROXY_CORE_SOURCE_SHA256 = '77643ec763a92b330a0b4a44870f78ee05c08792897e7f5e40a3654415c5f077';
+export const SOURCE_ARCHIVE_METADATA_POLICY = 'portable-tar-v1';
 const SOURCE_ARCHIVE = 'mihomo-corresponding-source.tar.gz';
 const ARTIFACTS = Object.freeze({
   'darwin-arm64': ['mihomo-darwin-arm64-v1.19.32.gz', '3312a6780652c622890fd4357c6a853bbf865464fd047ac7b7f52dab8de18652'],
@@ -143,7 +146,7 @@ export async function prepareProxyCoreSource({ artifact, sourceBytes, binaryByte
       dependencyVerification: 'Go module download verifies pinned go.sum checksums before go mod vendor.',
       compiler: 'A compatible Go toolchain is a build prerequisite, not included in this source archive.',
     }, null, 2)}\n`);
-    await execImpl('tar', ['-czf', destination, '-C', work, `mihomo-${artifact.commit}`], { timeout: 120000, maxBuffer: 65536 });
+    await createSourceArchive({ sourceDir, destination });
     return { filename: SOURCE_ARCHIVE, sha256: await digest(destination), offlineDependencies: true, releaseCA: true };
   } finally { await rm(work, { recursive: true, force: true }); }
 }
@@ -154,10 +157,12 @@ async function verifiedPreparedBundle(outputDir, artifact, validateImpl) {
     if (provenance.core !== 'mihomo' || provenance.version !== artifact.version || provenance.commit !== artifact.commit ||
         provenance.platform !== artifact.platform || provenance.arch !== artifact.arch ||
         provenance.sha256?.archive !== artifact.archiveSha256 || provenance.sha256?.sourceArchive !== artifact.sourceSha256 ||
-        provenance.correspondingSource !== SOURCE_ARCHIVE || provenance.source?.offlineDependencies !== true || provenance.source?.releaseCA !== true) return null;
+        provenance.correspondingSource !== SOURCE_ARCHIVE || provenance.source?.offlineDependencies !== true || provenance.source?.releaseCA !== true ||
+        provenance.source?.archiveMetadata?.policy !== SOURCE_ARCHIVE_METADATA_POLICY) return null;
     for (const [name, hash] of [[artifact.binaryName, provenance.sha256.binary], [SOURCE_ARCHIVE, provenance.sha256.correspondingSource], ['LICENSE', provenance.sha256.license]]) {
       verifyProxyCoreHash(await readFile(path.join(outputDir, name)), hash);
     }
+    await inspectSourceArchive(path.join(outputDir, SOURCE_ARCHIVE));
     await readFile(path.join(outputDir, 'SOURCE.md'));
     await validateImpl(path.join(outputDir, artifact.binaryName), artifact);
     return { outputDir, binaryPath: path.join(outputDir, artifact.binaryName), provenance, reused: true };
@@ -191,6 +196,10 @@ export async function prepareProxyCore({ rootDir = ROOT, outputDir = path.join(r
     if (source.offlineDependencies !== true || source.releaseCA !== true || source.sha256 !== await digest(path.join(stage, SOURCE_ARCHIVE))) {
       throw new Error('Corresponding Mihomo source bundle is incomplete or has an invalid digest.');
     }
+    const sourceInspection = await inspectSourceArchive(path.join(stage, SOURCE_ARCHIVE));
+    source.archiveMetadata = { policy: SOURCE_ARCHIVE_METADATA_POLICY, verified: true,
+      entries: sourceInspection.entries, expandedBytes: sourceInspection.expandedBytes };
+    await chmod(path.join(stage, SOURCE_ARCHIVE), 0o644);
     await copyFile(path.join(rootDir, 'third_party', 'proxy-core', 'LICENSE'), path.join(stage, 'LICENSE'));
     await copyFile(path.join(rootDir, 'third_party', 'proxy-core', 'SOURCE.md'), path.join(stage, 'SOURCE.md'));
     const provenance = {

@@ -6,7 +6,8 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import { access, copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { driverArtifacts, tarGzFiles, NODE_VERSION } from './prepare-playwright-driver.mjs';
-import { PROXY_CORE_VERSION, PROXY_CORE_COMMIT, proxyCoreArtifacts } from './prepare-proxy-core.mjs';
+import { PROXY_CORE_VERSION, PROXY_CORE_COMMIT, SOURCE_ARCHIVE_METADATA_POLICY, proxyCoreArtifacts } from './prepare-proxy-core.mjs';
+import { inspectSourceArchive } from './source-archive.mjs';
 
 const execute = promisify(execFileCallback);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -19,7 +20,8 @@ async function exists(filename) { try { await access(filename); return true; } c
 export const PF_RUNTIME_MODULE_FILES = Object.freeze(['helper.mjs', 'controller.mjs',
   'helper-production-native.mjs', 'notion-front-service.mjs', 'notion-socks-front.mjs', 'notion-socks-reader.mjs',
   'policy.mjs', 'stateless-verifier.mjs']);
-export const PF_BUILD_DEPENDENCY_INPUTS = Object.freeze(['scripts/prepare-playwright-driver.mjs', 'scripts/prepare-proxy-core.mjs']);
+export const PF_BUILD_DEPENDENCY_INPUTS = Object.freeze(['scripts/prepare-playwright-driver.mjs', 'scripts/prepare-proxy-core.mjs',
+  'scripts/create-source-archive.mjs', 'scripts/source-archive.mjs']);
 
 /** Build resources only. This never installs a helper, opens utun, or invokes PF. */
 export async function buildMacOSPF({ root = ROOT, output = path.join(root, 'build/app-routing/macos-pf'),
@@ -128,6 +130,8 @@ export async function buildMacOSPF({ root = ROOT, output = path.join(root, 'buil
     'known-installations/0359.manifest.json',
     'installer-upgrade-6e95.h',
     'known-installations/6e95.manifest.json',
+    'installer-upgrade-9ff6.h',
+    'known-installations/9ff6.manifest.json',
     'pf-filter-command.c',
     'pf-filter-command.h',
     'pf-filter-transaction.c',
@@ -199,11 +203,13 @@ export async function buildMacOSPF({ root = ROOT, output = path.join(root, 'buil
     if (core.core !== 'mihomo' || core.version !== PROXY_CORE_VERSION || core.commit !== PROXY_CORE_COMMIT ||
         core.platform !== platform || core.arch !== arch || core.sha256?.archive !== artifact.archiveSha256 ||
         core.sha256?.sourceArchive !== artifact.sourceSha256) throw new Error('Mihomo provenance does not match the pinned native dependency.');
+    if (core.source?.archiveMetadata?.policy !== SOURCE_ARCHIVE_METADATA_POLICY) throw new Error('Mihomo source archive requires clean metadata preparation.');
     for (const [name, hash, target] of [[artifact.binaryName, core.sha256.binary, 'mihomo'],
       [core.correspondingSource, core.sha256.correspondingSource, 'mihomo-corresponding-source.tar.gz'], ['LICENSE', core.sha256.license, 'mihomo-LICENSE']]) {
       await copyFile(path.join(coreDir, name), path.join(stage, target));
       if (await fileDigest(path.join(stage, target)) !== hash) throw new Error('Pinned Mihomo file hash does not match.');
     }
+    await inspectSourceArchive(path.join(stage, 'mihomo-corresponding-source.tar.gz'));
     await copyFile(path.join(coreDir, 'SOURCE.md'), path.join(stage, 'mihomo-SOURCE.md'));
     const native = path.join(stage, 'envara-pf-native');
     await exec('/usr/bin/make', ['OUT=' + native], { cwd: source, timeout: 60000, maxBuffer: 1024 * 1024 });

@@ -4,9 +4,10 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { gzipSync } from 'node:zlib';
+import { gzipSync, gunzipSync } from 'node:zlib';
+import { c as createTar } from 'tar';
 import { extractProxyCoreBinary, extractProxyCoreCA, prepareProxyCore, proxyCoreArtifacts, verifyProxyCoreHash,
-  PROXY_CORE_VERSION, PROXY_CORE_COMMIT } from '../scripts/prepare-proxy-core.mjs';
+  PROXY_CORE_VERSION, PROXY_CORE_COMMIT, SOURCE_ARCHIVE_METADATA_POLICY } from '../scripts/prepare-proxy-core.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 async function fixture(t) {
@@ -18,7 +19,13 @@ async function fixture(t) {
   const binary = Buffer.from('A fixture executable');
   const archive = gzipSync(binary);
   const source = Buffer.from('A fixture upstream source');
-  const completeSource = Buffer.from('A fixture vendored source');
+  const sourceDir = path.join(rootDir, 'fixture-source');
+  await mkdir(sourceDir);
+  await writeFile(path.join(sourceDir, 'LICENSE'), 'A fixture vendored source');
+  const sourceFile = path.join(rootDir, 'fixture-source.tar.gz');
+  await createTar({ cwd: rootDir, file: sourceFile, portable: true, noMtime: true,
+    gzip: { portable: true } }, ['fixture-source']);
+  const completeSource = await readFile(sourceFile);
   const artifact = { ...proxyCoreArtifacts(), archiveSha256: hash(archive), sourceSha256: hash(source) };
   let downloads = 0;
   let validations = 0;
@@ -89,8 +96,56 @@ test('prepared bundle includes executable, full source, license and immutable pr
   assert.equal(prepared.provenance.sha256.binary, hash(f.binary));
   assert.equal(prepared.provenance.sha256.correspondingSource, hash(f.completeSource));
   assert.equal(prepared.provenance.source.offlineDependencies, true);
+  assert.equal(prepared.provenance.source.archiveMetadata.policy, SOURCE_ARCHIVE_METADATA_POLICY);
+  assert.equal(prepared.provenance.source.archiveMetadata.verified, true);
   assert.equal(prepared.reused, false);
   assert.deepEqual(f.counts(), { downloads: 2, validations: 1, sourceBuilds: 1 });
+});
+
+function withSyntheticOwner(archive) {
+  const bytes = gunzipSync(archive);
+  bytes.fill(0, 265, 297);
+  bytes.write('synthetic-builder', 265, 'ascii');
+  bytes.fill(0x20, 148, 156);
+  let checksum = 0;
+  for (const byte of bytes.subarray(0, 512)) checksum += byte;
+  bytes.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148, 'ascii');
+  return gzipSync(bytes);
+}
+
+test('legacy provenance and owner-bearing source caches are rebuilt even with matching hashes', async t => {
+  const f = await fixture(t);
+  const first = await prepareProxyCore(f.options);
+  const provenanceFile = path.join(first.outputDir, 'provenance.json');
+  const oldProvenance = JSON.parse(await readFile(provenanceFile, 'utf8'));
+  delete oldProvenance.source.archiveMetadata;
+  await writeFile(provenanceFile, JSON.stringify(oldProvenance));
+  const migrated = await prepareProxyCore(f.options);
+  assert.equal(migrated.reused, false);
+  const dirty = withSyntheticOwner(f.completeSource);
+  const forged = JSON.parse(await readFile(provenanceFile, 'utf8'));
+  forged.sha256.correspondingSource = hash(dirty);
+  forged.source.sha256 = hash(dirty);
+  await writeFile(path.join(first.outputDir, 'mihomo-corresponding-source.tar.gz'), dirty);
+  await writeFile(provenanceFile, JSON.stringify(forged));
+  const repaired = await prepareProxyCore(f.options);
+  assert.equal(repaired.reused, false);
+  assert.deepEqual(await readFile(path.join(first.outputDir, 'mihomo-corresponding-source.tar.gz')), f.completeSource);
+  assert.equal(f.counts().sourceBuilds, 3);
+});
+
+test('new source with correct digest but host metadata cannot replace the previous clean bundle', async t => {
+  const f = await fixture(t);
+  const first = await prepareProxyCore(f.options);
+  const before = await readFile(path.join(first.outputDir, 'provenance.json'));
+  const dirty = withSyntheticOwner(f.completeSource);
+  await assert.rejects(prepareProxyCore({ ...f.options, force: true, prepareSourceImpl: async ({ destination }) => {
+    await writeFile(destination, dirty);
+    return { sha256: hash(dirty), offlineDependencies: true, releaseCA: true,
+      archiveMetadata: { policy: SOURCE_ARCHIVE_METADATA_POLICY, verified: true } };
+  } }), { code: 'SOURCE_ARCHIVE_METADATA_REFUSED' });
+  assert.deepEqual(await readFile(path.join(first.outputDir, 'provenance.json')), before);
+  assert.deepEqual(await readFile(path.join(first.outputDir, 'mihomo-corresponding-source.tar.gz')), f.completeSource);
 });
 
 test('reuse checks both executable and source hashes and runs native version validation', async t => {

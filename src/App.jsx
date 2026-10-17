@@ -1413,6 +1413,7 @@ function WorkspaceApp() {
   /* The browsers an environment's links may use: the same network group and the
    * same node as the environment itself. */
   const [linkRouter, setLinkRouter] = useState(null);
+  const linkRoutingPending = !!(pending["setLinkRouter:"] || pending["requestSystemLinkRouting:"] || pending["disableSystemLinkRouting:"]);
   useEffect(() => {
     if (!api.isDesktop || page !== "settings") return;
     api.call("linkRouterStatus").then(value => setLinkRouter(value)).catch(() => setLinkRouter(null));
@@ -1620,9 +1621,18 @@ function WorkspaceApp() {
               }
             })} /></div><div className="settings-row"><div><strong>{t("本地数据")}</strong><span className="path-label">{t(system.dataDir)}</span></div><Button icon={FolderOpen} disabled={!api.isDesktop} onClick={() => perform("openDataDirectory")}>{t("打开目录")}</Button></div></div>
         {api.isDesktop && snapshot.legacyMigration?.available && <div className="settings-card settings-rows migration-settings"><div className="settings-row"><div><strong>{t("旧版本工作区")}</strong></div><Button onClick={previewMigration} disabled={pending["previewLegacyMigration:"]}>{t("迁移旧环境")}</Button></div></div>}
-        {api.isDesktop && linkRouter && <><div className="section-heading"><h2>{t("打开链接")}</h2></div><div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("链接由境舱浏览器打开")}</strong><span>{t("普通终端和附加软件的链接使用境舱浏览器；关闭后改用本机浏览器。Claude 会话的链接与浏览器工具仍使用绑定的境舱浏览器。")}</span></div>
-          <label className="proxy-check-option settings-switch"><input type="checkbox" checked={linkRouter.preference !== false} disabled={pending["setLinkRouter:"]} onChange={async event => { const result = await perform("setLinkRouter", { enabled: event.target.checked }); if (result.ok && result.result) setLinkRouter(result.result); }} /><span>{t(linkRouter.preference !== false ? "已开启" : "已关闭")}</span></label></div>
-          {linkRouter.preference !== false && linkRouter.available && !linkRouter.enabled && <div className="settings-row"><div><strong>{t("等待 macOS 允许")}</strong><span>{t("附加软件自己打开的链接（例如登录）要 macOS 允许后才能交给境舱浏览器；终端里的链接不受影响。")}</span></div><Button onClick={async () => { const result = await perform("setLinkRouter", { enabled: true }); if (result.ok && result.result) setLinkRouter(result.result); }} disabled={pending["setLinkRouter:"]}>{t("允许")}</Button></div>}</div></>}
+        {api.isDesktop && linkRouter && <><div className="section-heading"><h2>{t("打开链接")}</h2></div><div className="settings-card settings-rows">
+          <div className="settings-row"><div><strong>{t("境舱内打开链接")}</strong><span>{t("境舱与普通终端的链接使用所选浏览器；关闭后改用系统浏览器（环境外）。Claude 会话不受影响。")}</span></div>
+            <label className="proxy-check-option settings-switch"><input type="checkbox" aria-label={t("境舱内打开链接")} checked={linkRouter.preference !== false} disabled={linkRoutingPending} onChange={async event => { const result = await perform("setLinkRouter", { enabled: event.target.checked }); if (result.ok && result.result) setLinkRouter(result.result); }} /><span>{t(linkRouter.preference !== false ? "已开启" : "已关闭")}</span></label>
+          </div>
+          {linkRouter.available && <div className="settings-row"><div><strong>{t("附加应用链接接管（可选）")}</strong>
+            <span>{t(linkRouter.enabled ? "已启用系统链接接管。恢复原默认浏览器不会改变境舱内链接偏好。" : "仅用于附加应用通过 macOS 打开的链接。macOS 会请求将境舱设为默认浏览器；无关应用仍使用原默认浏览器，终端链接无需此授权。")}</span>
+            {!linkRouter.enabled && linkRouter.preference === false && <span>{t("请先开启境舱内链接。")}</span>}
+          </div>
+            {linkRouter.enabled ? <Button disabled={linkRoutingPending} onClick={async () => { const result = await perform("disableSystemLinkRouting"); if (result.ok && result.result) setLinkRouter(result.result); }}>{t("恢复原默认浏览器")}</Button>
+              : <Button disabled={linkRoutingPending || linkRouter.preference === false} onClick={async () => { const result = await perform("requestSystemLinkRouting"); if (result.ok && result.result) setLinkRouter(result.result); }}>{t("启用系统链接接管")}</Button>}
+          </div>}
+        </div></>}
         <div className="section-heading"><h2>{t("关于")}</h2></div><div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("Envara 境舱")}</strong><span>{t("开源的本地独立工作空间")}</span></div><span className="version-label">{system.appVersion || "—"}</span></div><div className="settings-row"><div><strong>{t("浏览器内核许可")}</strong></div><Button onClick={() => perform("openDocumentation", {
               target: "runtime-license"
             })}>{t("查看许可")}</Button></div><div className="settings-row"><div><strong>GitHub</strong></div><Button icon={ArrowSquareOut} onClick={() => perform("openDocumentation", {

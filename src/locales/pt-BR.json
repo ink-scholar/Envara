@@ -1,4 +1,12 @@
 {
+  "境舱内打开链接": "Abrir links no Envara",
+  "境舱与普通终端的链接使用所选浏览器；关闭后改用系统浏览器（环境外）。Claude 会话不受影响。": "Os links do Envara e dos terminais comuns usam o navegador escolhido. Ao desativar, passam a usar o navegador do sistema (fora do ambiente). As sessões do Claude não são afetadas.",
+  "附加应用链接接管（可选）": "Gerenciamento de links de aplicativos vinculados (opcional)",
+  "仅用于附加应用通过 macOS 打开的链接。macOS 会请求将境舱设为默认浏览器；无关应用仍使用原默认浏览器，终端链接无需此授权。": "Aplica-se apenas aos links que aplicativos vinculados abrem pelo macOS. O macOS solicitará que o Envara seja definido como navegador padrão. Os demais aplicativos continuarão usando o navegador padrão anterior; os links dos terminais não precisam dessa autorização.",
+  "启用系统链接接管": "Ativar gerenciamento de links do sistema",
+  "已启用系统链接接管。恢复原默认浏览器不会改变境舱内链接偏好。": "O gerenciamento de links do sistema está ativado. Restaurar o navegador padrão anterior não altera a preferência de links no Envara.",
+  "请先开启境舱内链接。": "Ative primeiro a abertura de links no Envara.",
+  "恢复原默认浏览器": "Restaurar o navegador padrão anterior",
   "关联环境：{count}": "Ambientes vinculados: {count}",
   " · 绑定分组：{count}": " · Grupos vinculados: {count}",
   "设备模板（可选）": "Modelo de dispositivo (opcional)",

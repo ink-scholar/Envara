@@ -133,7 +133,7 @@ Go 后端改动使用对应包测试和并发 race 检查。原生 C/Objective-C
 - Windows、macOS Intel 和 Linux 的本次实机验收尚未完成，本次只提供 macOS arm64 制品。
 - 通用附加应用的系统 DNS 委托、外部辅助进程、所有故障情形和无关应用共存仍需逐项验证；缺少有效路由授权时必须拒绝启动。
 - Network Extension 备选路线需要相应签名、系统授权和独立验收。组件可读取状态不表示它已经激活。
-- 系统默认浏览器变更需要用户接受 macOS 自身提示；路由资料与配置隔离不建立独立系统用户、Keychain 或硬件身份。
+- 系统默认浏览器变更只在设置中明确启用附加应用链接接管时申请，由用户接受 macOS 自身提示；首次启动与内部链接开关不会自动申请。恢复原默认浏览器保留内部链接偏好。路由资料与配置隔离不建立独立系统用户、Keychain 或硬件身份。
 - 当前应用无 Developer ID 签名和公证。第三方原始签名和许可证按组件保留。
 
 [功能矩阵](capability-matrix.md) · [附加软件](application-routing-options.md) · [第三方声明](../THIRD_PARTY_NOTICES.md)

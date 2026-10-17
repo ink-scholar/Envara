@@ -12,6 +12,7 @@ import { showManagedApplicationWindow } from './application-window.mjs';
 import { TerminalLinkChannel, LinkSocketServer } from './terminal-link-channel.mjs';
 import { LinkRouter } from './link-router.mjs';
 import { LinkPreferences } from './link-preferences.mjs';
+import { createLinkRoutingControls } from './link-routing-controls.mjs';
 import { EnvaraService } from './service.mjs';
 import { BrowserRuntime } from './runtime.mjs';
 import { SidecarManager } from './sidecar-manager.mjs';
@@ -213,6 +214,7 @@ const applicationMethods = new Set(['saveApplication', 'startApplication', 'stop
   'getApplicationRoutingStatus', 'setupApplicationRouting', 'setApplicationLinkBrowser']);
 for (const method of [...applicationMethods, 'pickApplication', 'listLocalApplications', 'applicationIcon',
   'showApplicationWindow', 'clearApplicationData', 'signInData', 'deleteSignInData', 'linkRouterStatus', 'setLinkRouter',
+  'requestSystemLinkRouting', 'disableSystemLinkRouting',
   'previewProxyNetwork', 'searchNetworkAddress', 'checkEnvironmentNetwork', 'openNetworkLocationMap']) allowedMethods.add(method);
 for (const method of ['runNotionTrial', 'stopNotionTrial', 'notionTrialSnapshot', 'exportNotionDiagnostics', 'applicationStorage', 'reclaimApplicationStorage']) allowedMethods.add(method);
 allowedMethods.add('exportEnvironment');
@@ -260,8 +262,8 @@ function linkRouterResources() {
 function linkRouterInstalled() {
   return path.join(app.getPath('userData'), 'link-router', 'EnvaraLinkRouter.app');
 }
-async function linkRouterRun(arguments_) {
-  const { stdout } = await execFileAsync(linkRouterInstalled() + '/Contents/MacOS/EnvaraLinkRouter', arguments_, { timeout: 120000, maxBuffer: 1024 * 1024 });
+async function linkRouterRun(arguments_, bundle = linkRouterInstalled()) {
+  const { stdout } = await execFileAsync(path.join(bundle, 'Contents/MacOS/EnvaraLinkRouter'), arguments_, { timeout: 120000, maxBuffer: 1024 * 1024 });
   return stdout.trim();
 }
 // Keep the router outside versioned app bundles so removing an old build is safe.
@@ -289,7 +291,7 @@ async function ensureLinkRouterInstalled() {
   }
   return target;
 }
-// Remember a refused system prompt instead of asking again at every launch.
+// Internal links stay enabled independently of explicit system-handler consent.
 const linkPreferencesFile = () => path.join(app.getPath('userData'), 'link-preferences.json');
 const linkPreferences = new LinkPreferences({ file: linkPreferencesFile });
 async function linkRouterStatus() {
@@ -297,8 +299,10 @@ async function linkRouterStatus() {
   const preference = { preference: saved.openInEnvironment, declined: Boolean(saved.declinedAt) };
   if (process.platform !== 'darwin') return { available: false, enabled: false, handler: null, previous: null, ...preference };
   try {
-    await ensureLinkRouterInstalled();
-    const status = JSON.parse(await linkRouterRun(['--status']) || '{}');
+    // The bundled helper reads the same per-user state without installing or
+    // registering a system handler merely because Settings asks for its status.
+    const status = JSON.parse(await linkRouterRun(['--status'], linkRouterResources()) || '{}');
+    if (status.router !== LINK_ROUTER_BUNDLE_ID) throw Object.assign(new Error('链接路由标识无效。'), { code: 'LINK_ROUTER_UNAVAILABLE' });
     return { available: true, enabled: status.enabled === true, handler: typeof status.handler === 'string' ? status.handler : null,
       previous: typeof status.previous === 'string' && status.previous ? status.previous : null, ...preference };
   } catch (error) { return { available: false, enabled: false, handler: null, previous: null, ...preference, errorCode: error.code ?? 'LINK_ROUTER_UNAVAILABLE' }; }
@@ -316,12 +320,9 @@ async function requestLinkRouter() {
   await linkPreferences.patch({ declinedAt: null });
   return { granted: true, output };
 }
-async function offerLinkRouting() {
-  const saved = linkPreferences.snapshot();
-  if (process.platform !== 'darwin' || !saved.openInEnvironment || saved.declinedAt) return;
-  const status = await linkRouterStatus();
-  if (status.available && !status.enabled) await requestLinkRouter();
-}
+const linkRoutingControls = createLinkRoutingControls({ preferences: linkPreferences,
+  status: linkRouterStatus, requestSystem: requestLinkRouter,
+  restoreSystem: () => linkRouterRun(['--disable'], linkRouterResources()) });
 
 let signInNames = null;
 let linkChannel = null;
@@ -417,17 +418,9 @@ async function handleCall(method, args = {}, caller = window) {
     });
   }
   if (method === 'linkRouterStatus') return linkRouterStatus();
-  if (method === 'setLinkRouter') {
-    if (typeof args.enabled !== 'boolean') throw Object.assign(new Error('链接设置参数无效。'), { code: 'LINK_ROUTER_REQUEST_INVALID' });
-    await linkPreferences.patch({ openInEnvironment: args.enabled });
-    /* On asks macOS (its own dialog decides). Off sends ordinary managed links
-     * to this Mac's browser and restores the previous default. Dedicated Claude
-     * sessions retain their explicit browser binding. */
-    if (args.enabled) { const outcome = await requestLinkRouter(); return { ...(await linkRouterStatus()), granted: outcome.granted }; }
-    const status = await linkRouterStatus();
-    if (status.enabled) await linkRouterRun(['--disable']);
-    return linkRouterStatus();
-  }
+  if (method === 'setLinkRouter') return linkRoutingControls.setPreference(args.enabled);
+  if (method === 'requestSystemLinkRouting') return linkRoutingControls.requestSystem();
+  if (method === 'disableSystemLinkRouting') return linkRoutingControls.disableSystem();
   if (method === 'signInData') return signInDataSnapshot();
   if (method === 'deleteSignInData') {
     if (typeof args.id !== 'string' || args.id.length > 80) throw Object.assign(new Error('未找到这份登录数据。'), { code: 'SIGN_IN_DATA_NOT_FOUND' });
@@ -876,7 +869,6 @@ if (ownsLock) void startupStep('electron-ready', () => app.whenReady()).then(() 
     startupDiagnostics?.mark('startup-complete');
     if (quitting) return;
     void publish();
-    if (!isSmoke && !isWorkspaceSmoke) setTimeout(() => { if (!quitting) void offerLinkRouting().catch(error => console.error(`Envara link routing: ${error.message}`)); }, 1500).unref?.();
     const refreshTimer = setInterval(() => { void publish(); }, 4000);
     refreshTimer.unref();
   }).catch(reportStartupFailure);

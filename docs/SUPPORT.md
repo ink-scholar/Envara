@@ -4,35 +4,31 @@
 
 **打赏完全自愿，所有功能均不以打赏为前提。** 一个 Star、一次反馈或一份贡献，同样珍贵。
 
-选择币种，展开后选择网络；转出时请确认**币种与网络都和下表一致**。
+转出时请确认**币种与网络都和下表一致**。
 
 [USDT](#usdt) · [USDC](#usdc) · [币安 ID](#binance)
 
 <a id="usdt"></a>
-<details>
-<summary><strong>USDT · 展开选择网络</strong></summary>
+
+## USDT
 
 | 网络 | 收款地址 |
 | --- | --- |
-| <img src="assets/chains/tron.svg" width="24" height="24" alt="TRON" /> TRX（TRC20） | `TFnUooSKx1Joe6i8vkbsiQpiMVqiNq5c1r` |
-| <img src="assets/chains/ethereum.svg" width="24" height="24" alt="Ethereum" /> Ethereum（ERC20） | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
-| <img src="assets/chains/solana.svg" width="28" height="24" alt="Solana" /> Solana（SOL） | `6ACRnyNUHDuf7HeovVgxqBS8jgLsWrvbNTMuQnZdwr1V` |
-| <img src="assets/chains/arbitrum.svg" width="24" height="24" alt="Arbitrum" /> Arbitrum | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
-| <img src="assets/chains/plasma.svg" width="24" height="24" alt="Plasma" /> Plasma | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
-
-</details>
+| <img src="assets/chains/tron.png" width="24" height="24" alt="TRON" /> TRON（TRC20） | `TFnUooSKx1Joe6i8vkbsiQpiMVqiNq5c1r` |
+| <img src="assets/chains/ethereum.png" width="24" height="24" alt="Ethereum" /> Ethereum（ERC20） | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
+| <img src="assets/chains/solana.png" width="24" height="24" alt="Solana" /> Solana（SOL） | `6ACRnyNUHDuf7HeovVgxqBS8jgLsWrvbNTMuQnZdwr1V` |
+| <img src="assets/chains/arbitrum.png" width="24" height="24" alt="Arbitrum" /> Arbitrum | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
+| <img src="assets/chains/plasma.png" width="24" height="24" alt="Plasma" /> Plasma | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
 
 <a id="usdc"></a>
-<details>
-<summary><strong>USDC · 展开选择网络</strong></summary>
+
+## USDC
 
 | 网络 | 收款地址 |
 | --- | --- |
-| <img src="assets/chains/ethereum.svg" width="24" height="24" alt="Ethereum" /> Ethereum（ERC20） | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
-| <img src="assets/chains/solana.svg" width="28" height="24" alt="Solana" /> Solana（SOL） | `6ACRnyNUHDuf7HeovVgxqBS8jgLsWrvbNTMuQnZdwr1V` |
-| <img src="assets/chains/arbitrum.svg" width="24" height="24" alt="Arbitrum" /> Arbitrum | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
-
-</details>
+| <img src="assets/chains/ethereum.png" width="24" height="24" alt="Ethereum" /> Ethereum（ERC20） | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
+| <img src="assets/chains/solana.png" width="24" height="24" alt="Solana" /> Solana（SOL） | `6ACRnyNUHDuf7HeovVgxqBS8jgLsWrvbNTMuQnZdwr1V` |
+| <img src="assets/chains/arbitrum.png" width="24" height="24" alt="Arbitrum" /> Arbitrum | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
 
 <a id="binance"></a>
 

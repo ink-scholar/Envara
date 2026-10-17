@@ -49,6 +49,34 @@ Download the **macOS Apple Silicon (arm64)** DMG or ZIP from [GitHub Releases](h
 
 ## Support Envara
 
-Development has involved substantial AI usage costs. If Envara helps you, voluntary support is welcome: [USDT](../SUPPORT.md#usdt) · [USDC](../SUPPORT.md#usdc) · [Binance](../SUPPORT.md#binance). Stars, feedback, translations and code contributions help too.
+Development has involved substantial AI usage costs. If Envara helps you, voluntary support is welcome. Stars, feedback, translations and code contributions help too.
+
+**All features remain available without a donation.** Please match both the asset and network shown below.
+
+### USDT
+
+| Network | Address |
+| --- | --- |
+| <img src="../assets/chains/tron.png" width="24" height="24" alt="TRON" /> TRON（TRC20） | `TFnUooSKx1Joe6i8vkbsiQpiMVqiNq5c1r` |
+| <img src="../assets/chains/ethereum.png" width="24" height="24" alt="Ethereum" /> Ethereum（ERC20） | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
+| <img src="../assets/chains/solana.png" width="24" height="24" alt="Solana" /> Solana（SOL） | `6ACRnyNUHDuf7HeovVgxqBS8jgLsWrvbNTMuQnZdwr1V` |
+| <img src="../assets/chains/arbitrum.png" width="24" height="24" alt="Arbitrum" /> Arbitrum | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
+| <img src="../assets/chains/plasma.png" width="24" height="24" alt="Plasma" /> Plasma | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
+
+### USDC
+
+| Network | Address |
+| --- | --- |
+| <img src="../assets/chains/ethereum.png" width="24" height="24" alt="Ethereum" /> Ethereum（ERC20） | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
+| <img src="../assets/chains/solana.png" width="24" height="24" alt="Solana" /> Solana（SOL） | `6ACRnyNUHDuf7HeovVgxqBS8jgLsWrvbNTMuQnZdwr1V` |
+| <img src="../assets/chains/arbitrum.png" width="24" height="24" alt="Arbitrum" /> Arbitrum | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
+
+### Binance
+
+Binance ID: `820140284`
+
+[Support details and icon sources](../SUPPORT.md)
+
+---
 
 Original code uses [MIT](../../LICENSE). BrowseForge, Mihomo and other dependencies retain their own licenses and corresponding-source obligations. See [third-party notices](../../THIRD_PARTY_NOTICES.md).

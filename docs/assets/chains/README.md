@@ -1,12 +1,15 @@
 # 网络图标来源
 
-这些静态 SVG 仅用于帮助读者辨认支持页中的网络，不表示 Envara 与相关项目存在合作、赞助或背书关系。
+支持页使用币安公开价格页实际引用的 CoinMarketCap 图标，原图均为 64 × 64 PNG，以 24 × 24 显示。TRC20 对应 TRON 网络；图标用于辨认网络，收款币种仍以 USDT / USDC 分组为准。
 
-| 文件 | 来源与使用说明 |
-| --- | --- |
-| `ethereum.svg` | 基于 [ethereum.org 官方网站源码的 Ethereum 图标](https://github.com/ethereum/ethereum-org-website/blob/dev/src/components/icons/ethereum-icon.svg)，保留原始形状，将 `currentColor` 固定为 `#7A7FA7`，以便作为独立图片在明暗背景中显示。上游代码按 MIT 许可提供，完整版权与许可见 [ethereum-MIT-LICENSE.txt](ethereum-MIT-LICENSE.txt)。品牌权利仍归相应权利人所有。 |
-| `solana.svg` | [Solana 官方品牌页](https://solana.com/branding)提供的[原始 SVG](https://solana.com/src/img/branding/solanaLogoMark.svg)，未修改图案或颜色。Solana 标志归 Solana Foundation 所有，使用遵循官方品牌规范；不属于 Envara 的开源许可授权范围。 |
-| `plasma.svg` | [Plasma 官方品牌页](https://www.plasma.org/brand)提供的[原始 SVG](https://www.plasma.org/brand/logo/plasma-boxed.svg)，未修改图案或颜色。Plasma 保留其品牌资产权利；不属于 Envara 的开源许可授权范围。 |
-| `tron.svg`、`arbitrum.svg` | Envara 绘制的简洁文字网络标识，分别显示 TRX、ARB。它们不是这些项目的官方 Logo，按本仓库许可证提供。 |
+| 文件 | 币安页面 | 原始图标 |
+| --- | --- | --- |
+| `tron.png` | [TRON](https://www.binance.com/en/price/tron) | [CoinMarketCap · 1958](https://s2.coinmarketcap.com/static/img/coins/64x64/1958.png) |
+| `ethereum.png` | [Ethereum](https://www.binance.com/en/price/ethereum) | [CoinMarketCap · 1027](https://s2.coinmarketcap.com/static/img/coins/64x64/1027.png) |
+| `solana.png` | [Solana](https://www.binance.com/en/price/solana) | [CoinMarketCap · 5426](https://s2.coinmarketcap.com/static/img/coins/64x64/5426.png) |
+| `arbitrum.png` | [Arbitrum](https://www.binance.com/en/price/arbitrum) | [CoinMarketCap · 11841](https://s2.coinmarketcap.com/static/img/coins/64x64/11841.png) |
+| `plasma.png` | [Plasma（XPL）](https://www.binance.com/en/price/plasma-xpl) | [CoinMarketCap · 36645](https://s2.coinmarketcap.com/static/img/coins/64x64/36645.png) |
 
-官方资源获取日期：2026-10-17。后续替换图标时，请同步更新来源和适用规范。
+图片保持原样。第三方品牌标识及图片权利归原权利人，不属于 Envara 的 MIT 授权，也不表示相关项目、币安或 CoinMarketCap 对 Envara 的合作、赞助或背书。
+
+核对日期：2026-10-17。此处核对的是公开价格页中的图标，未核对登录后的充值网络选择界面。

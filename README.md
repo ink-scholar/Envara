@@ -49,6 +49,34 @@ Envara 境舱是开源的本地桌面工作台。为不同项目、账号或地�
 
 ## 支持境舱
 
-开发中投入了大量 AI 调用成本，如果 Envara 对你有帮助，欢迎自愿支持：[USDT](docs/SUPPORT.md#usdt) · [USDC](docs/SUPPORT.md#usdc) · [Binance](docs/SUPPORT.md#binance)。Star、反馈、翻译和代码贡献同样重要。
+开发中投入了大量 AI 调用成本。如果 Envara 对你有帮助，欢迎自愿支持；Star、反馈、翻译和代码贡献同样重要。
+
+**所有功能均不以打赏为前提。** 转出时请确认币种与网络均和下表一致。
+
+### USDT
+
+| 网络 | 收款地址 |
+| --- | --- |
+| <img src="docs/assets/chains/tron.png" width="24" height="24" alt="TRON" /> TRON（TRC20） | `TFnUooSKx1Joe6i8vkbsiQpiMVqiNq5c1r` |
+| <img src="docs/assets/chains/ethereum.png" width="24" height="24" alt="Ethereum" /> Ethereum（ERC20） | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
+| <img src="docs/assets/chains/solana.png" width="24" height="24" alt="Solana" /> Solana（SOL） | `6ACRnyNUHDuf7HeovVgxqBS8jgLsWrvbNTMuQnZdwr1V` |
+| <img src="docs/assets/chains/arbitrum.png" width="24" height="24" alt="Arbitrum" /> Arbitrum | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
+| <img src="docs/assets/chains/plasma.png" width="24" height="24" alt="Plasma" /> Plasma | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
+
+### USDC
+
+| 网络 | 收款地址 |
+| --- | --- |
+| <img src="docs/assets/chains/ethereum.png" width="24" height="24" alt="Ethereum" /> Ethereum（ERC20） | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
+| <img src="docs/assets/chains/solana.png" width="24" height="24" alt="Solana" /> Solana（SOL） | `6ACRnyNUHDuf7HeovVgxqBS8jgLsWrvbNTMuQnZdwr1V` |
+| <img src="docs/assets/chains/arbitrum.png" width="24" height="24" alt="Arbitrum" /> Arbitrum | `0x71dead57a9d0047349329fecb914f2b2a069a869` |
+
+### 币安
+
+币安 ID：`820140284`
+
+[支持说明与图标来源](docs/SUPPORT.md)
+
+---
 
 原创代码采用 [MIT](LICENSE)；BrowseForge、Mihomo 与其他依赖保留各自许可及对应源码义务，见[第三方声明](THIRD_PARTY_NOTICES.md)。

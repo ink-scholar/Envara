@@ -44,7 +44,7 @@ type doctorReport struct {
 const usageText = `BrowseForge CLI
 
 Usage:
-  BrowseForge [global flags] serve [--host HOST] [--port PORT] [--no-sandbox] [--no-open]
+  BrowseForge [global flags] serve [--host HOST] [--port PORT] [--no-sandbox] [--no-open] [--enforce-http-proxy-bridge]
   BrowseForge [global flags] mcp-stdio
   BrowseForge --mcp
   BrowseForge [global flags] init [--force] [--json]
@@ -230,6 +230,7 @@ func parseServeFlags(args []string, global cliGlobal) (*serveFlags, error) {
 	fs.StringVar(&f.port, "port", "", "API port")
 	fs.BoolVar(&f.noSandbox, "no-sandbox", false, "Disable Chromium sandbox")
 	fs.BoolVar(&f.noOpen, "no-open", false, "Do not open the dashboard browser")
+	fs.BoolVar(&f.enforceHTTPProxyBridge, "enforce-http-proxy-bridge", false, "Require desktop-managed HTTP proxy launches")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -237,6 +238,16 @@ func parseServeFlags(args []string, global cliGlobal) (*serveFlags, error) {
 		return nil, fmt.Errorf("serve does not accept positional arguments: %s", strings.Join(fs.Args(), " "))
 	}
 	return f, nil
+}
+
+func loadServeConfig(flags *serveFlags) (*config.Config, error) {
+	cfg, err := config.Load(flags.configPath)
+	if err != nil {
+		return nil, err
+	}
+	// This process-level launch boundary must not become a saved user preference.
+	cfg.EnforceHTTPProxyBridge = flags.enforceHTTPProxyBridge
+	return cfg, nil
 }
 
 func parseMCPStdioFlags(args []string, global cliGlobal) (mcpStdioOptions, error) {

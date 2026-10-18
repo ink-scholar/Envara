@@ -148,37 +148,79 @@ test('closing aborts an active address request and disallows further queries', a
 
 async function serviceFixture(t, kind, options = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'envara-address-test-'));
-  const networkProbe = new ProxyNetworkProbe({ transport: async () => geo });
-  const calls = [];
-  const addressGeocoder = new AddressGeocoder({ minIntervalMs: 0, transport: async args => { calls.push(args); return collection(feature()); } });
+  const networkProbe = options.networkProbe ?? new ProxyNetworkProbe({ transport: async () => geo });
+  const calls = [], probeInputs = [], ensured = [], released = [], active = new Map();
+  const probe = networkProbe.probe.bind(networkProbe);
+  networkProbe.probe = (input, settings) => { probeInputs.push(structuredClone(input)); return probe(input, settings); };
+  const addressGeocoder = options.addressGeocoder ?? new AddressGeocoder({ minIntervalMs: 0, transport: async () => collection(feature()) });
+  const transport = addressGeocoder.transport.bind(addressGeocoder);
+  addressGeocoder.transport = args => { calls.push(args); return transport(args); };
+  const proxyCore = {
+    async ensure(config) {
+      const wire = { protocol: 'http', host: '127.0.0.1', port: 43123 + ensured.length, username: `owned-user-${ensured.length}`, password: `owned-password-${ensured.length}` };
+      ensured.push({ upstream: structuredClone(config), wire }); active.set(config.id, wire);
+      return { ...wire };
+    },
+    async release(id) { released.push(id); active.delete(id); },
+    async close() { active.clear(); },
+  };
   const client = { request: async (method, route) => { assert.equal(method, 'POST'); assert.equal(route, '/api/shutdown'); return { data: 'closed' }; } };
-  const service = kind === 'browseforge' ? new BrowseForgeService(directory, client, {}, () => {}, { networkProbe, addressGeocoder, ...options }) : new EnvaraService(directory, { closeAll: async () => {} }, {}, () => {}, { networkProbe, addressGeocoder, ...options });
+  const service = kind === 'browseforge' ? new BrowseForgeService(directory, client, {}, () => {}, { proxyCore, networkProbe, addressGeocoder, ...options }) : new EnvaraService(directory, { closeAll: async () => {} }, {}, () => {}, { networkProbe, addressGeocoder, ...options });
   await service.ready;
   t.after(async () => { await service.shutdown(); await rm(directory, { recursive: true, force: true }); });
-  return { service, calls };
+  return { service, calls, probeInputs, ensured, released, active };
 }
 
-for (const kind of ['browseforge', 'legacy']) test(`${kind} address search requires a matching live private preview and never writes configuration`, async (t) => {
-  const { service, calls } = await serviceFixture(t, kind);
+function assertServiceRoute(kind, fixture, upstream, draftCount) {
+  const { service, calls, probeInputs, ensured, released, active } = fixture;
+  const connection = input => ({ protocol: input.protocol, host: input.host, port: input.port, username: input.username, password: input.password });
+  const routes = kind === 'browseforge' ? ensured.map(item => item.wire) : [upstream];
+  if (kind === 'browseforge') {
+    assert.equal(ensured.length, draftCount);
+    for (const item of ensured) {
+      assert.match(item.upstream.id, /^draft_/);
+      assert.deepEqual(connection(item.upstream), connection(upstream), 'the owned core must receive the selected upstream and its credentials');
+      assert.notEqual(item.wire.password, upstream.password);
+    }
+    assert.deepEqual(released, ensured.map(item => item.upstream.id));
+    assert.equal(active.size, 0); assert.equal(service.proxyWires.size, 0);
+  } else assert.equal(ensured.length, 0, 'the legacy service retains its selected proxy route');
+  assert.ok(probeInputs.length > 0);
+  for (const input of probeInputs) assert.ok(routes.some(route => JSON.stringify(connection(route)) === JSON.stringify(connection(input))), 'egress verification must use the selected authenticated route');
+  for (const { agent } of calls) {
+    assert.ok(agent && typeof agent.connect === 'function', 'address requests must never use a direct transport');
+    const route = routes.find(item => agent.proxy.protocol === `${item.protocol}:` && agent.proxy.hostname === item.host && Number(agent.proxy.port) === item.port);
+    assert.ok(route, 'address requests must use a wire issued for this upstream');
+    assert.equal(agent.proxyHeaders()['Proxy-Authorization'], `Basic ${Buffer.from(`${route.username}:${route.password}`).toString('base64')}`);
+  }
+}
+
+const serviceCases = [['browseforge', 'http'], ['browseforge', 'https'], ['legacy', 'http']];
+
+for (const [kind, protocol] of serviceCases) test(`${kind} ${protocol} address search requires a matching live private preview and never writes configuration`, async (t) => {
+  const selectedProxy = { ...proxy, protocol };
+  const fixture = await serviceFixture(t, kind), { service, calls } = fixture;
   const before = await service.store.read();
-  await assert.rejects(service.call('searchNetworkAddress', { proxy, query: 'Tokyo', locationPreviewToken: 'renderer-invented' }), { code: 'ADDRESS_NETWORK_NOT_VERIFIED' });
-  const preview = await service.call('previewProxyNetwork', { proxy });
+  await assert.rejects(service.call('searchNetworkAddress', { proxy: selectedProxy, query: 'Tokyo', locationPreviewToken: 'renderer-invented' }), { code: 'ADDRESS_NETWORK_NOT_VERIFIED' });
+  const preview = await service.call('previewProxyNetwork', { proxy: selectedProxy });
   assert.ok(preview.locationPreviewToken);
-  await assert.rejects(service.call('searchNetworkAddress', { proxy: { ...proxy, password: 'changed' }, query: 'Tokyo', locationPreviewToken: preview.locationPreviewToken }), { code: 'ADDRESS_NETWORK_NOT_VERIFIED' });
+  await assert.rejects(service.call('searchNetworkAddress', { proxy: { ...selectedProxy, password: 'changed' }, query: 'Tokyo', locationPreviewToken: preview.locationPreviewToken }), { code: 'ADDRESS_NETWORK_NOT_VERIFIED' });
   assert.equal(calls.length, 0);
-  const result = await service.call('searchNetworkAddress', { proxy, query: 'Tokyo', locationPreviewToken: preview.locationPreviewToken });
+  const result = await service.call('searchNetworkAddress', { proxy: selectedProxy, query: 'Tokyo', locationPreviewToken: preview.locationPreviewToken });
   assert.equal(result.candidates.length, 1); assert.equal(calls.length, 1);
   assert.deepEqual(await service.store.read(), before);
   service.locationPreviews.get(preview.locationPreviewToken).expiresAt = 0;
-  await assert.rejects(service.call('searchNetworkAddress', { proxy, query: 'Tokyo', locationPreviewToken: preview.locationPreviewToken }), { code: 'ADDRESS_NETWORK_NOT_VERIFIED' });
+  await assert.rejects(service.call('searchNetworkAddress', { proxy: selectedProxy, query: 'Tokyo', locationPreviewToken: preview.locationPreviewToken }), { code: 'ADDRESS_NETWORK_NOT_VERIFIED' });
   assert.equal(calls.length, 1);
+  assertServiceRoute(kind, fixture, selectedProxy, 2);
 });
 
-for (const kind of ['browseforge', 'legacy']) test(`${kind} automatically saves a private nearby reference without changing measured geolocation or trusting renderer fields`, async (t) => {
+for (const [kind, protocol] of serviceCases) test(`${kind} ${protocol} automatically saves a private nearby reference without changing measured geolocation or trusting renderer fields`, async (t) => {
+  const selectedProxy = { ...proxy, protocol };
   const measured = { ...geo, latitude: 35.65, longitude: 139.75 };
-  const { service, calls } = await serviceFixture(t, kind, { networkProbe: new ProxyNetworkProbe({ transport: async () => measured }) });
+  const fixture = await serviceFixture(t, kind, { networkProbe: new ProxyNetworkProbe({ transport: async () => measured }) }), { service, calls } = fixture;
   service.remote = async () => ({ profiles: [], groups: [] });
-  const preview = await service.call('previewProxyNetwork', { proxy, language: 'de', coordinates: { latitude: 0, longitude: 0 } });
+  const preview = await service.call('previewProxyNetwork', { proxy: selectedProxy, language: 'de', coordinates: { latitude: 0, longitude: 0 } });
   assert.equal(calls.length, 1);
   const reverse = new URL(calls[0].url);
   assert.equal(reverse.pathname, '/reverse'); assert.equal(reverse.searchParams.get('lat'), '35.65'); assert.equal(reverse.searchParams.get('lang'), 'de');
@@ -187,27 +229,32 @@ for (const kind of ['browseforge', 'legacy']) test(`${kind} automatically saves 
   assert.equal(preview.referenceLocation.latitude, 35.6); assert.equal(preview.referenceLocation.kind, 'nearby-reference');
   assert.equal((await service.store.read()).proxies.length, 0, 'preview does not persist configuration');
   preview.network.geolocation.latitude = 0; preview.referenceLocation.label = 'Forged renderer street';
-  await service.call('searchNetworkAddress', { proxy, query: 'Station Road', language: 'de', locationPreviewToken: preview.locationPreviewToken, bias: { latitude: 0, longitude: 0 } });
+  await service.call('searchNetworkAddress', { proxy: selectedProxy, query: 'Station Road', language: 'de', locationPreviewToken: preview.locationPreviewToken, bias: { latitude: 0, longitude: 0 } });
   assert.equal(new URL(calls[1].url).searchParams.get('lat'), '35.65', 'forward bias comes from the private verified preview');
-  await service.saveProxy({ proxy: { ...proxy, location: { mode: 'ip', confirmed: true, referenceLocation: preview.referenceLocation } }, locationPreviewToken: preview.locationPreviewToken });
+  await service.saveProxy({ proxy: { ...selectedProxy, location: { mode: 'ip', confirmed: true, referenceLocation: preview.referenceLocation } }, locationPreviewToken: preview.locationPreviewToken });
   const saved = (await service.store.read()).proxies[0];
   assert.deepEqual(saved.location.referenceLocation, originalReference);
   assert.equal(saved.location.label, 'Tokyo, Japan'); assert.equal(saved.location.source, 'ip-estimate'); assert.equal(saved.location.addressResolved, false);
   assert.deepEqual(networkLocationGeolocation(saved.location), originalNetwork.geolocation, 'only the original IP coordinates are used by consumers');
   assert.equal(calls.length, 2, 'saving does not perform another reverse lookup');
+  assertServiceRoute(kind, fixture, selectedProxy, 2);
+  assert.equal(Number(calls[0].agent.proxy.port), fixture.probeInputs[0].port, 'nearby lookup uses the same verified wire before releasing it');
 });
 
-for (const kind of ['browseforge', 'legacy']) test(`${kind} optional reverse failures preserve verified IP confirmation and manual choices`, async (t) => {
+for (const [kind, protocol] of serviceCases) test(`${kind} ${protocol} optional reverse failures preserve verified IP confirmation and manual choices`, async (t) => {
+  const selectedProxy = { ...proxy, protocol };
   const addressGeocoder = new AddressGeocoder({ minIntervalMs: 0, transport: async () => { throw new Error('fixture reverse unavailable'); } });
-  const { service } = await serviceFixture(t, kind, { addressGeocoder, networkProbe: new ProxyNetworkProbe({ transport: async () => ({ ...geo, latitude: 35.65, longitude: 139.75 }) }) });
+  const fixture = await serviceFixture(t, kind, { addressGeocoder, networkProbe: new ProxyNetworkProbe({ transport: async () => ({ ...geo, latitude: 35.65, longitude: 139.75 }) }) }), { service } = fixture;
   service.remote = async () => ({ profiles: [], groups: [] });
-  const preview = await service.call('previewProxyNetwork', { proxy });
+  const preview = await service.call('previewProxyNetwork', { proxy: selectedProxy });
   assert.equal(preview.network.ok, true); assert.ok(preview.locationPreviewToken); assert.equal(preview.referenceLocation, null);
   const manual = { mode: 'manual', confirmed: true, label: 'Saved chosen street', latitude: 1.23, longitude: 4.56 };
-  await service.saveProxy({ proxy: { ...proxy, location: manual }, locationPreviewToken: preview.locationPreviewToken });
+  await service.saveProxy({ proxy: { ...selectedProxy, location: manual }, locationPreviewToken: preview.locationPreviewToken });
   const saved = (await service.store.read()).proxies[0].location;
   assert.equal(saved.label, manual.label); assert.equal(saved.latitude, manual.latitude); assert.equal(saved.longitude, manual.longitude);
   assert.equal(Object.hasOwn(saved, 'referenceLocation'), false);
+  assert.equal(fixture.calls.length, 1);
+  assertServiceRoute(kind, fixture, selectedProxy, 1);
 });
 
 test('AnyTLS address search creates and releases only its temporary owned route on success and failure', async (t) => {

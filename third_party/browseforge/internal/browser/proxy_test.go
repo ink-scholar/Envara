@@ -106,7 +106,7 @@ func TestAllBrowserLaunchBuildersUseManagedSessionProxyAndPreserveStoredProfile(
 				t.Fatal(err)
 			}
 			enabled := true
-			cfg := &config.Config{Runtimes: map[string]config.RuntimeConfig{runtimeID: {BinaryPath: binaryPath, Enabled: &enabled, Settings: &config.CloakBrowserConfig{TargetPlatformPolicy: "allow"}}}}
+			cfg := &config.Config{EnforceHTTPProxyBridge: true, Runtimes: map[string]config.RuntimeConfig{runtimeID: {BinaryPath: binaryPath, Enabled: &enabled, Settings: &config.CloakBrowserConfig{TargetPlatformPolicy: "allow"}}}}
 			capturedError := errors.New("captured runtime launch options")
 			browserType := &capturingBrowserType{t: t, launchErr: capturedError}
 			manager := &Manager{cfg: cfg, groupStore: groupStore, runtimes: bfruntime.NewRegistry(cfg), pw: &playwright.Playwright{Chromium: browserType, Firefox: browserType}}

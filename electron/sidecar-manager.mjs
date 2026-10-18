@@ -186,7 +186,7 @@ export class SidecarManager {
     const capture = chunk => { diagnostic = (diagnostic + String(chunk).replaceAll(this.token, '[redacted]').replaceAll(this.token.slice(0, 16), '[redacted]')).slice(-4000); };
     let spawnError;
     const child = await this.startupStep('sidecar-process-spawn', () => {
-      const child = spawn(this.binary, ['--base-dir', this.baseDir, '--config', this.configFile, 'serve', '--host', '127.0.0.1', '--port', String(this.port), '--no-open'], { cwd: this.baseDir, env: this.env(), windowsHide: true });
+      const child = spawn(this.binary, ['--base-dir', this.baseDir, '--config', this.configFile, 'serve', '--host', '127.0.0.1', '--port', String(this.port), '--no-open', '--enforce-http-proxy-bridge'], { cwd: this.baseDir, env: this.env(), windowsHide: true });
       this.process = child;
       child.stdout.on('data', capture); child.stderr.on('data', capture);
       child.once('error', error => { spawnError = error; });

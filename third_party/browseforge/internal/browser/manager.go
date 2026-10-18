@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
 
 	"browseforge/internal/config"
 	"browseforge/internal/groups"
@@ -129,7 +130,7 @@ func (m *Manager) LaunchSession(p *profile.Profile) (*Session, error) {
 	if p == nil {
 		return nil, fmt.Errorf("profile is nil")
 	}
-	if err := validateManagedProxyLaunch(p); err != nil {
+	if err := m.validateManagedProxyLaunch(p); err != nil {
 		return nil, err
 	}
 	release, err := m.reserveProfile(p.ID)
@@ -327,7 +328,7 @@ func (m *Manager) removeClosedSession(session *Session) {
 }
 
 func (m *Manager) launchProfile(p *profile.Profile) (*Session, error) {
-	if err := validateManagedProxyLaunch(p); err != nil {
+	if err := m.validateManagedProxyLaunch(p); err != nil {
 		return nil, err
 	}
 	desc, err := m.runtimes.ResolveProfile(p)
@@ -350,6 +351,41 @@ func (m *Manager) launchProfile(p *profile.Profile) (*Session, error) {
 func validateManagedProxyLaunch(p *profile.Profile) error {
 	if p != nil && p.ManagedProxyRequired && p.SessionProxy == nil {
 		return codedError{code: "MANAGED_PROXY_REQUIRED", err: fmt.Errorf("this profile requires an Envara-managed proxy; start it through Envara so its managed node is connected")}
+	}
+	return nil
+}
+
+func (m *Manager) validateManagedProxyLaunch(p *profile.Profile) error {
+	if err := validateManagedProxyLaunch(p); err != nil {
+		return err
+	}
+	if p == nil || m.cfg == nil || !m.cfg.EnforceHTTPProxyBridge {
+		return nil
+	}
+	// Check the stored effective policy before the transient bridge overrides
+	// it; an enforced group must not let REST/MCP bypass desktop compatibility.
+	stored := *p
+	stored.SessionProxy = nil
+	upstream := m.effectiveProxy(&stored).Proxy
+	if upstream == nil {
+		return nil
+	}
+	proxyType := strings.ToLower(strings.TrimSpace(upstream.Type))
+	if proxyType != "http" && proxyType != "https" {
+		return nil
+	}
+	bridge := p.SessionProxy
+	valid := bridge != nil && bridge.Type == "http" && bridge.Host == "127.0.0.1" && bridge.Port >= 1 && bridge.Port <= 65535
+	if valid {
+		for _, credential := range []string{bridge.Username, bridge.Password} {
+			if credential == "" || len(credential) > 4096 || strings.IndexFunc(credential, unicode.IsControl) >= 0 {
+				valid = false
+				break
+			}
+		}
+	}
+	if !valid {
+		return codedError{code: "MANAGED_PROXY_REQUIRED", err: fmt.Errorf("this desktop HTTP(S) profile requires an authenticated Envara-managed loopback proxy; start it through Envara so its selected route is connected")}
 	}
 	return nil
 }

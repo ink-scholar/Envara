@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { SYSTEM_BROWSER, linkBrowserChoice } from "./link-browser.mjs";
 import { localeForInterfaceLanguage } from "../shared/interface-languages.mjs";
 import { savedNetworkPresentation } from "./network-flow-state.mjs";
+import { ProxyCompatibilityDetails } from "./proxy-compatibility.mjs";
 import { notionTrialControls, notionTrialLogLine, notionTrialTimingLine, notionTrialFailureLine, notionTrialErrorHint, attachedApplicationStatus, safeNotionTrial } from "./notion-trial-state.mjs";
 import { Stack, GlobeHemisphereWest, FolderOpen, Plus, Play, Stop, Trash, Desktop, ShieldCheck, WarningCircle, ArrowRight, PencilSimple, Browsers, TerminalWindow, Clock, Info, ArrowSquareOut, CaretRight, DownloadSimple } from "@phosphor-icons/react";
 import { ApplicationIcon } from "./ApplicationIcon.jsx";
@@ -95,6 +96,7 @@ export function ContextDetail({
             off: "停用"
           }[profile.privacy?.mode || "standard"])}</dd></div>
     </dl>
+    <ProxyCompatibilityDetails compatibility={proxy?.compatibility} t={t} />
     <div className="context-directory"><span>{t("工作目录")}</span><strong className={workspace?.cwd || profile.workspace?.cwd ? "" : "is-empty"} title={workspace?.cwd || profile.workspace?.cwd || ""}>{workspace?.cwd || profile.workspace?.cwd || t("未选择")}</strong><button className="button" disabled={directoryDisabled} onClick={onDirectory}><FolderOpen size={15} />{t(workspace?.cwd ? "更换目录" : "选择目录")}</button></div>
     <div className="context-launches">
       {[["browsers", "浏览器"], ["terminals", "终端"], ["applications", "附加软件"]].map(([page, label]) => <button key={page} onClick={() => onNavigate(page)}><span>{t(label)}</span><ArrowRight size={16} /></button>)}

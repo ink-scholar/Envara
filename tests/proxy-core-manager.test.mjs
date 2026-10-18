@@ -19,7 +19,14 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 
 async function fixture(t, overrides = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'envara-proxy-core-test-'));
-  const calls = []; let nextPort = 42000;
+  const calls = [], bridges = []; let nextPort = 42000;
+  const createCompatibilityBridge = async (settings, options) => {
+    const entry = { settings: structuredClone(settings), options, closes: 0 };
+    entry.bridge = { protocol: 'http', host: '127.0.0.1', port: 45000 + bridges.length,
+      username: 'fixture-bridge-user', password: `fixture-bridge-password-${bridges.length}`,
+      close: async () => { entry.closes++; } };
+    bridges.push(entry); return entry.bridge;
+  };
   const spawn = (binary, args, options) => {
     const child = new EventEmitter();
     child.pid = 50000 + calls.length;
@@ -35,10 +42,10 @@ async function fixture(t, overrides = {}) {
   };
   const manager = new ProxyCoreManager({ dataDir: directory, resourcesDir: directory,
     resolveBinary: async () => process.execPath, spawn, choosePort: async () => nextPort++,
-    probeListener: async () => {}, detectInterface: async () => 'en0', resolveBootstrapHost: async () => '93.184.215.14',
+    probeListener: async () => {}, createCompatibilityBridge, detectInterface: async () => 'en0', resolveBootstrapHost: async () => '93.184.215.14',
     bootstrapAddress: () => '192.0.2.10', startupTimeoutMs: 2000, retryDelayMs: 1, stopTimeoutMs: 5, ...overrides });
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
-  return { directory, manager, calls };
+  return { directory, manager, calls, bridges };
 }
 async function dirs(manager) { try { return await readdir(manager.baseDir); } catch (error) { if (error.code === 'ENOENT') return []; throw error; } }
 
@@ -161,6 +168,112 @@ test('ordinary core ownership keeps node type and retires credentials and identi
   assert.equal(calls.length, 3); assert.deepEqual(calls[0].child.kills, ['SIGTERM']); assert.deepEqual(calls[1].child.kills, ['SIGTERM']);
   await manager.release({ id: 'ordinary-node', protocol: 'socks5', host: '127.0.0.1', port: 8080 });
   assert.equal(manager.routingIdentity('ordinary-node'), null); assert.deepEqual(await dirs(manager), []);
+});
+
+test('HTTP compatibility retains the saved upstream and routes the native core only through its owned bridge', async t => {
+  const { manager, calls, bridges } = await fixture(t, { platform: 'darwin' });
+  const proxy = { id: 'remote-http', protocol: 'https', host: 'proxy.example.test', port: 8443,
+    username: 'original-user', password: 'original-secret' };
+  const before = structuredClone(proxy);
+  const wire = await manager.ensure(proxy);
+  assert.deepEqual(await manager.ensure(proxy), wire);
+  assert.equal(bridges.length, 1); assert.equal(calls.length, 1);
+  assert.equal(bridges[0].settings.host, proxy.host); assert.equal(bridges[0].settings.protocol, 'https');
+  assert.equal(bridges[0].settings.password, proxy.password);
+  assert.equal(bridges[0].options.upstreamAddress, '93.184.215.14');
+  assert.equal(bridges[0].options.localAddress, '192.0.2.10');
+  assert.equal(bridges[0].options.earlyConnectAck, true);
+  const outbound = calls[0].config.proxies[0];
+  assert.equal(outbound.server, '127.0.0.1'); assert.equal(outbound.port, bridges[0].bridge.port);
+  assert.equal(outbound.tls, false); assert.equal(outbound['interface-name'], undefined);
+  assert.equal(outbound.headers['Proxy-Authorization'], `Basic ${Buffer.from(`${bridges[0].bridge.username}:${bridges[0].bridge.password}`).toString('base64')}`);
+  assert.equal(JSON.stringify(calls[0].config).includes(proxy.password), false);
+  assert.deepEqual(calls[0].config.rules, ['MATCH,ENVARA_UPSTREAM']);
+  assert.equal(manager.routingIdentity(proxy).nodeType, 'https');
+  assert.equal(manager.routingIdentity(proxy).corePid, calls[0].child.pid);
+  assert.deepEqual(proxy, before);
+  await manager.release(proxy.id);
+  assert.equal(bridges[0].closes, 1); assert.equal(manager.routingIdentity(proxy), null);
+});
+
+test('HTTP core crash closes its bridge and recovers the same client endpoint with a fresh bridge and identity', async t => {
+  const { manager, calls, bridges } = await fixture(t);
+  const proxy = { id: 'http-recovery', protocol: 'http', host: '127.0.0.1', port: 8080 };
+  const first = await manager.ensure(proxy), identity = manager.routingIdentity(proxy);
+  const crashed = manager.routes.get(proxy.id);
+  calls[0].child.exitCode = 1; calls[0].child.emit('exit', 1);
+  await crashed.cleanupPromise;
+  assert.equal(bridges[0].closes, 1); assert.equal(manager.routingIdentity(proxy), null);
+  assert.deepEqual(await manager.ensure(proxy), first);
+  assert.equal(bridges.length, 2); assert.notEqual(bridges[0].bridge.port, bridges[1].bridge.port);
+  assert.notEqual(manager.routingIdentity(proxy).coreGeneration, identity.coreGeneration);
+  assert.notEqual(manager.routingIdentity(proxy).routeIdentity, identity.routeIdentity);
+  await manager.close(); assert.equal(bridges[1].closes, 1);
+});
+
+test('an unexpected compatibility listener failure revokes core readiness and closes both owned transports', async t => {
+  const events = [];
+  const { manager, calls, bridges } = await fixture(t, { onChange: event => event && events.push(event) });
+  const proxy = { id: 'bridge-failure', protocol: 'http', host: '127.0.0.1', port: 8080 };
+  const wire = await manager.ensure(proxy), route = manager.routes.get(proxy.id);
+  bridges[0].options.onError({ code: 'PROXY_COMPATIBILITY_BRIDGE_FAILED', untrusted: 'private upstream' });
+  assert.equal(manager.routingIdentity(proxy), null); assert.equal(manager.snapshot().activeCount, 0);
+  await route.cleanupPromise;
+  assert.deepEqual(calls[0].child.kills, ['SIGTERM']); assert.equal(bridges[0].closes, 1);
+  assert.equal(JSON.stringify(events).includes('private upstream'), false);
+  assert.deepEqual(await manager.ensure(proxy), wire);
+});
+
+test('cancelled bridge construction and failed core readiness clean all late owned listeners', async t => {
+  const gate = deferred(); let entered = false, closed = 0;
+  const { manager, calls } = await fixture(t, { createCompatibilityBridge: async () => { entered = true; return gate.promise; } });
+  const proxy = { id: 'http-cancel', protocol: 'http', host: '127.0.0.1', port: 8080 };
+  const starting = manager.ensure(proxy);
+  while (!entered) await delay(1);
+  const release = manager.release(proxy.id);
+  gate.resolve({ protocol: 'http', host: '127.0.0.1', port: 45000, username: 'owned-user', password: 'owned-password', close: async () => { closed++; } });
+  await assert.rejects(starting, code('PROXY_CORE_CANCELLED')); await release;
+  assert.equal(closed, 1); assert.equal(calls.length, 0); assert.equal(manager.routes.size, 0);
+  const failing = await fixture(t, { startupTimeoutMs: 25, probeListener: async () => { throw new Error('fixture not ready'); } });
+  await assert.rejects(failing.manager.ensure(proxy), code('PROXY_CORE_START_TIMEOUT'));
+  assert.ok(failing.bridges.length > 0); assert.ok(failing.bridges.every(entry => entry.closes === 1));
+  assert.deepEqual(await dirs(failing.manager), []);
+});
+
+test('HTTP port retries ignore retired bridge callbacks and expose only sanitized diagnostics', async t => {
+  let calls;
+  const data = await fixture(t, { probeListener: async () => {
+    if (calls.length === 1) {
+      calls[0].child.stderr.write('bind: address already in use');
+      calls[0].child.exitCode = 1; calls[0].child.emit('exit', 1);
+      throw new Error('fixture bind collision');
+    }
+  } });
+  calls = data.calls;
+  const proxy = { id: 'http-port-retry', protocol: 'http', host: '127.0.0.1', port: 8080 };
+  await data.manager.ensure(proxy);
+  assert.equal(data.bridges.length, 2); assert.equal(data.bridges[0].closes, 1);
+  data.bridges[0].options.onClose();
+  assert.equal(data.manager.snapshot().activeCount, 1);
+  data.bridges[1].bridge.snapshot = () => ({ recoveredConnections: 3, failedConnections: 1,
+    lastErrorCode: 'AUTH_REQUIRED', lastUpstreamStatus: 407, password: 'private', hostname: 'private.example' });
+  assert.deepEqual(data.manager.compatibilitySnapshot(proxy.id), { enabled: true, recoveredConnections: 3, failedConnections: 1,
+    lastErrorCode: 'AUTH_REQUIRED', lastUpstreamStatus: 407 });
+  data.bridges[1].bridge.snapshot = () => ({ recoveredConnections: Infinity, failedConnections: -1,
+    lastErrorCode: 'private upstream text', lastUpstreamStatus: 900 });
+  assert.deepEqual(data.manager.compatibilitySnapshot(proxy.id), { enabled: true, recoveredConnections: 0, failedConnections: 0,
+    lastErrorCode: null, lastUpstreamStatus: null });
+  await data.manager.close(); assert.equal(data.manager.compatibilitySnapshot(proxy.id), null);
+});
+
+test('core compatibility overrides accept only private authenticated HTTP listeners', () => {
+  const settings = managedProxySettings({ protocol: 'https', host: 'proxy.example.test', port: 8443 });
+  const local = { port: 42000, username: 'core-user', password: 'core-password' };
+  const valid = { protocol: 'http', host: '127.0.0.1', port: 45000, username: 'bridge-user', password: 'bridge-password' };
+  for (const patch of [{ protocol: 'https' }, { host: '93.184.215.14' }, { username: '' }, { password: '' }]) {
+    assert.throws(() => proxyCoreConfig(settings, local, { upstreamOverride: { ...valid, ...patch } }), code('INVALID_MANAGED_PROXY'));
+  }
+  assert.throws(() => proxyCoreConfig(anyTlsSettings(node()), local, { upstreamOverride: valid }), code('INVALID_MANAGED_PROXY'));
 });
 
 test('concurrent requests reuse the route but changed credentials replace only their owned process', async t => {

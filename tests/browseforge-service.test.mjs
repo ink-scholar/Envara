@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -68,7 +69,7 @@ async function fixture(t, options = {}) {
     for (const descriptor of client.descriptors) { descriptor.binary_path = path.join(directory, 'bin', `${descriptor.id}${process.platform === 'win32' ? '.exe' : ''}`); await writeFile(descriptor.binary_path, 'fixture executable', { mode: 0o700 }); }
   }
   const offlineProbe = new ProxyNetworkProbe({ transport: async () => { throw new Error('fixture offline; no external network requests'); } });
-  const service = new BrowseForgeService(directory, client, { platform: 'darwin' }, () => {}, { profilesDir, networkProbe: offlineProbe, addressGeocoder: { reverse: async () => null, close() {} }, ...serviceOptions });
+  const service = new BrowseForgeService(directory, client, { platform: 'darwin' }, () => {}, { profilesDir, proxyCore: managedProxyFixture().proxyCore, networkProbe: offlineProbe, addressGeocoder: { reverse: async () => null, close() {} }, ...serviceOptions });
   await service.ready;
   t.after(async () => { await service.shutdown(); await rm(directory, { recursive: true, force: true }); });
   return { directory, profilesDir, client, service };
@@ -460,7 +461,7 @@ test('bound native projections can reuse the measured region of an unconfirmed s
   const saved = { id: 'measured', name: 'Measured', protocol: 'http', host: 'proxy.example', port: 8080, username: '', password: '', region: '' };
   const native = { type: 'http', host: saved.host, port: saved.port, region: 'jp-tokyo' };
   const network = { ok: true, scope: 'egress', ip: '203.0.113.10', countryCode: 'JP', region: 'Tokyo', timezone: 'Asia/Tokyo' };
-  const service = { networkProbe: { peek: () => network }, proxyWires: new Map() };
+  const service = { networkProbe: { peek: () => network }, proxyWires: new Map([[saved.id, { protocol: 'http', host: '127.0.0.1', port: 20000, username: 'fixture-wire-user', password: 'fixture-wire-password' }]]) };
   const workspace = { proxies: [saved], profiles: [{ id: 'profile', proxyId: saved.id }], groups: [{ name: 'Group', proxyId: saved.id }] };
   const remote = { profiles: [{ id: 'profile', name: 'Profile', proxy: native }], groups: [{ name: 'Group', proxy: native }] };
   assert.deepEqual(BrowseForgeService.prototype.proxies.call(service, workspace, remote).map(proxy => proxy.id), [saved.id]);
@@ -468,6 +469,10 @@ test('bound native projections can reuse the measured region of an unconfirmed s
   assert.equal(saved.location, undefined);
   service.networkProbe.peek = () => null;
   assert.equal(BrowseForgeService.prototype.proxies.call(service, workspace, remote).length, 2, 'unavailable measurements cannot invent a matching region');
+  service.networkProbe.peek = () => network;
+  service.proxyWires.clear();
+  const withoutWire = BrowseForgeService.prototype.proxies.call(service, workspace, remote);
+  assert.equal(withoutWire.length, 2); assert.equal(withoutWire[0].network, null, 'managed nodes never fall back to an old raw cache after losing their wire');
 });
 
 test('network projection matching preserves readable legacy credentials and AnyTLS native differences', () => {
@@ -668,22 +673,26 @@ test('egress checks cache saved configuration, exclude network cache from export
 
 test('automatic timezone resolves an enforced group proxy and sends a transient launch override', async (t) => {
   const inputs = [];
+  const managed = managedProxyFixture();
   const networkProbe = new ProxyNetworkProbe({ transport: async () => networkGeo });
   const probe = networkProbe.probe.bind(networkProbe);
   networkProbe.probe = (proxy, options) => { inputs.push({ proxy: structuredClone(proxy), options }); return probe(proxy, options); };
-  const { service, client } = await fixture(t, { networkProbe });
+  const { service, client } = await fixture(t, { ...managed, networkProbe });
   const ownProxy = await savedProxy(service, { name: '个人出口', host: 'own.example' });
   const groupProxy = await savedProxy(service, { name: '分组出口', host: 'group.example', password: 'group-password' });
   await service.call('saveGroup', { name: '强制分组', proxyId: groupProxy.id, proxyMode: 'enforced' });
   const profile = await create(service, { group: '强制分组', proxyId: ownProxy.id, timezone: '' });
   const started = await service.call('startProfile', { id: profile.id });
-  assert.equal(inputs[0].proxy.host, 'group.example'); assert.equal(inputs[0].options.force, true);
-  assert.deepEqual(client.requests.find((request) => request.route === '/api/sessions' && request.method === 'POST').body.launch_overrides, { timezone: 'America/New_York', locale: 'zh-CN', country_code: 'US', privacy: { mode: 'standard' }, geolocation: null });
+  assert.equal(managed.calls[0].host, 'group.example'); assert.equal(managed.calls[0].password, 'group-password');
+  assert.equal(inputs[0].proxy.host, '127.0.0.1'); assert.equal(inputs[0].options.force, true);
+  const { proxy: launchProxy, ...overrides } = client.requests.find((request) => request.route === '/api/sessions' && request.method === 'POST').body.launch_overrides;
+  assert.deepEqual(overrides, { timezone: 'America/New_York', locale: 'zh-CN', country_code: 'US', privacy: { mode: 'standard' }, geolocation: null });
+  assert.deepEqual(launchProxy, { type: 'http', host: inputs[0].proxy.host, port: inputs[0].proxy.port, username: inputs[0].proxy.username, password: inputs[0].proxy.password });
   assert.equal(client.profiles[0].launch_overrides.timezone, '', 'stored profile remains automatic');
   assert.equal(started.profiles[0].resolvedTimezone, 'America/New_York'); assert.equal(started.profiles[0].timezoneSource, 'proxy');
   assert.equal(started.profiles[0].network.ip, '8.8.8.8');
   const context = await service.resolveWorkspaceContext(profile.id);
-  assert.equal(context.proxy.password, 'group-password'); assert.equal(context.proxySource, 'group'); assert.equal(context.timezone, 'America/New_York');
+  assert.equal(context.proxy.password, inputs[0].proxy.password); assert.equal(context.proxySource, 'group'); assert.equal(context.timezone, 'America/New_York');
   await assert.rejects(service.call('resolveWorkspaceContext', { id: profile.id }), { code: 'UNKNOWN_METHOD' });
   await assert.rejects(service.call('getWorkspaceContext', { id: profile.id }), { code: 'UNKNOWN_METHOD' });
   assert.equal(JSON.stringify(started.profiles[0].network).includes('group-password'), false);
@@ -700,7 +709,7 @@ test('automatic locale and regional location use the detected egress and remain 
   assert.deepEqual(context.geolocation, { latitude: 14.6, longitude: 121, accuracy: 50000 });
   await service.call('startProfile', { id: profile.id });
   const launch = client.requests.find(request => request.route === '/api/sessions' && request.method === 'POST').body.launch_overrides;
-  assert.deepEqual(launch, { timezone: 'Asia/Manila', locale: 'en-PH', country_code: 'PH', privacy: { mode: 'standard' }, geolocation: context.geolocation });
+  assert.deepEqual(launch, { timezone: 'Asia/Manila', locale: 'en-PH', country_code: 'PH', privacy: { mode: 'standard' }, geolocation: context.geolocation, proxy: { type: 'http', host: context.proxy.host, port: context.proxy.port, username: context.proxy.username, password: context.proxy.password } });
   assert.deepEqual(client.profiles[0], before, 'resolved egress values must not change the stored automatic configuration');
   const exported = await service.call('exportProfiles');
   assert.equal(JSON.stringify(exported).includes('latitude'), false);
@@ -730,7 +739,7 @@ test('failed proxy geolocation blocks automatic launch without direct fallback a
   const profile = await create(service, { proxyId: proxy.id, timezone: '' });
   await assert.rejects(service.call('startProfile', { id: profile.id }), { code: 'AUTO_TIMEZONE_FAILED' });
   assert.equal(client.requests.some((request) => request.route === '/api/sessions' && request.method === 'POST'), false);
-  assert.ok(inputs.every((input) => input?.host === 'proxy.example'));
+  assert.ok(inputs.every((input) => input?.host === '127.0.0.1' && input.username && input.password && input.password !== 'dummy-password'));
   const failed = (await service.snapshot()).profiles[0];
   assert.equal(failed.status, 'error'); assert.equal(failed.network.ok, false); assert.match(failed.networkLastError, /HTTPS/);
   assert.equal(JSON.stringify(failed).includes('dummy-password'), false);
@@ -994,7 +1003,7 @@ test('AnyTLS browser and terminal contexts use the same authenticated internal H
   assert.ok(managed.calls.every((row) => row.id === proxy.id && row.protocol === 'anytls'));
 });
 
-test('ordinary application routes use an owned core while saved browser bindings keep their existing upstream', async t => {
+test('HTTP browser, terminal and application routes share one owned core while saved bindings keep their upstream', async t => {
   for (const protocol of ['http', 'https', 'socks5']) {
     const managed = managedProxyFixture();
     managed.proxyCore.routingIdentity = id => managed.wires.has(id) ? { proxyId: id, nodeType: protocol, routeIdentity: 'owned-route', corePid: 12345, coreGeneration: 'owned-generation', coreVersion: 'v1.19.32' } : null;
@@ -1003,18 +1012,180 @@ test('ordinary application routes use an owned core while saved browser bindings
     const profile = await create(service, { proxyId: proxy.id });
     const before = structuredClone(client.profiles[0]), saved = JSON.stringify(await service.store.read());
     const ordinary = await service.resolveWorkspaceContext(profile.id);
-    assert.equal(ordinary.managedProxy, false); assert.equal(ordinary.proxy.host, proxy.host); assert.equal(managed.calls.length, 0);
+    assert.equal(ordinary.managedProxy, protocol !== 'socks5');
+    assert.equal(ordinary.proxy.host, protocol === 'socks5' ? proxy.host : '127.0.0.1');
+    assert.equal(managed.calls.length, protocol === 'socks5' ? 0 : 1);
     const application = await service.resolveWorkspaceContext(profile.id, { force: true, requireManagedRoute: true });
     assert.equal(application.managedProxy, true); assert.equal(application.proxy.host, '127.0.0.1');
     assert.equal(application.applicationRoute.protocol, 'socks5'); assert.equal(application.applicationRoute.udp, protocol === 'socks5');
     assert.equal(application.applicationRoute.udpPolicy, protocol === 'socks5' ? 'proxy' : 'block');
     assert.equal(application.managedRoute.nodeType, protocol); assert.equal(application.managedRoute.profileId, profile.id);
+    if (protocol !== 'socks5') assert.deepEqual(ordinary.proxy, application.proxy);
     assert.equal(managed.probes.at(-1).proxy.password, application.applicationRoute.password);
     assert.deepEqual(client.profiles[0], before); assert.equal(JSON.stringify(await service.store.read()), saved);
     assert.equal(JSON.stringify(await service.snapshot()).includes(application.proxy.password), false);
     service.invalidateManagedProxy(proxy.id);
     assert.equal((await service.snapshot()).profiles[0].network.ok, false);
     await service.releaseProxy(proxy); assert.equal(managed.wires.has(proxy.id), false);
+  }
+});
+
+test('HTTP and HTTPS require the owned core even with a fixed manual timezone', async t => {
+  for (const protocol of ['http', 'https']) {
+    const managed = managedProxyFixture();
+    const { service, client } = await fixture(t, { ...managed, proxyCore: null });
+    const proxy = await savedProxy(service, { protocol });
+    const profile = await create(service, { proxyId: proxy.id });
+    await assert.rejects(service.call('startProfile', { id: profile.id }), { code: 'PROXY_CORE_UNAVAILABLE' });
+    await assert.rejects(service.call('checkProxy', { id: proxy.id }), { code: 'PROXY_CORE_UNAVAILABLE' });
+    assert.equal(client.sessions.length, 0); assert.equal(managed.probes.length, 0);
+  }
+});
+
+test('HTTP compatibility diagnostics are public snapshot data and never saved or exported', async t => {
+  const managed = managedProxyFixture();
+  const diagnostics = { enabled: true, recoveredConnections: 3, failedConnections: 1, lastErrorCode: 'UPSTREAM_CONNECT_FAILED', lastUpstreamStatus: 502 };
+  managed.proxyCore.compatibilitySnapshot = id => managed.wires.has(id) ? structuredClone(diagnostics) : null;
+  const { service } = await fixture(t, managed);
+  const proxy = await savedProxy(service), profile = await create(service, { proxyId: proxy.id });
+  assert.equal((await service.snapshot()).proxies[0].compatibility, null);
+  await service.resolveWorkspaceContext(profile.id);
+  const publicProxy = (await service.snapshot()).proxies[0];
+  assert.deepEqual(publicProxy.compatibility, diagnostics);
+  await service.call('saveProxy', { proxy: { ...publicProxy, name: 'Edited name' } });
+  assert.equal(JSON.stringify(await service.store.read()).includes('compatibility'), false);
+  assert.equal(JSON.stringify(await service.call('exportProfiles')).includes('recoveredConnections'), false);
+});
+
+test('HTTP and HTTPS draft checks, previews and address searches release only their owned temporary cores', async t => {
+  for (const protocol of ['http', 'https']) {
+    const managed = managedProxyFixture(), lookups = [];
+    const probe = managed.networkProbe.probe.bind(managed.networkProbe);
+    managed.networkProbe.probe = async (...args) => ({ ...await probe(...args), scope: 'egress', countryCode: 'JP', country: 'Japan', geolocation: { latitude: 35.6, longitude: 139.7, accuracy: 50000 } });
+    const addressGeocoder = { close() {}, async reverse(input) { lookups.push(input); this.onReverse?.(); return null; }, async search(input) { lookups.push(input); this.onSearch?.(); if (this.failure) throw new Error('fixture address lookup failed'); return [{ label: 'Tokyo', latitude: 35.6, longitude: 139.7 }]; } };
+    const { service } = await fixture(t, { ...managed, addressGeocoder });
+    const saved = await savedProxy(service, { protocol }), profile = await create(service, { proxyId: saved.id });
+    const context = await service.resolveWorkspaceContext(profile.id), before = JSON.stringify(await service.store.read());
+    const draft = { protocol, host: 'draft.example', port: 8443, username: 'draft-user', password: 'draft-password' };
+    const preview = await service.call('previewProxyNetwork', { proxy: draft });
+    assert.ok(preview.locationPreviewToken); assert.equal(managed.releases.length, 1);
+    await service.call('checkProxy', { proxy: draft });
+    assert.equal(managed.releases.length, 2);
+    await service.call('checkProxy', { id: saved.id });
+    assert.equal(managed.releases.length, 2, 'saved checks retain the shared route');
+    await service.call('searchNetworkAddress', { proxy: draft, locationPreviewToken: preview.locationPreviewToken, query: 'Tokyo' });
+    assert.equal(managed.releases.length, 3);
+    addressGeocoder.onSearch = () => service.invalidateManagedProxy(managed.calls.at(-1).id);
+    await assert.rejects(service.call('searchNetworkAddress', { proxy: draft, locationPreviewToken: preview.locationPreviewToken, query: 'Tokyo' }), { code: 'PROXY_CORE_STOPPED' });
+    delete addressGeocoder.onSearch;
+    addressGeocoder.onReverse = () => service.invalidateManagedProxy(managed.calls.at(-1).id);
+    await assert.rejects(service.call('previewProxyNetwork', { proxy: draft }), { code: 'PROXY_CORE_STOPPED' });
+    delete addressGeocoder.onReverse;
+    assert.equal(managed.releases.length, 5, 'invalidation during either map callback cannot retain a draft or accept stale results');
+    addressGeocoder.failure = true;
+    await assert.rejects(service.call('searchNetworkAddress', { proxy: draft, locationPreviewToken: preview.locationPreviewToken, query: 'Tokyo' }), /fixture address lookup failed/);
+    assert.equal(managed.releases.length, 6);
+    managed.proxyCore.failure = true;
+    await assert.rejects(service.call('checkProxy', { proxy: draft }), value => value.code === 'PROXY_CORE_FAILED' && !value.message.includes(draft.password));
+    assert.equal(managed.releases.length, 7);
+    assert.ok(managed.releases.every(id => id.startsWith('draft_')));
+    assert.ok(lookups.every(input => input.proxy.host === '127.0.0.1' && input.proxy.username && input.proxy.password !== draft.password));
+    assert.deepEqual([...managed.wires.keys()], [saved.id]); assert.deepEqual(managed.wires.get(saved.id), context.proxy);
+    assert.equal(JSON.stringify(await service.store.read()), before);
+  }
+});
+
+test('managed HTTP launch receipts retain the stored marker and never persist runtime credentials', async t => {
+  for (const [protocol, marker] of [['http', false], ['https', false], ['http', undefined], ['anytls', false]]) {
+    const managed = managedProxyFixture();
+    const { service, client } = await fixture(t, managed);
+    const proxy = protocol === 'anytls' ? (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0] : await savedProxy(service, { protocol });
+    const profile = await create(service, { proxyId: proxy.id });
+    if (marker === undefined) delete client.profiles[0].managed_proxy_required; else client.profiles[0].managed_proxy_required = marker;
+    const before = structuredClone(client.profiles[0]), request = client.request.bind(client);
+    let launchedProxy;
+    client.request = async (method, route, body, options) => {
+      if (route.endsWith('/identity')) {
+        const digest = createHash('sha256').update('envara-browser-route-v1\0');
+        for (const field of [launchedProxy.type, launchedProxy.host, String(launchedProxy.port), launchedProxy.username, launchedProxy.password]) digest.update(`${Buffer.byteLength(field)}:`).update(field);
+        return { data: { instance_id: client.sessions[0].instance_id, route_digest: digest.digest('hex') } };
+      }
+      if (route === '/api/playwright/endpoint') return { data: client.sessions.map(session => ({ ...session, endpoint: 'ws://127.0.0.1:28000/fixture' })) };
+      const response = await request(method, route, body, options);
+      if (route === '/api/sessions' && method === 'POST') { launchedProxy = body.launch_overrides.proxy; response.data.instance_id = '1'.repeat(32); client.sessions[0].instance_id = response.data.instance_id; }
+      return response;
+    };
+    const context = await service.resolveWorkspaceContext(profile.id);
+    await service.call('startProfile', { id: profile.id });
+    assert.ok(service.browserLaunchReceipts.has(profile.id));
+    assert.equal((await service.ensureBoundBrowser({ profileId: profile.id, expectedContext: context })).profile_id, profile.id);
+    assert.deepEqual(client.profiles[0], protocol === 'anytls' ? { ...before, managed_proxy_required: true } : before);
+    assert.equal(launchedProxy.host, '127.0.0.1'); assert.equal(launchedProxy.password, context.proxy.password);
+    for (const value of [await service.store.read(), await service.snapshot(), await service.call('exportProfiles'), client.profiles]) {
+      assert.equal(JSON.stringify(value).includes(context.proxy.password), false);
+      assert.equal(JSON.stringify(value).includes(context.proxy.username), false);
+    }
+  }
+});
+
+test('legacy inline HTTP routes acquire their existing synthetic identity without rewriting native configuration', async t => {
+  for (const protocol of ['http', 'https']) for (const source of ['profile', 'group', 'bound-inline']) {
+    const managed = managedProxyFixture();
+    const { service, client } = await fixture(t, managed);
+    const profile = await create(service, { group: source === 'group' ? 'Legacy' : '', proxyId: null });
+    const native = { type: protocol, host: 'legacy.example', port: 8443, username: 'legacy-user', password: 'legacy-password', region: 'jp-tokyo' };
+    if (source === 'group') client.groups.push({ name: 'Legacy', proxy_mode: 'enforced', proxy: native });
+    else client.profiles[0].proxy = native;
+    await service.store.transaction(workspace => { workspace.profiles = source === 'bound-inline' ? [{ id: profile.id, proxyId: `inline_${profile.id}` }] : []; });
+    const before = structuredClone({ profiles: client.profiles, groups: client.groups }), stored = JSON.stringify(await service.store.read());
+    const expectedId = (await service.snapshot()).proxies[0].id;
+    const context = await service.resolveWorkspaceContext(profile.id);
+    assert.equal(context.proxyId, expectedId); assert.equal(context.managedProxy, true); assert.equal(context.proxy.host, '127.0.0.1');
+    assert.equal(managed.calls[0].id, expectedId); assert.equal(managed.calls[0].protocol, protocol);
+    assert.deepEqual({ profiles: client.profiles, groups: client.groups }, before); assert.equal(JSON.stringify(await service.store.read()), stored);
+    service.invalidateManagedProxy(expectedId);
+    assert.equal((await service.snapshot()).profiles[0].network.ok, false);
+  }
+});
+
+test('legacy native routes borrow an existing node ID without inheriting its confirmed location', async t => {
+  const managed = managedProxyFixture();
+  const { service, client } = await fixture(t, managed);
+  const saved = await savedProxy(service, { region: 'jp-tokyo' });
+  const profile = await create(service, { proxyId: null, timezone: 'Europe/Berlin', locale: 'de-DE' });
+  client.profiles[0].proxy = { type: saved.protocol, host: saved.host, port: saved.port, username: saved.username, password: saved.password, region: saved.region };
+  await service.store.transaction(workspace => { workspace.proxies[0].location = { mode: 'manual', confirmed: true, countryCode: 'JP', timezone: 'Asia/Tokyo', label: 'Saved-only map pin', latitude: 35.6, longitude: 139.7 }; });
+  const native = structuredClone(client.profiles[0]);
+  const context = await service.resolveWorkspaceContext(profile.id);
+  assert.equal(context.proxyId, saved.id); assert.equal(context.timezone, 'Europe/Berlin');
+  assert.equal(context.selectedLocation, null); assert.equal(context.geolocation, null);
+  assert.equal((await service.snapshot()).profiles[0].network.ok, true, 'the runtime context keeps the native configuration signature');
+  service.invalidateManagedProxy(saved.id);
+  assert.equal((await service.snapshot()).profiles[0].network.ok, false);
+  assert.deepEqual(client.profiles[0], native);
+});
+
+test('HTTP and HTTPS core invalidation blocks stale results and focus restores only the existing session', async t => {
+  for (const protocol of ['http', 'https']) {
+    const managed = managedProxyFixture();
+    const { service, client } = await fixture(t, managed);
+    const proxy = await savedProxy(service, { protocol }), profile = await create(service, { proxyId: proxy.id });
+    await service.call('startProfile', { id: profile.id });
+    const originalProbe = managed.networkProbe.probe.bind(managed.networkProbe);
+    for (const operation of [() => service.call('checkProxy', { id: proxy.id }), () => service.resolveWorkspaceContext(profile.id, { force: true })]) {
+      let entered, finish;
+      const started = new Promise(resolve => { entered = resolve; });
+      managed.networkProbe.probe = async () => { entered(); return new Promise(resolve => { finish = () => resolve({ ok: true, timezone: 'Asia/Tokyo', ip: '203.0.113.8' }); }); };
+      const pending = operation();
+      await started; service.invalidateManagedProxy(proxy.id); finish();
+      await assert.rejects(pending, { code: 'PROXY_CORE_STOPPED' });
+      assert.equal((await service.snapshot()).profiles[0].network.ok, false);
+    }
+    managed.networkProbe.probe = originalProbe;
+    const previousCalls = managed.calls.length;
+    await service.call('focusProfile', { id: profile.id });
+    assert.equal(managed.calls.length, previousCalls + 1); assert.equal((await service.snapshot()).profiles[0].network.ok, true);
+    assert.equal(client.requests.filter(row => row.method === 'POST' && row.route === '/api/sessions').length, 1);
   }
 });
 
@@ -1202,7 +1373,7 @@ test('AnyTLS group edits protect every running member and preserve local binding
 });
 
 test('AnyTLS stale or unavailable managed bindings fail closed even with a fixed manual timezone', async (t) => {
-  const { service, client } = await fixture(t);
+  const { service, client } = await fixture(t, { proxyCore: null });
   const raw = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
   const profile = await create(service, { proxyId: raw.id, timezone: 'Asia/Tokyo' });
   await assert.rejects(service.call('startProfile', { id: profile.id }), { code: 'PROXY_CORE_UNAVAILABLE' });

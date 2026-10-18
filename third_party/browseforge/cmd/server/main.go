@@ -37,13 +37,14 @@ func main() {
 
 // serveFlags holds CLI overrides for serve mode
 type serveFlags struct {
-	baseDir      string
-	configPath   string
-	host         string
-	port         string
-	noSandbox    bool
-	noOpen       bool
-	pauseOnError bool
+	baseDir                string
+	configPath             string
+	host                   string
+	port                   string
+	noSandbox              bool
+	noOpen                 bool
+	enforceHTTPProxyBridge bool
+	pauseOnError           bool
 }
 
 func isDocker() bool {
@@ -139,7 +140,7 @@ func runServer(flags *serveFlags) {
 	}
 
 	// Load config once
-	cfg, err := config.Load(flags.configPath)
+	cfg, err := loadServeConfig(flags)
 	if err != nil {
 		exitServerError(flags, "Config error: %v", err)
 	}

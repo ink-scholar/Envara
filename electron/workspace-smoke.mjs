@@ -123,7 +123,7 @@ export async function runWorkspaceSmoke({ app, window, service, terminal, applic
     await fillField('名称', 'Synthetic address network'); await fillField('服务器地址', '127.0.0.1'); await fillField('端口', '9');
     await clickText('检测并继续', '.proxy-modal button');
     await waitFor(() => evaluate("Boolean(document.querySelector('.location-mode-control'))"), 'verified network location step');
-    await clickText('手动选择位置', '.proxy-modal button'); await fillField('地址或地点', 'Synthetic public landmark');
+    await clickText('手动选择位置', '.proxy-modal button'); await fillField('街道、地址或地点', 'Synthetic public landmark');
     await clickText('查询地址', '.proxy-modal button');
     await waitFor(() => evaluate("document.querySelectorAll('.address-search-results > button').length === 1"), 'address candidates from production IPC');
     assert.equal(await evaluate("document.querySelector('.location-confirmation input').checked"), false);
@@ -132,7 +132,7 @@ export async function runWorkspaceSmoke({ app, window, service, terminal, applic
     assert.equal(await evaluate("document.querySelector('.location-confirmation input').checked"), false);
     await fillField('Google Maps 链接（选填）', 'https://www.google.com/maps/search/?api=1&query=14.6,121');
     assert.equal(await evaluate("document.querySelector('.location-manual-fields input').value"), '', 'replacing a map pin discards the previous candidate label');
-    await fillField('地址或地点', 'Synthetic public landmark'); await clickText('查询地址', '.proxy-modal button');
+    await fillField('街道、地址或地点', 'Synthetic public landmark'); await clickText('查询地址', '.proxy-modal button');
     await waitFor(() => evaluate("document.querySelectorAll('.address-search-results > button').length === 1"), 'replacement address candidates');
     await evaluate("document.querySelector('.address-search-results > button').click()");
     for (const language of languages) {

@@ -11,6 +11,56 @@ import (
 	"browseforge/internal/browser"
 )
 
+func TestServeHTTPProxyBridgeFlagDoesNotChangeSavedConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "standalone default"},
+		{name: "desktop flag", args: []string{"--enforce-http-proxy-bridge"}, want: true},
+		{name: "explicit on", args: []string{"--enforce-http-proxy-bridge=true"}, want: true},
+		{name: "explicit off", args: []string{"--enforce-http-proxy-bridge=false"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			baseDir := t.TempDir()
+			filename := filepath.Join(baseDir, "config.json")
+			original := []byte(`{"port":"19427","enforce_http_proxy_bridge":true,"EnforceHTTPProxyBridge":true}`)
+			if err := os.WriteFile(filename, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			flags, err := parseServeFlags(tc.args, cliGlobal{baseDir: baseDir, configPath: filename})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if flags.enforceHTTPProxyBridge != tc.want {
+				t.Fatalf("parsed guard = %v, want %v", flags.enforceHTTPProxyBridge, tc.want)
+			}
+			cfg, err := loadServeConfig(flags)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.EnforceHTTPProxyBridge != tc.want || cfg.Port != "19427" {
+				t.Fatalf("runtime config guard/port = %v/%q", cfg.EnforceHTTPProxyBridge, cfg.Port)
+			}
+			encoded, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(encoded, []byte("enforce_http_proxy_bridge")) || bytes.Contains(encoded, []byte("EnforceHTTPProxyBridge")) {
+				t.Fatal("serve runtime flag must not enter serialized config")
+			}
+			unchanged, err := os.ReadFile(filename)
+			if err != nil || !bytes.Equal(unchanged, original) {
+				t.Fatalf("loading serve config changed its saved bytes: %v", err)
+			}
+		})
+	}
+	if _, err := parseServeFlags([]string{"--enforce-http-proxy-bridge=invalid"}, cliGlobal{}); err == nil {
+		t.Fatal("invalid boolean flag unexpectedly succeeded")
+	}
+}
+
 func TestCLIHelpAndVersion(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := runCLI([]string{"--help"}, &stdout, &stderr); code != 0 {

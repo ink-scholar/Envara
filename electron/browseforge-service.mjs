@@ -123,6 +123,7 @@ function proxyConfig(input) {
 }
 const upstreamProxy = (proxy) => { if (!proxy) return null; assertHttpProxyUsername(proxy.protocol, proxy.username); const region = browseForgeRegionFor(proxy); return { type: proxy.protocol, host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password, ...(region ? { region } : {}) }; };
 const sameProxy = (a, b) => JSON.stringify(proxyConfig(a)) === JSON.stringify(proxyConfig(b));
+const usesManagedProxy = (proxy) => ['http', 'https', 'anytls'].includes(proxy?.protocol ?? proxy?.type);
 // Explicit IDs keep saved nodes distinct even when their endpoint fields match.
 const proxyMatchesBinding = (proxy, boundId, inline) => boundId ? boundId === proxy.id : inline && sameProxy(inline, proxy);
 const rawProxyFingerprint = (proxy) => proxy?.protocol === 'anytls' ? createHash('sha256').update(JSON.stringify(proxyConfig(proxy))).digest('hex') : proxyFingerprint(proxy);
@@ -235,16 +236,17 @@ export class BrowseForgeService {
   }
   proxies(workspace, remote) {
     const result = [...workspace.proxies];
+    const networkFor = (proxy) => usesManagedProxy(proxy) ? (this.proxyWires.has(proxy.id) ? this.networkProbe.peek(this.proxyWires.get(proxy.id)) : null) : this.networkProbe.peek(proxy);
     const isBoundProjection = (inline, boundId) => {
       const saved = boundId && workspace.proxies.find((proxy) => proxy.id === boundId);
       if (!saved || saved.protocol === 'anytls') return false;
       // Native copies include the derived region; they do not create a new saved node.
-      try { return sameProxy(upstreamProxy({ ...saved, network: this.networkProbe.peek(saved) }), inline); }
+      try { return sameProxy(upstreamProxy({ ...saved, network: networkFor(saved) }), inline); }
       catch { return false; } // Legacy values must remain readable for repair.
     };
     for (const profile of remote.profiles) if (profile.proxy && !result.some((proxy) => sameProxy(proxy, profile.proxy)) && !isBoundProjection(profile.proxy, workspace.profiles.find((item) => item.id === profile.id)?.proxyId)) result.push({ id: `inline_${profile.id}`, name: `${profile.name} · 配置内代理`, ...proxyConfig(profile.proxy), source: 'profile', profileId: profile.id });
     for (const group of remote.groups) if (group.proxy && !result.some((proxy) => sameProxy(proxy, group.proxy)) && !isBoundProjection(group.proxy, workspace.groups?.find((item) => item.name === group.name)?.proxyId)) result.push({ id: `group_${Buffer.from(group.name).toString('hex').slice(0, 70)}`, name: `${group.name} · 分组代理`, ...proxyConfig(group.proxy), source: 'group', groupName: group.name });
-    return result.map((proxy) => ({ ...proxy, network: proxy.protocol === 'anytls' ? (this.proxyWires.has(proxy.id) ? this.networkProbe.peek(this.proxyWires.get(proxy.id)) : null) : this.networkProbe.peek(proxy) }));
+    return result.map((proxy) => ({ ...proxy, network: networkFor(proxy), compatibility: this.options?.proxyCore?.compatibilitySnapshot?.(proxy.id) ?? null }));
   }
   groups(workspace, remoteGroups) {
     const groups = remoteGroups.map((group) => ({ ...group }));
@@ -543,7 +545,7 @@ export class BrowseForgeService {
         const identity = await this.browserSessionIdentity(session, context);
         const endpoint = await this.boundBrowserEndpoint(session);
         this.browserLaunchReceipts.set(profileId, { sessionId: session.session_id, runtimeId: session.runtime_id, instanceId: identity.instance_id, endpoint,
-          profileSignature: browserProfileSignature({ ...profile, ...(context.managedProxy ? { managed_proxy_required: true } : {}) }),
+          profileSignature: browserProfileSignature(profile),
           signature: browserContextSignature(context), context: structuredClone({ proxyId: context.proxyId, timezone: context.timezone, locale: context.locale, geolocation: context.geolocation, network: context.network }) });
       } catch { /* Normal browser launch remains usable; bound automation refuses. */ }
       const metadata = (await this.store.read()).profiles.find((item) => item.id === profileId);
@@ -616,7 +618,7 @@ export class BrowseForgeService {
       return this.client.callMcpTool(name, { ...input, profile_id: profileId });
     });
   }
-  async focusProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); const session = remote.sessions.find((item) => item.profile_id === profileId); if (!session || (await this.health(session)).alive !== true) throw error('环境尚未运行。', 'PROFILE_NOT_RUNNING'); const workspace = await this.store.read(); if (this.effectiveProxy(profile, remote.groups, workspace).proxy?.protocol === 'anytls' || profile.managed_proxy_required) await this.resolveWorkspaceContext(profileId, { remote, force: true }); if (this.options.focusSession) await this.options.focusSession(session); else await this.request('POST', `/api/sessions/${encoded(session.session_id)}/focus`); await this.capture(profileId, session.session_id); }
+  async focusProfile({ id: profileId }) { const remote = await this.remote(); const profile = this.find(remote, profileId); const session = remote.sessions.find((item) => item.profile_id === profileId); if (!session || (await this.health(session)).alive !== true) throw error('环境尚未运行。', 'PROFILE_NOT_RUNNING'); const workspace = await this.store.read(); if (usesManagedProxy(this.effectiveProxy(profile, remote.groups, workspace).proxy) || profile.managed_proxy_required) await this.resolveWorkspaceContext(profileId, { remote, force: true }); if (this.options.focusSession) await this.options.focusSession(session); else await this.request('POST', `/api/sessions/${encoded(session.session_id)}/focus`); await this.capture(profileId, session.session_id); }
   resetPreview(profileId) { this.previews.delete(profileId); this.previewAttempts.delete(profileId); this.previewCapturedAt.delete(profileId); this.previewInFlight.delete(profileId); }
   async capture(profileId, sessionId, { force = true } = {}) {
     const pending = this.previewInFlight.get(profileId);
@@ -716,7 +718,7 @@ export class BrowseForgeService {
     if (!proxy && requireManagedRoute) throw error('托管网络出口绑定缺失，请先选择代理节点。', 'MANAGED_PROXY_BINDING_MISSING');
     if (!proxy) return { wire: null, managed: false };
     assertHttpProxyUsername(proxy.protocol ?? proxy.type, proxy.username);
-    if (proxy.protocol !== 'anytls' && !requireManagedRoute) return { wire: { ...proxyConfig(proxy), region: browseForgeRegionFor(proxy) ?? '' }, managed: false };
+    if (!usesManagedProxy(proxy) && !requireManagedRoute) return { wire: { ...proxyConfig(proxy), region: browseForgeRegionFor(proxy) ?? '' }, managed: false };
     if (!this.options.proxyCore?.ensure) throw error('内置代理网络内核尚未就绪。', 'PROXY_CORE_UNAVAILABLE');
     let candidate;
     try { candidate = await this.options.proxyCore.ensure({ ...proxyConfig(proxy), id: identifier(proxy.id) }); }
@@ -762,19 +764,19 @@ export class BrowseForgeService {
       else { const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]); proxy = this.proxies(workspace, remote).find((item) => item.id === proxyId); if (!proxy) throw error('网络出口不存在。', 'PROXY_NOT_FOUND'); }
       const revision = this.managedProxyRevisions.get(proxy.id) ?? 0;
       try { return { proxy, revision, ...(await this.prepareProxy(proxy)) }; }
-      catch (value) { if (draft != null && proxy.protocol === 'anytls') await this.releaseProxy(proxy); throw value; }
+      catch (value) { if (draft != null && usesManagedProxy(proxy)) await this.releaseProxy(proxy); throw value; }
     };
-    const { proxy, wire, revision } = draft == null ? await this.serialize(prepare) : await prepare();
+    const { proxy, wire, revision, managed } = draft == null ? await this.serialize(prepare) : await prepare();
     try {
       const result = await this.networkProbe.probe(wire, { force: true });
-      if (proxy.protocol === 'anytls' && revision !== (this.managedProxyRevisions.get(proxy.id) ?? 0)) throw error('AnyTLS 网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
+      if (managed && revision !== (this.managedProxyRevisions.get(proxy.id) ?? 0)) throw error('代理网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
       // Main-only callback keeps optional map context on the exact verified
       // wire until the owned draft is released. IPC cannot supply this callback.
       if (afterProbe) await afterProbe(result, wire);
-      if (proxy.protocol === 'anytls' && revision !== (this.managedProxyRevisions.get(proxy.id) ?? 0)) throw error('AnyTLS 网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
+      if (managed && revision !== (this.managedProxyRevisions.get(proxy.id) ?? 0)) throw error('代理网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
       if (draft == null) this.changed();
       return result;
-    } finally { if (draft != null && proxy.protocol === 'anytls') await this.releaseProxy(proxy); }
+    } finally { if (draft != null && managed) await this.releaseProxy(proxy); }
   }
   async previewProxyNetwork({ proxy, language = 'en' }) {
     await this.ready;
@@ -804,10 +806,13 @@ export class BrowseForgeService {
     if (!preview || preview.expiresAt <= Date.now() || preview.fingerprint !== rawProxyFingerprint(config)) throw error('请先检测当前代理，再查询地址。', 'ADDRESS_NETWORK_NOT_VERIFIED');
     addressQuery(query);
     const draft = { ...config, id: `draft_${randomUUID()}` };
+    const revision = this.managedProxyRevisions.get(draft.id) ?? 0;
     try {
-      const { wire } = await this.prepareProxy(draft);
-      return await this.addressGeocoder.search({ query, language, proxy: wire, routeKey: rawProxyFingerprint(config), bias: preview.network.geolocation });
-    } finally { if (draft.protocol === 'anytls') await this.releaseProxy(draft); }
+      const { wire, managed } = await this.prepareProxy(draft);
+      const result = await this.addressGeocoder.search({ query, language, proxy: wire, routeKey: rawProxyFingerprint(config), bias: preview.network.geolocation });
+      if (managed && revision !== (this.managedProxyRevisions.get(draft.id) ?? 0)) throw error('代理网络内核在地址查询期间中断，请重试。', 'PROXY_CORE_STOPPED');
+      return result;
+    } finally { if (usesManagedProxy(draft)) await this.releaseProxy(draft); }
   }
   contextSignature(profile, effective) { return `${profile.id}:${JSON.stringify(profile.launch_overrides ?? {})}:${JSON.stringify({ timezone: profileGeoField(profile, 'timezone'), locale: profileGeoField(profile, 'locale') })}:${rawProxyFingerprint(effective.proxy)}:${JSON.stringify(effective.proxy?.location ?? null)}`; }
   /** Main-process only: this returns proxy credentials and is deliberately absent from call()/IPC. */
@@ -817,8 +822,12 @@ export class BrowseForgeService {
     const remote = providedRemote ?? await this.remote(), profile = this.find(remote, profileId);
     const workspace = await this.store.read();
     const effective = this.effectiveProxy(profile, remote.groups, workspace);
+    if (effective.proxy && !effective.proxy.id) {
+      const listed = this.proxies(workspace, remote).find((proxy) => sameProxy(proxy, effective.proxy));
+      if (listed) effective.proxy = { ...effective.proxy, id: listed.id, protocol: listed.protocol };
+    }
     if (profile.managed_proxy_required && effective.proxy?.protocol !== 'anytls') throw error('托管网络出口绑定缺失，请重新选择 AnyTLS 节点后再启动。', 'MANAGED_PROXY_BINDING_MISSING');
-    if (effective.proxy?.protocol === 'anytls' && !profile.managed_proxy_required) await this.request('PUT', `/api/profiles/${encoded(profileId)}`, { managed_proxy_required: true });
+    if (effective.proxy?.protocol === 'anytls' && !profile.managed_proxy_required) { await this.request('PUT', `/api/profiles/${encoded(profileId)}`, { managed_proxy_required: true }); profile.managed_proxy_required = true; }
     const revision = this.managedProxyRevisions.get(effective.proxy?.id) ?? 0;
     const { wire, managed } = await this.prepareProxy(effective.proxy, { requireManagedRoute });
     const signature = this.contextSignature(profile, effective);

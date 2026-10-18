@@ -22,8 +22,10 @@ type Config struct {
 	Runtimes          map[string]RuntimeConfig `json:"runtimes,omitempty"`
 	FingerprintDir    string                   `json:"fingerprint_dir"`
 	Humanize          *HumanizeConfig          `json:"humanize,omitempty"`
-	APIToken          string                   `json:"-"` // generated at runtime
-	Version           string                   `json:"-"` // set from main
+	// EnforceHTTPProxyBridge is enabled by the desktop serve flag, never by saved JSON.
+	EnforceHTTPProxyBridge bool   `json:"-"`
+	APIToken               string `json:"-"` // generated at runtime
+	Version                string `json:"-"` // set from main
 }
 
 // CloakBrowserConfig controls Chromium/CloakBrowser launch compatibility.

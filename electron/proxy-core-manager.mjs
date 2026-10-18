@@ -10,12 +10,14 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { resolveProxyBootstrapHost } from './proxy-bootstrap-dns.mjs';
 import { isPublicIP } from './proxy-network.mjs';
 import { assertHttpProxyUsername } from '../shared/proxy-auth.mjs';
+import { createProxyCompatibilityBridge } from './proxy-compatibility-bridge.mjs';
 
 export const PROXY_CORE_VERSION = 'v1.19.32';
 // IP-addressed DoH bootstraps the node without consulting host VPN fake-IP DNS.
 // TLS verification stays enabled. These resolvers never become an OS listener.
 export const PROXY_CORE_BOOTSTRAP_DNS = Object.freeze(['https://223.5.5.5/dns-query', 'https://223.6.6.6/dns-query']);
 const physicalInterfacePattern = /^(?:en\d+|bridge\d+|bond\d+)$/;
+const compatibilityErrorCodes = new Set(['AUTH_REQUIRED', 'DENIED', 'RATE_LIMITED', 'DESTINATION_DNS_FAILED', 'CONNECT_FAILED', 'TLS_FAILED', 'RECOVERED']);
 const execute = promisify(execFile);
 const fail = (code, message) => Object.assign(new Error(message), { code });
 const cancelled = () => fail('PROXY_CORE_CANCELLED', '代理内核启动已取消。');
@@ -100,15 +102,25 @@ function normalizeManagedProxySettings(input) {
     udp: input.protocol === 'socks5' && input.udp !== false };
 }
 
-export function proxyCoreConfig(settings, local, { interfaceName, resolvedServer } = {}) {
+export function proxyCoreConfig(settings, local, { interfaceName, resolvedServer, upstreamOverride } = {}) {
   assertHttpProxyUsername(settings.protocol, settings.username);
   if (interfaceName != null && !physicalInterfacePattern.test(interfaceName)) throw fail('PROXY_CORE_INTERFACE_UNAVAILABLE', '默认物理网络接口无效。');
   if (resolvedServer != null && (net.isIP(resolvedServer) !== 4 || !isPublicIP(resolvedServer))) throw fail('PROXY_CORE_BOOTSTRAP_UNAVAILABLE', '节点解析未返回有效的公开 IPv4 地址。');
+  // A private compatibility listener is transport state, never a saved node.
+  // Its owner retains the original upstream, credentials and TLS identity.
+  if (upstreamOverride != null) {
+    if (!['http', 'https'].includes(settings.protocol)) throw fail('INVALID_MANAGED_PROXY', '代理兼容入口不适用于此协议。');
+    const override = managedProxySettings(upstreamOverride);
+    if (override.protocol !== 'http' || override.host !== '127.0.0.1' || !override.username || !override.password) {
+      throw fail('INVALID_MANAGED_PROXY', '代理兼容入口无效。');
+    }
+    settings = override;
+  }
   const resolvers = PROXY_CORE_BOOTSTRAP_DNS.map(url => interfaceName ? `${url}#${interfaceName}` : url);
   const anytls = settings.protocol === 'anytls';
   const outbound = { name: anytls ? 'ENVARA_ANYTLS' : 'ENVARA_UPSTREAM',
-    type: settings.protocol === 'https' ? 'http' : settings.protocol, server: resolvedServer ?? settings.host, port: settings.port,
-    ...(interfaceName ? { 'interface-name': interfaceName } : {}) };
+    type: settings.protocol === 'https' ? 'http' : settings.protocol, server: upstreamOverride ? settings.host : resolvedServer ?? settings.host, port: settings.port,
+    ...(interfaceName && !upstreamOverride ? { 'interface-name': interfaceName } : {}) };
   if (anytls) Object.assign(outbound, { password: settings.password, sni: settings.serverName,
     'skip-cert-verify': settings.skipCertVerify, 'client-fingerprint': settings.clientFingerprint,
     'client-metadata': '', udp: settings.udp, ...(settings.alpn.length ? { alpn: [...settings.alpn] } : {}), 'min-idle-session': 0 });
@@ -202,7 +214,7 @@ export class ProxyCoreManager {
     probeListener = probeCoreListener, onChange = () => {}, startupTimeoutMs = 8000,
     retryDelayMs = 75, portAttempts = 3, stopTimeoutMs = 1500, platform = process.platform,
     detectInterface = detectMacPhysicalInterface, resolveBootstrapHost = resolveProxyBootstrapHost,
-    bootstrapAddress = bootstrapLocalAddress } = {}) {
+    bootstrapAddress = bootstrapLocalAddress, createCompatibilityBridge = createProxyCompatibilityBridge } = {}) {
     if (!path.isAbsolute(dataDir ?? '') || !path.isAbsolute(resourcesDir ?? '')) throw fail('INVALID_PROXY_CORE_PATH', '代理内核目录无效。');
     this.baseDir = path.join(dataDir, 'proxy-core'); this.resourcesDir = resourcesDir;
     this.resolveBinary = resolveBinary ?? (() => this._bundledBinary());
@@ -211,6 +223,7 @@ export class ProxyCoreManager {
     this.portAttempts = portAttempts; this.stopTimeoutMs = stopTimeoutMs;
     this.platform = platform; this.detectInterface = detectInterface;
     this.resolveBootstrapHost = resolveBootstrapHost; this.bootstrapAddress = bootstrapAddress;
+    this.createCompatibilityBridge = createCompatibilityBridge;
     this.routes = new Map(); this.queues = new Map(); this.generations = new Map(); this.closed = false;
     this.binary = null; this.binaryPromise = null; this.resourceError = null;
   }
@@ -269,7 +282,20 @@ export class ProxyCoreManager {
     if (process.platform === 'win32' && process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
     return env;
   }
-  _assertLive(route) { if (this.closed || route.controller.signal.aborted) throw cancelled(); }
+  _assertLive(route) {
+    if (this.closed || route.controller.signal.aborted) throw cancelled();
+    if (route.compatibilityFailed) throw fail('PROXY_CORE_START_FAILED', '代理兼容入口不可用，未切换线路。');
+  }
+  _compatibilityFailure(route, token) {
+    if (this.routes.get(route.key) !== route || route.compatibilityToken !== token || ['stopping', 'stopped', 'failed'].includes(route.status)) return;
+    route.compatibilityFailed = true;
+    if (route.status !== 'running') return;
+    route.recoveryWire = route.wire ? { ...route.wire } : null;
+    route.wire = null; route.status = 'failed';
+    this._changed({ id: route.key, status: 'failed', error: 'PROXY_CORE_EXITED' });
+    route.cleanupPromise = (async () => { try { await this._stopChild(route); } finally { await this._discard(route); } })();
+    route.cleanupPromise.catch(() => {});
+  }
   async ensure(proxy, { signal } = {}) {
     const settings = managedProxySettings(proxy); const key = this._key(proxy, settings);
     const digest = createHash('sha256').update(JSON.stringify(settings)).digest('hex');
@@ -296,9 +322,9 @@ export class ProxyCoreManager {
       if (signal?.aborted) onAbort();
       try {
         await this.initialize(); this._assertLive(route);
-        let resolvedServer;
+        let resolvedServer, localAddress;
         if (this.platform === 'darwin' && !isLoopbackHost(settings.host) && !net.isIP(settings.host)) {
-          const localAddress = this.bootstrapAddress(interfaceName);
+          localAddress = this.bootstrapAddress(interfaceName);
           try { resolvedServer = await this.resolveBootstrapHost(settings.host, { localAddress, signal: route.controller.signal }); }
           catch { this._assertLive(route); throw fail('PROXY_CORE_BOOTSTRAP_UNAVAILABLE', '无法安全解析节点入口；未切换为系统 DNS 或直接连接。'); }
           if (net.isIP(resolvedServer) !== 4 || !isPublicIP(resolvedServer)) throw fail('PROXY_CORE_BOOTSTRAP_UNAVAILABLE', '节点解析未返回有效的公开 IPv4 地址。');
@@ -312,12 +338,39 @@ export class ProxyCoreManager {
           // time for a fresh port without depending on their diagnostic output.
           const attemptDeadline = Math.min(deadline, Date.now() + Math.max(1, (deadline - Date.now()) / (attempts - attempt)));
           if (recoveryWire) { await this.verifyRecoveryPort(recoveryWire.port); this._assertLive(route); }
+          if (['http', 'https'].includes(settings.protocol)) {
+            // The original physical source address is retained for remote Mac
+            // nodes. This is a socket source binding, not a host route change or
+            // a claim that an arbitrary system VPN cannot capture the socket.
+            if (interfaceName && !localAddress && net.isIP(settings.host) !== 6) localAddress = this.bootstrapAddress(interfaceName);
+            const token = {};
+            route.compatibilityToken = token;
+            route.compatibilityBridge = await this.createCompatibilityBridge(settings, {
+              // Mihomo bounds its outbound handshake to five seconds. This
+              // private hop acknowledges local transport only; the bridge
+              // buffers target bytes until the actual upstream tunnel is ready.
+              earlyConnectAck: true,
+              ...(resolvedServer ? { upstreamAddress: resolvedServer } : {}),
+              ...(localAddress ? { localAddress } : {}),
+              onError: () => this._compatibilityFailure(route, token), onClose: () => this._compatibilityFailure(route, token),
+              onDiagnostic: () => {
+                if (route.compatibilityToken !== token || route.status !== 'running' || route.compatibilityPublishTimer) return;
+                route.compatibilityPublishTimer = setTimeout(() => {
+                  route.compatibilityPublishTimer = null;
+                  if (route.compatibilityToken === token && route.status === 'running') this._changed();
+                }, 100);
+                route.compatibilityPublishTimer.unref();
+              },
+            });
+            this._assertLive(route);
+          }
           route.directory = await this._privateDirectory(); this._assertLive(route);
           const port = recoveryWire?.port ?? await this.choosePort(); this._assertLive(route);
           route.wire = recoveryWire ? { ...recoveryWire } : { protocol: 'http', host: '127.0.0.1', port,
             username: randomBytes(16).toString('hex'), password: randomBytes(32).toString('hex') };
           const config = path.join(route.directory, 'config.json');
-          await writeFile(config, JSON.stringify(proxyCoreConfig(settings, route.wire, { interfaceName, resolvedServer })), { mode: 0o600, flag: 'wx' });
+          await writeFile(config, JSON.stringify(proxyCoreConfig(settings, route.wire, { interfaceName, resolvedServer,
+            ...(route.compatibilityBridge ? { upstreamOverride: route.compatibilityBridge } : {}) })), { mode: 0o600, flag: 'wx' });
           await chmod(config, 0o600); this._assertLive(route);
           route.exited = false; route.bindCollision = false;
           route.coreGeneration = randomUUID();
@@ -387,11 +440,16 @@ export class ProxyCoreManager {
   }
   async _discard(route) {
     route.wire = null;
-    if (route.directory) { const directory = route.directory; route.directory = null; await rm(directory, { recursive: true, force: true }); }
+    const bridge = route.compatibilityBridge;
+    route.compatibilityBridge = null;
+    route.compatibilityToken = null;
+    clearTimeout(route.compatibilityPublishTimer); route.compatibilityPublishTimer = null;
+    try { if (bridge) await bridge.close(); }
+    finally { if (route.directory) { const directory = route.directory; route.directory = null; await rm(directory, { recursive: true, force: true }); } }
   }
   async _stop(route) {
     route.status = 'stopping'; route.controller.abort();
-    await this._stopChild(route); await route.cleanupPromise; await this._discard(route);
+    try { await this._stopChild(route); await route.cleanupPromise; } finally { await this._discard(route); }
     route.recoveryWire = null;
     if (this.routes.get(route.key) === route) this.routes.delete(route.key);
     route.status = 'stopped'; this._changed({ id: route.key, status: 'stopped' });
@@ -404,6 +462,17 @@ export class ProxyCoreManager {
         !Number.isSafeInteger(route.child?.pid) || route.child.pid < 1 || !route.coreGeneration) return null;
     return { proxyId: key, nodeType: route.nodeType, routeIdentity: route.routeIdentity,
       coreGeneration: route.coreGeneration, corePid: route.child.pid, coreVersion: PROXY_CORE_VERSION };
+  }
+  /** Counts and fixed error categories only; destination and credentials stay private. */
+  compatibilitySnapshot(proxyId) {
+    const route = this.routes.get(proxyId);
+    if (this.closed || route?.status !== 'running' || route.exited || route.compatibilityFailed || !route.compatibilityBridge) return null;
+    const value = route.compatibilityBridge.snapshot?.();
+    if (!value || typeof value !== 'object') return null;
+    const count = item => Number.isSafeInteger(item) && item >= 0 ? item : 0;
+    return { enabled: true, recoveredConnections: count(value.recoveredConnections), failedConnections: count(value.failedConnections),
+      lastErrorCode: compatibilityErrorCodes.has(value.lastErrorCode) ? value.lastErrorCode : null,
+      lastUpstreamStatus: Number.isInteger(value.lastUpstreamStatus) && value.lastUpstreamStatus >= 100 && value.lastUpstreamStatus <= 599 ? value.lastUpstreamStatus : null };
   }
   async release(proxyOrId) {
     const key = typeof proxyOrId === 'string' ? proxyOrId : this._key(proxyOrId, normalizeManagedProxySettings(proxyOrId));

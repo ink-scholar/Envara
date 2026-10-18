@@ -51,11 +51,28 @@ async function fixture(t, platform = 'darwin') {
     if (route === '/api/shutdown') return { data: 'closed' };
     throw new Error('Unsupported fixture request');
   } };
+  const coreRoutes = new Map(), coreCalls = [], probes = [];
+  let wireSequence = 0;
+  const proxyCore = {
+    async ensure(proxy) {
+      coreCalls.push(structuredClone(proxy));
+      if (!coreRoutes.has(proxy.id)) {
+        const serial = ++wireSequence;
+        coreRoutes.set(proxy.id, { upstream: structuredClone(proxy), wire: { protocol: 'http', host: '127.0.0.1', port: 24000 + serial, username: `fixture-wire-user-${serial}`, password: `fixture-wire-password-${serial}` } });
+      }
+      return structuredClone(coreRoutes.get(proxy.id).wire);
+    },
+    async release(id) { coreRoutes.delete(id); },
+    async close() { coreRoutes.clear(); },
+  };
   const networkProbe = { peek: () => null, invalidate() {}, close() {}, probe: async proxy => {
-    const malaysia = proxy?.host === 'my.example';
+    const route = proxy && [...coreRoutes.values()].find(({ wire }) => ['protocol', 'host', 'port', 'username', 'password'].every(key => wire[key] === proxy[key]));
+    if (proxy) assert.ok(route, 'network measurements must use an authenticated owned wire');
+    probes.push({ wire: structuredClone(proxy), upstream: structuredClone(route?.upstream ?? null) });
+    const malaysia = route?.upstream.host === 'my.example';
     return { ok: true, ip: malaysia ? '203.0.113.2' : '203.0.113.1', countryCode: malaysia ? 'MY' : 'US', timezone: malaysia ? 'Asia/Kuala_Lumpur' : 'America/New_York', geolocation: null };
   } };
-  let service = new BrowseForgeService(root, client, { platform }, () => {}, { profilesDir, networkProbe });
+  let service = new BrowseForgeService(root, client, { platform }, () => {}, { profilesDir, networkProbe, proxyCore });
   await service.ready;
   t.after(async () => { await service.shutdown(); await rm(root, { recursive: true, force: true }); });
   const create = async patch => {
@@ -66,11 +83,11 @@ async function fixture(t, platform = 'darwin') {
     await service.shutdown();
     const stored = await Promise.all((await readdir(profilesDir)).map(async id => JSON.parse(await readFile(path.join(profilesDir, id, 'profile.json'), 'utf8'))));
     profiles.splice(0, profiles.length, ...stored);
-    service = new BrowseForgeService(root, client, { platform }, () => {}, { profilesDir, networkProbe });
+    service = new BrowseForgeService(root, client, { platform }, () => {}, { profilesDir, networkProbe, proxyCore });
     await service.ready;
     return service;
   };
-  return { root, get service() { return service; }, client, profiles, sessions, requests, create, reopen };
+  return { root, get service() { return service; }, client, profiles, sessions, requests, coreCalls, probes, create, reopen };
 }
 
 test('device catalog is versioned, country-independent and limited to tested provider mappings', () => {
@@ -187,6 +204,10 @@ test('network changes alter regional context without changing the device or seed
   await f.service.call('updateProfile', { id: profile.id, profile: { proxyId: saved[1].id } });
   const context = await f.service.resolveWorkspaceContext(profile.id);
   assert.equal(context.locale, 'ms-MY'); assert.equal(context.timezone, 'Asia/Kuala_Lumpur');
+  assert.deepEqual(f.coreCalls.map(proxy => proxy.host), ['us.example', 'my.example']);
+  assert.deepEqual(f.probes.map(probe => probe.upstream.id), saved.map(proxy => proxy.id));
+  assert.ok(f.probes.every(probe => probe.wire.host === '127.0.0.1' && probe.wire.username && probe.wire.password));
+  assert.notEqual(f.probes[0].wire.port, f.probes[1].wire.port);
   assert.deepEqual(f.profiles[0].fingerprint, fingerprint); assert.equal(f.profiles[0].fingerprint_seed, seed);
   assert.equal((await f.service.snapshot()).profiles[0].deviceProfileId, PROVIDER_DEFAULT_DEVICE_PROFILE_ID);
   assert.deepEqual(fingerprint ?? {}, {}, 'changing egress never injects a fixed device specification');

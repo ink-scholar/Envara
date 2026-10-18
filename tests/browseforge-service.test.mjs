@@ -406,9 +406,11 @@ test('global confirmed regions flow into BrowseForge profiles and groups without
   assert.equal(saved.region, '', 'automatic region selection does not become an explicit saved override');
   const profile = await create(service, { engine: 'browseforge-chromium', proxyId: saved.id, group: '全球地区' });
   assert.equal(client.profiles[0].proxy.region, 'jp-tokyo');
+  assert.deepEqual((await service.snapshot()).proxies.map(proxy => proxy.id), [saved.id], 'the native profile projection is not another saved network');
   const identity = structuredClone({ seed: client.profiles[0].fingerprint_seed, fingerprint: client.profiles[0].fingerprint });
   await service.call('saveGroup', { name: '全球地区', proxyId: saved.id });
   assert.equal(client.groups[0].proxy.region, 'jp-tokyo');
+  assert.deepEqual((await service.snapshot()).proxies.map(proxy => proxy.id), [saved.id], 'the native group projection reuses its saved network');
 
   measured = { ...networkGeo, country: 'Malaysia', country_code: 'MY', region: 'Selangor', city: 'Petaling', timezone: { id: 'Asia/Kuala_Lumpur' } };
   const moved = { ...draft, id: saved.id, port: 8081 };
@@ -422,6 +424,66 @@ test('global confirmed regions flow into BrowseForge profiles and groups without
   assert.equal(stored.region, '');
   assert.equal(stored.location.countryCode, 'MY');
   assert.match(stored.location.label, /Petaling/);
+  assert.deepEqual((await service.snapshot()).proxies.map(proxy => proxy.id), [saved.id]);
+});
+
+test('network lists keep saved identities and only collapse native projections of their own bindings', () => {
+  const saved = { id: 'saved_a', name: 'Saved A', protocol: 'http', host: 'proxy.example', port: 8080, username: 'fixture-user', password: 'fixture-password', region: '', location: { confirmed: true, countryCode: 'JP', region: 'Tokyo' } };
+  const projected = { type: 'http', host: saved.host, port: saved.port, username: saved.username, password: saved.password, region: 'jp-tokyo' };
+  const service = { networkProbe: { peek: () => null }, proxyWires: new Map() };
+  const list = (proxies, profiles, groups, remoteProfiles, remoteGroups) => BrowseForgeService.prototype.proxies.call(service, { proxies, profiles, groups }, { profiles: remoteProfiles, groups: remoteGroups });
+  const remoteProfile = { id: 'profile_a', name: 'Profile A', proxy: projected };
+  const remoteGroup = { name: 'Group A', proxy: projected };
+  const profileBinding = { id: remoteProfile.id, proxyId: saved.id };
+  const groupBinding = { name: remoteGroup.name, proxyId: saved.id };
+  const second = { ...saved, id: 'saved_b', name: 'Saved B' };
+  const before = structuredClone({ saved, second, remoteProfile, remoteGroup });
+
+  assert.deepEqual(list([saved, second], [profileBinding], [], [remoteProfile], []).map(proxy => proxy.id), [saved.id, second.id]);
+  assert.deepEqual(list([saved, second], [], [groupBinding], [], [remoteGroup]).map(proxy => proxy.id), [saved.id, second.id]);
+  for (const proxyId of [undefined, 'missing', second.id]) {
+    const others = proxyId === second.id ? [{ ...second, host: 'other.example' }] : [];
+    assert.equal(list([saved, ...others], [{ ...profileBinding, proxyId }], [], [remoteProfile], []).at(-1).source, 'profile', `profile binding ${proxyId} cannot borrow another saved projection`);
+    assert.equal(list([saved, ...others], [], [{ ...groupBinding, proxyId }], [], [remoteGroup]).at(-1).source, 'group', `group binding ${proxyId} cannot borrow another saved projection`);
+  }
+  for (const patch of [{ host: 'other.example' }, { port: 8081 }, { type: 'socks5' }, { username: 'other-user' }, { password: 'other-password' }, { region: 'us-ny' }]) {
+    assert.equal(list([saved], [profileBinding], [], [{ ...remoteProfile, proxy: { ...projected, ...patch } }], []).length, 2, `changed profile ${Object.keys(patch)[0]} stays visible`);
+    assert.equal(list([saved], [], [groupBinding], [], [{ ...remoteGroup, proxy: { ...projected, ...patch } }]).length, 2, `changed group ${Object.keys(patch)[0]} stays visible`);
+  }
+  const exact = { ...saved, region: 'jp-tokyo' };
+  assert.equal(list([exact], [], [], [remoteProfile], [remoteGroup]).length, 1, 'existing exact configuration matching remains compatible');
+  assert.equal(list([{ ...saved, region: 'JP-TOKYO' }], [profileBinding], [groupBinding], [remoteProfile], [remoteGroup]).length, 1, 'native region normalization does not create a second network');
+  assert.deepEqual({ saved, second, remoteProfile, remoteGroup }, before, 'list synthesis does not rewrite saved or native configuration');
+});
+
+test('bound native projections can reuse the measured region of an unconfirmed saved node', () => {
+  const saved = { id: 'measured', name: 'Measured', protocol: 'http', host: 'proxy.example', port: 8080, username: '', password: '', region: '' };
+  const native = { type: 'http', host: saved.host, port: saved.port, region: 'jp-tokyo' };
+  const network = { ok: true, scope: 'egress', ip: '203.0.113.10', countryCode: 'JP', region: 'Tokyo', timezone: 'Asia/Tokyo' };
+  const service = { networkProbe: { peek: () => network }, proxyWires: new Map() };
+  const workspace = { proxies: [saved], profiles: [{ id: 'profile', proxyId: saved.id }], groups: [{ name: 'Group', proxyId: saved.id }] };
+  const remote = { profiles: [{ id: 'profile', name: 'Profile', proxy: native }], groups: [{ name: 'Group', proxy: native }] };
+  assert.deepEqual(BrowseForgeService.prototype.proxies.call(service, workspace, remote).map(proxy => proxy.id), [saved.id]);
+  assert.equal(saved.region, '');
+  assert.equal(saved.location, undefined);
+  service.networkProbe.peek = () => null;
+  assert.equal(BrowseForgeService.prototype.proxies.call(service, workspace, remote).length, 2, 'unavailable measurements cannot invent a matching region');
+});
+
+test('network projection matching preserves readable legacy credentials and AnyTLS native differences', () => {
+  const service = { networkProbe: { peek: () => null }, proxyWires: new Map() };
+  const saved = { id: 'saved', name: 'Legacy', protocol: 'http', host: 'proxy.example', port: 8080, username: 'legacy:user', password: 'fixture-password', region: '', location: { confirmed: true, countryCode: 'JP', region: 'Tokyo' } };
+  const native = { type: 'http', host: saved.host, port: saved.port, username: saved.username, password: saved.password, region: 'jp-tokyo' };
+  const list = (proxy, inline, group = false) => BrowseForgeService.prototype.proxies.call(service, {
+    proxies: [proxy], profiles: [{ id: 'legacy', proxyId: proxy.id }], groups: [{ name: 'Legacy', proxyId: proxy.id }],
+  }, { profiles: group ? [] : [{ id: 'legacy', name: 'Legacy', proxy: inline }], groups: group ? [{ name: 'Legacy', proxy: inline }] : [] });
+  for (const group of [false, true]) {
+    assert.equal(list(saved, native, group).length, 2, 'invalid legacy usernames remain readable for repair');
+    const anytls = { ...saved, protocol: 'anytls', username: '', serverName: 'tls.example', alpn: ['h2'], udp: false };
+    const nativeAnyTLS = { ...native, type: 'anytls', username: '' };
+    assert.equal(list(anytls, nativeAnyTLS, group).length, 2, 'the ordinary projection cannot discard AnyTLS options');
+    assert.equal(list(anytls, { ...native, type: 'socks5', host: '127.0.0.1', port: 50000, username: 'runtime-user' }, group).length, 2, 'a managed listener is not the saved upstream node');
+  }
 });
 
 test('invalid explicit BrowseForge region is refused across profile, proxy and group writes', async (t) => {

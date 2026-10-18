@@ -235,8 +235,15 @@ export class BrowseForgeService {
   }
   proxies(workspace, remote) {
     const result = [...workspace.proxies];
-    for (const profile of remote.profiles) if (profile.proxy && !result.some((proxy) => sameProxy(proxy, profile.proxy))) result.push({ id: `inline_${profile.id}`, name: `${profile.name} · 配置内代理`, ...proxyConfig(profile.proxy), source: 'profile', profileId: profile.id });
-    for (const group of remote.groups) if (group.proxy && !result.some((proxy) => sameProxy(proxy, group.proxy))) result.push({ id: `group_${Buffer.from(group.name).toString('hex').slice(0, 70)}`, name: `${group.name} · 分组代理`, ...proxyConfig(group.proxy), source: 'group', groupName: group.name });
+    const isBoundProjection = (inline, boundId) => {
+      const saved = boundId && workspace.proxies.find((proxy) => proxy.id === boundId);
+      if (!saved || saved.protocol === 'anytls') return false;
+      // Native copies include the derived region; they do not create a new saved node.
+      try { return sameProxy(upstreamProxy({ ...saved, network: this.networkProbe.peek(saved) }), inline); }
+      catch { return false; } // Legacy values must remain readable for repair.
+    };
+    for (const profile of remote.profiles) if (profile.proxy && !result.some((proxy) => sameProxy(proxy, profile.proxy)) && !isBoundProjection(profile.proxy, workspace.profiles.find((item) => item.id === profile.id)?.proxyId)) result.push({ id: `inline_${profile.id}`, name: `${profile.name} · 配置内代理`, ...proxyConfig(profile.proxy), source: 'profile', profileId: profile.id });
+    for (const group of remote.groups) if (group.proxy && !result.some((proxy) => sameProxy(proxy, group.proxy)) && !isBoundProjection(group.proxy, workspace.groups?.find((item) => item.name === group.name)?.proxyId)) result.push({ id: `group_${Buffer.from(group.name).toString('hex').slice(0, 70)}`, name: `${group.name} · 分组代理`, ...proxyConfig(group.proxy), source: 'group', groupName: group.name });
     return result.map((proxy) => ({ ...proxy, network: proxy.protocol === 'anytls' ? (this.proxyWires.has(proxy.id) ? this.networkProbe.peek(this.proxyWires.get(proxy.id)) : null) : this.networkProbe.peek(proxy) }));
   }
   groups(workspace, remoteGroups) {

@@ -5,7 +5,7 @@
 <p align="center"><strong>Un environnement dédié à chaque contexte de travail.</strong><br />Votre navigateur, votre terminal et vos applications, dans un même environnement.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licence du code original : MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.0-475569" alt="Envara 1.0.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.1-475569" alt="Envara 1.0.1" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README en 9 langues" /></a>
 </p>
 <p align="center">
@@ -89,7 +89,7 @@ L’interface à trois colonnes propose un mode clair, sombre ou adapté au syst
 
 ## Téléchargement et installation
 
-Téléchargez le DMG ou le ZIP pour **macOS Apple Silicon (arm64)** sur [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). Ouvrez le DMG, puis faites glisser Envara dans le dossier « Applications ». Les fichiers de sommes de contrôle et les notes de version accompagnent la publication.
+Téléchargez le paquet DMG ou ZIP pour **macOS Apple Silicon (arm64)** sur [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). Ouvrez le DMG, puis faites glisser Envara dans le dossier « Applications ». Les fichiers de sommes de contrôle et les notes de version accompagnent la publication.
 
 **Les fichiers macOS actuels ne sont ni signés avec un Apple Developer ID ni notariés.** Les contrôles de sécurité de macOS peuvent bloquer la première ouverture. Vérifiez que le téléchargement provient de ce dépôt et contrôlez sa somme de contrôle. Envara ne désactive pas automatiquement les contrôles de sécurité du système. Le composant système de routage des applications associées nécessite une autorisation administrateur distincte ; le lancement d’un navigateur ou de l’espace de travail ordinaire ne l’installe pas automatiquement.
 

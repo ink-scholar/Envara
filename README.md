@@ -5,7 +5,7 @@
 <p align="center"><strong>给每一套工作，一个独立的境舱。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原创代码许可证：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.0-475569" alt="Envara 1.0.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.1-475569" alt="Envara 1.0.1" /></a>
 </p>
 <p align="center">
   <strong>简体中文</strong> · <a href="docs/readme/zh-TW.md">繁體中文</a> · <a href="docs/readme/en.md">English</a> · <a href="docs/readme/ja.md">日本語</a> · <a href="docs/readme/ko.md">한국어</a> · <a href="docs/readme/es.md">Español</a> · <a href="docs/readme/fr.md">Français</a> · <a href="docs/readme/de.md">Deutsch</a> · <a href="docs/readme/pt-BR.md">Português (Brasil)</a>
@@ -43,7 +43,7 @@ Envara 境舱是开源的本地桌面工作台。为不同项目、账号或地�
 
 ## 开始使用
 
-从 [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) 下载 **macOS Apple Silicon（arm64）** DMG 或 ZIP，附 SHA-256 校验文件。当前制品未使用 Apple Developer ID 签名，也未公证；安装步骤见指南。其他平台暂不提供已验证制品。
+从 [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) 下载 **macOS Apple Silicon（arm64）** 的 DMG 或 ZIP 安装包，附 SHA-256 校验文件。当前制品未使用 Apple Developer ID 签名，也未公证；安装步骤见指南。其他平台暂不提供已验证制品。
 
 **第一次使用，建议从一个项目开始。** 先添加并检测网络出口，再创建环境、选择浏览器；需要终端时选好工作目录，需要桌面软件时绑定受支持的应用。以后回到同一环境，可以沿用已保存的浏览资料、终端配置和应用数据，减少切换工具时的重复配置。
 

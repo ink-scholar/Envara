@@ -5,7 +5,7 @@
 <p align="center"><strong>작업마다, 하나의 독립된 환경을.</strong><br />브라우저도, 터미널도, 앱도. 하나의 작업 환경에서.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="자체 코드 라이선스: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.0-475569" alt="Envara 1.0.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.1-475569" alt="Envara 1.0.1" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9개 언어의 README" /></a>
 </p>
 <p align="center">
@@ -89,7 +89,7 @@ Claude Code는 여러 통합 기능 중 하나입니다. 환경마다 **수정�
 
 ## 다운로드 및 설치
 
-[GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest)에서 **macOS Apple Silicon(arm64)**용 DMG 또는 ZIP을 다운로드하세요. DMG를 열고 Envara를 ‘응용 프로그램’ 폴더로 드래그하면 됩니다. 체크섬 파일과 버전 설명은 Release에 함께 제공됩니다.
+[GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest)에서 **macOS Apple Silicon(arm64)**용 DMG 또는 ZIP 설치 패키지를 다운로드하세요. DMG를 열고 Envara를 ‘응용 프로그램’ 폴더로 드래그하면 됩니다. 체크섬 파일과 버전 설명은 Release에 함께 제공됩니다.
 
 **현재 macOS 배포 파일은 Apple Developer ID 서명과 공증을 받지 않았습니다.** 처음 열 때 macOS 보안 검사로 실행이 차단될 수 있으므로 이 저장소에서 다운로드했는지 확인하고 체크섬을 대조하세요. Envara는 시스템 보안 검사를 자동으로 끄지 않습니다. 연결된 앱의 시스템 라우팅 구성 요소에는 별도의 관리자 승인이 필요하며, 브라우저나 일반 작업 공간을 시작할 때 자동으로 설치되지 않습니다.
 

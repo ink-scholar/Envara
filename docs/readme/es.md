@@ -5,7 +5,7 @@
 <p align="center"><strong>Un entorno propio para cada flujo de trabajo.</strong><br />Un entorno. Tu navegador, terminal y aplicaciones.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licencia del código original: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.0-475569" alt="Envara 1.0.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.1-475569" alt="Envara 1.0.1" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README en 9 idiomas" /></a>
 </p>
 <p align="center">
@@ -89,7 +89,7 @@ La interfaz de tres columnas ofrece los modos claro, oscuro y según el sistema,
 
 ## Descarga e instalación
 
-Descarga el DMG o ZIP para **macOS Apple Silicon (arm64)** desde [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). Abre el DMG y arrastra Envara a Aplicaciones. Los archivos de sumas de verificación y las notas de la versión se incluyen en la publicación.
+Descarga el paquete DMG o ZIP para **macOS Apple Silicon (arm64)** desde [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). Abre el DMG y arrastra Envara a Aplicaciones. Los archivos de sumas de verificación y las notas de la versión se incluyen en la publicación.
 
 **Los paquetes actuales para macOS no están firmados con Apple Developer ID ni notarizados.** macOS puede aplicar sus comprobaciones de seguridad al abrir la aplicación por primera vez; confirma que la descarga procede de este repositorio y verifica la suma de comprobación. Envara no desactiva automáticamente las comprobaciones de seguridad del sistema. El componente de enrutamiento del sistema para las aplicaciones vinculadas requiere autorización independiente del administrador; iniciar el navegador o el espacio de trabajo habitual no lo instala automáticamente.
 

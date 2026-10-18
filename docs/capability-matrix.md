@@ -1,8 +1,8 @@
-# Envara 1.0.0 能力矩阵
+# Envara 1.0.1 能力矩阵
 
 当前发布目标为 **macOS Apple Silicon（arm64）**。下表区分源码能力、桌面入口和验收边界，不表示所有 provider、网站或原生软件都已逐项通过。
 
-本文描述 Envara 1.0.0 的实现，最终制品的实测范围见验证说明。三内核随机身份与资料迁移实测记录归属 0.5.24 的验证基线；0.5.25 及后续修复包的实测结果也保留各自版本归属，不自动转为 1.0.0 发布包结论。具体范围见[验证说明](verification.md)。
+本文描述 Envara 1.0.1 候选源码的实现；本地制品核验与维护者付款实测完成后方可发布，当前状态见[验证说明](verification.md#101-本地候选验证)。三内核随机身份与资料迁移实测记录归属 0.5.24 的验证基线；0.5.25 及后续修复包的实测结果也保留各自版本归属，不自动转为 1.0.1 制品结论。
 
 ## 与固定 BrowseForge 基线的关系
 
@@ -13,11 +13,11 @@ Envara 纳入 BrowseForge **v2.1.15 / `fa9e0bb670e749706a9c8f2d4095333347d6c521`
 | 产品入口 | Web Dashboard、CLI、本地/服务器部署 | Electron 本机工作区；先显示窗口再初始化服务。网页预览不提供原生 PTY 或路由 |
 | 浏览器内核 | Camoufox/Firefox、CloakBrowser/Chromium、BrowseForge Chromium Alpha | 保留三个 provider 的选择、探测和安装；不是任意已安装 Chrome/Edge 的管理器 |
 | 环境管理 | 创建、编辑、复制、删除、分组、标签、独立资料目录 | 桌面操作、批量管理、预览、旧配置迁移；克隆不复制原浏览资料 |
-| 指纹与地区 | provider 各自的结构化配置、种子、语言/时区映射 | 新环境生成并持久化身份，重开复用、复制生成新身份、导入保留配置；三个 provider 的 Canvas/字体/音频覆盖有差异。1.0.0 提供三内核显式固定模板及 BrowseForge Chromium 完整地区预设目录，见[设备边界](browser-device-profiles.md)与[地区选择](network-context.md) |
+| 指纹与地区 | provider 各自的结构化配置、种子、语言/时区映射 | 新环境生成并持久化身份，重开复用、复制生成新身份、导入保留配置；三个 provider 的 Canvas/字体/音频覆盖有差异。自 1.0.0 起提供三内核显式固定模板及 BrowseForge Chromium 完整地区预设目录，见[设备边界](browser-device-profiles.md)与[地区选择](network-context.md) |
 | 代理与分组 | 认证代理、环境代理及分组默认/强制策略 | HTTP/HTTPS/SOCKS5 与托管 AnyTLS；分组和 provider 的协议/地域限制仍适用 |
 | AnyTLS | 无原始节点与内置核心管理流程 | 独立自有核心、节点身份分路由、认证回环入口；保留 SNI/ALPN/TLS 指纹/UDP，不是通用订阅客户端 |
 | 网络位置 | 浏览器 GeoIP 与启动时地区调整 | 测量认证出口后确认位置/时区，消费者共用；经所选已验证路线自动查询 Photon 附近参考位置，也可手动查询地址并选择坐标。附近参考不提高 IP 定位精度，手动位置可覆盖推荐；模拟位置与真实出口分开，公共查询服务不提供可用性保证 |
-| 追踪保护 | provider 提供的浏览器机制 | 可审计的第三方 HTTP(S) 规则与标准/严格模式，并支持页面/frame WS/WSS；BrowseForge 使用路由接口、CloakBrowser 使用构造器适配、Camoufox 使用自有临时扩展。规则与 worker 边界按 provider 区分，见[浏览器边界](browser-device-profiles.md)；不代表全部遥测或服务端关联已消失 |
+| 追踪保护 | provider 提供的浏览器机制 | 可审计的第三方 HTTP(S) 规则与标准/严格模式；两种模式保留已列明 HTTPS 支付服务的兼容例外，包括其风控和诊断请求。并支持页面/frame WS/WSS；BrowseForge 使用路由接口、CloakBrowser 使用构造器适配、Camoufox 使用自有临时扩展。规则与 worker 边界按 provider 区分，见[浏览器边界](browser-device-profiles.md)；不代表全部遥测或服务端关联已消失 |
 | REST / MCP / Playwright | 浏览器、页面、标签、表单、Cookie、截图等自动化接口 | 保留本机后台接口；专用终端另用会话级 broker，全部工具未宣称逐项验收 |
 | YAML 工作流 | CLI/REST/MCP 的工作流执行 | 固定后端保留；没有等价的桌面可视化工作流编辑器 |
 | 备份与数据交换 | 配置 ZIP、Cookie 备份与 CLI 文件系统备份 | 增加密码加密的浏览器/终端/单软件导出；导入新环境，不覆盖已有资料，旧整环境文件兼容 |

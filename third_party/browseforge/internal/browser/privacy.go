@@ -154,8 +154,8 @@ func builtinTrackerExempt(host, firstHost, trackerDomain string) bool {
 // blockTrackerRequest decides one request. Envara's own tiers decide first; a
 // host they name is blocked or deliberately allowed. Otherwise the bundled
 // EasyPrivacy rules apply to third-party requests, except that standard never
-// blocks what the strict tier holds back as able to break sites, and a page
-// the user navigates to is never blocked.
+// blocks what the strict tier holds back as able to break sites. Named HTTPS
+// payment services and a page the user navigates to are kept reachable.
 func blockTrackerRequest(raw, firstParty, mode string, kind uint16) bool {
 	if mode == "off" {
 		return false
@@ -178,6 +178,9 @@ func blockTrackerRequest(raw, firstParty, mode string, kind uint16) bool {
 				return false
 			}
 		}
+	}
+	if paymentServiceExempt(target) {
+		return false
 	}
 	if kind == kindDocument || sameSite(host, firstHost) {
 		return false

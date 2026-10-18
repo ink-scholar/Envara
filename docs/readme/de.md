@@ -5,7 +5,7 @@
 <p align="center"><strong>Eine eigene Umgebung für jeden Arbeitskontext.</strong><br />Dein Browser, dein Terminal und deine Apps in einer gemeinsamen Umgebung.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Lizenz des Originalcodes: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.0-475569" alt="Envara 1.0.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.1-475569" alt="Envara 1.0.1" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README in 9 Sprachen" /></a>
 </p>
 <p align="center">
@@ -89,7 +89,7 @@ Die Oberfläche mit drei Spalten unterstützt einen hellen und dunklen Modus ode
 
 ## Herunterladen und installieren
 
-Lade auf [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) die DMG- oder ZIP-Datei für **macOS Apple Silicon (arm64)** herunter. Öffne die DMG-Datei und ziehe Envara in den Ordner „Programme“. Prüfsummen und Versionshinweise werden mit dem Release bereitgestellt.
+Lade auf [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) das DMG- oder ZIP-Paket für **macOS Apple Silicon (arm64)** herunter. Öffne die DMG-Datei und ziehe Envara in den Ordner „Programme“. Prüfsummen und Versionshinweise werden mit dem Release bereitgestellt.
 
 **Die aktuellen macOS-Artefakte sind weder mit einer Apple Developer ID signiert noch notarisiert.** Beim ersten Öffnen können die Sicherheitsprüfungen von macOS den Start verhindern. Vergewissere dich, dass der Download aus diesem Repository stammt, und prüfe die Prüfsumme. Envara schaltet die Sicherheitsprüfungen des Systems nicht automatisch aus. Die Systemkomponente für das Routing angebundener Anwendungen benötigt eine gesonderte Administratorfreigabe. Der Start eines Browsers oder des normalen Arbeitsbereichs installiert sie nicht automatisch.
 

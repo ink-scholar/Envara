@@ -1,6 +1,6 @@
 # Claude Code sessions
 
-This document describes the Envara 1.0.0 implementation. The release target is macOS arm64; the final package’s measured scope and limitations are recorded in [verification](verification.md#100-发布验证). Historical 0.5.24 and 0.5.25 measurements retain their original package scope; they do not establish final-package Claude account or model-call acceptance. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
+This document describes the Envara 1.0.1 candidate implementation. The release target is macOS arm64; package verification and payment-flow acceptance status are recorded in [candidate verification](verification.md#101-本地候选验证). Historical 0.5.24 and 0.5.25 measurements retain their original package scope; they do not establish final-package Claude account or model-call acceptance. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
 
 ## Start and installation
 

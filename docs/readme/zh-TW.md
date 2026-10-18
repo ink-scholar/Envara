@@ -5,7 +5,7 @@
 <p align="center"><strong>讓每一套工作，都有獨立的境艙。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原創程式碼授權：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.0-475569" alt="Envara 1.0.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.1-475569" alt="Envara 1.0.1" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 種 README 語言" /></a>
 </p>
 <p align="center">
@@ -89,7 +89,7 @@ Claude Code 是其中一項整合：每個環境獨立安裝**未經修改的官
 
 ## 下載與安裝
 
-從 [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) 下載 **macOS Apple Silicon（arm64）** 的 DMG 或 ZIP。開啟 DMG 後，將 Envara 拖入「應用程式」。校驗檔與版本說明隨 Release 提供。
+從 [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) 下載 **macOS Apple Silicon（arm64）** 的 DMG 或 ZIP 安裝包。開啟 DMG 後，將 Envara 拖入「應用程式」。校驗檔與版本說明隨 Release 提供。
 
 **目前 macOS 成品未使用 Apple Developer ID 簽章，也未經公證。** 首次開啟可能受到 macOS 安全檢查；請確認下載來自本儲存庫並核對校驗值。Envara 不會自動關閉系統安全檢查。附加軟體的系統路由元件需要另外取得管理員授權，啟動瀏覽器或一般工作區不會自動安裝它。
 

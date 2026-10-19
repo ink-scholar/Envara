@@ -26,6 +26,31 @@ export function validateSshTarget(host, port) {
   return { host: normalized, port: numericPort };
 }
 
+function endpointHostKey(host) {
+  const family = net.isIP(host);
+  if (family !== 6) return `${family === 4 ? 'ipv4' : 'name'}:${host}`;
+  // WHATWG URL parses/serializes numeric IPv6 locally; it does no DNS lookup.
+  // Expand its compressed hex words solely for comparison. Preserve the saved
+  // spelling for OpenSSH's trusted known_hosts lookup and actual connection.
+  const serialized = new URL(`http://[${host}]/`).hostname.slice(1, -1);
+  const [left, right] = serialized.split('::');
+  const leading = left ? left.split(':') : [], trailing = right ? right.split(':') : [];
+  const words = (right === undefined ? leading : [...leading, ...Array(8 - leading.length - trailing.length).fill('0'), ...trailing])
+    .map(value => Number.parseInt(value, 16));
+  // A mapped IPv6 literal uses the same IPv4 endpoint. This is numeric address
+  // equality, not an inference about DNS names, aliases or IPv4-compatible ::/96.
+  if (words.slice(0, 5).every(value => value === 0) && words[5] === 0xffff)
+    return `ipv4:${[words[6] >> 8, words[6] & 255, words[7] >> 8, words[7] & 255].join('.')}`;
+  return `ipv6:${words.map(value => value.toString(16)).join(':')}`;
+}
+
+/** Authorization compares numeric addresses independently of their spelling.
+ * Stored host text, destination user and pinned host keys remain unchanged. */
+export function sameSshTarget(first, second) {
+  const a = validateSshTarget(first?.host, first?.port), b = validateSshTarget(second?.host, second?.port);
+  return a.port === b.port && endpointHostKey(a.host) === endpointHostKey(b.host);
+}
+
 export function validateSshProxyUrl(value) {
   try {
     if (typeof value !== 'string' || value.length > 8192 || /[\x00-\x20\x7f]/.test(value)) throw invalid();
@@ -99,12 +124,17 @@ function responseStatus(header) {
 
 /** Opaque TCP transport only: HTTP 200 does not prove an SSH handshake or login.
  * The destination name is sent to the proxy unchanged, never resolved locally. */
-export async function runSshProxy({ host, port, proxyUrl, allowedTargets, input = process.stdin, output = process.stdout,
+export async function runSshProxy({ host, port, proxyUrl, allowedTargets, targetPolicy = 'registered', input = process.stdin, output = process.stdout,
   signal, connectTimeoutMs = 10_000, maxHeaderBytes = 16 * 1024 } = {}) {
+  if (!['registered', 'environment'].includes(targetPolicy)) throw invalid();
   const target = validateSshTarget(host, port);
-  const targets = validateTargets(allowedTargets);
-  if (!targets.some(allowed => allowed.host === target.host && allowed.port === target.port)) {
-    throw failure('SSH_PROXY_TARGET_DENIED', 'This SSH destination is not authorized for this session.');
+  // General environment SSH is an explicit policy. Missing or empty registered
+  // targets never opt a saved-connection transport into that broader policy.
+  if (targetPolicy === 'registered') {
+    const targets = validateTargets(allowedTargets);
+    if (!targets.some(allowed => sameSshTarget(allowed, target))) {
+      throw failure('SSH_PROXY_TARGET_DENIED', 'This SSH destination is not authorized for this session.');
+    }
   }
   const proxy = validateSshProxyUrl(proxyUrl);
   if (!Number.isInteger(connectTimeoutMs) || connectTimeoutMs < 10 || connectTimeoutMs > 120_000
@@ -218,9 +248,12 @@ export async function runSshProxyCli(argv = process.argv.slice(2), env = process
   process.once('SIGTERM', onTerm);
   process.once('SIGINT', onInt);
   try {
-    if (argv.length !== 4 || argv[0] !== '--host' || argv[2] !== '--port') throw invalid();
-    const allowedTargets = await readSshTargets(env.ENVARA_SSH_TARGETS);
-    await runSshProxy({ host: argv[1], port: argv[3], proxyUrl: env.ENVARA_SSH_PROXY_URL, allowedTargets, output, signal: abort.signal });
+    if (![4, 5].includes(argv.length) || argv[0] !== '--host' || argv[2] !== '--port'
+      || argv.length === 5 && argv[4] !== '--environment-targets') throw invalid();
+    const targetPolicy = argv.length === 5 ? 'environment' : 'registered';
+    const allowedTargets = targetPolicy === 'registered' ? await readSshTargets(env.ENVARA_SSH_TARGETS) : undefined;
+    await runSshProxy({ host: argv[1], port: argv[3], proxyUrl: env.ENVARA_SSH_PROXY_URL,
+      allowedTargets, targetPolicy, output, signal: abort.signal });
     return 0;
   } catch (error) {
     // Never include native socket errors, URLs, host names or credentials.

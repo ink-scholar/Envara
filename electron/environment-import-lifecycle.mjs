@@ -7,6 +7,7 @@ const publicFailureCodes = new Set(['IMPORT_TARGET_NOT_EMPTY', 'IMPORT_TARGET_UN
 const dataMutations = new Set(['createProfile', 'updateProfile', 'cloneProfile', 'deleteProfile', 'clearProfile', 'startProfile',
   'saveProxy', 'deleteProxy', 'saveGroup', 'deleteGroup', 'clearGroupProxy', 'bulkProfiles', 'migrateLegacy', 'saveSettings', 'installEngine',
   'chooseWorkspaceDirectory', 'setTerminalLinkBrowser', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'createClaudeAccount',
+  'reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal',
   'renameClaudeAccount', 'deleteClaudeAccount', 'saveApplication', 'startApplication', 'runNotionTrial', 'deleteApplication', 'clearApplicationData',
   'deleteSignInData', 'setApplicationLinkBrowser', 'setupApplicationRouting', 'reclaimApplicationStorage',
   'saveTerminalSshConnection', 'setTerminalSshPassword', 'removeTerminalSshConnection']);

@@ -26,7 +26,7 @@ const publicKey = seed => {
   return `ssh-ed25519 ${bytes.toString('base64')}`;
 };
 
-async function fixture(t, { real = false, passphrase = '', now = Date.now, execute: overrideExecute, spawn, createPasswordBroker } = {}) {
+async function fixture(t, { real = false, passphrase = '', now = Date.now, execute: overrideExecute, spawn, createPasswordBroker, createDirectTransport } = {}) {
   const root = await realpath(await mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(), 'evssh-')));
   const dataDir = path.join(root, 'data'), hostHome = path.join(root, 'host'), keyDirectory = path.join(root, 'keys');
   await Promise.all([dataDir, hostHome, keyDirectory].map(directory => mkdir(directory, { mode: 0o700 })));
@@ -57,7 +57,7 @@ async function fixture(t, { real = false, passphrase = '', now = Date.now, execu
   });
   const nodeExecutable = await realpath(process.execPath);
   const options = { dataDir, hostHome, nodeExecutable, agentRoot: path.join(root, 'agents'), platform: 'darwin', execute, now,
-    ...(spawn ? { spawn } : {}), ...(createPasswordBroker ? { createPasswordBroker } : {}) };
+    ...(spawn ? { spawn } : {}), ...(createPasswordBroker ? { createPasswordBroker } : {}), ...(createDirectTransport ? { createDirectTransport } : {}) };
   const createManager = (extra = {}) => { const manager = new TerminalSshManager({ ...options, ...extra }); managers.push(manager); return manager; };
   const manager = createManager();
   t.after(async () => { await Promise.allSettled(managers.map(value => value.close())); await rm(root, { recursive: true, force: true }); });
@@ -91,6 +91,101 @@ function passwordBrokers(t, { beforeCreate = async () => {}, beforeDispose = asy
   };
   return { create, calls };
 }
+
+function directTransports(t, { beforeDispose = async () => {} } = {}) {
+  const calls = [], servers = new Set();
+  t.after(async () => { for (const server of servers) if (server.listening) await new Promise(resolve => server.close(resolve)); });
+  return { calls, create: async options => {
+    const socket = path.join(options.directory, 'transport.sock'), server = createServer(client => client.destroy());
+    servers.add(server);
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socket, resolve); });
+    await chmod(socket, 0o600);
+    const call = { options, socket, disposed: false }; calls.push(call);
+    return { socket, token: 'a'.repeat(64), async dispose() {
+      await beforeDispose(call);
+      if (server.listening) await new Promise(resolve => server.close(resolve));
+      call.disposed = true;
+    } };
+  } };
+}
+
+test('saved aliases use only their fixed direct transport and replaced password grants cannot revive an old session', async t => {
+  const relays = directTransports(t), brokers = passwordBrokers(t);
+  const f = await fixture(t, { createPasswordBroker: brokers.create, createDirectTransport: relays.create });
+  const saved = await f.savePassword(), first = await f.session();
+  const relay = relays.calls[0];
+  assert.deepEqual(relay.options.connections, [{ alias: saved.alias, host, port: 2222 }]);
+  assert.equal(relay.options.isActive(saved.alias), true); assert.equal(relay.options.isActive('envara-000000000000'), false);
+  assert.equal(first.environment.ENVARA_SSH_DIRECT_SOCKET, relay.socket);
+  const config = await readFile(path.join(path.dirname(first.binDirectory), 'config'), 'utf8');
+  assert.ok(config.includes(`--alias ${saved.alias}`));
+  assert.ok(config.includes('terminal-ssh-direct.mjs')); assert.ok(!config.includes('--host')); assert.ok(!config.includes('--environment-targets'));
+  // Exercise the identity guard independently of the public mutation gate,
+  // which already rejects unlocking a connection held by an active session.
+  f.manager.clearPassword(saved.id);
+  f.manager.grantPassword(saved.id, Buffer.from('replacement-synthetic-secret'));
+  assert.equal(relay.options.isActive(saved.alias), false);
+  const second = await f.session({ sessionId: 'fresh-grant' });
+  assert.equal(relays.calls[1].options.isActive(saved.alias), true); assert.equal(relay.options.isActive(saved.alias), false);
+  await first.dispose(); assert.equal(relay.disposed, true); assert.equal(relays.calls[1].options.isActive(saved.alias), true);
+  await second.dispose(); assert.equal(relays.calls[1].disposed, true);
+});
+
+test('unknown-host configuration keeps environment trust persistent and configured locked targets in its immutable refusal set', async t => {
+  const f = await fixture(t), saved = await f.savePassword();
+  const unlocked = f.createManager(); await unlocked.ready;
+  const envHome = path.join(f.root, 'environment-home'); await mkdir(envHome, { mode: 0o700 });
+  const envConfig = path.join(envHome, '.config'); await mkdir(envConfig, { mode: 0o700 });
+  const args = { profileId: 'profile-a', sessionId: 'locked-with-proxy', proxyUrl, directories: { home: envHome, config: envConfig } };
+  const binding = await unlocked.createSession(args), publicDirectory = path.dirname(binding.binDirectory);
+  assert.equal(binding.describe().status, 'empty'); assert.equal(binding.environment.ENVARA_SSH_PROXY_URL, proxyUrl);
+  assert.equal(binding.environment.ENVARA_SSH_DIRECT_SOCKET, undefined);
+  const config = await readFile(path.join(publicDirectory, 'environment-ssh-config'), 'utf8');
+  for (const setting of ['StrictHostKeyChecking ask', 'IdentityAgent none', 'IdentityFile none', 'GlobalKnownHostsFile /dev/null', '--environment-targets', 'ForwardAgent no']) assert.ok(config.includes(setting), setting);
+  const knownHosts = path.join(envConfig, 'ssh-known_hosts'); assert.ok(config.includes(knownHosts));
+  assert.equal((await lstat(knownHosts)).mode & 0o777, 0o600);
+  const launcher = await readFile(path.join(publicDirectory, 'launch.mjs'), 'utf8');
+  assert.ok(launcher.includes('configuredConnections')); assert.ok(launcher.includes(saved.alias)); assert.ok(launcher.includes('adHocConfigPath'));
+  assert.ok(!launcher.includes(proxyUrl)); assert.ok(launcher.includes('proxyUrl: process.env.ENVARA_SSH_PROXY_URL'));
+  await writeFile(knownHosts, 'synthetic persistent host trust\n'); await binding.dispose();
+  const next = await unlocked.createSession({ ...args, sessionId: 'locked-after-reopen' });
+  assert.equal(await readFile(knownHosts, 'utf8'), 'synthetic persistent host trust\n'); await next.dispose();
+});
+
+test('legacy expanded IPv6 records retain their stored identity and exact trusted-host lookup spelling', async t => {
+  const brokers = passwordBrokers(t), relays = directTransports(t);
+  const f = await fixture(t, { createPasswordBroker: brokers.create, createDirectTransport: relays.create });
+  const saved = await f.savePassword(), expanded = '2001:0db8:0000:0000:0000:0000:0000:0001';
+  const document = JSON.parse(await readFile(f.manager.filename, 'utf8'));
+  const stored = document.profiles[0].connections[0]; stored.host = expanded;
+  const original = JSON.stringify(document); await writeFile(f.manager.filename, original);
+  await writeFile(f.knownHosts, `[${expanded}]:2222 ${f.hostPublicKey}\n`);
+  const reloaded = f.createManager(); await reloaded.ready;
+  const entry = (await reloaded.list({ id: 'profile-a' })).connections[0];
+  assert.equal(entry.host, expanded); assert.equal(entry.id, saved.id); assert.equal(entry.alias, saved.alias);
+  assert.deepEqual(entry.hostFingerprints, saved.hostFingerprints); assert.equal(entry.passwordReady, false);
+  await reloaded.setPassword({ id: 'profile-a', connectionId: saved.id, password: 'synthetic-reloaded-password' });
+  const binding = await reloaded.createSession({ profileId: 'profile-a', sessionId: 'legacy-ipv6', proxyUrl });
+  assert.equal(relays.calls.at(-1).options.connections[0].host, expanded);
+  const lookups = f.calls.filter(call => call.command === '/usr/bin/ssh-keygen' && call.args[0] === '-F');
+  assert.equal(lookups.at(-1).args[1], `[${expanded}]:2222`);
+  const config = await readFile(path.join(path.dirname(binding.binDirectory), 'config'), 'utf8');
+  assert.ok(config.includes(`HostName ${expanded}`)); assert.ok(config.includes(`HostKeyAlias ${saved.alias}`));
+  assert.equal(await readFile(f.manager.filename, 'utf8'), original, 'loading/unlocking/reopening must not migrate the store or rewrite its identity');
+  await binding.dispose();
+});
+
+test('direct transport cleanup failure keeps owned custody until a successful retry', async t => {
+  let refuse = true;
+  const relays = directTransports(t, { beforeDispose: async () => { if (refuse) throw new Error('synthetic direct cleanup failure'); } });
+  const brokers = passwordBrokers(t), f = await fixture(t, { createDirectTransport: relays.create, createPasswordBroker: brokers.create });
+  const saved = await f.savePassword(), binding = await f.session(), directory = path.dirname(binding.binDirectory);
+  await assert.rejects(binding.dispose(), code('SSH_CLEANUP_FAILED'));
+  assert.equal(relays.calls[0].options.isActive(saved.alias), false); assert.equal(f.manager.sessions.size, 1);
+  assert.equal((await lstat(directory)).isDirectory(), true);
+  refuse = false; await binding.dispose(); assert.equal(f.manager.sessions.size, 0); assert.equal(relays.calls[0].disposed, true);
+  await assert.rejects(lstat(directory), { code: 'ENOENT' });
+});
 
 test('selection is redacted, profile-bound, single-use, and persisted outside profile exports', async t => {
   const f = await fixture(t);
@@ -187,7 +282,9 @@ test('password sessions use an app-lifetime private broker without key agents or
   assert.equal(broker.passwords.get(saved.alias).toString(), secret); assert.equal(broker.isActive(), true);
   assert.equal(broker.options.expiresAt, null);
   assert.ok(broker.options.passwords.get(saved.alias).every(value => value === 0));
-  assert.equal(broker.options.proxyUrl, proxyUrl); assert.deepEqual(session.allowedSockets, [broker.socket]);
+  assert.equal(broker.options.proxyUrl, proxyUrl); assert.deepEqual(session.allowedSockets, [broker.socket, session.environment.ENVARA_SSH_DIRECT_SOCKET]);
+  assert.equal(broker.options.transportSocket, session.environment.ENVARA_SSH_DIRECT_SOCKET);
+  assert.equal(broker.options.directToken, session.environment.ENVARA_SSH_DIRECT_TOKEN);
   assert.equal(session.environment.SSH_AUTH_SOCK, undefined); assert.ok(!JSON.stringify(session.environment).includes(secret));
   const publicDirectory = path.dirname(session.binDirectory), config = await readFile(path.join(publicDirectory, 'config'), 'utf8');
   for (const line of ['IdentityFile none', 'IdentityAgent none', 'PreferredAuthentications password', 'PubkeyAuthentication no', 'PermitLocalCommand no', 'EnableEscapeCommandline no', 'EscapeChar none']) assert.ok(config.includes(line), line);
@@ -559,7 +656,7 @@ test('mixed authentication keeps both methods available without timers and isola
   assert.equal(session.describe().connections.length, 2); assert.ok(session.agentSocket);
   assert.equal(session.describe().expiresAt, null);
   assert.ok(session.describe().connections.every(record => record.expiresAt === null && record.available));
-  assert.deepEqual(session.allowedSockets, [session.agentSocket, brokers.calls[0].socket]);
+  assert.deepEqual(session.allowedSockets, [session.agentSocket, brokers.calls[0].socket, session.environment.ENVARA_SSH_DIRECT_SOCKET]);
   assert.equal(brokers.calls[0].passwords.size, 1); assert.ok(brokers.calls[0].passwords.has(password.alias));
   assert.deepEqual((await readdir(publicDirectory)).filter(name => name.endsWith('.pub')), [`${key.id}.pub`]);
   const additions = commands.filter(call => call.command === '/usr/bin/ssh-add' && call.args.includes('-q'));

@@ -5,7 +5,7 @@
 <p align="center"><strong>给每一套工作，一个独立的境舱。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原创代码许可证：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.4-475569" alt="Envara 1.0.4" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.0-475569" alt="Envara 1.1.0" /></a>
 </p>
 <p align="center">
   <strong>简体中文</strong> · <a href="docs/readme/zh-TW.md">繁體中文</a> · <a href="docs/readme/en.md">English</a> · <a href="docs/readme/ja.md">日本語</a> · <a href="docs/readme/ko.md">한국어</a> · <a href="docs/readme/es.md">Español</a> · <a href="docs/readme/fr.md">Français</a> · <a href="docs/readme/de.md">Deutsch</a> · <a href="docs/readme/pt-BR.md">Português (Brasil)</a>
@@ -20,6 +20,13 @@ Envara 境舱是开源的本地桌面工作台。为不同项目、账号或地�
 
 ![Envara 工作区，使用合成示例数据](docs/media/workspace-zh-CN.png)
 
+## 1.1.0：更顺手的工作台
+
+- **精简界面与可折叠导航**：收起左侧导航，为浏览器、终端和应用内容留出更多空间，常用操作保持集中。
+- **保存常用终端**：普通终端和 Claude 终端都有可命名的持久入口；选择运行中的会话，或按已保存上下文重新打开空闲 shell，不重放命令。
+- **找回自定义 MCP 与插件**：官方 Claude CLI 可读取境舱内用户、项目与本地配置，同时保留 Envara 的固定浏览器工具与会话网络约束。
+- **按目标选择 SSH 路线**：macOS 已保存主机使用本机出口，未保存目标使用境舱代理；认证或连接失败不切换路线。
+
 ## Claude Code「防封」与环境隔离
 
 把**选定网络路线、独立账号目录、持久浏览器身份和受支持的设备读取限制**放进同一套会话流程，减少网络与账号配置混用。每个环境独立安装**原样的官方 CLI**，登录档案分别保存；模型、恢复会话与权限由你决定。
@@ -33,13 +40,15 @@ Envara 境舱是开源的本地桌面工作台。为不同项目、账号或地�
 | 🌐 网络环境 | HTTP / HTTPS / SOCKS5 / AnyTLS；检测认证出口，确认地区与时区，AnyTLS 无需外装 Clash |
 | 🧭 独立浏览器 | CloakBrowser、Camoufox 与实验性 BrowseForge Chromium；分开保存资料，重开沿用身份 |
 | 🤖 Claude Code | 环境内安装与更新、命名登录档案、绑定环境浏览器，账号资料按档案保存 |
-| ⌨️ 原生终端 | 选择项目目录，多会话、可伸缩面板与独立窗口，配置和历史按环境保留；macOS 支持经所选代理建立[密码或私钥 SSH 连接](docs/claude-code-sessions.md#ssh-through-the-environment-route)，私钥保留本机 |
+| ⌨️ 原生终端 | 选择项目目录，多会话、可伸缩面板与独立窗口，配置和历史按环境保留；macOS [SSH 连接](docs/claude-code-sessions.md#ssh-through-the-environment-route)按保存目标选路线：保存主机走本机出口，未保存地址走境舱代理 |
 | 🧩 附加应用 | 为受支持的 Chromium / Electron 软件绑定环境，管理独立资料与启动、停止 |
 | 🔗 链接与自动化 | 链接交给指定浏览器，提供 REST / MCP / Playwright 浏览器接口 |
 | 📦 加密迁移 | 分别导出浏览器、所选终端档案或单个应用；密码加密，导入新环境 |
-| 🗂️ 工作区管理 | 环境分组、搜索、复制与运行状态；三栏布局、九种语言、浅色 / 深色 / 跟随系统 |
+| 🗂️ 工作区管理 | 环境分组、搜索、复制与运行状态；三栏布局与可折叠左侧导航、九种语言、浅色 / 深色 / 跟随系统 |
 
-**终端里的 SSH 也沿用当前环境。** macOS 的普通会话、Claude 会话和复制会话均支持密码或私钥；用 `envara-ssh list` 查看本会话已授权连接，再按保存别名或 `ssh -p 2222 user@server.example` 连接。授权在本次 Envara 运行期间有效，不定时到期；密码仅保存在应用内存，退出清除。服务器信任、代理可达性与支持限制见 [SSH 指南](docs/claude-code-sessions.md#ssh-through-the-environment-route)。
+**终端里的 SSH 按保存目标选择路线。** macOS 普通会话、Claude 会话和复制会话均支持：保存主机走本机网络出口，服从已有 VPN / TUN，服务器可见该出口 IP；未保存的主机与端口可用 `ssh user@host` 经境舱代理连接。已保存目标未解锁、未载入或用户名冲突时拒绝连接，不改走代理。用 `envara-ssh list` 查看本会话已载入的授权；密码和私钥授权在本次 Envara 运行期间不定时到期，密码仅在应用内存保留至退出，私钥保留本机。
+
+1.1.0 的新建终端使用双路线，现有终端保留创建时的上下文。支持的参数仍限于端口、用户、TTY 和日志选项，未集成 `scp` / `sftp`、`-i`、跳板或端口转发。主机信任、可达性与认证要求见 [SSH 指南](docs/claude-code-sessions.md#ssh-through-the-environment-route)。
 
 附加应用的系统授权、沙箱取舍与支持范围见[功能与边界](docs/capability-matrix.md)。停止或解绑会保留登录资料。
 

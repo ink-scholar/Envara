@@ -1,0 +1,182 @@
+import { after, before, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { build } from 'esbuild';
+import { _electron } from 'playwright-core';
+import { languages, translate } from '../src/i18n.mjs';
+
+// Actual sidebar, preference hook and CSS in a disposable hidden renderer.
+// Production main, IPC, accounts, terminals and personal browsers are not used.
+const noDisplay = process.platform === 'linux' && !process.env.DISPLAY;
+const project = fileURLToPath(new URL('../', import.meta.url));
+const preferenceKey = 'envara.sidebar.collapsed.v1';
+const labels = ['环境', '网络出口', '浏览器', '终端', '附加软件', '运行监控', '设置'];
+let directory, desktop, page;
+
+before(async () => {
+  if (noDisplay) return;
+  directory = await mkdtemp(path.join(tmpdir(), 'envara-sidebar-ui-'));
+  const output = await build({ stdin: { resolveDir: project, loader: 'jsx', contents: `
+import React, { useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import { WorkspaceSidebar, useSidebarPreference } from './src/App.jsx';
+import { translate } from './src/i18n.mjs';
+const root = createRoot(document.querySelector('#root'));
+window.fixtureLanguage = 'zh-CN';
+function Fixture({ detail = true, terminal = false, expanded = false }) {
+  const [collapsed, setCollapsed] = useSidebarPreference();
+  const [page, setPage] = useState('profiles');
+  const t = value => translate(value, window.fixtureLanguage);
+  return <div className={\`app-shell is-desktop \${detail ? 'with-detail' : ''} \${collapsed ? 'sidebar-collapsed' : ''} \${terminal ? 'terminal-visible' : ''} \${expanded ? 'terminal-expanded' : ''}\`}>
+    <WorkspaceSidebar collapsed={collapsed} onToggle={() => setCollapsed(value => !value)} page={page}
+      onNavigate={setPage} count={12} totalBytes={1024} language={window.fixtureLanguage} t={t} />
+    <main className="main-panel"><h1>{t(page === 'settings' ? '设置' : '环境')}</h1></main>
+    {detail && <aside className="detail-panel">Synthetic detail</aside>}
+    {terminal && <div className="terminal-dock">Synthetic terminal layout only</div>}
+  </div>;
+}
+let revision = 0;
+window.mountSidebar = (options = {}) => {
+  window.fixtureLanguage = options.language || 'zh-CN';
+  document.documentElement.lang = window.fixtureLanguage;
+  document.documentElement.dataset.theme = options.theme || 'dark';
+  root.render(<Fixture key={++revision} {...options} />);
+};
+window.mountSidebar();
+` }, bundle: true, write: false, platform: 'browser', format: 'iife', loader: { '.css': 'empty' },
+    define: { 'process.env.NODE_ENV': '"test"', 'import.meta.env.BASE_URL': '"./"' },
+    plugins: [{ name: 'isolated-production-sidebar', setup(builder) {
+      builder.onLoad({ filter: /[/\\]src[/\\]App\.jsx$/ }, async args => ({
+        contents: `${await readFile(args.path, 'utf8')}\nexport { WorkspaceSidebar, useSidebarPreference };`, loader: 'jsx',
+      }));
+      builder.onResolve({ filter: /^\.\/(client\.js|i18n\.jsx)$/ }, args => ({ path: args.path, namespace: 'sidebar-fixture' }));
+      builder.onLoad({ filter: /.*/, namespace: 'sidebar-fixture' }, args => ({
+        contents: args.path.endsWith('client.js') ? 'export const api = {};' : `
+import { translate } from ${JSON.stringify(path.join(project, 'src/i18n.mjs'))};
+export const useI18n = () => ({ language: window.fixtureLanguage, t: value => translate(value, window.fixtureLanguage) });
+`, resolveDir: project, loader: 'js',
+      }));
+    } }],
+  });
+  await writeFile(path.join(directory, 'fixture.js'), output.outputFiles[0].text);
+  await writeFile(path.join(directory, 'styles.css'), await readFile(new URL('../src/styles.css', import.meta.url), 'utf8'));
+  await writeFile(path.join(directory, 'index.html'), '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="styles.css"><div id="root"></div><script src="fixture.js"></script>');
+  const entry = path.join(directory, 'main.cjs');
+  await writeFile(entry, `const { app, BrowserWindow } = require('electron');
+app.setPath('userData', ${JSON.stringify(path.join(directory, 'data'))});
+app.whenReady().then(() => { app.dock?.hide(); const window = new BrowserWindow({ show: false, width: 1440, height: 900, webPreferences: { sandbox: true } }); window.loadURL(${JSON.stringify(pathToFileURL(path.join(directory, 'index.html')).href)}); });`);
+  const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
+  desktop = await _electron.launch({ args: [entry], env, timeout: 15000 });
+  page = await desktop.firstWindow();
+  await page.context().route('**/*', route => route.request().url().startsWith(pathToFileURL(directory + path.sep).href) ? route.continue() : route.abort());
+  await page.locator('.sidebar-toggle').waitFor();
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+});
+
+after(async () => {
+  try { await desktop?.close(); }
+  finally { if (directory) await rm(directory, { recursive: true, force: true }); }
+});
+
+async function mount(options = {}, saved = 'false') {
+  await page.evaluate(({ options, saved, preferenceKey }) => {
+    localStorage.setItem(preferenceKey, saved);
+    window.mountSidebar(options);
+  }, { options, saved, preferenceKey });
+  await page.waitForFunction(expected => document.querySelector('.sidebar-toggle')?.getAttribute('aria-expanded') === expected, saved === 'true' ? 'false' : 'true');
+}
+const columns = () => page.locator('.app-shell').evaluate(element => getComputedStyle(element).gridTemplateColumns.split(' ').map(Number.parseFloat));
+
+test('keyboard collapse keeps named navigation, current page and bottom settings usable, and persists on reload', { skip: noDisplay }, async () => {
+  await mount();
+  assert.deepEqual(await page.locator('.sidebar .nav-item').evaluateAll(items => items.map(item => item.getAttribute('aria-label'))), labels);
+  assert.ok((await columns())[0] === 210);
+  const toggle = page.getByRole('button', { name: '收起侧栏', exact: true });
+  await toggle.focus(); await page.keyboard.press('Enter');
+  await page.getByRole('button', { name: '展开侧栏', exact: true }).waitFor();
+  assert.equal((await columns())[0], 64);
+  assert.equal(await page.evaluate(key => localStorage.getItem(key), preferenceKey), 'true');
+  for (const label of labels) {
+    const action = page.getByRole('button', { name: label, exact: true });
+    assert.equal(await action.getAttribute('title'), label);
+    await action.click(); assert.equal(await action.getAttribute('aria-current'), 'page');
+  }
+  const bounds = await page.locator('.settings-navigation').boundingBox();
+  const navigation = await page.locator('.navigation').boundingBox();
+  assert.ok(bounds.y > navigation.y + navigation.height, 'Settings stays below the workspace navigation');
+  await page.reload();
+  await page.getByRole('button', { name: '展开侧栏', exact: true }).waitFor();
+  assert.equal((await columns())[0], 64);
+  await page.getByRole('button', { name: '展开侧栏', exact: true }).press('Space');
+  await page.getByRole('button', { name: '收起侧栏', exact: true }).waitFor();
+  assert.equal(await page.evaluate(key => localStorage.getItem(key), preferenceKey), 'false');
+});
+
+test('denied localStorage reads and writes preserve interactive navigation without throwing', { skip: noDisplay }, async () => {
+  await mount();
+  const errors = []; const onError = error => errors.push(error.message); page.on('pageerror', onError);
+  try {
+    await page.evaluate(() => {
+      window.sidebarStorageDescriptor = Object.getOwnPropertyDescriptor(window, 'localStorage');
+      Object.defineProperty(window, 'localStorage', { configurable: true, get() { throw new Error('Synthetic storage denial'); } });
+      window.mountSidebar();
+    });
+    await page.getByRole('button', { name: '收起侧栏', exact: true }).click();
+    await page.getByRole('button', { name: '展开侧栏', exact: true }).waitFor();
+    await page.getByRole('button', { name: '网络出口', exact: true }).click();
+    assert.equal(await page.getByRole('button', { name: '网络出口', exact: true }).getAttribute('aria-current'), 'page');
+    assert.deepEqual(errors, []);
+  } finally {
+    await page.evaluate(() => Object.defineProperty(window, 'localStorage', window.sidebarStorageDescriptor));
+  }
+  try {
+    await page.evaluate(() => {
+      window.sidebarSetItem = Storage.prototype.setItem;
+      Storage.prototype.setItem = function () { throw new DOMException('Synthetic quota refusal', 'QuotaExceededError'); };
+      window.mountSidebar();
+    });
+    await page.getByRole('button', { name: '收起侧栏', exact: true }).click();
+    await page.getByRole('button', { name: '展开侧栏', exact: true }).waitFor();
+    assert.deepEqual(errors, [], 'failed persistence must not disable the current navigation');
+  } finally {
+    await page.evaluate(() => { Storage.prototype.setItem = window.sidebarSetItem; });
+    page.off('pageerror', onError);
+  }
+});
+
+test('all nine languages keep icon hit targets and three columns within wide and narrow desktop layouts in both themes', { skip: noDisplay }, async () => {
+  for (const language of Object.keys(languages)) for (const theme of ['light', 'dark']) {
+    await mount({ language, theme });
+    for (const width of [900, 1280, 1720]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const collapsed of [false, true]) {
+        const name = translate(collapsed ? '展开侧栏' : '收起侧栏', language);
+        if (await page.getByRole('button', { name, exact: true }).count() === 0)
+          await page.locator('.sidebar-toggle').click();
+        const values = await columns();
+        assert.equal(values.length, 3); assert.equal(values[0], collapsed ? 64 : 210);
+        assert.ok(values[1] > 300 && values[2] > 0);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+        for (const label of labels) {
+          const action = page.getByRole('button', { name: translate(label, language), exact: true });
+          assert.equal(await action.getAttribute('title'), translate(label, language));
+          assert.equal(await action.evaluate(element => element.scrollWidth <= element.clientWidth), true);
+          assert.ok((await action.boundingBox()).height >= 40);
+        }
+      }
+    }
+  }
+});
+
+test('collapsed sidebar preserves terminal grid placement and expansion', { skip: noDisplay }, async () => {
+  await mount({ terminal: true }, 'true');
+  assert.equal(await page.locator('.terminal-dock').evaluate(element => element.getBoundingClientRect().x), 64);
+  assert.equal(await page.locator('.sidebar').evaluate(element => getComputedStyle(element).gridRow), '1 / 3');
+  await mount({ terminal: true, expanded: true }, 'true');
+  assert.equal(await page.locator('.terminal-dock').evaluate(element => element.getBoundingClientRect().x), 64);
+  assert.equal(await page.locator('.main-panel').isVisible(), false);
+  assert.equal(await page.locator('.detail-panel').isVisible(), false);
+});

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import test from 'node:test';
-import { describeSshSession, parseSshInvocation, runSshCommand, SSH_SESSION_SCHEMA, SSH_SESSION_VERSION } from '../electron/terminal-ssh-command.mjs';
+import { createSshChildEnvironment, describeSshSession, parseSshInvocation, runSshCommand, SSH_SESSION_SCHEMA, SSH_SESSION_VERSION } from '../electron/terminal-ssh-command.mjs';
 
 const now = 1_800_000_000_000;
 const baseConnection = { id: 'ssh_fixture_a', name: 'Fixture server', alias: 'envara-123456789abc', host: 'ssh-fixture.invalid', port: 2222, user: 'fixture' };
@@ -16,6 +16,9 @@ const manifest = (connections = [connection], expiresAt = connections.length && 
 const parse = (argv, connections = [connection], entry = 'ssh') => parseSshInvocation(argv, { connections, entry });
 const fail = code => ({ code });
 const recorder = () => { let text = ''; return { write(value) { text += value; }, value: () => text }; };
+const adHocConfigPath = path.resolve('owned-fixture-proxy-config');
+const childContext = { home: '/private/tmp/owned-ssh-runtime', proxyUrl: 'http://fixture:synthetic-secret@127.0.0.1:48123',
+  targetsPath: '/private/tmp/owned-ssh-runtime/targets.json', directSocket: '/private/tmp/owned-ssh-runtime/direct.sock', directToken: 'a'.repeat(64) };
 async function invoke({ argv = [], entry = 'ssh', selected = manifest(), currentTime = now, spawn, signals = new EventEmitter(), ...extra } = {}) {
   const output = recorder(), errorOutput = recorder(), calls = [];
   const code = await runSshCommand({ argv, entry, manifest: selected, now: currentTime,
@@ -158,6 +161,137 @@ test('alias, user@host and explicit -l requests map to the same saved configurat
   assert.throws(() => parse(['fixture@ssh-fixture.invalid']), fail('SSH_TARGET_NOT_AUTHORIZED'));
 });
 
+test('explicit environment capability permits new destinations without changing saved target selection', () => {
+  const options = { connections: [connection], allowAdHoc: true };
+  assert.deepEqual(parseSshInvocation(['-p2200', 'other@new.invalid', '-T', 'printf', '-oProxyCommand=remote-data'], options), {
+    kind: 'connect', alias: null, target: { host: 'new.invalid', port: 2200, user: 'other' }, flags: ['-T'], command: ['printf', '-oProxyCommand=remote-data'],
+  });
+  assert.deepEqual(parseSshInvocation(['-lfixture', 'NEW.invalid'], { connections: [], allowAdHoc: true }).target,
+    { host: 'new.invalid', port: 22, user: 'fixture' });
+  assert.deepEqual(parseSshInvocation(['envara-user@envara-server.invalid'], { connections: [], allowAdHoc: true }).target,
+    { host: 'envara-server.invalid', port: 22, user: 'envara-user' });
+  assert.deepEqual(parseSshInvocation(['fixture@[2001:db8::12]'], options).target,
+    { host: '2001:db8::12', port: 22, user: 'fixture' });
+  assert.equal(parseSshInvocation(['-p2222', 'fixture@ssh-fixture.invalid'], options).alias, connection.alias);
+  assert.equal(parseSshInvocation(['-p2223', 'fixture@ssh-fixture.invalid'], options).alias, null);
+  for (const argv of [['-p2222', 'other@ssh-fixture.invalid'], [connection.alias, '-lother'], ['envara-deadbeefdead'], ['fixture@envara-deadbeefdead']]) {
+    assert.throws(() => parseSshInvocation(argv, options), fail('SSH_TARGET_NOT_AUTHORIZED'));
+  }
+  assert.throws(() => parseSshInvocation(['new.invalid'], options), fail('SSH_ARGUMENT_INVALID'));
+  assert.throws(() => parseSshInvocation(['fixture@new.invalid']), fail('SSH_CONNECTIONS_EMPTY'));
+  assert.throws(() => parseSshInvocation(['fixture@new.invalid'], { ...options, allowAdHoc: 'yes' }), fail('SSH_SESSION_INVALID'));
+});
+
+test('environment destinations keep the connection-option whitelist and opaque remote command boundary', () => {
+  for (const flag of ['-i/private/key', '-oProxyCommand=direct', '-F/custom', '-Jjump', '-A', '-L1234:x:22', '-s', '-tt']) {
+    for (const argv of [[flag, 'fixture@new.invalid'], ['fixture@new.invalid', flag]]) {
+      assert.throws(() => parseSshInvocation(argv, { allowAdHoc: true }), fail('SSH_OPTIONS_UNSUPPORTED'));
+    }
+  }
+  assert.deepEqual(parseSshInvocation(['fixture@new.invalid', '--', '-i', '/remote/path'], { allowAdHoc: true }).command,
+    ['-i', '/remote/path']);
+});
+
+test('an empty saved manifest can start only the fixed proxy configuration with explicit target arguments', async () => {
+  const result = await invoke({ argv: ['-v', '-p2200', 'fixture@new.invalid', '-T', 'printf', '%s', 'remote data'],
+    selected: manifest([]), configuredConnections: [], adHocConfigPath, childEnvironment: childContext });
+  assert.equal(result.code, 0); assert.equal(result.calls.length, 1);
+  assert.deepEqual(result.calls[0][1], ['-F', adHocConfigPath, '-v', '-T', '-oBatchMode=yes', '-p', '2200', '-l', 'fixture', '--', 'new.invalid', 'printf', '%s', 'remote data']);
+  assert.deepEqual(result.calls[0][2].env, createSshChildEnvironment(childContext));
+  const refused = await invoke({ argv: ['fixture@new.invalid'], selected: manifest([]) });
+  assert.equal(refused.calls.length, 0); assert.match(refused.stderr, /SSH_CONNECTIONS_EMPTY/);
+});
+
+test('new destinations require a local input and output TTY for manual authentication', async () => {
+  for (const [inputTty, outputTty] of [[true, true], [true, false], [false, true], [false, false]]) {
+    const result = await invoke({ argv: ['-T', 'fixture@new.invalid', 'true'], selected: manifest([]), adHocConfigPath,
+      input: { isTTY: inputTty }, output: { isTTY: outputTty, write() {} } });
+    assert.equal(result.code, 0);
+    assert.equal(result.calls[0][1].includes('-oBatchMode=yes'), !(inputTty && outputTty));
+    assert.ok(result.calls[0][1].includes('-T'));
+  }
+  const saved = await invoke({ argv: [connection.alias], adHocConfigPath,
+    input: { isTTY: false }, output: { isTTY: false, write() {} } });
+  assert.equal(saved.calls[0][1].includes('-oBatchMode=yes'), false);
+});
+
+test('configured but locked targets never become environment destinations or borrow another identity', async () => {
+  const locked = { ...passwordConnection, id: 'locked-password', alias: 'envara-abcdef123456', host: 'locked.invalid', port: 22 };
+  for (const argv of [[locked.alias], [`${locked.user}@${locked.host}`]]) {
+    const result = await invoke({ argv, selected: manifest([]), configuredConnections: [locked], adHocConfigPath,
+      passwordClient: async () => { throw new Error('No unavailable credential may be requested'); } });
+    assert.equal(result.code, 2); assert.equal(result.calls.length, 0); assert.match(result.stderr, /SSH_SAVED_CONNECTION_UNAVAILABLE/);
+  }
+  const mismatch = await invoke({ argv: ['other@locked.invalid'], selected: manifest([]), configuredConnections: [locked], adHocConfigPath });
+  assert.equal(mismatch.calls.length, 0); assert.match(mismatch.stderr, /SSH_TARGET_NOT_AUTHORIZED/);
+  const unknown = await invoke({ argv: ['fixture@new.invalid'], selected: manifest([]), configuredConnections: [locked], adHocConfigPath });
+  assert.equal(unknown.code, 0); assert.equal(unknown.calls[0][1][1], adHocConfigPath);
+});
+
+test('equivalent numeric saved and locked endpoints cannot escape to the environment proxy', async () => {
+  for (const hosts of [
+    ['2001:db8::1', '2001:0db8:0000:0000:0000:0000:0000:0001', '[2001:DB8:0:0::1]'],
+    ['192.0.2.1', '::ffff:192.0.2.1', '::ffff:c000:201', '[0:0:0:0:0:FFFF:C000:0201]'],
+  ]) for (const stored of hosts) for (const requested of hosts) {
+    const saved = { ...connection, host: stored }, argv = ['-p2222', `fixture@${requested}`];
+    assert.equal(parseSshInvocation(argv, { connections: [saved], allowAdHoc: true }).alias, saved.alias, `${stored} / ${requested}`);
+    const active = await invoke({ argv, selected: manifest([saved]), configuredConnections: [{ ...saved, host: requested }], adHocConfigPath });
+    assert.equal(active.code, 0); assert.equal(active.calls[0][1][1], path.resolve('owned-fixture-config'));
+    assert.ok(active.calls[0][1].includes(saved.alias));
+    const locked = { ...saved, authType: 'password', expiresAt: null };
+    const refused = await invoke({ argv, selected: manifest([]), configuredConnections: [locked], adHocConfigPath });
+    assert.equal(refused.calls.length, 0); assert.match(refused.stderr, /SSH_SAVED_CONNECTION_UNAVAILABLE/);
+    const otherUser = await invoke({ argv: ['-p2222', `other@${requested}`], selected: manifest([]), configuredConnections: [locked], adHocConfigPath });
+    assert.equal(otherUser.calls.length, 0); assert.match(otherUser.stderr, /SSH_TARGET_NOT_AUTHORIZED/);
+  }
+  const duplicate = { ...connection, id: 'another', alias: 'envara-abcdef123456', host: '0:0:0:0:0:ffff:c000:201' };
+  assert.throws(() => parseSshInvocation(['-p2222', 'fixture@192.0.2.1'], {
+    connections: [{ ...connection, host: '::ffff:192.0.2.1' }, duplicate], allowAdHoc: true }), fail('SSH_TARGET_AMBIGUOUS'));
+});
+
+test('proxy capability cannot reroute saved expiration, ambiguity or a mismatched configured snapshot', async () => {
+  const expired = { ...connection, expiresAt: now };
+  const result = await invoke({ argv: [expired.alias], selected: manifest([expired]), configuredConnections: [expired], adHocConfigPath });
+  assert.equal(result.calls.length, 0); assert.match(result.stderr, /SSH_AUTHORIZATION_EXPIRED/);
+  for (const configuredConnections of [[], [{ ...connection, host: 'changed.invalid' }], [{ ...connection, id: 'changed' }]]) {
+    const value = await invoke({ argv: ['fixture@new.invalid'], configuredConnections, adHocConfigPath });
+    assert.equal(value.calls.length, 0); assert.match(value.stderr, /SSH_SESSION_INVALID/);
+  }
+  const second = { ...connection, id: 'second', alias: 'envara-abcdef123456' };
+  const ambiguous = await invoke({ argv: ['-p2222', 'fixture@ssh-fixture.invalid'], selected: manifest([connection, second]), adHocConfigPath });
+  assert.equal(ambiguous.calls.length, 0); assert.match(ambiguous.stderr, /SSH_TARGET_AMBIGUOUS/);
+  const selected = await invoke({ argv: [connection.alias], adHocConfigPath, childEnvironment: childContext });
+  assert.equal(selected.code, 0); assert.equal(selected.calls[0][1][1], path.resolve('owned-fixture-config'));
+});
+
+test('native child environment has only fixed runtime fields and explicitly issued capabilities', () => {
+  const value = createSshChildEnvironment({ ...childContext, USER: 'host-user', LOGNAME: 'host-user', HOSTNAME: 'host-name',
+    PWD: '/private/host', TZ: 'Private/Zone', DISPLAY: ':42', ANTHROPIC_API_KEY: 'host-secret', SSH_AUTH_SOCK: '/host-agent',
+    NODE_OPTIONS: '--require=host-code', LANG: 'host-locale', environment: process.env });
+  assert.deepEqual(value, { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: childContext.home, LANG: 'C', LC_ALL: 'C', TERM: 'xterm-256color',
+    SSH_ASKPASS_REQUIRE: 'never', SSH_ASKPASS: '/usr/bin/false', ENVARA_SSH_PROXY_URL: childContext.proxyUrl,
+    ENVARA_SSH_TARGETS: childContext.targetsPath, ENVARA_SSH_DIRECT_SOCKET: childContext.directSocket, ENVARA_SSH_DIRECT_TOKEN: childContext.directToken });
+  const askpass = createSshChildEnvironment({ ...childContext, askpassPath: '/private/tmp/owned/askpass',
+    askpassSocket: '/private/tmp/owned/auth.sock', askpassToken: 'b'.repeat(64) });
+  assert.equal(askpass.SSH_ASKPASS_REQUIRE, 'force'); assert.equal(askpass.SSH_ASKPASS, '/private/tmp/owned/askpass');
+  assert.equal(askpass.ENVARA_SSH_ASKPASS_SOCKET, '/private/tmp/owned/auth.sock'); assert.equal(askpass.ENVARA_SSH_ASKPASS_TOKEN, 'b'.repeat(64));
+});
+
+test('invalid native capabilities and ad-hoc config paths fail before spawning or echoing values', async () => {
+  for (const value of [{ home: 'relative' }, { home: '/private/tmp/owned', proxyUrl: 'http://private-secret@remote.invalid' },
+    { home: '/private/tmp/owned', targetsPath: '../private-secret' }, { home: '/private/tmp/owned', directSocket: '/private/tmp/direct.sock' },
+    { home: '/private/tmp/owned', directToken: 'a'.repeat(64) }, { home: '/private/tmp/owned', askpassPath: '/private/tmp/askpass' },
+    { home: '/private/tmp/owned', askpassSocket: '/private/tmp/auth.sock', askpassToken: 'private-secret' }]) {
+    assert.throws(() => createSshChildEnvironment(value), fail('SSH_SESSION_INVALID'));
+    const result = await invoke({ argv: [connection.alias], childEnvironment: value });
+    assert.equal(result.calls.length, 0); assert.match(result.stderr, /SSH_SESSION_INVALID/); assert.doesNotMatch(result.stderr, /private-secret/);
+  }
+  for (const config of [null, '', 'relative', '/private/../tmp/config', '/private/tmp/bad\nconfig']) {
+    const result = await invoke({ argv: ['fixture@new.invalid'], adHocConfigPath: config });
+    assert.equal(result.calls.length, 0); assert.match(result.stderr, /SSH_SESSION_INVALID/);
+  }
+});
+
 test('the first remote command token or explicit delimiter permanently ends connection options', () => {
   const command = ['printf', '--', '-p', '9999', '-oProxyCommand=synthetic', 'one argument with spaces', 'line one\nline two'];
   assert.deepEqual(parse(['fixture@ssh-fixture.invalid', '-p2222', ...command]).command, command);
@@ -216,7 +350,7 @@ test('empty sessions expose read-only discovery and a precise refusal without st
     const result = await invoke({ argv, entry: 'envara-ssh', selected: manifest([]) });
     assert.equal(result.code, 0); assert.equal(result.calls.length, 0); assert.equal(result.stderr, '');
     if (argv.includes('--json')) assert.equal(JSON.parse(result.stdout).status, 'empty');
-    else assert.match(result.stdout, /No SSH connections are loaded/);
+    else assert.match(result.stdout, /No saved SSH connections are loaded/);
   }
 });
 

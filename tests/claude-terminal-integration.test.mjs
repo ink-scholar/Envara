@@ -66,7 +66,7 @@ test('dedicated session opens a shell with a manual Claude wrapper and pinned MC
   assert.equal(prepared.executable, path.join(launch.options.env.HOME, '.local/share/claude/versions/2.1.296'));
   assert.equal(prepared.installation.entryPath, path.join(launch.options.env.HOME, '.local/bin/claude'));
   assert.notEqual((await stat(prepared.executable)).ino, (await stat(path.join(f.root, '2.1.296'))).ino);
-  assert(prepared.args.includes('--strict-mcp-config')); assert(prepared.args.includes('--no-chrome'));
+  assert(!prepared.args.includes('--strict-mcp-config')); assert(prepared.args.includes('--no-chrome'));
   assert.equal(launch.options.env.PATH.split(path.delimiter)[0], prepared.binDirectory);
   assert.equal(path.join(prepared.binDirectory, 'claude'), prepared.wrapperPath);
   assert.equal(launch.options.cwd, f.cwd); assert.equal(launch.options.env.TZ, 'Asia/Manila');

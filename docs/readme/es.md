@@ -5,7 +5,7 @@
 <p align="center"><strong>Un entorno propio para cada flujo de trabajo.</strong><br />Un entorno. Tu navegador, terminal y aplicaciones.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licencia del código original: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.4-475569" alt="Envara 1.0.4" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.0-475569" alt="Envara 1.1.0" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README en 9 idiomas" /></a>
 </p>
 <p align="center">
@@ -20,6 +20,13 @@
 Envara es un espacio de trabajo local y de código abierto que reúne la salida de red, los perfiles del navegador, las herramientas de terminal y las aplicaciones de escritorio compatibles. Cada entorno conserva sus propios ajustes y datos. Crea contextos distintos para tus proyectos, cuentas o regiones y gestiónalos desde una sola interfaz.
 
 ![Espacio de trabajo nativo de Envara en chino](../media/workspace-zh-CN.png)
+
+## Novedades de 1.1.0
+
+- **Una interfaz más clara y navegación plegable.** Recoge el menú lateral para dar más espacio al navegador, los terminales y las aplicaciones.
+- **Terminales guardados con nombre.** Vuelve a una sesión normal o de Claude en ejecución, o abre un shell inactivo con su contexto guardado. Los comandos no se repiten.
+- **MCP y complementos personalizados.** La CLI oficial de Claude puede descubrir la configuración de usuario, proyecto y ámbito local del entorno, manteniendo las herramientas del navegador fijado y las restricciones de red de Envara.
+- **SSH según el destino.** En macOS, los hosts guardados usan la salida de red del equipo; los destinos no guardados usan el proxy del entorno. Un fallo no cambia la ruta.
 
 <p align="center"><sub>Espacio de trabajo nativo de Electron. La captura utiliza datos de ejemplo sintéticos.</sub></p>
 
@@ -45,7 +52,7 @@ Al crear un entorno de red, Envara mide la **salida real de la conexión autenti
 
 Al crear una sesión, elige la **red, el navegador para los enlaces y la carpeta del proyecto**. La configuración y el historial se guardan por entorno. Los PTY reales, las sesiones múltiples, la altura ajustable, la expansión al área de trabajo y las ventanas independientes integran la línea de comandos en tu día a día.
 
-En macOS, puedes usar [conexiones SSH controladas](../claude-code-sessions.md) a través del proxy seleccionado, manteniendo las claves privadas en tu Mac.
+En macOS, las [conexiones SSH controladas](../claude-code-sessions.md) usan la salida de red actual de este equipo (incluida una VPN/TUN activa del sistema) para las combinaciones de host y puerto guardadas; el servidor remoto ve esa IP de salida. Las combinaciones no guardadas pueden usar `ssh user@host` a través del proxy del entorno. Las conexiones guardadas sin autorización vigente se bloquean y no cambian al proxy; las claves privadas permanecen en tu Mac. Estas rutas se aplican a los terminales nuevos de 1.1.0; las sesiones existentes conservan su contexto original.
 
 Duplicar un terminal abre un nuevo proceso inactivo con el mismo contexto. Cerrar el panel no termina la sesión: puedes volver a ella después. Las rutas de bucle local administradas y compatibles con macOS utilizan una barrera de red; los programas que no admiten el proxy no podrán conectarse, evitando conexiones directas silenciosas. La carpeta del proyecto permanece en su ubicación original para que sigas usando tus herramientas habituales.
 

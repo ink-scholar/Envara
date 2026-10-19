@@ -274,9 +274,10 @@ async function assertAccountPolicy(launch, prepared, privacyMode, fixtureSecrets
   const settingsText = await readFile(settingsPath, 'utf8'), settings = JSON.parse(settingsText);
   assert.equal(settings.forceLoginMethod, 'claudeai');
   assert.equal(settings.sandbox.enabled, false);
-  for (const flag of ['--no-chrome', '--strict-mcp-config']) assert(prepared.args.includes(flag));
+  assert(prepared.args.includes('--no-chrome'));
+  assert(!prepared.args.includes('--strict-mcp-config'));
   for (const flag of ['--permission-mode', '--dangerously-skip-permissions', '--allow-dangerously-skip-permissions']) assert(!prepared.args.includes(flag), 'The dedicated shell must not enable a permission bypass by default.');
-  assert.equal(prepared.args[prepared.args.indexOf('--setting-sources') + 1], 'user');
+  assert.equal(prepared.args[prepared.args.indexOf('--setting-sources') + 1], 'user,project,local');
   assert.equal(launch.options.env.DISABLE_AUTOUPDATER, '1');
   assert.equal(launch.options.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(launch.options.env.ANTHROPIC_AUTH_TOKEN, undefined);

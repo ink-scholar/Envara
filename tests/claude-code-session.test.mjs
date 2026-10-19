@@ -66,7 +66,7 @@ test('a program writable by other users is not eligible', async t => {
   await assert.rejects(prepareClaudeSession(f.request), { code: 'CLAUDE_CODE_INSTALLATION_INVALID' });
 });
 
-test('creates private session config with only the selected MCP and cleans only its runtime', async t => {
+test('adds the selected MCP without disabling profile MCP discovery and cleans only its runtime', async t => {
   const f = await fixture(t);
   const userSettings = path.join(f.claude, 'settings.json');
   await writeFile(userSettings, '{"theme":"dark","permissions":{"defaultMode":"default"}}', { mode: 0o600 });
@@ -75,7 +75,7 @@ test('creates private session config with only the selected MCP and cleans only 
   const settingsFile = launch.args[launch.args.indexOf('--settings') + 1];
   const runtime = path.dirname(mcpFile);
   assert.equal(launch.executable, f.executable);
-  assert.deepEqual(launch.args, ['--no-chrome', '--strict-mcp-config', '--mcp-config', mcpFile, '--setting-sources', 'user', '--settings', settingsFile]);
+  assert.deepEqual(launch.args, ['--no-chrome', '--mcp-config', mcpFile, '--setting-sources', 'user,project,local', '--settings', settingsFile]);
   assert.deepEqual(JSON.parse(await readFile(mcpFile)), { mcpServers: { envara_browser: { type: 'stdio', ...f.request.mcpServer } } });
   const settings = JSON.parse(await readFile(settingsFile));
   assert.deepEqual(settings.sandbox, { enabled: false });
@@ -94,7 +94,7 @@ test('creates private session config with only the selected MCP and cleans only 
   const second = await prepareClaudeSession({ ...f.request, sessionId: 'term_two' });
   await launch.cleanup(); await launch.cleanup();
   await assert.rejects(lstat(runtime), { code: 'ENOENT' });
-  assert.ok((await lstat(path.dirname(second.args[3]))).isDirectory());
+  assert.ok((await lstat(path.dirname(second.args[second.args.indexOf('--mcp-config') + 1]))).isDirectory());
   assert.equal(await readFile(userSettings, 'utf8'), '{"theme":"dark","permissions":{"defaultMode":"default"}}');
   await second.cleanup();
 });
@@ -123,7 +123,7 @@ test('does not adopt a linked runtime or overwrite an existing session', async t
 test('cleanup refuses a replaced runtime and preserves the replacement target', async t => {
   const f = await fixture(t);
   const launch = await prepareClaudeSession(f.request);
-  const runtime = path.dirname(launch.args[3]);
+  const runtime = path.dirname(launch.args[launch.args.indexOf('--mcp-config') + 1]);
   const saved = runtime + '-saved';
   await rename(runtime, saved);
   const elsewhere = path.join(f.root, 'elsewhere');
@@ -340,6 +340,7 @@ test('manual wrapper preserves argv quoting and explicit permissions without ena
   const launch = await prepareClaudeSession({ ...f.request, directories: { ...f.request.directories, temp: special }, environment: { ...f.request.environment, TMPDIR: special } });
   for (const userArgs of [[], ['--permission-mode', 'bypassPermissions'], ['--permission-mode=bypassPermissions'],
     ['--model', 'sonnet', '--continue'], ['--resume', "conversation with space's quote"], ['-p', "explain `literal` and $(literal) 'quoted' \"double\""],
+    ['mcp', 'add', 'custom-tool', '--', '/owned/bin/tool'], ['mcp', 'add', '--scope', 'user', 'custom-tool', '--', '/owned/bin/tool'],
     ['--', '--settings=literal prompt text']]) {
     const { stdout } = await execute(launch.wrapperPath, userArgs, { env: launch.environment, timeout: 5000 });
     const observed = JSON.parse(stdout);
@@ -350,6 +351,29 @@ test('manual wrapper preserves argv quoting and explicit permissions without ena
   assert.ok(!launch.args.some(value => value.includes('skip-permissions')));
   const { stdout } = await execute('/bin/sh', ['-c', 'command -v claude'], { env: launch.environment });
   assert.equal(stdout.trim(), launch.wrapperPath);
+});
+
+test('the existing wrapper checks settings again in the directory of each manual invocation', async t => {
+  const f = await fixture(t);
+  await compileClaudeFixture(f.executable);
+  const first = path.join(f.root, 'first-project'), second = path.join(f.root, 'second-project');
+  for (const cwd of [first, second]) await mkdir(path.join(cwd, '.claude'), { recursive: true, mode: 0o700 });
+  const launch = await prepareClaudeSession(f.request);
+  const invoke = cwd => execute(launch.wrapperPath, ['--version'], { cwd, env: launch.environment, timeout: 5000 });
+  assert.equal(JSON.parse((await invoke(first)).stdout).config, f.claude);
+  const settings = path.join(second, '.claude', 'settings.local.json');
+  const source = JSON.stringify({ env: { HTTPS_PROXY: 'http://synthetic-forbidden-route.invalid' } });
+  await writeFile(settings, source, { mode: 0o600 });
+  await assert.rejects(invoke(second), error => error.code === 78 && error.stdout === ''
+    && error.stderr.includes('CLAUDE_CODE_SESSION_POLICY_CONFLICT') && !error.stderr.includes('synthetic-forbidden-route'));
+  assert.equal(await readFile(settings, 'utf8'), source);
+  assert.equal(JSON.parse((await invoke(first)).stdout).config, f.claude);
+  await writeFile(settings, JSON.stringify({ env: { PATH: f.request.environment.PATH }, model: 'sonnet' }), { mode: 0o600 });
+  assert.equal(JSON.parse((await invoke(second)).stdout).path, launch.environment.PATH);
+  await saveSettings(f, { apiKeyHelper: 'synthetic-private-helper' });
+  await assert.rejects(invoke(first), error => error.code === 78 && error.stdout === ''
+    && error.stderr.includes('CLAUDE_CODE_ACCOUNT_CONFIGURATION_CONFLICT') && !error.stderr.includes('synthetic-private-helper'));
+  await launch.cleanup();
 });
 
 test('wrapper warns once per terminal about legacy shared Console data without using or changing it', async t => {
@@ -379,7 +403,7 @@ test('manual wrapper refuses binding overrides in exact and equals forms before 
   const f = await fixture(t), launch = await prepareClaudeSession(f.request);
   for (const flag of ['--mcp-config', '--strict-mcp-config', '--no-strict-mcp-config', '--settings', '--setting-sources', '--chrome', '--no-chrome', '--bare', '--safe-mode', '--restricted']) {
     for (const args of [[flag, 'untrusted'], [`${flag}=untrusted`]]) {
-      await assert.rejects(execute(launch.wrapperPath, args, { env: launch.environment, timeout: 5000 }), error => error.code === 64 && error.stdout === '' && error.stderr.includes('此会话的浏览器和隔离配置已固定'));
+      await assert.rejects(execute(launch.wrapperPath, args, { env: launch.environment, timeout: 5000 }), error => error.code === 64 && error.stdout === '' && error.stderr.includes('此会话的浏览器和隔离配置已固定') && error.stderr.includes('claude mcp add'));
     }
   }
   const script = await readFile(launch.wrapperPath, 'utf8');

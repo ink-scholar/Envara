@@ -10,6 +10,7 @@ import { TerminalNetworkFence } from './terminal-network-fence.mjs';
 import { findClaudeExecutable, prepareClaudeSession } from './claude-code-session.mjs';
 import { ensureClaudeInstallation, claudeInstallationStatus as inspectClaudeInstallation } from './claude-code-installation.mjs';
 import { ClaudeAccountStore, DEFAULT_CLAUDE_ACCOUNT, claudeAccountId as validateClaudeAccountId } from './claude-account-store.mjs';
+import { TerminalEntryStore } from './terminal-entry-store.mjs';
 import { installedProcessLocales, resolveProcessLanguage } from './workspace-context.mjs';
 
 const require = createRequire(import.meta.url);
@@ -60,6 +61,18 @@ function checkedProxy(value) {
   for (const key of ['username', 'password']) if (value[key] != null && (typeof value[key] !== 'string' || value[key].length > 2048 || /[\0\r\n]/.test(value[key]))) throw codeError('终端代理凭据格式无效。');
   return { protocol, host, port: value.port, username: value.username ?? '', password: value.password ?? '' };
 }
+// Durable route references contain no runtime listener credentials or endpoint.
+function terminalEntryNetwork(context) {
+  const proxy = checkedProxy(context?.proxy);
+  const proxyId = context?.proxyId ?? context?.managedRoute?.proxyId ?? null;
+  if (proxyId != null) validId(proxyId);
+  const managed = context?.managedProxy === true || Boolean(context?.managedRoute);
+  if (managed && (!proxy || !proxyId)) throw codeError('此终端的网络或浏览器配置已改变，请新建终端确认配置。', 'TERMINAL_ENTRY_CONTEXT_CHANGED');
+  return { kind: proxy ? managed ? 'managed' : 'proxy' : 'direct', proxyId: proxy ? proxyId : null };
+}
+const entryContextChanged = () => codeError('此终端的网络或浏览器配置已改变，请新建终端确认配置。', 'TERMINAL_ENTRY_CONTEXT_CHANGED');
+const samePrivateProxy = (first, second) => JSON.stringify(checkedProxy(first)) === JSON.stringify(checkedProxy(second));
+
 function proxyURL(proxy) {
   const host = proxy.host.includes(':') ? `[${proxy.host}]` : proxy.host;
   const value = new URL(`${proxy.protocol}://${host}:${proxy.port}`);
@@ -177,6 +190,8 @@ export class TerminalService {
     this.root = await privateDirectory(canonical, 'terminal');
     this.profilesDir = await privateDirectory(this.root, 'profiles');
     this.settingsFile = path.join(this.root, 'workspace.json');
+    this.savedTerminals = new TerminalEntryStore({ root: this.root });
+    await this.savedTerminals.ready;
     this.claudeAccounts = new ClaudeAccountStore({ root: this.root });
     await this.claudeAccounts.ready;
     await this.sshManager?.ready;
@@ -240,6 +255,7 @@ export class TerminalService {
       catch { /* A failed authority description cannot advertise SSH access. */ }
     }
     return { sessionId: session.sessionId, profileId: session.profileId, kind: session.kind ?? 'shell', ...(session.browserProfileId ? { browserProfileId: session.browserProfileId, browserName: session.browserName ?? null } : {}), status: session.status, cwd: session.cwd, timezone: session.timezone ?? null, language: session.language ?? null, networkFence: session.networkFence === true, privacy: session.launchContext?.privacy ?? { mode: 'standard' }, geolocation: session.launchContext?.geolocation ?? null, network: session.network ?? unknownNetwork(), columns: session.columns, rows: session.rows, startedAt: session.startedAt, sequence: session.sequence, replay: session.replay,
+      ...(session.savedTerminalId ? { savedTerminalId: session.savedTerminalId, savedTerminalName: session.savedTerminalName } : {}),
       ...(session.requestId ? { requestId: session.requestId } : {}),
       ...(session.kind === 'claude-code' ? { claudeAccountId: session.claudeAccountId, claudeAccountName: session.claudeAccountName ?? null, claudeInstallSource: session.claudeInstallSource,
         deviceIdentifierRestrictions: session.deviceIdentifierRestrictions === true } : {}),
@@ -294,13 +310,92 @@ export class TerminalService {
   async snapshot({ id } = {}) {
     await this.ready;
     if (id != null) validId(id);
-    const ids = id ? [id] : [...new Set([...this.settings.keys(), ...this.contexts.keys(), ...this.sessions.values()].map(value => typeof value === 'string' ? value : value.profileId))];
+    const saved = await this.savedTerminals.list(id);
+    const ids = id ? [id] : [...new Set([...this.settings.keys(), ...this.contexts.keys(), ...this.sessions.values(), ...saved].map(value => typeof value === 'string' ? value : value.profileId))];
+    const accountLists = new Map(await Promise.all([...new Set(saved.filter(entry => entry.kind === 'claude-code').map(entry => entry.profileId))].map(async profileId => [profileId, await this.claudeAccounts.list(profileId)])));
     return { profiles: ids.map(profileId => {
       const context = this.contexts.get(profileId);
       return { profileId, name: context?.name ?? null, cwd: this.settings.get(profileId)?.cwd ?? null, browserProfileId: this.settings.get(profileId)?.browserProfileId ?? null, timezone: context?.timezone ?? null, timezoneSource: context?.timezoneSource ?? 'unknown', language: context?.language ?? null, network: context?.network ?? unknownNetwork(),
         configDir: context?.configDir ?? null, claudeConfigDir: context?.claudeConfigDir ?? null,
+        savedTerminals: saved.filter(entry => entry.profileId === profileId).map(entry => this.savedTerminalMetadata(entry, accountLists.get(profileId))),
         sessions: [...this.sessions.values()].filter(session => session.profileId === profileId).map(session => this.metadata(session)) };
     }) };
+  }
+  savedTerminalMetadata(entry, accounts = []) {
+    const active = [...this.sessions.values()].filter(session => session.savedTerminalId === entry.id && !session.finished && ['starting', 'running', 'closing'].includes(session.status));
+    const latest = active.find(session => session.status === 'closing' || session.cleanupError || session.finishing)
+      ?? active.find(session => session.status === 'starting') ?? active.at(-1);
+    const account = entry.kind === 'claude-code' ? accounts.find(item => item.id === entry.claudeAccountId) : null;
+    return { ...entry, sessionId: latest?.sessionId ?? null, status: latest?.status ?? 'saved', activeSessionCount: active.length,
+      ...(entry.kind === 'claude-code' ? { claudeAccountName: account?.name ?? null, ...(account ? {} : { unavailableReason: 'CLAUDE_ACCOUNT_NOT_FOUND' }) } : {}) };
+  }
+  async savedTerminal(id, entryId) {
+    validId(id); await this.ready;
+    return this.savedTerminals.get(id, entryId);
+  }
+  async renameSavedTerminal({ id, entryId, name }) {
+    validId(id);
+    return this.serialized(id, async () => {
+      if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
+      const entry = await this.savedTerminals.rename(id, entryId, name);
+      for (const session of this.sessions.values()) if (session.savedTerminalId === entry.id) session.savedTerminalName = entry.name;
+      await this.emitSavedTerminalsChanged(id);
+      return this.snapshot({ id });
+    });
+  }
+  async removeSavedTerminal({ id, entryId }) {
+    validId(id);
+    return this.serialized(id, async () => {
+      if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
+      const entry = await this.savedTerminals.remove(id, entryId);
+      for (const session of this.sessions.values()) if (session.savedTerminalId === entry.id) {
+        session.savedTerminalId = null; session.savedTerminalName = null;
+      }
+      await this.emitSavedTerminalsChanged(id);
+      return this.snapshot({ id });
+    });
+  }
+  async emitSavedTerminalsChanged(id) {
+    try { await this.onEvent({ type: 'workspace', profileId: id }); } catch { /* display failure does not undo metadata */ }
+  }
+  async validateSavedTerminalContext(entry, context) {
+    const actual = terminalEntryNetwork(context);
+    if (actual.kind !== entry.networkRef.kind || actual.proxyId !== entry.networkRef.proxyId) throw entryContextChanged();
+    const browser = entry.kind === 'claude-code' ? entry.profileId : this.linkBrowser(entry.profileId) ?? entry.profileId;
+    if (browser !== entry.browserProfileId) throw entryContextChanged();
+    if (browser === 'system') {
+      if (entry.kind !== 'shell') throw entryContextChanged();
+      return;
+    }
+    if (browser !== entry.profileId) {
+      let target; try { target = await this.resolveContext(browser); } catch { throw entryContextChanged(); }
+      if (target?.id !== browser) throw entryContextChanged();
+      const route = terminalEntryNetwork(target);
+      if (route.kind !== actual.kind || route.proxyId !== actual.proxyId || !samePrivateProxy(target.proxy, context.proxy)) throw entryContextChanged();
+    }
+  }
+  async reserveSavedTerminalStart({ id, entryId }) {
+    const entry = await this.savedTerminal(id, entryId);
+    return entry.kind === 'claude-code' ? this.reserveClaudeAccountStart(id, entry.claudeAccountId) : () => {};
+  }
+  async reopenSavedTerminal({ id, entryId, requestId = null }) {
+    validId(id); if (requestId != null) validId(requestId);
+    const selected = await this.savedTerminal(id, entryId);
+    const releaseAccount = selected.kind === 'claude-code' ? this.reserveClaudeAccountStart(id, selected.claudeAccountId) : null;
+    return this.serialized(id, async () => {
+      if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
+      const entry = await this.savedTerminals.get(id, entryId);
+      if ([...this.sessions.values()].some(session => session.profileId === id && !session.finished && (session.status === 'closing' || session.cleanupError || session.finishing)))
+        throw codeError('此终端仍在启动或清理，请稍后重试。', 'TERMINAL_ENTRY_BUSY');
+      const associated = [...this.sessions.values()].filter(session => session.savedTerminalId === entry.id && !session.finished);
+      if (associated.some(session => session.status !== 'running' || session.cleanupError || session.finishing || session.networkFailure))
+        throw codeError('此终端仍在启动或清理，请稍后重试。', 'TERMINAL_ENTRY_BUSY');
+      const running = associated.at(-1);
+      if (running) return this.metadata(running);
+      const account = entry.kind === 'claude-code' ? await this.claudeAccounts.get(id, entry.claudeAccountId) : null;
+      return this.startSession({ id, cwd: entry.cwd, kind: entry.kind, browserProfileId: entry.kind === 'claude-code' ? entry.browserProfileId : null,
+        account, requestId, savedEntry: entry });
+    }).finally(() => releaseAccount?.());
   }
   /* The browser this environment's links use. It is read when a link arrives,
    * so changing it applies to the next link without a restart. */
@@ -635,7 +730,8 @@ export class TerminalService {
     }).finally(() => releaseAccount?.());
   }
   requireDuplicable(session) {
-    if (session.status !== 'running' || session.finished || session.finishing || !session.launchContext) throw codeError('只能复制仍在运行的终端。', 'TERMINAL_NOT_RUNNING');
+    if (session.status !== 'running' || session.finished || session.finishing || session.cleanupError || session.networkFailure || !session.launchContext ||
+        [...this.sessions.values()].some(other => other.profileId === session.profileId && !other.finished && (other.status === 'closing' || other.cleanupError || other.finishing))) throw codeError('只能复制仍在运行的终端。', 'TERMINAL_NOT_RUNNING');
   }
   assertStarting(session) {
     if (session.networkFailure) throw codeError(session.networkFailure.message, session.networkFailure.code);
@@ -659,23 +755,33 @@ export class TerminalService {
     session.claudeInstall = safe;
     this.emit(session, 'status', { status: 'starting', claudeInstall: safe });
   }
-  async startSession({ id, cwd, columns, rows, context: copiedContext, source, kind = 'shell', browserProfileId = null, account = null, requestId = null, claudeInstallSource = 'download' }) {
+  async startSession({ id, cwd, columns, rows, context: copiedContext, source, kind = 'shell', browserProfileId = null, account = null, requestId = null, claudeInstallSource = 'download', savedEntry = null }) {
     if ([...this.sessions.values()].filter(session => ['starting', 'running', 'closing'].includes(session.status)).length >= MAX_SESSIONS) throw codeError('最多同时打开 8 个终端会话。', 'TERMINAL_LIMIT');
     const session = { sessionId: `term_${randomUUID().replaceAll('-', '')}`, profileId: id, kind, requestId, claudeAccountId: account?.id ?? null, claudeAccountName: account?.name ?? null, claudeInstallSource: kind === 'claude-code' ? claudeInstallSource : null, abortController: new AbortController(), browserProfileId: kind === 'claude-code' ? browserProfileId : null, status: 'starting', cwd, columns: integer(columns, 100, 20, 400), rows: integer(rows, 30, 5, 150), startedAt: new Date().toISOString(), sequence: 0, replay: '', events: [], queuedBytes: 0, secretTail: '', secrets: [], disposables: [], finished: false, pumping: false };
+    if (savedEntry) { session.savedTerminalId = savedEntry.id; session.savedTerminalName = savedEntry.name; }
+    else if (source?.savedTerminalId) { session.savedTerminalId = source.savedTerminalId; session.savedTerminalName = source.savedTerminalName; }
     const proxyFailuresAtStart = new Map(this.managedProxyFailures);
     // Reserve before the first asynchronous check so parallel profiles and
     // duplicates cannot race past the global session limit.
     this.sessions.set(session.sessionId, session);
     this.emit(session, 'status', { status: 'starting' });
     try {
-      const canonical = await realpath(cwd);
+      try {
+        const canonical = await realpath(cwd);
+        this.assertStarting(session);
+        const directory = await stat(cwd);
+        if (canonical !== cwd || !directory.isDirectory()) throw codeError('工作目录已改变，请重新选择。', 'TERMINAL_UNSAFE_PATH');
+        if (savedEntry) await access(cwd, constants.R_OK | constants.X_OK);
+      } catch (error) {
+        if (savedEntry && !session.startCancelled && !this.closed) throw codeError('此终端的工作目录已改变，请重新选择。', 'TERMINAL_ENTRY_DIRECTORY_UNAVAILABLE');
+        throw error;
+      }
       this.assertStarting(session);
-      const directory = await stat(cwd);
-      this.assertStarting(session);
-      if (canonical !== cwd || !directory.isDirectory()) throw codeError('工作目录已改变，请重新选择。', 'TERMINAL_UNSAFE_PATH');
       const context = copiedContext ?? await this.resolveContext(id);
       this.assertStarting(session);
       if (!context || context.id !== id) throw codeError('未找到此环境的终端配置。', 'TERMINAL_PROFILE_NOT_FOUND');
+      if (savedEntry) await this.validateSavedTerminalContext(savedEntry, context);
+      this.assertStarting(session);
       const timezone = safeTimezone(context.timezone);
       session.language = this.languageFor(context.locale);
       const proxy = checkedProxy(context.proxy);
@@ -801,7 +907,15 @@ export class TerminalService {
       if (cancelled) this.assertStarting(session);
       await session.capturePromise;
       if (session.networkFailure) this.assertStarting(session);
-      if (session.status === 'starting' && !session.finished && !session.finishing) { session.status = 'running'; this.emit(session, 'status', { status: 'running' }); }
+      if (session.status === 'starting' && !session.finished && !session.finishing) {
+        const accountName = account?.id === DEFAULT_CLAUDE_ACCOUNT && account.name === '默认' ? null : account?.name;
+        const entry = await this.savedTerminals.upsert({ profileId: id, name: (accountName ?? session.launchContext.name ?? id).trim().slice(0, 80) || id.slice(0, 80), kind,
+          cwd, browserProfileId: kind === 'claude-code' ? browserProfileId : this.linkBrowser(id) ?? id, claudeAccountId: account?.id ?? null,
+          networkRef: terminalEntryNetwork(session.launchContext) });
+        session.savedTerminalId = entry.id; session.savedTerminalName = entry.name;
+        this.assertStarting(session);
+        session.status = 'running'; this.emit(session, 'status', { status: 'running', savedTerminalId: entry.id, savedTerminalName: entry.name });
+      }
       this.pruneSessions();
       return this.metadata(session);
     } catch (error) {
@@ -1033,6 +1147,7 @@ export class TerminalService {
       await this.updateSettings(id, () => undefined);
       if (exists && !preserve) await rm(namespace, { recursive: true, force: true });
       await this.claudeAccounts.removeProfile(id);
+      await this.savedTerminals.removeProfile(id);
       await this.sshManager?.removeProfile?.({ id });
       this.contexts.delete(id);
       for (const session of this.sessions.values()) if (session.profileId === id) this.sessions.delete(session.sessionId);

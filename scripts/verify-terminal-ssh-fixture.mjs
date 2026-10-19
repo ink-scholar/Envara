@@ -1,5 +1,6 @@
 /** Opt-in macOS-only SSH acceptance with disposable keys and owned loopback
- * listeners. No login, user SSH files, real server, shell server or downloads.
+ * listeners. Saved targets use the direct relay; unconfigured targets use an
+ * authenticated refusing proxy. No user SSH files, real server or downloads.
  * ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/Electron.app/Contents/MacOS/Electron scripts/verify-terminal-ssh-fixture.mjs --run
  * --packaged /absolute/Envara.app uses that app own executable/modules/runtime.
  * --claude /absolute/native/versions/X.Y.Z adds version-only dedicated Claude acceptance.
@@ -65,7 +66,7 @@ const children = new Set(), knownPids = new Set(), peers = new Set(), output = n
 let stage = 'prepare', terminal, manager, server, pythonChild, broker, linkChannel, proxyMode = 'normal', serverPort;
 const brokerDirectories = new Set();
 let browserLaunchAttempts = 0;
-const stats = { proxyConnections: 0, authenticated: 0, executions: 0, mapped: 0, refused407: 0, rejectedTargets: 0, rejectedAuth: 0 };
+const stats = { proxyConnections: 0, serverConnections: 0, authenticated: 0, executions: 0, refused407: 0, rejectedTargets: 0, rejectedAuth: 0 };
 const check = name => { proof.checks.push(name); console.log(`PASS ${name}`); };
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
 const jsonLine = text => { for (const line of text.split('\n')) { try { const value = JSON.parse(line.trim()); if (value && typeof value === 'object') return value; } catch {} } throw Object.assign(new Error('No structured fixture result.'), { code: 'FIXTURE_JSON_MISSING' }); };
@@ -105,7 +106,7 @@ def serve(sock):
   if transport: transport.close()
   sock.close()
 while True:
- sock,_=listener.accept();threading.Thread(target=serve,args=(sock,),daemon=True).start()
+ sock,_=listener.accept();print(json.dumps({'event':'connected'}),flush=True);threading.Thread(target=serve,args=(sock,),daemon=True).start()
 `;
 try {
   await command(python, ['-I', '-c', 'import paramiko; print(paramiko.__version__)']);
@@ -119,6 +120,7 @@ try {
     lines += chunk.toString(); if (lines.length > 16384) { lines = ''; return; }
     for (;;) { const at = lines.indexOf('\n'); if (at < 0) break; const line = lines.slice(0, at); lines = lines.slice(at + 1);
       try { const item = JSON.parse(line); if (item.event === 'ready' && Number.isInteger(item.port)) serverPort = item.port;
+        if (item.event === 'connected') stats.serverConnections++;
         if (item.event === 'authenticated') stats.authenticated++; if (item.event === 'executed') stats.executions++; } catch {} }
   });
   await waitFor(() => serverPort, 'server-ready');
@@ -135,11 +137,11 @@ try {
         if (proxyMode === '407') stats.refused407++; else stats.rejectedAuth++;
         return socket.end('HTTP/1.1 407 Proxy Authentication Required\r\n\r\n');
       }
-      if (!text.startsWith('CONNECT ssh.envara.invalid:1030 HTTP/1.1\r\n')) { stats.rejectedTargets++; return socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); }
-      const upstream = net.connect({ host: '127.0.0.1', port: serverPort }); peers.add(upstream);
-      upstream.on('error', () => socket.destroy()); upstream.once('close', () => { peers.delete(upstream); socket.destroy(); }); socket.once('close', () => upstream.destroy());
-      upstream.once('connect', () => { stats.mapped++; socket.write('HTTP/1.1 200 Connection established\r\n\r\n');
-        const tail = header.subarray(at + 4); if (tail.length) upstream.write(tail); socket.pipe(upstream); upstream.pipe(socket); socket.resume(); });
+      if (!text.startsWith('CONNECT unknown.envara.invalid:1030 HTTP/1.1\r\n')
+        && !text.startsWith(`CONNECT 127.0.0.1:${serverPort === 65535 ? 65534 : serverPort + 1} HTTP/1.1\r\n`)) {
+        return socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+      }
+      stats.rejectedTargets++; socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
     });
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
@@ -147,12 +149,12 @@ try {
   for (const directory of [dataDir, hostHome, working]) await mkdir(directory, { mode: 0o700 });
   await mkdir(path.join(hostHome, '.ssh'), { mode: 0o700 });
   const publicHost = (await readFile(path.join(temporary, 'server.pub'), 'utf8')).trim().split(/\s+/).slice(0, 2).join(' ');
-  await writeFile(path.join(hostHome, '.ssh/known_hosts'), `[ssh.envara.invalid]:1030 ${publicHost}\n`, { mode: 0o600 });
+  await writeFile(path.join(hostHome, '.ssh/known_hosts'), `[127.0.0.1]:${serverPort} ${publicHost}\n`, { mode: 0o600 });
   manager = new TerminalSshManager({ dataDir, hostHome, nodeExecutable: runtime, agentRoot: path.join(temporary, 'agents'),
     spawn: (...argv) => { const child = spawn(...argv); children.add(child); if (child.pid) knownPids.add(child.pid); return child; } });
   await manager.ready;
   stage = 'select-save';
-  const selected = await manager.prepareIdentity({ id: 'ssh-fixture', host: 'ssh.envara.invalid', port: 1030, user: 'fixture', keyPath: path.join(temporary, 'client') });
+  const selected = await manager.prepareIdentity({ id: 'ssh-fixture', host: '127.0.0.1', port: serverPort, user: 'fixture', keyPath: path.join(temporary, 'client') });
   const saved = await manager.save({ id: 'ssh-fixture', name: 'Disposable local SSH', selectionToken: selected.selectionToken });
   check('Disposable key and existing isolated host trust selected with no host credentials.');
   const route = { protocol: 'http', host: '127.0.0.1', port: server.address().port, username: user, password };
@@ -194,12 +196,17 @@ try {
   const emptyList = jsonLine(emptyListResult.text);
   assert.equal(emptyList.schema, 'envara.ssh-session'); assert.equal(emptyList.version, 2);
   assert.equal(emptyList.status, 'empty'); assert.equal(emptyList.expiresAt, null); assert.deepEqual(emptyList.connections, []);
-  for (const command of ['ssh', 'ssh fixture@ssh.envara.invalid -p1030 envara-fixture']) {
-    const result = await runCommand(empty, command); assert.equal(result.code, 2); assert(result.text.includes('SSH_CONNECTIONS_EMPTY'));
+  for (const command of ['ssh', 'ssh envara-deadbeefdead']) {
+    const result = await runCommand(empty, command); assert.equal(result.code, 2);
+    assert(/SSH_(ARGUMENT_INVALID|TARGET_NOT_AUTHORIZED)/.test(result.text));
   }
   assert.deepEqual(traffic(), beforeEmpty);
+  const emptyTarget = await runCommand(empty, 'ssh fixture@unknown.envara.invalid -p1030 envara-fixture');
+  assert.notEqual(emptyTarget.code, 0); assert(emptyTarget.text.includes('SSH proxy refused this destination'));
+  assert.equal(stats.proxyConnections, beforeEmpty.proxyConnections + 1); assert.equal(stats.rejectedTargets, beforeEmpty.rejectedTargets + 1);
+  assert.equal(stats.serverConnections, beforeEmpty.serverConnections); assert.equal(stats.authenticated, beforeEmpty.authenticated);
   await terminal.close({ sessionId: empty.sessionId });
-  check('Empty SSH configuration reports setup guidance and structured empty discovery without opening a proxy or authenticating.');
+  check('Empty saved configuration exposes read-only discovery; only an explicit unconfigured target contacts the environment proxy and its refusal reaches no SSH server.');
   stage = 'terminal-create';
   const first = await terminal.create({ id: 'ssh-fixture', directory: working, fresh: true });
   assert(first.networkFence && first.ssh?.privateKeyProtection && first.ssh.available);
@@ -207,26 +214,28 @@ try {
     const before = traffic(), result = await runCommand(session, 'envara-ssh list --json'); assert.equal(result.code, 0);
     const value = jsonLine(result.text); assert.equal(value.schema, 'envara.ssh-session'); assert.equal(value.version, 2); assert.equal(value.status, 'ready');
     assert.equal(value.expiresAt, null);
-    assert.deepEqual(value.connections, [{ id: saved.id, name: saved.name, alias: saved.alias, host: 'ssh.envara.invalid', port: 1030, user: 'fixture',
+    assert.deepEqual(value.connections, [{ id: saved.id, name: saved.name, alias: saved.alias, host: '127.0.0.1', port: serverPort, user: 'fixture',
       authType: 'publickey', expiresAt: null, status: 'ready', available: true }]);
     for (const secret of [user, password, path.join(temporary, 'client'), manager.filename]) assert(!JSON.stringify(value).includes(secret));
     assert.deepEqual(traffic(), before); return value;
   };
   stage = 'discover'; await discover(first);
   check('Structured connection discovery exposes only saved public destinations and aliases, with no route or authentication.');
-  stage = 'first-protected-ssh'; const firstResult = await invoke(first); proof.firstResult = firstResult;
+  stage = 'first-protected-ssh'; const beforeFirst = traffic(), firstResult = await invoke(first); proof.firstResult = firstResult;
   assert.equal(firstResult.code, 0); assert(firstResult.marker); assert(stats.authenticated >= 1 && stats.executions >= 1);
-  check('Real protected native SSH authenticates through constrained agent and selected authenticated CONNECT route.');
+  assert.equal(stats.proxyConnections, beforeFirst.proxyConnections); assert.equal(stats.serverConnections, beforeFirst.serverConnections + 1);
+  check('Real protected native SSH authenticates through its constrained agent and saved direct relay without contacting the environment proxy.');
   stage = 'standard-target';
-  for (const command of ['ssh fixture@ssh.envara.invalid -p1030 envara-fixture', 'ssh -p 1030 fixture@ssh.envara.invalid envara-fixture']) {
+  for (const command of [`ssh fixture@127.0.0.1 -p${serverPort} envara-fixture`, `ssh -p ${serverPort} fixture@127.0.0.1 envara-fixture`]) {
     const result = await runCommand(first, command); assert.equal(result.code, 0); assert(result.text.includes('ENVARA_SSH_FIXTURE_OK'));
   }
+  assert.equal(stats.proxyConnections, beforeFirst.proxyConnections);
   check('Common user@host and -pPORT/-p PORT forms resolve only to the registered connection.');
   stage = 'refused-targets-options';
   const beforeRefusals = traffic();
   for (const command of [
-    'ssh fixture@unknown.envara.invalid -p1030 envara-fixture', 'ssh fixture@ssh.envara.invalid -p1031 envara-fixture',
-    'ssh other@ssh.envara.invalid -p1030 envara-fixture', `ssh -o ProxyCommand=/usr/bin/true ${saved.alias}`,
+    `ssh other@127.0.0.1 -p${serverPort} envara-fixture`, `ssh -p${serverPort === 65535 ? 65534 : serverPort + 1} ${saved.alias}`,
+    `ssh -o ProxyCommand=/usr/bin/true ${saved.alias}`,
     `ssh -F /dev/null ${saved.alias}`, `ssh -i ${quote(path.join(temporary, 'client'))} ${saved.alias}`,
     `ssh -A ${saved.alias}`, `ssh -L 22222:127.0.0.1:22 ${saved.alias}`,
   ]) {
@@ -234,7 +243,16 @@ try {
     assert(/SSH_(TARGET_NOT_AUTHORIZED|OPTIONS_UNSUPPORTED|ARGUMENT_INVALID)/.test(result.text));
   }
   assert.deepEqual(traffic(), beforeRefusals);
-  check('Unknown destinations, mismatched users or ports and client/identity/forwarding overrides refuse before proxy contact.');
+  check('Mismatched saved users or alias ports and client/identity/forwarding overrides refuse before any proxy or SSH server contact.');
+  stage = 'unconfigured-target-proxy';
+  for (const command of ['ssh fixture@unknown.envara.invalid -p1030 envara-fixture',
+    `ssh fixture@127.0.0.1 -p${serverPort === 65535 ? 65534 : serverPort + 1} envara-fixture`]) {
+    const before = traffic(), result = await runCommand(first, command);
+    assert.notEqual(result.code, 0); assert(result.text.includes('SSH proxy refused this destination'));
+    assert.equal(stats.proxyConnections, before.proxyConnections + 1); assert.equal(stats.rejectedTargets, before.rejectedTargets + 1);
+    assert.equal(stats.serverConnections, before.serverConnections); assert.equal(stats.authenticated, before.authenticated);
+  }
+  check('Unconfigured hosts and different destination ports use the environment proxy; its refusal never opens a direct SSH connection.');
   stage = 'duplicate';
   const beforeDuplicate = stats.executions, second = await terminal.duplicate({ sessionId: first.sessionId });
   assert(second.sessionId !== first.sessionId && second.ssh.privateKeyProtection && second.networkFence);
@@ -308,11 +326,18 @@ try {
     assert.equal(browserLaunchAttempts, 0);
     check('Dedicated Claude terminal runs official version-only CLI with device restrictions and real broker/link binding, then authenticates through its own constrained SSH agent.');
   }
-  stage = 'route-407'; proxyMode = '407'; const authCount = stats.authenticated, refusedRoute = await invoke(first);
-  assert(refusedRoute.code !== 0 && !refusedRoute.marker && refusedRoute.routeRefused); assert.equal(stats.authenticated, authCount);
-  check('Selected route HTTP 407 refuses without direct SSH or credential fallback.');
+  stage = 'route-407'; proxyMode = '407'; const before407 = traffic(), savedWhileProxyRefuses = await invoke(first);
+  assert.equal(savedWhileProxyRefuses.code, 0); assert(savedWhileProxyRefuses.marker);
+  assert.equal(stats.proxyConnections, before407.proxyConnections); assert.equal(stats.serverConnections, before407.serverConnections + 1);
+  const beforeUnknown407 = traffic(), refusedRoute = await runCommand(first, 'ssh fixture@unknown.envara.invalid -p1030 envara-fixture');
+  assert.notEqual(refusedRoute.code, 0); assert(refusedRoute.text.includes('SSH proxy authentication was refused'));
+  assert.equal(stats.refused407, beforeUnknown407.refused407 + 1); assert.equal(stats.proxyConnections, beforeUnknown407.proxyConnections + 1);
+  assert.equal(stats.serverConnections, beforeUnknown407.serverConnections); assert.equal(stats.authenticated, beforeUnknown407.authenticated);
+  check('Saved SSH remains direct while an environment HTTP 407 refuses an unconfigured target without direct fallback.');
   stage = 'host-key-change'; proxyMode = 'normal'; await writeFile(path.join(temporary, 'mode'), 'changed');
+  const authCount = stats.authenticated, proxyCount = stats.proxyConnections;
   const changed = await invoke(first); assert(changed.code !== 0 && !changed.marker && changed.hostRefused); assert.equal(stats.authenticated, authCount);
+  assert.equal(stats.proxyConnections, proxyCount);
   check('Changed server host key refuses before authentication; no trust update is applied.');
   stage = 'close'; if (dedicated) await terminal.close({ sessionId: dedicated.sessionId });
   if (broker) assert.equal(broker.sessions.size, 0);

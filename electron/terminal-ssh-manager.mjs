@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { validateSshProxyUrl, validateSshTarget } from './terminal-ssh-proxy.mjs';
 import { describeSshSession, SSH_SESSION_SCHEMA, SSH_SESSION_VERSION } from './terminal-ssh-command.mjs';
 import { createPasswordSshBroker } from './terminal-ssh-broker.mjs';
+import { createSshDirectTransport } from './terminal-ssh-direct.mjs';
 
 const STORE_SCHEMA = 'envara.terminal-ssh';
 const MAX_STORE_BYTES = 1024 * 1024;
@@ -174,17 +175,16 @@ function trustedHostKeys(output) {
   return [...result].sort(([a], [b]) => a.localeCompare(b)).map(([fingerprint, text]) => ({ fingerprint, text }));
 }
 
-function launchScript(config, manifest, passwordBroker) {
+function launchScript(config, manifest, passwordBroker, { adHocConfigPath, configuredConnections, childEnvironment } = {}) {
   return `import { runSshCommand } from './terminal-ssh-command.mjs';
 // This manifest and configuration are fixed when the session starts. Discovery
 // and expiry never read caller-controlled environment overrides or renew keys.
 const manifest = ${JSON.stringify(manifest)};
-process.exitCode = await runSshCommand({ argv: process.argv.slice(3), entry: process.argv[2], manifest, configPath: ${JSON.stringify(config)}${passwordBroker ? `, passwordBroker: ${JSON.stringify(passwordBroker)}` : ''} });
+process.exitCode = await runSshCommand({ argv: process.argv.slice(3), entry: process.argv[2], manifest, configPath: ${JSON.stringify(config)}${passwordBroker ? `, passwordBroker: ${JSON.stringify(passwordBroker)}` : ''}${adHocConfigPath ? `, adHocConfigPath: ${JSON.stringify(adHocConfigPath)}` : ''}, configuredConnections: ${JSON.stringify(configuredConnections ?? [])}, childEnvironment: { ...${JSON.stringify(childEnvironment)}, proxyUrl: process.env.ENVARA_SSH_PROXY_URL } });
 `;
 }
 
 function configuration(records, files, nodeExecutable) {
-  const proxy = `${shellQuote(nodeExecutable).replaceAll('%', '%%')} ${shellQuote(files.proxy).replaceAll('%', '%%')} --host '%h' --port '%p'`;
   return records.map(record => [
     `Host ${record.alias}`, `  HostName ${record.host}`, `  Port ${record.port}`, `  User ${record.user}`,
     `  HostKeyAlias ${record.alias}`,
@@ -200,8 +200,33 @@ function configuration(records, files, nodeExecutable) {
     '  ForwardAgent no', '  ForwardX11 no', '  ClearAllForwardings yes',
     '  ControlMaster no', '  ControlPath none', '  ControlPersist no', '  CanonicalizeHostname no',
     '  PermitLocalCommand no', '  EnableEscapeCommandline no', '  EscapeChar none',
-    '  ServerAliveInterval 30', '  ServerAliveCountMax 3', `  ProxyCommand ${proxy}`, '',
+    '  ServerAliveInterval 30', '  ServerAliveCountMax 3',
+    `  ProxyCommand ${shellQuote(nodeExecutable).replaceAll('%', '%%')} ${shellQuote(files.direct).replaceAll('%', '%%')} --alias ${record.alias}`, '',
   ].join('\n')).join('\n');
+}
+
+function adHocConfiguration(files, nodeExecutable, knownHosts) {
+  const proxy = `${shellQuote(nodeExecutable).replaceAll('%', '%%')} ${shellQuote(files.proxy).replaceAll('%', '%%')} --host '%h' --port '%p' --environment-targets`;
+  return ['Host *', `  UserKnownHostsFile ${configQuote(knownHosts)}`, '  GlobalKnownHostsFile /dev/null',
+    '  StrictHostKeyChecking ask', '  VerifyHostKeyDNS no', '  UpdateHostKeys no',
+    '  IdentityFile none', '  IdentityAgent none', '  IdentitiesOnly yes', '  AddKeysToAgent no', '  UseKeychain no', '  PKCS11Provider none',
+    '  ForwardAgent no', '  ForwardX11 no', '  ClearAllForwardings yes', '  ControlMaster no', '  ControlPath none', '  ControlPersist no',
+    '  CanonicalizeHostname no', '  PermitLocalCommand no', '  EnableEscapeCommandline no', '  EscapeChar none',
+    '  ConnectTimeout 15', '  ConnectionAttempts 1', '  ServerAliveInterval 30', '  ServerAliveCountMax 3', `  ProxyCommand ${proxy}`, ''].join('\n');
+}
+
+async function adHocTrustFile(directories) {
+  // Older injected consumers may only provide home. Production passes the
+  // main-created environment config directory; no renderer-selected path enters.
+  if (directories?.config == null) return null;
+  await checkedDirectory(absolute(directories.config), { privateMode: true });
+  const filename = path.join(directories.config, 'ssh-known_hosts');
+  let handle;
+  try { handle = await open(filename, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), PRIVATE_MODE); }
+  catch (error) { if (error.code !== 'EEXIST') throw error; }
+  finally { await handle?.close(); }
+  await safeRead(filename, MAX_STORE_BYTES, { privateMode: true });
+  return filename;
 }
 
 /** Private-key references stay outside the exported profile tree. Only native
@@ -213,12 +238,13 @@ export class TerminalSshManager {
   constructor({ dataDir, hostHome, nodeExecutable, platform = process.platform, execute = nativeExecute, spawn = spawnChild,
     now = Date.now, agentRoot = platform === 'darwin' ? `/private/tmp/envara-ssh-${uid() ?? 'unsupported'}`
       : path.join(dataDir ?? '', 'terminal', 'ssh-access-runtime'),
-    createPasswordBroker = createPasswordSshBroker } = {}) {
+    createPasswordBroker = createPasswordSshBroker, createDirectTransport = createSshDirectTransport } = {}) {
     this.dataDir = absolute(dataDir); this.hostHome = absolute(hostHome);
     this.nodeExecutable = nodeExecutable == null ? null : absolute(nodeExecutable);
     this.root = path.join(this.dataDir, 'terminal', 'ssh-access'); this.filename = path.join(this.root, 'connections.json');
     this.agentRoot = absolute(agentRoot); this.platform = platform; this.execute = execute; this.spawn = spawn; this.now = now;
     this.createPasswordBroker = createPasswordBroker;
+    this.createDirectTransport = createDirectTransport;
     this.profiles = new Map(); this.pending = new Map(); this.sessions = new Map(); this.queue = Promise.resolve();
     this.closed = false; this.supported = false; this.ready = this.initialize();
   }
@@ -479,7 +505,7 @@ export class TerminalSshManager {
     let settleSetup;
     const lease = { profileId, sessionId, records, revoked: false, child: null, directory: null, directoryIdentity: null,
       publicDirectory: null, publicIdentity: null, binIdentity: null, processError: false, stopped: false, cleanup: null,
-      passwords, passwordBroker: null,
+      passwords, passwordBroker: null, directTransport: null,
       setup: new Promise(resolve => { settleSetup = resolve; }) };
     // Every new binding uses the current application lifetime. Null is an
     // explicit v2 authorization scope, not an extended numeric timeout.
@@ -491,6 +517,13 @@ export class TerminalSshManager {
     const check = () => { this.assertOpen(); if (lease.revoked) throw fail('SSH_SESSION_CLOSED', 'SSH 会话已取消。'); };
     // Object identity prevents a later grant from resurrecting a revoked lease.
     const passwordGrantsActive = () => [...grants].every(([selectedId, grant]) => this.passwordGrant(selectedId) === grant);
+    const connectionActive = alias => {
+      if (lease.revoked || this.closed) return false;
+      const record = records.find(value => value.alias === alias);
+      if (!record) return false;
+      if (authType(record) === 'password') return this.passwordGrant(record.id) === grants.get(record.id);
+      return !!lease.child?.pid && !lease.processError && !lease.stopped && lease.child.exitCode == null && lease.child.signalCode == null;
+    };
     const dispose = () => this.disposeSession(lease);
     this.sessions.set(sessionId, lease);
     let result, failure;
@@ -512,6 +545,7 @@ export class TerminalSshManager {
       if (socket && Buffer.byteLength(socket) > 100) throw fail('SSH_UNSAFE_PATH', 'SSH 代理通道路径过长。');
       const files = { socket, knownHosts: path.join(lease.publicDirectory, 'known_hosts'),
         config: path.join(lease.publicDirectory, 'config'), targets: path.join(lease.publicDirectory, 'targets.json'),
+        direct: path.join(lease.publicDirectory, 'terminal-ssh-direct.mjs'), adHocConfig: path.join(lease.publicDirectory, 'environment-ssh-config'),
         manifest: path.join(lease.publicDirectory, 'connections.json'), command: path.join(lease.publicDirectory, 'terminal-ssh-command.mjs'),
         proxy: path.join(lease.publicDirectory, 'terminal-ssh-proxy.mjs'), launcher: path.join(lease.publicDirectory, 'launch.mjs'), publicKeys: new Map() };
       for (const record of keyRecords) {
@@ -523,14 +557,34 @@ export class TerminalSshManager {
       const targets = [...new Map(records.map(record => [`${record.host}:${record.port}`, { host: record.host, port: record.port }])).values()];
       await writeFile(files.targets, JSON.stringify(targets), { mode: 0o400, flag: 'wx' });
       await writeFile(files.proxy, await readFile(fileURLToPath(new URL('./terminal-ssh-proxy.mjs', import.meta.url))), { mode: 0o400, flag: 'wx' });
+      await writeFile(files.direct, await readFile(fileURLToPath(new URL('./terminal-ssh-direct.mjs', import.meta.url))), { mode: 0o400, flag: 'wx' });
       await writeFile(files.command, await readFile(fileURLToPath(new URL('./terminal-ssh-command.mjs', import.meta.url))), { mode: 0o400, flag: 'wx' });
       await writeFile(path.join(lease.publicDirectory, 'terminal-ssh-client.mjs'), await readFile(fileURLToPath(new URL('./terminal-ssh-client.mjs', import.meta.url))), { mode: 0o400, flag: 'wx' });
       await writeFile(files.manifest, JSON.stringify(manifest), { mode: 0o400, flag: 'wx' });
       await writeFile(files.config, configuration(records, files, nodeExecutable), { mode: 0o400, flag: 'wx' });
+      const knownHosts = await adHocTrustFile(directories); check();
+      const adHocConfigPath = knownHosts ? files.adHocConfig : null;
+      if (adHocConfigPath) await writeFile(adHocConfigPath, adHocConfiguration(files, nodeExecutable, knownHosts), { mode: 0o400, flag: 'wx' });
+      if (records.length) {
+        try {
+          lease.directTransport = await this.createDirectTransport({ directory: lease.directory,
+            connections: records.map(record => ({ alias: record.alias, host: record.host, port: record.port })), isActive: connectionActive });
+        } catch (error) {
+          if (typeof error.sshCleanup === 'function') lease.directTransport = { dispose: error.sshCleanup };
+          throw error;
+        }
+        if (lease.directTransport?.socket !== path.join(lease.directory, 'transport.sock')
+          || typeof lease.directTransport.token !== 'string' || !/^[a-f0-9]{64}$/.test(lease.directTransport.token)
+          || typeof lease.directTransport.dispose !== 'function') throw unsafe();
+        const directSocket = await checkedPath(lease.directTransport.socket);
+        if (!directSocket.isSocket() || uid() !== undefined && directSocket.uid !== uid() || directSocket.mode & 0o077) throw unsafe();
+        check();
+      }
       if (passwords.size) {
         try {
           lease.passwordBroker = await this.createPasswordBroker({ directory: lease.directory, publicDirectory: lease.publicDirectory,
             nodeExecutable, configPath: files.config, proxyUrl, targetsPath: files.targets, manifest, passwords,
+            transportSocket: lease.directTransport.socket, directToken: lease.directTransport.token,
             runtimeReadOnlyPaths: base.readOnlyPaths,
             now: this.now, expiresAt: manifest.expiresAt, isActive: () => !lease.revoked && !this.closed && passwordGrantsActive() });
         } catch (error) {
@@ -548,7 +602,11 @@ export class TerminalSshManager {
         check();
       }
       const passwordBroker = lease.passwordBroker ? { socket: lease.passwordBroker.socket, aliases: [...passwords.keys()] } : undefined;
-      await writeFile(files.launcher, launchScript(files.config, manifest, passwordBroker), { mode: 0o400, flag: 'wx' });
+      const configuredConnections = allRecords.map(record => ({ id: record.id, name: record.name, alias: record.alias,
+        host: record.host, port: record.port, user: record.user, authType: authType(record) }));
+      const childEnvironment = { home: lease.publicDirectory, targetsPath: files.targets,
+        ...(lease.directTransport ? { directSocket: lease.directTransport.socket, directToken: lease.directTransport.token } : {}) };
+      await writeFile(files.launcher, launchScript(files.config, manifest, passwordBroker, { adHocConfigPath, configuredConnections, childEnvironment }), { mode: 0o400, flag: 'wx' });
       for (const name of ['ssh', 'envara-ssh']) await writeFile(path.join(binDirectory, name), `#!/bin/sh\nexec ${shellQuote(nodeExecutable)} ${shellQuote(files.launcher)} ${shellQuote(name)} "$@"\n`, { mode: 0o500, flag: 'wx' });
       check();
       if (keyRecords.length) {
@@ -590,10 +648,11 @@ export class TerminalSshManager {
       check();
       result = { ...base, environment: { ENVARA_SSH_CONFIG: files.config, ENVARA_SSH_CONNECTIONS: files.manifest,
         ...(socket ? { SSH_AUTH_SOCK: socket } : {}),
-        ...(records.length ? { ENVARA_SSH_PROXY_URL: proxyUrl, ENVARA_SSH_TARGETS: files.targets } : {}) },
+        ...(records.length || adHocConfigPath ? { ENVARA_SSH_PROXY_URL: proxyUrl, ENVARA_SSH_TARGETS: files.targets } : {}),
+        ...(lease.directTransport ? { ENVARA_SSH_DIRECT_SOCKET: lease.directTransport.socket, ENVARA_SSH_DIRECT_TOKEN: lease.directTransport.token } : {}) },
         binDirectory, readablePaths: [lease.publicDirectory], readOnlyPaths: [...new Set([lease.publicDirectory, ...base.readOnlyPaths])],
         agentSocket: socket, allowedAgentSocket: socket,
-        allowedSockets: [socket, lease.passwordBroker?.socket].filter(Boolean), dispose,
+        allowedSockets: [socket, lease.passwordBroker?.socket, lease.directTransport?.socket].filter(Boolean), dispose,
         describe: () => {
           const now = this.now(), passwordsActive = passwordGrantsActive();
           const keysUnavailable = keyRecords.length > 0 && (!lease.child?.pid || lease.processError || lease.stopped
@@ -618,6 +677,10 @@ export class TerminalSshManager {
     lease.cleanup = (async () => {
       await lease.setup;
       let failure;
+      if (lease.directTransport) {
+        try { await lease.directTransport.dispose(); lease.directTransport = null; }
+        catch { failure = fail('SSH_CLEANUP_FAILED', 'SSH 直连通道清理尚未确认，请重试结束会话。'); }
+      }
       for (const secret of lease.passwords?.values() ?? []) secret.fill(0);
       if (lease.passwordBroker) {
         try { await lease.passwordBroker.dispose(); lease.passwordBroker = null; }

@@ -30,6 +30,29 @@ const app = { id: 'app', name: 'Fixture app', identity: 'bundle:fixture.app', pa
 const supported = { supported: true, adapter: 'chromium-front', verification: 'pending', dataScope: 'environment' };
 const renderApp = (value, extra) => renderToStaticMarkup(React.createElement(ApplicationsWorkspace, fixture(value, extra)));
 const action = (html, text) => [...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)].find(match => match[2].endsWith(text))?.[1];
+const readiness = html => /<div class="routing-readiness"[^>]*>([\s\S]*?)<\/div>/.exec(html)?.[1];
+
+test('preview routing renders its repeated desktop requirement only once in every interface language', () => {
+  for (const [language, catalog] of Object.entries(translationCatalog)) {
+    const html = renderApp(app, { desktop: false, routing: { ready: false, message: '本地软件需要桌面应用。' }, t: key => catalog[key] ?? key });
+    const notice = readiness(html);
+    assert.ok(notice, language); assert.match(notice, /<strong>/, language);
+    assert.doesNotMatch(notice, /<span>/, language);
+  }
+});
+
+test('routing deduplicates only the same notice and retains detailed failures, fallback guidance and installation actions', () => {
+  for (const [status, title] of [['prepared', '网络组件已准备'], ['authorization-required', '需要系统授权'], ['unavailable', '网络接管尚未就绪']]) {
+    const repeated = readiness(renderApp(app, { routing: { ready: false, status, message: `  ${title}。  ` } }));
+    assert.doesNotMatch(repeated, /<span>/);
+    const failure = `${title}。权限检查失败：APPLICATION_ROUTING_NOT_READY`;
+    assert.ok(readiness(renderApp(app, { routing: { ready: false, status, message: failure } })).includes(failure));
+  }
+  const html = renderApp(app, { routing: { backend: 'pf-utun', ready: false, installed: false,
+    component: { available: true, verified: true } }, onInstall: noop });
+  assert.ok(readiness(html).includes('完成系统网络组件安装后，才能启动附加软件。'));
+  assert.doesNotMatch(action(html, '安装网络组件'), /disabled/);
+});
 
 test('only inspected Mac adapters enable attach; other platforms retain their existing routing gate', () => {
   for (const candidate of [app, { ...app, compatibility: { ...supported, supported: false } },

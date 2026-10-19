@@ -48,6 +48,25 @@ test('account deletion excludes a same-environment export or import while other 
   assert.equal(await lock.transfer(async () => 'ready', 'env_one'), 'ready');
 });
 
+test('saved terminal starts and metadata changes exclude transfers in both directions for their environment', async () => {
+  for (const method of ['reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal']) {
+    const lock = new DesktopEnvironmentTransferLock(), copying = deferred();
+    const args = { id: 'env_one', entryId: 'savedterm_' + 'a'.repeat(32) };
+    assert.equal(isEnvironmentDataMutation(method, args), true);
+    const scope = environmentMutationProfile(method, args);
+    assert.equal(scope, 'env_one');
+    const transfer = lock.transfer(() => copying.promise, scope);
+    await assert.rejects(lock.mutate(method, args, async () => assert.fail('saved terminal must wait for copying'), scope), { code: 'ENVIRONMENT_TRANSFER_BUSY' });
+    assert.equal(await lock.mutate(method, { ...args, id: 'env_two' }, async () => 'other remains available', 'env_two'), 'other remains available');
+    copying.resolve(); await transfer;
+    const changing = deferred(), mutation = lock.mutate(method, args, () => changing.promise, scope);
+    await assert.rejects(lock.transfer(async () => assert.fail('copy must wait for the saved terminal operation'), scope), { code: 'ENVIRONMENT_TRANSFER_BUSY' });
+    assert.equal(await lock.transfer(async () => 'other can export', 'env_two'), 'other can export');
+    changing.resolve(); await mutation;
+    assert.equal(await lock.transfer(async () => 'finished', scope), 'finished');
+  }
+});
+
 test('SSH configuration changes respect environment transfer locks while read-only selection remains available', async () => {
   const lock = new DesktopEnvironmentTransferLock(), gate = deferred();
   const transfer = lock.transfer(() => gate.promise, 'env_one');

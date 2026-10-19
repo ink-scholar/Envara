@@ -1,4 +1,6 @@
-// Opt-in live SSH acceptance using an already running, app-owned proxy route.
+// Opt-in live saved SSH acceptance using this computer's network. The server
+// sees that network's exit IP. An existing app-owned proxy supplies the isolated
+// terminal and Claude environment; the saved SSH connection uses its direct relay.
 // Run with ELECTRON_RUN_AS_NODE=1 and this build's Electron executable.
 // Required: --route-config <private runtime config.json> --key <private key>
 // --host <server> --port <port> --user <user> --claude <native version binary>.
@@ -64,7 +66,8 @@ const dataDir = path.join(temporary, 'data'), cwd = path.join(temporary, 'worksp
 await mkdir(dataDir, { mode: 0o700 }); await mkdir(cwd, { mode: 0o700 });
 const nodeExecutable = path.join(resources, 'backend/playwright-driver/node');
 const proof = { passed: false, packaged: Boolean(packagePath), checks: [], limitations: [
-  'The SSH target receives read-only printf commands through the existing authenticated route.',
+  'The saved SSH target receives read-only printf commands through the host network direct relay and can observe its network exit IP.',
+  'The selected authenticated proxy remains the terminal and Claude environment route; this check does not prove SSH transport through that proxy.',
   'The official native CLI version runs in a fresh dedicated session. No model request or existing account login is used.',
   'The browser binding uses synthetic profile metadata; no browser or public-egress measurement is exercised.',
 ] };
@@ -135,9 +138,9 @@ try {
     proof.remoteAttempts ??= [];
     try {
       const result = await command(session, `ssh ${quote(connection.alias)} ${quote(`printf '%s\\n' '${marker}'`)}`);
-      assert(result.split(/\r?\n/).includes(marker), 'SSH must return the remote marker, not just HTTP CONNECT success.');
+      assert(result.split(/\r?\n/).includes(marker), 'SSH must authenticate and return the remote command marker.');
       proof.remoteAttempts.push({ kind, authenticated: true });
-      check(`${kind}: strict host verification, constrained-agent authentication and remote command succeeded through the proxy.`);
+      check(`${kind}: strict host verification, constrained-agent authentication and remote command succeeded through the saved host network direct relay.`);
     } catch (error) {
       const code = typeof error.code === 'string' && /^[A-Z_\d]+$/.test(error.code) ? error.code : 'SSH_ACCEPTANCE_FAILED';
       proof.remoteAttempts.push({ kind, authenticated: false, error: code });

@@ -343,3 +343,14 @@ test('the existing loading shell remains noninteractive until real settings arri
   assert.match(app, /inert=\{initializing \? true : undefined\}/);
   assert.match(welcome, /if \(phase === 'loading'\).*role="status"/);
 });
+
+test('independent terminal saved-entry operations retain their bound environment scope', async () => {
+  const f = fixture(); f.startup.start(); await f.startup.ready;
+  f.views.set(f.event.sender, { window: f.view, kind: 'terminal', profileId: 'prof_fixture' });
+  for (const method of ['reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal']) {
+    await assert.rejects(f.api.call(method, { id: 'another-profile', entryId: 'savedterm_1234567890abcdef1234567890abcdef' }), /此窗口仅操作当前环境/);
+    assert.equal(f.calls.length, 0);
+    await f.api.call(method, { id: 'prof_fixture', entryId: 'savedterm_1234567890abcdef1234567890abcdef' });
+    assert.equal(f.calls.pop().method, method);
+  }
+});

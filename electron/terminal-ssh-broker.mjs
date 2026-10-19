@@ -11,7 +11,7 @@ import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { TerminalNetworkFence } from './terminal-network-fence.mjs';
 import { captureTerminalProcess, closeTerminalProcess } from './terminal-process.mjs';
-import { describeSshSession, parseSshInvocation } from './terminal-ssh-command.mjs';
+import { createSshChildEnvironment, describeSshSession, parseSshInvocation } from './terminal-ssh-command.mjs';
 import { validateSshProxyUrl } from './terminal-ssh-proxy.mjs';
 
 const require = createRequire(import.meta.url);
@@ -65,6 +65,7 @@ async function listen(server, socket) {
  * Like the terminal key guard, this is not isolation from unrelated same-UID
  * host processes outside Envara's sandbox. */
 export async function createPasswordSshBroker({ directory, publicDirectory, nodeExecutable, configPath, proxyUrl, targetsPath,
+  transportSocket = null, directToken = null,
   manifest, passwords, now = Date.now, expiresAt, isActive, fence = new TerminalNetworkFence(), spawn = spawnChild,
   runtimeReadOnlyPaths = [], ptyFactory = defaultPtyFactory, writePty = nativePtyWrite, monotonicNow = () => performance.now(),
   processControl = { capture: captureTerminalProcess, close: closeTerminalProcess } } = {}) {
@@ -74,6 +75,11 @@ export async function createPasswordSshBroker({ directory, publicDirectory, node
   if (publicDirectory !== path.join(directory, 'public') || !configPath.startsWith(`${publicDirectory}/`)
     || !targetsPath.startsWith(`${publicDirectory}/`) || typeof now !== 'function' || typeof monotonicNow !== 'function' || typeof isActive !== 'function'
     || !(passwords instanceof Map) || !passwords.size || passwords.size > 20) throw fail('SSH_BROKER_INVALID');
+  if (transportSocket !== null || directToken !== null) {
+    if (transportSocket !== path.join(directory, 'transport.sock') || typeof directToken !== 'string' || !/^[a-f0-9]{64}$/.test(directToken)) throw fail('SSH_BROKER_INVALID');
+    const info = await lstat(transportSocket);
+    if (!info.isSocket() || info.isSymbolicLink() || process.getuid && info.uid !== process.getuid() || info.mode & 0o077) throw fail('SSH_BROKER_INVALID');
+  }
   const createdAt = now(), monotonicStart = monotonicNow();
   if (!Number.isFinite(monotonicStart)) throw fail('SSH_BROKER_INVALID');
   const description = describeSshSession(structuredClone(manifest), createdAt);
@@ -255,13 +261,12 @@ export async function createPasswordSshBroker({ directory, publicDirectory, node
         'ClearAllForwardings=yes', 'ControlMaster=no', 'ControlPath=none', 'ControlPersist=no',
       ].flatMap(value => ['-o', value]), ...invocation.flags.filter(value => value !== '-T' && value !== '-t'),
       tty ? '-tt' : '-T', '--', invocation.alias, ...invocation.command];
-      const environment = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: publicDirectory, LANG: 'C', LC_ALL: 'C', TERM: 'xterm-256color',
-        SSH_ASKPASS_REQUIRE: 'force', SSH_ASKPASS: path.join(directory, 'askpass'),
-        ENVARA_SSH_ASKPASS_SOCKET: authSocket, ENVARA_SSH_ASKPASS_TOKEN: run.token,
-        ENVARA_SSH_PROXY_URL: proxyUrl, ENVARA_SSH_TARGETS: targetsPath };
+      const environment = createSshChildEnvironment({ home: publicDirectory, proxyUrl, targetsPath,
+        askpassPath: path.join(directory, 'askpass'), askpassSocket: authSocket, askpassToken: run.token,
+        ...(transportSocket ? { directSocket: transportSocket, directToken } : {}) });
       const wrapped = await fence.wrap({ executable: '/usr/bin/ssh', args, environment }, { routePort: route.port,
         restrictDeviceIdentifiers: true, sshProtection: { protectedPaths: [agentRoot], readablePaths: [directory],
-          readOnlyPaths: executionReadOnlyPaths, agentRoot, agentSocket: null, allowedSockets: [authSocket] } });
+          readOnlyPaths: executionReadOnlyPaths, agentRoot, agentSocket: null, allowedSockets: [authSocket, transportSocket].filter(Boolean) } });
       assertAuthorization(invocation.alias); if (run.cancelled) throw fail();
       if (wrapped.sshPrivateKeyProtection !== true || wrapped.deviceIdentifierRestrictions !== true) throw fail();
       const grant = { run, alias: invocation.alias, expiresAt: now() + 30000, hardDeadline: monotonicNow() + 30000,

@@ -9,6 +9,7 @@ import { ApplicationIcon } from "./ApplicationIcon.jsx";
 import { supportsAttachedApplication, canDeleteApplicationData } from "./application-capability.mjs";
 const live = new Set(["starting", "running", "stopping"]);
 const networkLocation = network => [network?.country || network?.countryCode, network?.city].filter(Boolean).join(" · ");
+const readinessCopy = value => typeof value === "string" ? value.normalize("NFKC").trim().replace(/\s+/gu, " ").replace(/[.。]$/u, "") : null;
 function WorkspaceEmpty({
   icon: Icon = Stack,
   title,
@@ -121,7 +122,7 @@ export function ApplicationDataPanel({ items, totalBytes, pending, onReload, onD
     </div>;
   };
   return <div className="sign-in-data">
-    <div className="sign-in-head"><span>{t("境舱内的软件登录、设置与本地内容。停止或移除软件不会删除。")}</span>
+    <div className="sign-in-head"><span>{t("停止或移除软件会保留应用数据。")}</span>
       {loaded && <span className="sign-in-total">{t("共 {value1}", { value1: formatBytes(totalBytes) })}</span>}
       <button className="button" onClick={onReload} disabled={pending["signInData:"]}>{t(pending["signInData:"] ? "检查中…" : "刷新")}</button></div>
     {!loaded ? <div className="table-loading">{t("正在读取…")}</div>
@@ -177,6 +178,9 @@ export function ApplicationsWorkspace({
   const staleComponent = desktop && routing?.backend === "pf-utun" && routing?.controlledNotionTrialErrorCode === "PF_INSTALLED_CANDIDATE_MISMATCH";
   const canUpgrade = staleComponent && routing?.component?.available === true && routing?.component?.verified === true;
   const startable = desktop && routing?.controlledNotionTrialAvailable === true;
+  const readinessHeading = t(!desktop ? "本地软件需要桌面应用" : routing?.status === "prepared" ? "网络组件已准备" : routing?.status === "authorization-required" ? "需要系统授权" : "网络接管尚未就绪");
+  const readinessMessage = t(routing?.message || "完成系统网络组件安装后，才能启动附加软件。");
+  const repeatedReadiness = readinessCopy(readinessHeading) !== null && readinessCopy(readinessHeading) === readinessCopy(readinessMessage);
   return <div className="applications-workspace">
     <div className="application-context-strip">
       <label><span>{t("境舱")}</span><select value={selectedId || ""} onChange={event => onSelect(event.target.value)} aria-label={t("选择境舱")} disabled={!profiles.length}><option value="" disabled>{t("选择境舱")}</option>{profiles.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
@@ -185,7 +189,7 @@ export function ApplicationsWorkspace({
     </div>
     {/* While software can start there is nothing to say here. Only a state that
        * stops it from starting is shown, with the action that resolves it. */}
-    {!ready && !startable && <div className="routing-readiness" role="status"><ShieldCheck size={17} /><strong>{t(!desktop ? "本地软件需要桌面应用" : routing?.status === "prepared" ? "网络组件已准备" : routing?.status === "authorization-required" ? "需要系统授权" : "网络接管尚未就绪")}</strong><span>{t(routing?.message || "完成系统网络组件安装后，才能启动附加软件。")}</span>{canUpgrade && <button className="button primary" title={t("已安装的网络组件早于当前应用版本，需要更新后才能附加软件。")} onClick={onInstall} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "更新中…" : "更新网络组件")}</button>}{canInstall && <button className="button" onClick={onInstall} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "安装中…" : "安装网络组件")}</button>}</div>}
+    {!ready && !startable && <div className="routing-readiness" role="status"><ShieldCheck size={17} /><strong>{readinessHeading}</strong>{!repeatedReadiness && <span>{readinessMessage}</span>}{canUpgrade && <button className="button primary" title={t("已安装的网络组件早于当前应用版本，需要更新后才能附加软件。")} onClick={onInstall} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "更新中…" : "更新网络组件")}</button>}{canInstall && <button className="button" onClick={onInstall} disabled={pending["setupApplicationRouting:"]}>{t(pending["setupApplicationRouting:"] ? "安装中…" : "安装网络组件")}</button>}</div>}
     <div className="workspace-segments"><button className={tab === "environment" ? "selected" : ""} onClick={() => setTab("environment")}>{t("当前境舱")}</button><button className={tab === "all" ? "selected" : ""} onClick={() => setTab("all")}>{t("全部软件")}<span>{applications.length}</span></button>{desktop && typeof onCheckSignInData === "function" && <button className={tab === "signInData" ? "selected" : ""} onClick={() => setTab("signInData")}>{t("应用数据")}</button>}</div>
     {tab === "signInData" ? <ApplicationDataPanel items={data?.items} totalBytes={data?.totalBytes ?? 0} pending={pending} formatBytes={formatBytes} t={t}
       onReload={async () => { const result = await onCheckSignInData(); if (result?.ok) setData(result.result); }}
@@ -319,7 +323,7 @@ export function MonitorWorkspace({
             starting: "启动中",
             stopping: "停止中",
             closing: "关闭中"
-          }[row.status] || row.status)}</span><button className="button" onClick={() => onNavigate(id)}>{t("查看")}</button></div>))}{!browsers.length && !terminals.length && !apps.length && <div className="empty-activity">{t("当前没有运行中的会话")}</div>}</div>
+          }[row.status] || row.status)}</span><button className="button" onClick={() => onNavigate(id)}>{t("查看")}</button></div>))}{!browsers.length && !terminals.length && !apps.length && <div className="empty-activity">{t("暂无运行会话")}</div>}</div>
     {events.length > 0 && <div className="section-heading activity-heading"><h2>{t("运行记录")}</h2></div>}
     <div className={`activity-list${events.length ? "" : " is-empty"}`}>{events.length ? [...events].sort((a, b) => new Date(b.time) - new Date(a.time)).slice(0, 80).map(event => <div className="activity-row" key={event.id}><span className={`activity-dot ${event.type === "error" ? "failure" : ""}`} /><span className="activity-message">{t(event.message)}</span><time>{new Date(event.time).toLocaleTimeString(localeForInterfaceLanguage(language), {
             hour: "2-digit",

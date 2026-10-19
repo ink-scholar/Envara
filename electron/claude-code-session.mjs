@@ -1,19 +1,15 @@
 import path from 'node:path';
 import { constants } from 'node:fs';
-import { access, chmod, lstat, mkdir, open, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { resolveClaudeInstallation } from './claude-code-installation.mjs';
+import { CLAUDE_ACCOUNT_ENV, CLAUDE_CONTEXT_ENV, readClaudeSettings, validateClaudeEnvironment, validateClaudeSettings } from './claude-code-settings.mjs';
 
 const fail = (message, code = 'CLAUDE_CODE_INVALID_CONFIGURATION') => Object.assign(new Error(message), { code });
 const absolute = value => typeof value === 'string' && path.isAbsolute(value) && !/[\0\r\n]/.test(value);
-const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-const validEnvironment = environment => object(environment) && Object.entries(environment).every(([key, value]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && typeof value === 'string' && !value.includes('\0'));
-const accountConflict = () => fail('此境舱的 Claude 设置含 API、网关或外部登录配置；请移除冲突后使用账号登录会话。', 'CLAUDE_CODE_ACCOUNT_CONFIGURATION_CONFLICT');
 const policyConflict = () => fail('此境舱的 Claude 设置会覆盖会话网络或目录；请移除冲突后重试。', 'CLAUDE_CODE_SESSION_POLICY_CONFLICT');
-const invalidSettings = () => fail('此境舱的 Claude 设置无法安全读取，请检查 settings.json。', 'CLAUDE_CODE_SETTINGS_INVALID');
-const MAX_SETTINGS_BYTES = 1024 * 1024;
 const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`;
 
-function claudeShim({ node, resolver, home, runtime }, args) {
+function claudeShim({ node, resolver, settingsCheck, config, home, runtime, basePath }, args) {
   // These options belong to the terminal's binding. Scalar option order and
   // variadic --mcp-config merging are not reliable override prevention.
   const reserved = ['--mcp-config', '--strict-mcp-config', '--no-strict-mcp-config', '--settings', '--setting-sources',
@@ -24,7 +20,7 @@ for envara_arg in "$@"; do
   case "\${envara_arg}" in
     --) break ;;
     ${reserved.flatMap(flag => [flag, `${flag}=*`]).join('|')})
-      printf 'envara: %s\\n' '此会话的浏览器和隔离配置已固定，不能用这些参数覆盖。模型、权限和会话恢复参数可以正常使用。' >&2
+      printf 'envara: %s\\n' '此会话的浏览器和隔离配置已固定，不能用这些参数覆盖。可用 claude mcp add 添加自定义 MCP；模型、权限和会话恢复参数可以正常使用。' >&2
       exit 64 ;;
   esac
 done
@@ -33,40 +29,11 @@ if [ -e ${shellQuote(path.join(home, '.config', 'anthropic'))} ] || [ -L ${shell
     printf '%s\\n' '旧版共用的 Console 登录资料仍保留，请在所选档案重新登录。' >&2
   fi
 fi
+NODE_OPTIONS= BUN_OPTIONS= ${[node, settingsCheck, '--check', config, '--home', home, '--base-path', basePath].map(shellQuote).join(' ')} || exit 78
 envara_claude=$(NODE_OPTIONS= BUN_OPTIONS= ${[node, resolver, '--resolve', home].map(shellQuote).join(' ')}) || exit 126
 exec "\${envara_claude}" ${args.map(shellQuote).join(' ')} "$@"
 `;
 }
-
-// Only documented routing/authentication inputs: model and permission choices
-// are left to the user's environment-local settings. Never read auth storage.
-const ACCOUNT_ENV = new Set([
-  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_CUSTOM_HEADERS',
-  'ANTHROPIC_AWS_API_KEY', 'ANTHROPIC_AWS_BASE_URL', 'ANTHROPIC_AWS_WORKSPACE_ID',
-  'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_BEDROCK_MANTLE_BASE_URL',
-  'ANTHROPIC_FOUNDRY_API_KEY', 'ANTHROPIC_FOUNDRY_AUTH_TOKEN', 'ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_FOUNDRY_RESOURCE',
-  'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_VERTEX_PROJECT_ID', 'ANTHROPIC_PROFILE',
-  'ANTHROPIC_FEDERATION_RULE_ID', 'ANTHROPIC_ORGANIZATION_ID', 'ANTHROPIC_WORKSPACE_ID', 'AWS_BEARER_TOKEN_BEDROCK',
-  'CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_VERTEX',
-  'CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH', 'CLAUDE_CODE_SKIP_BEDROCK_AUTH', 'CLAUDE_CODE_SKIP_FOUNDRY_AUTH', 'CLAUDE_CODE_SKIP_MANTLE_AUTH', 'CLAUDE_CODE_SKIP_VERTEX_AUTH',
-  'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_OAUTH_REFRESH_TOKEN', 'CLAUDE_CODE_OAUTH_SCOPES',
-  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', 'DISABLE_LOGIN_COMMAND',
-]);
-function accountValueActive(key, value) {
-  if (value === '') return false;
-  const boolean = key.startsWith('CLAUDE_CODE_USE_') || key.startsWith('CLAUDE_CODE_SKIP_')
-    || key === 'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST' || key === 'DISABLE_LOGIN_COMMAND';
-  return !boolean || !/^(0|false|no|off)$/i.test(value);
-}
-const CONTEXT_ENV = new Set([
-  'HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME',
-  'CLAUDE_CONFIG_DIR', 'ANTHROPIC_CONFIG_DIR', 'HISTFILE', 'ZDOTDIR', 'NPM_CONFIG_USERCONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM',
-  'TMPDIR', 'TMP', 'TEMP', 'TZ', 'LANG', 'LC_ALL', 'PATH', 'BROWSER', 'NODE_USE_ENV_PROXY', 'NO_PROXY', 'no_proxy',
-  'ENVARA_LINK_SOCKET', 'ENVARA_BROWSER_SOCKET',
-  'SSH_AUTH_SOCK', 'ENVARA_SSH_CONFIG', 'ENVARA_SSH_TARGETS', 'ENVARA_SSH_CONNECTIONS',
-]);
-const PRIVATE_ENV = new Set(['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'ENVARA_LINK_TOKEN', 'ENVARA_BROWSER_TOKEN', 'ENVARA_SSH_PROXY_URL']);
-const SESSION_BREAKING_ENV = new Set(['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB', 'NODE_OPTIONS', 'BUN_OPTIONS', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES']);
 
 async function checkedDirectory(root, { owned = false } = {}) {
   if (!absolute(root) || path.resolve(root) !== root) throw fail('Claude Code 会话目录无效。');
@@ -75,39 +42,11 @@ async function checkedDirectory(root, { owned = false } = {}) {
     || await realpath(root) !== root) throw fail('Claude Code 会话目录包含不安全的链接。', 'CLAUDE_CODE_UNSAFE_PATH');
 }
 
-async function readUserSettings(directory) {
-  await checkedDirectory(directory);
-  const filename = path.join(directory, 'settings.json');
-  let handle;
-  try {
-    // lstat rejects links before open (including broken links); O_NOFOLLOW
-    // closes a link replacement race on supported hosts. Never echo file text.
-    let before;
-    try { before = await lstat(filename); } catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
-    if (!before.isFile() || before.isSymbolicLink() || before.size > MAX_SETTINGS_BYTES || (before.mode & 0o022)) throw invalidSettings();
-    handle = await open(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-    const opened = await handle.stat();
-    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size > MAX_SETTINGS_BYTES) throw invalidSettings();
-    const buffer = Buffer.alloc(MAX_SETTINGS_BYTES + 1);
-    let count = 0;
-    while (count < buffer.length) {
-      const { bytesRead } = await handle.read(buffer, count, buffer.length - count, null);
-      if (!bytesRead) break;
-      count += bytesRead;
-    }
-    const after = await handle.stat();
-    if (count > MAX_SETTINGS_BYTES || count !== opened.size || after.mtimeMs !== opened.mtimeMs || after.size !== opened.size) throw invalidSettings();
-    const settings = JSON.parse(buffer.toString('utf8', 0, count));
-    if (!object(settings) || (settings.env !== undefined && !validEnvironment(settings.env))) throw invalidSettings();
-    return settings;
-  } catch { throw invalidSettings(); }
-  finally { await handle?.close(); }
-}
-
 async function sessionPolicy({ directories, environment, privacy }) {
-  if (!validEnvironment(environment)) throw fail('Claude Code 会话环境无效。');
+  validateClaudeEnvironment(environment);
   await checkedDirectory(directories?.home);
-  const user = await readUserSettings(directories?.claude);
+  await checkedDirectory(directories?.claude);
+  const user = await readClaudeSettings(path.join(directories.claude, 'settings.json'));
   if (environment.HOME !== directories.home || environment.USERPROFILE !== directories.home || environment.CLAUDE_CONFIG_DIR !== directories.claude) throw policyConflict();
   if (directories.anthropic !== path.join(directories.claude, 'anthropic') || environment.ANTHROPIC_CONFIG_DIR !== directories.anthropic) throw policyConflict();
   await checkedDirectory(directories.anthropic, { owned: true });
@@ -116,21 +55,12 @@ async function sessionPolicy({ directories, environment, privacy }) {
   const launch = { ...environment, DISABLE_AUTOUPDATER: '1', DO_NOT_TRACK: mode === 'off' ? '' : '1',
     DISABLE_TELEMETRY: mode === 'off' ? '' : '1', DISABLE_ERROR_REPORTING: mode === 'off' ? '' : '1',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: mode === 'strict' ? '1' : '' };
-  for (const source of [environment, user.env ?? {}]) {
-    if (Object.entries(source).some(([key, value]) => ACCOUNT_ENV.has(key) && accountValueActive(key, value))) throw accountConflict();
-    if (Object.entries(source).some(([key, value]) => SESSION_BREAKING_ENV.has(key) && value !== '')) throw policyConflict();
-  }
-  for (const key of ['apiKeyHelper', 'awsAuthRefresh', 'awsCredentialExport', 'gcpAuthRefresh', 'forceLoginGatewayUrl']) if (user[key] != null && user[key] !== '') throw accountConflict();
-  if (user.forceLoginMethod != null && user.forceLoginMethod !== 'claudeai') throw accountConflict();
-  if (user.proxyAuthHelper != null && user.proxyAuthHelper !== '') throw policyConflict();
-  for (const [key, value] of Object.entries(user.env ?? {})) {
-    if ((CONTEXT_ENV.has(key) || PRIVATE_ENV.has(key) || key.startsWith('ENVARA_')) && value !== (launch[key] ?? '')) throw policyConflict();
-  }
-  const pins = Object.fromEntries([...CONTEXT_ENV].filter(key => launch[key] !== undefined).map(key => [key, launch[key]]));
+  validateClaudeSettings(user, launch);
+  const pins = Object.fromEntries([...CLAUDE_CONTEXT_ENV].filter(key => launch[key] !== undefined).map(key => [key, launch[key]]));
   for (const key of ['DISABLE_AUTOUPDATER', 'DO_NOT_TRACK', 'DISABLE_TELEMETRY', 'DISABLE_ERROR_REPORTING', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC']) pins[key] = launch[key];
   // These are non-secret empty pins, not credential copies. An existing API or
   // token configuration is rejected above rather than silently discarded.
-  for (const key of ACCOUNT_ENV) pins[key] = '';
+  for (const key of CLAUDE_ACCOUNT_ENV) pins[key] = '';
   return { environment: launch, settings: { forceLoginMethod: 'claudeai', sandbox: { enabled: false }, env: pins } };
 }
 
@@ -206,6 +136,7 @@ export async function prepareClaudeSession({ sessionId, directories, installatio
     const binDirectory = path.join(runtime, 'bin');
     const wrapperPath = path.join(binDirectory, 'claude');
     const resolver = path.join(runtime, 'claude-installation-check.mjs');
+    const settingsCheck = path.join(runtime, 'claude-code-settings.mjs');
     await mkdir(binDirectory, { mode: 0o700 });
     // The shell and Claude's own subprocesses resolve the same wrapper, even
     // after Claude reapplies its --settings env block. Never modify host PATH.
@@ -222,9 +153,14 @@ export async function prepareClaudeSession({ sessionId, directories, installatio
     // environment. User settings can still reload; this is not an auth policy
     // or a replacement for Envara's process network fence and browser broker.
     await writeFile(settings, JSON.stringify(policy.settings), { mode: 0o600, flag: 'wx' });
-    const args = ['--no-chrome', '--strict-mcp-config', '--mcp-config', mcp, '--setting-sources', 'user', '--settings', settings];
+    // Add the session broker to Claude's normal MCP discovery. Strict mode
+    // would silently hide MCPs added by the user or by Claude in this profile.
+    // The private CLI config retains the managed broker's name and binding;
+    // the process fence, not an MCP allowlist, enforces the selected route.
+    const args = ['--no-chrome', '--mcp-config', mcp, '--setting-sources', 'user,project,local', '--settings', settings];
     await writeFile(resolver, await readFile(new URL('./claude-code-installation.mjs', import.meta.url)), { mode: 0o600, flag: 'wx' });
-    await writeFile(wrapperPath, claudeShim({ node, resolver, home: directories.home, runtime }, args), { mode: 0o700, flag: 'wx' });
+    await writeFile(settingsCheck, await readFile(new URL('./claude-code-settings.mjs', import.meta.url)), { mode: 0o600, flag: 'wx' });
+    await writeFile(wrapperPath, claudeShim({ node, resolver, settingsCheck, config: directories.claude, home: directories.home, runtime, basePath: environment.PATH ?? '' }, args), { mode: 0o700, flag: 'wx' });
     return { executable: selected, installation, args, environment: policy.environment, binDirectory, wrapperPath, cleanup };
   } catch (error) {
     try { await cleanup(); }

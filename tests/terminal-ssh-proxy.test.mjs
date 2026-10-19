@@ -10,7 +10,7 @@ import { PassThrough, Readable, Writable } from 'node:stream';
 import test from 'node:test';
 import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
-import { readSshTargets, runSshProxy, validateSshProxyUrl, validateSshTarget } from '../electron/terminal-ssh-proxy.mjs';
+import { readSshTargets, runSshProxy, sameSshTarget, validateSshProxyUrl, validateSshTarget } from '../electron/terminal-ssh-proxy.mjs';
 import { cert, key } from './claude-download-fixture.mjs';
 
 const target = { host: 'ssh-fixture.invalid', port: 2222 };
@@ -75,6 +75,22 @@ async function targetFile(t) {
   return { root, file };
 }
 
+async function invokeCli(t, argv, environment) {
+  const env = { ...process.env };
+  delete env.ENVARA_SSH_TARGETS;
+  delete env.ENVARA_SSH_PROXY_URL;
+  Object.assign(env, environment);
+  const child = spawn(process.execPath, [helperPath, ...argv], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  const stdout = [], stderr = [];
+  child.stdout.on('data', chunk => stdout.push(chunk));
+  child.stderr.on('data', chunk => stderr.push(chunk));
+  const closed = once(child, 'close');
+  child.stdin.end();
+  const [code, signal] = await closed;
+  return { code, signal, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr).toString() };
+}
+
 test('validates exact destinations and requires authenticated literal loopback proxies', () => {
   assert.deepEqual(validateSshTarget('SSH-Fixture.invalid', '2222'), target);
   assert.deepEqual(validateSshTarget('[::1]', 22), { host: '::1', port: 22 });
@@ -90,6 +106,33 @@ test('validates exact destinations and requires authenticated literal loopback p
     'http://user:pass@127.0.0.1:1234/path', 'http://user:pass@127.0.0.1:1234#fragment',
     'http://user:pass@127.0.0.1:1234?query', 'http://u%3Aser:pass@127.0.0.1:1234', 'http://user:p%0Aass@127.0.0.1:1234']) {
     assert.throws(() => validateSshProxyUrl(url), { code: 'SSH_PROXY_CONFIGURATION' });
+  }
+});
+
+test('numeric endpoint equality covers IPv6 spellings and IPv4-mapped forms without changing saved host text', () => {
+  for (const hosts of [
+    ['2001:db8::1', '2001:0db8:0000:0000:0000:0000:0000:0001', '[2001:DB8:0:0::1]'],
+    ['192.0.2.1', '::ffff:192.0.2.1', '::ffff:c000:201', '[0000:0000:0000:0000:0000:FFFF:C000:0201]'],
+    ['::', '0:0:0:0:0:0:0:0', '[0000::]'],
+  ]) for (const first of hosts) for (const second of hosts) {
+    assert.equal(sameSshTarget({ host: first, port: 2222 }, { host: second, port: 2222 }), true, `${first} / ${second}`);
+    assert.equal(sameSshTarget({ host: first, port: 2222 }, { host: second, port: 22 }), false);
+  }
+  assert.equal(validateSshTarget('2001:0db8:0000:0000:0000:0000:0000:0001', 2222).host, '2001:0db8:0000:0000:0000:0000:0000:0001');
+  for (const [first, second] of [['2001:db8::1', '2001:db8::2'], ['::192.0.2.1', '192.0.2.1'],
+    ['::ffff:c000:201', '192.0.2.2'], ['ssh-fixture.invalid', '192.0.2.1'], ['ssh-fixture.invalid', 'alias-fixture.invalid']])
+    assert.equal(sameSshTarget({ host: first, port: 2222 }, { host: second, port: 2222 }), false);
+});
+
+test('registered proxy matching accepts equivalent numeric hosts but sends the caller destination unchanged', async t => {
+  for (const [stored, requested] of [['2001:0db8:0000:0000:0000:0000:0000:0001', '2001:db8::1'],
+    ['::ffff:c000:201', '192.0.2.1'], ['192.0.2.1', '::ffff:192.0.2.1']]) {
+    const proxy = await proxyFixture(t, socket => socket.end('HTTP/1.1 200 Connection established\r\n\r\nSSH-fixture\n'));
+    const output = collector();
+    await runSshProxy({ host: requested, port: 2222, proxyUrl: proxy.url, allowedTargets: [{ host: stored, port: 2222 }], input: Readable.from([]), output: output.output });
+    const authority = `${net.isIP(requested) === 6 ? `[${requested}]` : requested}:2222`;
+    assert.ok(proxy.requests[0].startsWith(`CONNECT ${authority} HTTP/1.1\r\n`));
+    assert.equal(output.bytes().toString(), 'SSH-fixture\n');
   }
 });
 
@@ -120,7 +163,44 @@ test('authorizes host and port before contacting a proxy', async t => {
   const proxy = await proxyFixture(t, socket => socket.destroy());
   await assert.rejects(run(proxy, { host: 'different.invalid' }), { code: 'SSH_PROXY_TARGET_DENIED' });
   await assert.rejects(run(proxy, { port: target.port + 1 }), { code: 'SSH_PROXY_TARGET_DENIED' });
+  for (const allowedTargets of [[], undefined]) {
+    await assert.rejects(run(proxy, { allowedTargets }), { code: 'SSH_PROXY_CONFIGURATION' });
+  }
   await assert.rejects(run(proxy, { proxyUrl: `http://127.0.0.1:${proxy.port}` }), { code: 'SSH_PROXY_CONFIGURATION' });
+  assert.equal(proxy.requests.length, 0);
+});
+
+test('explicit environment policy connects an unregistered domain through the authenticated proxy', async t => {
+  const selected = { host: 'unregistered-ssh.invalid', port: 2207 };
+  const payload = Buffer.from([0, 255, 128, 13, 10, 83, 83, 72]);
+  let received = Buffer.alloc(0);
+  const proxy = await proxyFixture(t, socket => {
+    socket.write('HTTP/1.1 200 OK\r\n\r\n');
+    socket.on('data', chunk => { received = Buffer.concat([received, chunk]); });
+    socket.on('end', () => socket.end(payload));
+  });
+  const { output, bytes } = collector();
+  await runSshProxy({ ...selected, targetPolicy: 'environment', proxyUrl: proxy.url,
+    input: Readable.from([payload]), output });
+  assert.deepEqual(received, payload);
+  assert.deepEqual(bytes(), payload);
+  assert.equal(proxy.requests.length, 1);
+  assert.match(proxy.requests[0], /^CONNECT unregistered-ssh\.invalid:2207 HTTP\/1\.1\r\n/);
+  assert.ok(proxy.requests[0].includes(`\r\nProxy-Authorization: ${authorization}`));
+});
+
+test('environment policy still rejects malformed targets, invalid proxies and unknown policies before connecting', async t => {
+  const proxy = await proxyFixture(t, socket => socket.destroy());
+  for (const targetPolicy of ['', 'all', 'Environment', null, true, {}]) {
+    await assert.rejects(run(proxy, { targetPolicy }), { code: 'SSH_PROXY_CONFIGURATION' });
+  }
+  for (const extra of [
+    { host: 'host\r\nInjected: value' }, { host: 'bad..host' }, { port: '22junk' }, { port: 0 },
+    { proxyUrl: undefined }, { proxyUrl: `http://127.0.0.1:${proxy.port}` },
+    { proxyUrl: `http://${credentials}@localhost:${proxy.port}` },
+    { proxyUrl: `http://${credentials}@192.0.2.1:${proxy.port}` },
+  ]) await assert.rejects(run(proxy, { targetPolicy: 'environment', allowedTargets: undefined, ...extra }),
+    { code: 'SSH_PROXY_CONFIGURATION' });
   assert.equal(proxy.requests.length, 0);
 });
 
@@ -290,6 +370,73 @@ test('closed or unavailable proxy never contacts the direct destination', async 
   const closed = await proxyFixture(t, socket => socket.end());
   await assert.rejects(run(closed, { ...selected, allowedTargets: [selected] }), { code: 'SSH_PROXY_RESPONSE' });
   assert.equal(directConnections, 0);
+});
+
+test('environment policy never falls back to the destination after proxy refusal, closure or connection failure', async t => {
+  let directConnections = 0;
+  const destination = net.createServer(socket => { directConnections++; socket.end('must not reach this'); });
+  const port = await listen(t, destination);
+  const selected = { host: '127.0.0.1', port, targetPolicy: 'environment', allowedTargets: undefined };
+  for (const status of [403, 407, 502]) {
+    const proxy = await proxyFixture(t, socket => socket.end(`HTTP/1.1 ${status} Refused\r\n\r\n`));
+    await assert.rejects(run(proxy, selected), { code: `SSH_PROXY_HTTP_${status}` });
+  }
+  const closed = await proxyFixture(t, socket => socket.end());
+  await assert.rejects(run(closed, selected), { code: 'SSH_PROXY_RESPONSE' });
+  const unavailable = net.createServer();
+  unavailable.listen(0, '127.0.0.1');
+  await once(unavailable, 'listening');
+  const refusedPort = unavailable.address().port;
+  await new Promise(resolve => unavailable.close(resolve));
+  await assert.rejects(run({ url: `http://${credentials}@127.0.0.1:${refusedPort}` }, selected),
+    { code: 'SSH_PROXY_CONNECT' });
+  assert.equal(directConnections, 0);
+});
+
+test('CLI environment flag uses authenticated CONNECT without a targets file while the original form still requires one', { timeout: 5000 }, async t => {
+  const proxy = await proxyFixture(t, socket => {
+    socket.write('HTTP/1.1 200 OK\r\n\r\nSSH-2.0-unregistered-fixture\r\n');
+    socket.on('end', () => socket.end());
+  });
+  const argv = ['--host', 'unregistered-ssh.invalid', '--port', '2207'];
+  const environment = { ENVARA_SSH_PROXY_URL: proxy.url };
+  const accepted = await invokeCli(t, [...argv, '--environment-targets'], environment);
+  assert.equal(accepted.code, 0, accepted.stderr);
+  assert.equal(accepted.signal, null);
+  assert.equal(accepted.stdout.toString(), 'SSH-2.0-unregistered-fixture\r\n');
+  assert.equal(accepted.stderr, '');
+  assert.equal(proxy.requests.length, 1);
+  assert.match(proxy.requests[0], /^CONNECT unregistered-ssh\.invalid:2207 HTTP\/1\.1\r\n/);
+  assert.ok(proxy.requests[0].includes(`\r\nProxy-Authorization: ${authorization}`));
+  const refused = await invokeCli(t, argv, environment);
+  assert.equal(refused.code, 1);
+  assert.equal(refused.stdout.length, 0);
+  assert.match(refused.stderr, /SSH proxy configuration is unavailable or invalid/);
+  assert.equal(proxy.requests.length, 1);
+});
+
+test('CLI rejects misplaced, repeated or unknown environment flags and invalid environment targets without connecting', { timeout: 5000 }, async t => {
+  const proxy = await proxyFixture(t, socket => socket.destroy());
+  const argv = ['--host', target.host, '--port', String(target.port)];
+  for (const args of [
+    [...argv, '--all-targets'], ['--environment-targets', ...argv],
+    ['--host', target.host, '--environment-targets', '--port', String(target.port)],
+    [...argv, '--environment-targets', '--environment-targets'],
+    ['--port', String(target.port), '--host', target.host, '--environment-targets'],
+    ['--host', 'bad\r\nhost', '--port', String(target.port), '--environment-targets'],
+    ['--host', target.host, '--port', '65536', '--environment-targets'],
+  ]) {
+    const result = await invokeCli(t, args, { ENVARA_SSH_PROXY_URL: proxy.url });
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout.length, 0);
+    assert.match(result.stderr, /SSH proxy configuration is unavailable or invalid/);
+    assert.doesNotMatch(result.stderr, /fixture-password|Basic|127\.0\.0\.1|bad/);
+  }
+  const result = await invokeCli(t, [...argv, '--environment-targets'], {});
+  assert.equal(result.code, 1);
+  assert.equal(result.stdout.length, 0);
+  assert.match(result.stderr, /SSH proxy configuration is unavailable or invalid/);
+  assert.equal(proxy.requests.length, 0);
 });
 
 test('HTTPS proxy verifies certificates even when the inherited environment disables TLS checks', async t => {

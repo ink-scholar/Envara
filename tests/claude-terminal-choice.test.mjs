@@ -59,11 +59,11 @@ test('the terminal chooser wires its tested constraints and keeps ordinary link 
   assert.match(pane, /selectedSession\?\.kind === CLAUDE_SESSION/);
   assert.match(pane, /session\.kind === CLAUDE_SESSION\s*\? `Claude Code/);
   assert.match(pane, /className="terminal-claude-settings"><summary>\{t\('会话设置'\)\}/);
-  assert.match(pane, /<dt>\{t\('Claude 安装'\)\}<\/dt><dd>\{t\('首次可下载或从本机初始化，之后复用境舱安装。'\)\}/);
+  assert.match(pane, /只复制程序，登录档案仍独立。/);
   assert.match(pane, /const privacyMode = host\?\.privacy\?\.mode \?\? 'standard'/);
   assert.match(pane, /privacyMode !== 'off' && <small className="terminal-claude-privacy-note">\{t\('关闭遥测可能影响 Remote Control 等功能。'\)\}/);
   assert.match(pane, /账号登录；启动前检查 API 配置冲突/);
-  assert.match(pane, /进入终端后运行 claude，可自行添加参数。/);
+  assert.match(pane, /进入终端后运行 claude。/);
   assert.doesNotMatch(pane, /'启动 Claude Code'/, 'creation opens the prepared terminal, not Claude itself');
   assert.match(pane, /if \(event\.type === 'status' \|\| event\.type === 'exit'\) retainFailure\(event\)/);
   assert.match(pane, /retainFailure\(session\)/);
@@ -73,10 +73,10 @@ test('the terminal chooser wires its tested constraints and keeps ordinary link 
 });
 
 test('dedicated-session copy is available in all nine interface languages', () => {
-  const keys = ['会话类型', '普通终端', '独立 Claude · 账号登录', '运行此境舱独立安装的 Claude；MCP 与 Playwright 固定使用所选浏览器。', 'Claude 安装', '首次自动安装，更新只影响此境舱。', '固定使用所选网络和浏览器，保留境舱配置。', '会话设置', '登录方式', '账号登录；启动前检查 API 配置冲突', '配置与历史', '境舱独立保存', '网络与浏览器', '固定绑定；网络组件退出时结束会话', '官方隐私设置', '不额外关闭遥测与错误上报。', '关闭遥测与错误上报。', '同时关闭非必要网络请求。', 'MCP 与 Playwright 仅使用所选浏览器。会话内关闭自动更新。', '先添加网络出口，并为它创建一个境舱浏览器。', '请选择此网络的境舱浏览器。', '启动 Claude Code', '浏览器固定为：{name}', '此境舱的 Claude 设置含 API、网关或外部登录配置；请移除冲突后使用账号登录会话。', '此境舱的 Claude 设置会覆盖会话网络或目录；请移除冲突后重试。', '此境舱的 Claude 设置无法安全读取，请检查 settings.json。'];
+  const keys = ['会话类型', '普通终端', '独立 Claude · 账号登录', '运行此境舱独立安装的 Claude，保留自定义 MCP 与插件。', 'Claude 安装', '首次自动安装，更新只影响此境舱。', '固定使用所选网络和浏览器，保留境舱配置。', '会话设置', '登录方式', '账号登录；启动前检查 API 配置冲突', '配置与历史', '境舱独立保存', '网络与浏览器', '固定绑定；网络组件退出时结束会话', '官方隐私设置', '不额外关闭遥测与错误上报。', '关闭遥测与错误上报。', '同时关闭非必要网络请求。', '内置浏览器工具绑定所选浏览器；支持此境舱的自定义 MCP。会话内关闭自动更新。', '先添加网络出口，并为它创建一个境舱浏览器。', '请选择此网络的境舱浏览器。', '启动 Claude Code', '浏览器固定为：{name}', '此境舱的 Claude 设置含 API、网关或外部登录配置；请移除冲突后使用账号登录会话。', '此境舱的 Claude 设置会覆盖会话网络或目录；请移除冲突后重试。', '此境舱的 Claude 设置无法安全读取，请检查 settings.json。'];
   for (const [language, catalog] of Object.entries(translationCatalog)) {
     assert.equal(typeof catalog['关闭遥测可能影响 Remote Control 等功能。'], 'string', language);
-    for (const key of ['进入终端后运行 claude，可自行添加参数。', '同一境舱保留 Claude 登录信息。']) assert.equal(typeof catalog[key], 'string', `${language}: ${key}`);
+    for (const key of ['进入终端后运行 claude。', '下载（推荐）', '复制本机程序', '同一境舱保留 Claude 登录信息。']) assert.equal(typeof catalog[key], 'string', `${language}: ${key}`);
     assert.equal(typeof catalog['所选网络的代理内核已停止，Claude Code 会话已中止。请检查网络后新建会话。'], 'string', language);
     for (const key of ['终端进程清理未完成，请重试关闭会话。', '终端进程清理未完成，请查看应用状态。']) assert.equal(typeof catalog[key], 'string', `${language}: ${key}`);
     for (const key of keys) assert.equal(typeof catalog[key], 'string', `${language}: ${key}`);

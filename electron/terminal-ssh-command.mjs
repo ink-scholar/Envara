@@ -3,7 +3,7 @@
 // read-only runtime. Keep their dependencies limited to Node builtins.
 import { spawn as spawnChild } from 'node:child_process';
 import path from 'node:path';
-import { validateSshTarget } from './terminal-ssh-proxy.mjs';
+import { sameSshTarget, validateSshProxyUrl, validateSshTarget } from './terminal-ssh-proxy.mjs';
 import { runPasswordSshClient } from './terminal-ssh-client.mjs';
 
 export const SSH_SESSION_SCHEMA = 'envara.ssh-session';
@@ -13,9 +13,10 @@ const USER = /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/;
 const ALIAS = /^envara-[a-f0-9]{12}$/;
 const MESSAGES = Object.freeze({
   SSH_SESSION_INVALID: 'The protected SSH session is unavailable. Start a new terminal session.',
-  SSH_CONNECTIONS_EMPTY: 'No SSH connections are loaded in this terminal. Open Terminal > SSH connections, save a connection, then start a new terminal session.',
+  SSH_CONNECTIONS_EMPTY: 'No saved SSH connections are loaded in this terminal. Open Terminal > SSH connections, save or unlock a connection, then start a new terminal session.',
   SSH_AUTHORIZATION_EXPIRED: 'SSH authorization has expired. Start a new terminal session to load the saved connections again. No authorization was renewed.',
-  SSH_TARGET_NOT_AUTHORIZED: 'This host, port and user do not match a saved connection. Run envara-ssh list to see this session\'s authorized connections.',
+  SSH_TARGET_NOT_AUTHORIZED: 'This request does not match the saved SSH connection. No other network route was used. Run envara-ssh list and use the intended saved alias and user.',
+  SSH_SAVED_CONNECTION_UNAVAILABLE: 'This saved SSH connection is unavailable in this terminal. Unlock or load it in Terminal > SSH connections, then start a new terminal session.',
   SSH_TARGET_AMBIGUOUS: 'More than one saved connection matches this host, port and user. Run envara-ssh list and use the intended saved alias.',
   SSH_OPTIONS_UNSUPPORTED: 'Custom connection options are not allowed. Use only -p PORT, -l USER, -T, -t, -v, -vv or -vvv. Run envara-ssh help for examples.',
   SSH_ARGUMENT_INVALID: 'SSH arguments are invalid or conflicting. Use a saved alias or an explicit user@host, and run envara-ssh help for syntax.',
@@ -28,8 +29,41 @@ const usage = () => ({
   alias: 'ssh [-T|-t] [-v|-vv|-vvv] SAVED_ALIAS [COMMAND ...]',
   target: 'ssh [-p PORT] [-l USER] USER@HOST [COMMAND ...]',
   options: 'Connection options may also follow the destination until the first command argument. Use -- to end connection options explicitly. Later command arguments are preserved unchanged.',
-  setup: 'Open Terminal > SSH connections, save a connection, then start a new terminal session. Only connections loaded in this session are available.',
+  setup: 'Open Terminal > SSH connections to save or unlock a connection, then start a new terminal session. Saved connections use this computer\'s network; the server can see its network exit IP. Other explicit USER@HOST destinations use the environment proxy; saved connections never fall back to that route.',
 });
+
+const absolutePath = value => typeof value === 'string' && path.isAbsolute(value) && path.normalize(value) === value
+  && value.length <= 4096 && !/[\x00-\x1f\x7f]/.test(value);
+
+/** Native SSH receives only the owned runtime and explicitly issued session
+ * capabilities. Never forward a caller's account, host identity or locale. */
+export function createSshChildEnvironment({ home, proxyUrl, targetsPath, directSocket, directToken,
+  askpassPath, askpassSocket, askpassToken } = {}) {
+  if (!absolutePath(home)) throw failure('SSH_SESSION_INVALID');
+  const environment = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: home, LANG: 'C', LC_ALL: 'C', TERM: 'xterm-256color',
+    SSH_ASKPASS_REQUIRE: 'never', SSH_ASKPASS: '/usr/bin/false' };
+  if (proxyUrl !== undefined) {
+    try { validateSshProxyUrl(proxyUrl); } catch { throw failure('SSH_SESSION_INVALID'); }
+    environment.ENVARA_SSH_PROXY_URL = proxyUrl;
+  }
+  if (targetsPath !== undefined) {
+    if (!absolutePath(targetsPath)) throw failure('SSH_SESSION_INVALID');
+    environment.ENVARA_SSH_TARGETS = targetsPath;
+  }
+  const socket = value => absolutePath(value) && Buffer.byteLength(value) <= 100;
+  const token = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  if (directSocket !== undefined || directToken !== undefined) {
+    if (!socket(directSocket) || !token(directToken)) throw failure('SSH_SESSION_INVALID');
+    environment.ENVARA_SSH_DIRECT_SOCKET = directSocket;
+    environment.ENVARA_SSH_DIRECT_TOKEN = directToken;
+  }
+  if (askpassPath !== undefined || askpassSocket !== undefined || askpassToken !== undefined) {
+    if (!absolutePath(askpassPath) || !socket(askpassSocket) || !token(askpassToken)) throw failure('SSH_SESSION_INVALID');
+    environment.SSH_ASKPASS_REQUIRE = 'force'; environment.SSH_ASKPASS = askpassPath;
+    environment.ENVARA_SSH_ASKPASS_SOCKET = askpassSocket; environment.ENVARA_SSH_ASKPASS_TOKEN = askpassToken;
+  }
+  return environment;
+}
 
 function publicConnections(value) {
   if (!Array.isArray(value) || value.length > MAX_CONNECTIONS) throw failure('SSH_SESSION_INVALID');
@@ -107,11 +141,12 @@ function discoveryInvocation(argv, entry) {
 
 /** No caller-supplied option reaches native SSH except the small flags below.
  * Once a remote command begins, its remaining arguments are opaque data. */
-export function parseSshInvocation(argv, { connections = [], entry = 'ssh' } = {}) {
+export function parseSshInvocation(argv, { connections = [], entry = 'ssh', allowAdHoc = false } = {}) {
+  if (typeof allowAdHoc !== 'boolean') throw failure('SSH_SESSION_INVALID');
   const discovery = discoveryInvocation(argv, entry);
   if (discovery) return discovery;
   const records = publicConnections(connections);
-  if (!records.length) throw failure('SSH_CONNECTIONS_EMPTY');
+  if (!records.length && !allowAdHoc) throw failure('SSH_CONNECTIONS_EMPTY');
   let targetToken = null, selectedPort = null, selectedUser = null, terminalFlag = null;
   let index = 0, command = [];
   const flags = [];
@@ -151,6 +186,7 @@ export function parseSshInvocation(argv, { connections = [], entry = 'ssh' } = {
   if (selected) {
     if (selectedPort !== null && selectedPort !== selected.port || selectedUser !== null && selectedUser !== selected.user) throw failure('SSH_TARGET_NOT_AUTHORIZED');
   } else {
+    if (ALIAS.test(targetToken)) throw failure('SSH_TARGET_NOT_AUTHORIZED');
     const parts = targetToken.split('@');
     if (parts.length > 2) throw failure('SSH_ARGUMENT_INVALID');
     const user = parts.length === 2 ? parts[0] : selectedUser;
@@ -158,8 +194,12 @@ export function parseSshInvocation(argv, { connections = [], entry = 'ssh' } = {
     if (typeof user !== 'string' || !USER.test(user) || selectedUser !== null && selectedUser !== user) throw failure('SSH_ARGUMENT_INVALID');
     let target;
     try { target = validateSshTarget(host, selectedPort ?? 22); } catch { throw failure('SSH_ARGUMENT_INVALID'); }
-    const matches = records.filter(record => record.host === target.host && record.port === target.port && record.user === user);
-    if (!matches.length) throw failure('SSH_TARGET_NOT_AUTHORIZED');
+    if (ALIAS.test(target.host)) throw failure('SSH_TARGET_NOT_AUTHORIZED');
+    const matches = records.filter(record => sameSshTarget(record, target) && record.user === user);
+    if (!matches.length) {
+      if (!allowAdHoc || records.some(record => sameSshTarget(record, target))) throw failure('SSH_TARGET_NOT_AUTHORIZED');
+      return { kind: 'connect', alias: null, target: { ...target, user }, flags, command };
+    }
     if (matches.length > 1) throw failure('SSH_TARGET_AMBIGUOUS');
     [selected] = matches;
   }
@@ -185,11 +225,12 @@ function describeText(description) {
 
 function helpText(description) {
   return `${describeText(description)}\nUsage:\n  ${description.usage.list}\n  ${description.usage.alias}\n  ${description.usage.target}\n${description.usage.options}\n` +
-    'Host, port and user must uniquely match a connection already loaded in this session. Without -p, a host target uses port 22; aliases keep their saved port and user. IPv6 hosts may use brackets; inline host:port is not supported.\n' +
+    'Saved hosts, ports and users select their fixed connection. Other USER@HOST destinations use the environment proxy when this terminal supports it. An unavailable saved connection never changes routes. Without -p, a host target uses port 22; aliases keep their saved port and user. IPv6 hosts may use brackets; inline host:port is not supported.\n' +
     'Custom key/configuration/proxy options, jump hosts, forwarding, scp and sftp are not supported. No direct-network fallback is used.\n';
 }
 
 export async function runSshCommand({ argv = [], entry = 'ssh', manifest, configPath,
+  adHocConfigPath, configuredConnections, childEnvironment,
   passwordBroker = null, passwordClient = runPasswordSshClient, input = process.stdin,
   unavailableAliases = [], now = Date.now, spawn = spawnChild, output = process.stdout, errorOutput = process.stderr, signals = process } = {}) {
   const writeError = code => errorOutput.write(`Envara SSH [${code}]: ${MESSAGES[code] ?? MESSAGES.SSH_SESSION_INVALID}\n`);
@@ -201,16 +242,20 @@ export async function runSshCommand({ argv = [], entry = 'ssh', manifest, config
         : discovery.json ? `${JSON.stringify(description)}\n` : describeText(description));
       return 0;
     }
-    if (description.status === 'empty') throw failure('SSH_CONNECTIONS_EMPTY');
+    if (adHocConfigPath !== undefined && !absolutePath(adHocConfigPath)) throw failure('SSH_SESSION_INVALID');
+    const configured = configuredConnections === undefined ? description.connections : publicConnections(configuredConnections);
+    if (configuredConnections !== undefined && publicConnections(manifest.connections).some(record => !configured.some(candidate =>
+      ['id', 'alias', 'user'].every(key => candidate[key] === record[key]) && sameSshTarget(candidate, record)))) throw failure('SSH_SESSION_INVALID');
+    if (description.status === 'empty' && !adHocConfigPath && !configured.length) throw failure('SSH_CONNECTIONS_EMPTY');
     if (description.status === 'unavailable' || description.status === 'closed') throw failure('SSH_SESSION_INVALID');
-    const invocation = parseSshInvocation(argv, { connections: description.connections, entry });
+    const invocation = parseSshInvocation(argv, { connections: configured, entry, allowAdHoc: adHocConfigPath !== undefined });
     const selected = description.connections.find(record => record.alias === invocation.alias);
-    const selectedStatus = description.version === 1
+    if (invocation.alias && !selected) throw failure('SSH_SAVED_CONNECTION_UNAVAILABLE');
+    const selectedStatus = !selected ? 'ready' : description.version === 1
       ? unavailableAliases.includes(invocation.alias) ? 'unavailable' : description.status : selected.status;
     if (selectedStatus === 'expired') throw failure('SSH_AUTHORIZATION_EXPIRED');
     if (selectedStatus === 'unavailable') throw failure('SSH_SESSION_INVALID');
-    if (typeof configPath !== 'string' || !path.isAbsolute(configPath) || path.normalize(configPath) !== configPath
-      || /[\x00-\x1f\x7f]/.test(configPath)) throw failure('SSH_SESSION_INVALID');
+    if (!absolutePath(configPath)) throw failure('SSH_SESSION_INVALID');
     if (passwordBroker !== null) {
       if (!passwordBroker || typeof passwordBroker !== 'object' || Array.isArray(passwordBroker)
         || typeof passwordBroker.socket !== 'string' || !path.isAbsolute(passwordBroker.socket)
@@ -228,7 +273,15 @@ export async function runSshCommand({ argv = [], entry = 'ssh', manifest, config
           rows: Number.isInteger(output.rows) && output.rows >= 1 && output.rows <= 1000 ? output.rows : 24 });
       }
     }
-    if (selected.authType === 'password') throw failure('SSH_SESSION_INVALID');
+    if (selected?.authType === 'password') throw failure('SSH_SESSION_INVALID');
+    const nativeConfig = selected ? configPath : adHocConfigPath;
+    if (!absolutePath(nativeConfig)) throw failure('SSH_SESSION_INVALID');
+    const nativeEnvironment = createSshChildEnvironment(childEnvironment ?? { home: path.dirname(nativeConfig) });
+    const nativeTarget = selected ? [invocation.alias]
+      : [invocation.target.host];
+    const nativeArguments = ['-F', nativeConfig, ...invocation.flags,
+      ...(!selected && (input.isTTY !== true || output.isTTY !== true) ? ['-oBatchMode=yes'] : []),
+      ...(!selected ? ['-p', String(invocation.target.port), '-l', invocation.target.user] : []), '--', ...nativeTarget, ...invocation.command];
     return await new Promise(resolve => {
       let child, settled = false;
       const listeners = new Map();
@@ -239,8 +292,8 @@ export async function runSshCommand({ argv = [], entry = 'ssh', manifest, config
         resolve(code);
       };
       try {
-        child = spawn('/usr/bin/ssh', ['-F', configPath, ...invocation.flags, '--', invocation.alias, ...invocation.command], {
-          stdio: 'inherit', env: { ...process.env, SSH_ASKPASS_REQUIRE: 'never', SSH_ASKPASS: '/usr/bin/false' },
+        child = spawn('/usr/bin/ssh', nativeArguments, {
+          stdio: 'inherit', env: nativeEnvironment,
         });
         for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
           const handler = () => { try { child.kill(signal); } catch {} };

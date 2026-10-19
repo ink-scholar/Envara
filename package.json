@@ -1,6 +1,6 @@
 {
   "name": "envara",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "description": "Envara 境舱 — an open-source desktop workspace for browsers, terminals and supported desktop applications",
   "author": "ink-scholar",
   "license": "MIT",
@@ -37,6 +37,7 @@
     "routing:build:win": "node scripts/build-windows-app-routing.mjs",
     "routing:test:win": "node scripts/test-windows-app-routing.mjs",
     "test:workspace": "node scripts/workspace-smoke.mjs",
+    "test:claude:mcp": "node scripts/verify-claude-mcp.mjs",
     "test:privacy:sidecar": "node scripts/privacy-sidecar-smoke.mjs",
     "test:package:resources": "node scripts/verify-package-resources.mjs",
     "routing:build:mac:link-router": "node scripts/build-macos-link-router.mjs",

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Stack, GlobeHemisphereWest, ChartLine, Gear, Plus, MagnifyingGlass, DownloadSimple, UploadSimple, Play, Stop, PencilSimple, Trash, ArrowsClockwise, FolderOpen, ArrowSquareOut, X, CheckCircle, WarningCircle, Browsers, CaretRight, Clock, Eye, EyeSlash, ShieldCheck, TerminalWindow, Desktop } from "@phosphor-icons/react";
+import { Stack, GlobeHemisphereWest, ChartLine, Gear, Plus, MagnifyingGlass, DownloadSimple, UploadSimple, Play, Stop, PencilSimple, Trash, ArrowsClockwise, FolderOpen, ArrowSquareOut, X, CheckCircle, WarningCircle, Browsers, CaretLeft, CaretRight, Clock, Eye, EyeSlash, ShieldCheck, TerminalWindow, Desktop } from "@phosphor-icons/react";
 import { api } from "./client.js";
 import { TerminalDock } from "./TerminalPane.jsx";
 import { TerminalWindowApp } from "./TerminalWindowApp.jsx";
@@ -137,6 +137,26 @@ function IconButton({
     t
   } = useI18n();
   return <button className="icon-button" aria-label={t(label)} title={t(label)} {...props}><Icon size={18} /></button>;
+}
+const sidebarPreferenceKey = "envara.sidebar.collapsed.v1";
+function useSidebarPreference() {
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return window.localStorage.getItem(sidebarPreferenceKey) === "true"; }
+    catch { return false; }
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem(sidebarPreferenceKey, String(collapsed)); }
+    catch { /* The navigation remains usable when browser storage is unavailable. */ }
+  }, [collapsed]);
+  return [collapsed, setCollapsed];
+}
+function WorkspaceSidebar({ collapsed, onToggle, page, onNavigate, count, totalBytes, language, t }) {
+  return <aside className="sidebar">
+    <div className="brand"><img className="brand-mark" src={`${import.meta.env.BASE_URL}assets/envara-icon.png`} alt="" /><div className="brand-copy"><div className="brand-name">Envara{language.startsWith("zh") && <span>境舱</span>}</div><div className="brand-caption">{t("独立工作空间")}</div></div></div>
+    <div className="sidebar-section"><span>{t("工作区")}</span><IconButton className="icon-button sidebar-toggle" icon={collapsed ? CaretRight : CaretLeft} label={collapsed ? "展开侧栏" : "收起侧栏"} aria-expanded={!collapsed} aria-controls="workspace-navigation" onClick={onToggle} /></div>
+    <nav id="workspace-navigation" className="navigation" aria-label={t("主导航")}>{navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${page === id ? "active" : ""}`} aria-label={t(label)} title={t(label)} aria-current={page === id ? "page" : undefined} onClick={() => onNavigate(id)}><Icon size={20} weight={page === id ? "fill" : "regular"} /><span className="nav-label">{t(label)}</span>{id === "profiles" && <span className="nav-count">{count}</span>}</button>)}</nav>
+    <div className="sidebar-bottom"><button className={`nav-item settings-navigation ${page === "settings" ? "active" : ""}`} aria-label={t("设置")} title={t("设置")} aria-current={page === "settings" ? "page" : undefined} onClick={() => onNavigate("settings")}><Gear size={20} weight={page === "settings" ? "fill" : "regular"} /><span className="nav-label">{t("设置")}</span></button><div className="owner" title={`${t("本地工作区")} · ${t("设备所有者")}`}><div className="owner-avatar">{t("境")}</div><div className="owner-copy"><strong>{t("本地工作区")}</strong><span>{totalBytes > 0 ? `${t("环境数据")} ${bytes(totalBytes)}` : t("设备所有者")}</span></div><span className="local-dot" /></div></div>
+  </aside>;
 }
 function Modal({
   title,
@@ -702,7 +722,7 @@ function ProxyForm({
       else window.open(mapsUrl, "_blank", "noopener,noreferrer");
     } catch (error) { setCheckError(error.message || t("地图链接未打开，请重试。")); }
   };
-  return <Modal title={proxy ? t("编辑网络环境") : t("创建网络环境")} subtitle={t("先验证代理，再确认位置与时区。")} onClose={onClose} className="proxy-modal"><form onSubmit={event => {
+  return <Modal title={proxy ? t("编辑网络环境") : t("创建网络环境")} onClose={onClose} className="proxy-modal"><form onSubmit={event => {
       event.preventDefault();
       const error = proxyFormError(form);
       if (error) {
@@ -724,14 +744,14 @@ function ProxyForm({
     <Field label={anytls ? t("节点密码") : t("密码（选填）")} className={anytls ? "span-two" : ""}><div className="input-action"><input required={anytls} type={visible ? "text" : "password"} value={form.password} onChange={change("password")} autoComplete="new-password" /><IconButton type="button" icon={visible ? EyeSlash : Eye} label={visible ? t("隐藏密码") : t("显示密码")} onClick={() => setVisible(!visible)} /></div></Field>
     {anytls && <Field label={t("TLS 服务器名称 / SNI（选填）")} className="span-two" hint={t("留空时使用服务器地址；如果服务商提供了 SNI，请填写指定值。")}><input value={form.serverName || ""} onChange={change("serverName")} placeholder={form.host.trim() || t("默认使用服务器地址")} autoComplete="off" /></Field>}
     </div>
-    {anytls && <><div className={`anytls-core-note ${api.isDesktop && proxyCore?.supported === false ? "unavailable" : ""}`} role={api.isDesktop && proxyCore?.supported === false ? "status" : undefined}><ShieldCheck size={17} /><span>{!api.isDesktop ? t("AnyTLS 由境舱桌面应用内置连接，浏览器与终端共用节点，无需单独运行 Clash。") : proxyCore?.supported === false ? proxyCore.message || t("当前安装无法使用内置 AnyTLS。可先保存节点配置，检测或启动时会显示具体问题。") : t("境舱在应用内连接 AnyTLS 节点，浏览器与终端共用出口，无需单独运行 Clash。")}</span></div>
+    {anytls && <><div className={`anytls-core-note ${api.isDesktop && proxyCore?.supported === false ? "unavailable" : ""}`} role={api.isDesktop && proxyCore?.supported === false ? "status" : undefined}><ShieldCheck size={17} /><span>{api.isDesktop && proxyCore?.supported === false ? proxyCore.message || t("当前安装无法使用内置 AnyTLS。可先保存节点配置，检测或启动时会显示具体问题。") : t("桌面版内置 AnyTLS；浏览器与终端共用出口，无需另开 Clash。")}</span></div>
       <details className="advanced-settings proxy-tls-settings"><summary>{t("高级节点设置")}<span>{form.skipCertVerify ? t("证书验证已关闭") : t("验证服务器证书")}</span></summary><div className="proxy-tls-options">
         <label className="proxy-check-option"><input type="checkbox" checked={!form.skipCertVerify} onChange={event => update("skipCertVerify", !event.target.checked)} /><span>{t("验证 TLS 证书")}</span></label>
         <p className="field-hint">{t("如果服务商使用自签名证书，可按其配置关闭验证。")}</p>
         <Field label={t("ALPN（选填）")} hint={t("按服务商配置填写，用英文逗号分隔；留空使用内核默认值。")}><input value={Array.isArray(form.alpn) ? form.alpn.join(", ") : form.alpn || ""} onChange={change("alpn")} placeholder="h2, http/1.1" autoComplete="off" /></Field>
         <div className="proxy-udp-option"><label className="proxy-check-option"><input type="checkbox" checked={form.udp !== false} onChange={event => update("udp", event.target.checked)} /><span>{t("启用节点 UDP")}</span></label><p className="field-hint">{t("控制此节点的 UDP 转发，不会自动接管本机程序的全部 UDP 流量。")}</p></div>
       </div></details></>}
-    <details className="advanced-settings proxy-region-settings"><summary>{t("高级设置")}</summary><div className="form-grid"><Field label={t("代理地域（选填）")} className="span-two" hint={t("通常按已确认的网络位置自动匹配；仅在需要手动指定时填写，例如 jp-tokyo、de-berlin 或 my。地区代码不能替代实际出口检测。")}><input maxLength={64} value={form.region || ""} onChange={change("region")} placeholder="us-ny" /></Field></div></details>
+    <details className="advanced-settings proxy-region-settings"><summary>{t("高级设置")}</summary><div className="form-grid"><Field label={t("代理地域（选填）")} className="span-two" hint={t("按已确认位置自动匹配，也可手动指定地区代码；不能替代出口检测。")}><input maxLength={64} value={form.region || ""} onChange={change("region")} placeholder="us-ny" /></Field></div></details>
     {checking && <div className="proxy-detect-card"><NetworkResult checking /></div>}
     {!api.isDesktop && <p className="native-feature-note">{t("真实出口识别需要境舱桌面应用。")}</p>}
     <div className="form-note">{t("代理凭据仅保存在本机。导出的环境配置不包含密码。")}</div></> : <>
@@ -894,6 +914,7 @@ export function App() {
 }
 function WorkspaceApp() {
   const { preference: appearance, setPreference: setAppearance, saving: savingAppearance } = useAppearance();
+  const [sidebarCollapsed, setSidebarCollapsed] = useSidebarPreference();
   const {
     t,
     language,
@@ -1517,20 +1538,11 @@ function WorkspaceApp() {
     } catch (error) { return { ok: false, message: error.message || t("操作未完成，请重试。") }; }
     finally { pendingRef.current.delete(key); setPending(value => { const next = { ...value }; delete next[key]; return next; }); }
   };
-  return <div className={`app-shell ${api.isDesktop ? "is-desktop" : ""} ${withDetail ? "with-detail" : ""} ${terminalVisible ? "terminal-visible" : ""} ${terminalVisible && terminalExpanded ? "terminal-expanded" : ""} ${page === "terminals" ? "terminal-workspace" : ""}`} style={{
+  return <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${api.isDesktop ? "is-desktop" : ""} ${withDetail ? "with-detail" : ""} ${terminalVisible ? "terminal-visible" : ""} ${terminalVisible && terminalExpanded ? "terminal-expanded" : ""} ${page === "terminals" ? "terminal-workspace" : ""}`} style={{
     "--terminal-height": `${Math.min(terminalHeight, terminalMaxHeight)}px`
   }}>
     {api.isDesktop && <div className="desktop-titlebar" aria-hidden="true" />}
-    <aside className="sidebar">
-      <div className="brand"><img className="brand-mark" src={`${import.meta.env.BASE_URL}assets/envara-icon.png`} alt="" /><div><div className="brand-name">Envara{language.startsWith("zh") && <span>境舱</span>}</div><div className="brand-caption">{t("独立工作空间")}</div></div></div>
-      <div className="sidebar-section">{t("工作区")}</div>
-      <nav className="navigation" aria-label={t("主导航")}>{navItems.map(({
-          id,
-          label,
-          icon: Icon
-        }) => <button key={id} className={`nav-item ${page === id ? "active" : ""}`} aria-current={page === id ? "page" : undefined} onClick={() => navigate(id)}><Icon size={20} weight={page === id ? "fill" : "regular"} /><span>{t(label)}</span>{id === "profiles" && <span className="nav-count">{profiles.length}</span>}</button>)}</nav>
-      <div className="sidebar-bottom"><button className={`nav-item settings-navigation ${page === "settings" ? "active" : ""}`} aria-current={page === "settings" ? "page" : undefined} onClick={() => navigate("settings")}><Gear size={20} weight={page === "settings" ? "fill" : "regular"} /><span>{t("设置")}</span></button><div className="owner" title={`${t("本地工作区")} · ${t("设备所有者")}`}><div className="owner-avatar">{t("境")}</div><div><strong>{t("本地工作区")}</strong><span>{totalBytes > 0 ? `${t("环境数据")} ${bytes(totalBytes)}` : t("设备所有者")}</span></div><span className="local-dot" /></div></div>
-    </aside>
+    <WorkspaceSidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(value => !value)} page={page} onNavigate={navigate} count={profiles.length} totalBytes={totalBytes} language={language} t={t} />
     <main className="main-panel">
       <header className="page-header"><div className="page-heading"><div className="heading-line"><h1 tabIndex={-1}>{t(page === "settings" ? "设置" : navItems.find(item => item.id === page)?.label)}</h1>{!api.isDesktop && <span className="preview-badge">{t("界面预览")}</span>}</div></div>
         {page === "profiles" && <div className="header-actions"><Button icon={UploadSimple} onClick={() => importProfiles()} disabled={pending["importProfiles:"]}>{t("导入")}</Button><Button icon={Plus} className="primary" onClick={() => setModal({
@@ -1622,11 +1634,11 @@ function WorkspaceApp() {
             })} /></div><div className="settings-row"><div><strong>{t("本地数据")}</strong><span className="path-label">{t(system.dataDir)}</span></div><Button icon={FolderOpen} disabled={!api.isDesktop} onClick={() => perform("openDataDirectory")}>{t("打开目录")}</Button></div></div>
         {api.isDesktop && snapshot.legacyMigration?.available && <div className="settings-card settings-rows migration-settings"><div className="settings-row"><div><strong>{t("旧版本工作区")}</strong></div><Button onClick={previewMigration} disabled={pending["previewLegacyMigration:"]}>{t("迁移旧环境")}</Button></div></div>}
         {api.isDesktop && linkRouter && <><div className="section-heading"><h2>{t("打开链接")}</h2></div><div className="settings-card settings-rows">
-          <div className="settings-row"><div><strong>{t("境舱内打开链接")}</strong><span>{t("境舱与普通终端的链接使用所选浏览器；关闭后改用系统浏览器（环境外）。Claude 会话不受影响。")}</span></div>
+          <div className="settings-row"><div><strong>{t("境舱内打开链接")}</strong><span>{t("境舱及普通终端链接使用所选浏览器；关闭后转到系统浏览器（环境外）。Claude 会话不变。")}</span></div>
             <label className="proxy-check-option settings-switch"><input type="checkbox" aria-label={t("境舱内打开链接")} checked={linkRouter.preference !== false} disabled={linkRoutingPending} onChange={async event => { const result = await perform("setLinkRouter", { enabled: event.target.checked }); if (result.ok && result.result) setLinkRouter(result.result); }} /><span>{t(linkRouter.preference !== false ? "已开启" : "已关闭")}</span></label>
           </div>
           {linkRouter.available && <div className="settings-row"><div><strong>{t("附加应用链接接管（可选）")}</strong>
-            <span>{t(linkRouter.enabled ? "已启用系统链接接管。恢复原默认浏览器不会改变境舱内链接偏好。" : "仅用于附加应用通过 macOS 打开的链接。macOS 会请求将境舱设为默认浏览器；无关应用仍使用原默认浏览器，终端链接无需此授权。")}</span>
+            <span>{t(linkRouter.enabled ? "已接管系统链接；恢复原默认浏览器不影响境舱内偏好。" : "仅接管附加应用的系统链接。macOS 将请求把境舱设为默认浏览器；无关应用仍用原浏览器，终端无需此授权。")}</span>
             {!linkRouter.enabled && linkRouter.preference === false && <span>{t("请先开启境舱内链接。")}</span>}
           </div>
             {linkRouter.enabled ? <Button disabled={linkRoutingPending} onClick={async () => { const result = await perform("disableSystemLinkRouting"); if (result.ok && result.result) setLinkRouter(result.result); }}>{t("恢复原默认浏览器")}</Button>

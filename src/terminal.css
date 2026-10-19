@@ -33,6 +33,33 @@
 .terminal-timezone.is-fallback { color: var(--warning); }
 .terminal-language { flex-shrink: 0; color: var(--text-muted); font-size: var(--font-size-xs, 12px); }
 .terminal-language.is-fallback { color: var(--warning); }
+.terminal-saved-terminals { flex: none; min-width: 0; border-bottom: 1px solid var(--border); background: var(--bg-inset); font-size: var(--font-size-xs, 12px); }
+.terminal-saved-terminals > summary { display: flex; align-items: center; gap: 6px; min-height: var(--control-height-sm, 30px); padding: 4px 14px; color: var(--text-secondary); cursor: pointer; list-style: none; }
+.terminal-saved-terminals > summary::-webkit-details-marker { display: none; }
+.terminal-saved-terminals > summary > svg { flex: none; transform: rotate(-90deg); }
+.terminal-saved-terminals[open] > summary > svg { transform: none; }
+.terminal-saved-terminals > summary > small { color: var(--text-muted); font-size: inherit; font-variant-numeric: tabular-nums; }
+.terminal-saved-terminals > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.terminal-saved-list { max-height: var(--terminal-saved-max-height, 80px); overflow-y: auto; overscroll-behavior: contain; padding: 0 8px 6px; }
+.terminal-saved-empty { margin: 0; padding: 3px 6px 5px; color: var(--text-muted); line-height: 1.5; }
+.terminal-saved-entry { min-width: 0; border-radius: var(--radius-control, 8px); }
+.terminal-saved-row { display: flex; align-items: center; min-width: 0; }
+.terminal-saved-open { display: grid; gap: 4px; flex: 1; min-width: 0; padding: 6px; border: 0; border-radius: var(--radius-control, 8px); background: transparent; color: var(--text-secondary); text-align: left; }
+.terminal-saved-open:hover:not(:disabled) { background: var(--icon-hover); color: var(--text); }
+.terminal-saved-heading { display: flex; align-items: center; min-width: 0; gap: 10px; }
+.terminal-saved-heading > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-size-xs, 12px); font-weight: var(--weight-medium, 500); }
+.terminal-saved-heading > small { display: inline-flex; align-items: center; gap: 5px; flex: none; color: var(--text-muted); font-size: inherit; }
+.terminal-saved-context { display: flex; align-items: center; gap: 12px; min-width: 0; color: var(--text-muted); font-size: var(--font-size-xs, 12px); }
+.terminal-saved-account { flex: 0 1 auto; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-saved-directory { display: flex; align-items: center; flex: 1; gap: 5px; min-width: 0; font-family: var(--font-mono); }
+.terminal-saved-directory > svg { flex: none; }
+.terminal-saved-directory > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-saved-actions, .terminal-saved-editor-actions { display: flex; flex: none; align-items: center; gap: 4px; }
+.terminal-saved-editor { display: grid; gap: 8px; padding: 4px 6px 10px; }
+.terminal-saved-editor > label { display: grid; gap: 6px; min-width: 0; color: var(--text-muted); }
+.terminal-saved-editor input { width: 100%; min-width: 0; min-height: var(--control-height-sm, 30px); padding: 5px 8px; border: 1px solid var(--input-border); border-radius: var(--radius-control, 8px); background: var(--input-bg); color: var(--text); font: inherit; user-select: text; }
+.terminal-saved-editor p { margin: 0; color: var(--text-muted); line-height: 1.5; overflow-wrap: anywhere; }
+.terminal-saved-editor-actions { justify-content: flex-end; flex-wrap: wrap; }
 .terminal-session-bar { display: flex; align-items: center; flex-wrap: wrap; flex-shrink: 0; min-height: 36px; padding: 2px var(--space-2, 8px); gap: 2px var(--space-2, 8px); border-bottom: 1px solid var(--border); background: var(--bg-inset); }
 .terminal-session-tabs { display: flex; align-items: center; flex: 1 1 180px; min-width: 0; gap: var(--space-1, 4px); min-height: var(--control-height-sm, 30px); overflow-x: auto; scroll-behavior: auto; }
 .terminal-session-tab { max-width: min(260px, calc(100vw - 48px)); display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; font-size: var(--font-size-xs, 12px); color: var(--text-muted); border: 0; background: transparent; padding: 6px 9px; border-radius: var(--radius-control, 8px) var(--radius-control, 8px) 0 0; }
@@ -78,13 +105,18 @@
 .terminal-new-session-field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; font-size: var(--font-size-xs, 12px); color: var(--text-muted); }
 .terminal-ssh-note { margin: 0; color: var(--text-muted); font-size: var(--font-size-xs, 12px); line-height: 1.5; overflow-wrap: anywhere; }
 .terminal-ssh-fields, .terminal-ssh-list, .terminal-ssh-identity { display: grid; gap: 10px; min-width: 0; }
-.terminal-ssh-fields label, .terminal-ssh-connection > label, .terminal-ssh-unlock label { display: grid; gap: 6px; min-width: 0; color: var(--text-muted); font-size: var(--font-size-xs, 12px); }
-.terminal-ssh-fields input, .terminal-ssh-fields select, .terminal-ssh-connection > label > input, .terminal-ssh-unlock input { width: 100%; min-width: 0; min-height: var(--control-height, 36px); padding: 6px 8px; border: 1px solid var(--input-border); border-radius: var(--radius-control, 8px); background: var(--input-bg); color: var(--text); font: inherit; font-size: var(--font-size-sm, 13px); }
+.terminal-ssh-fields label, .terminal-ssh-connection > label, .terminal-ssh-details > label, .terminal-ssh-unlock label { display: grid; gap: 6px; min-width: 0; color: var(--text-muted); font-size: var(--font-size-xs, 12px); }
+.terminal-ssh-fields input, .terminal-ssh-fields select, .terminal-ssh-connection > label > input, .terminal-ssh-details > label > input, .terminal-ssh-unlock input { width: 100%; min-width: 0; min-height: var(--control-height, 36px); padding: 6px 8px; border: 1px solid var(--input-border); border-radius: var(--radius-control, 8px); background: var(--input-bg); color: var(--text); font: inherit; font-size: var(--font-size-sm, 13px); }
 .terminal-ssh-target { display: grid; grid-template-columns: minmax(0, 1fr) 88px; gap: 8px; }
 .terminal-ssh-connection { display: grid; gap: 7px; min-width: 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-control, 8px); background: var(--bg-surface); font-size: var(--font-size-xs, 12px); overflow-wrap: anywhere; }
 .terminal-ssh-connection > strong { color: var(--text); font-weight: var(--weight-medium, 500); }
 .terminal-ssh-connection > span, .terminal-ssh-connection summary { color: var(--text-muted); }
-.terminal-ssh-connection > label > input { font-family: var(--font-mono); user-select: text; }
+.terminal-ssh-connection > label > input, .terminal-ssh-details > label > input { font-family: var(--font-mono); user-select: text; }
+.terminal-ssh-details > label { margin-top: 8px; }
+.terminal-ssh-details summary, .terminal-ssh-help summary { color: var(--text-secondary); cursor: pointer; }
+.terminal-ssh-details > summary:focus-visible, .terminal-ssh-help > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.terminal-ssh-help { padding-top: 8px; border-top: 1px solid var(--border); font-size: var(--font-size-xs, 12px); }
+.terminal-ssh-help > div { display: grid; gap: 8px; margin-top: 8px; }
 .terminal-ssh-remove-button { justify-self: end; }
 .terminal-ssh-unlock { display: grid; gap: 8px; min-width: 0; }
 .terminal-ssh-remove p { margin: 0 0 8px; line-height: 1.5; }
@@ -139,7 +171,7 @@
 .terminal-text-button, .terminal-empty-start, .terminal-close-session, .terminal-duplicate-session { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1, 4px); min-height: var(--control-height-sm, 30px); max-width: 100%; border-radius: var(--radius-control, 8px); font-size: var(--font-size-xs, 12px); line-height: 1.4; text-align: center; white-space: normal; }
 .terminal-text-button { --control-rest-background: var(--control-bg); --control-rest-border: var(--control-border); --control-rest-color: var(--text-secondary); --control-hover-background: var(--control-hover); --control-hover-border: var(--border-strong); --control-active-background: var(--control-active); }
 .terminal-start-button, .terminal-empty-start { --control-rest-background: var(--info-bg); --control-rest-border: var(--info-border); --control-rest-color: var(--accent-text); --control-hover-background: var(--selected-hover); --control-hover-border: var(--selected-edge); --control-hover-color: var(--accent-text); --control-active-background: var(--selected-bg); }
-.terminal-close-session, .terminal-account-delete { --control-hover-color: var(--danger); }
+.terminal-close-session, .terminal-account-delete, .terminal-saved-remove { --control-hover-color: var(--danger); }
 .terminal-account-delete { --control-rest-color: var(--danger); }
 .terminal-duplicate-session { --control-hover-color: var(--accent-text); }
 button:is(.terminal-icon-button, .terminal-text-button, .terminal-empty-start, .terminal-close-session, .terminal-duplicate-session):hover:not(:disabled, [aria-disabled="true"], [aria-busy="true"]) { background: var(--control-hover-background); border-color: var(--control-hover-border); color: var(--control-hover-color); }

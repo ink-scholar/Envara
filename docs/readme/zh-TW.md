@@ -5,7 +5,7 @@
 <p align="center"><strong>讓每一套工作，都有獨立的境艙。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原創程式碼授權：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.4-475569" alt="Envara 1.0.4" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.0-475569" alt="Envara 1.1.0" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 種 README 語言" /></a>
 </p>
 <p align="center">
@@ -20,6 +20,13 @@
 境艙是開源的本機桌面工作台，將網路出口、瀏覽器設定檔、終端工具與支援的桌面應用程式整合在一起。每個環境保存自己的設定與資料，你可以為不同專案、帳號或地區建立不同的工作脈絡，在同一個介面中管理。
 
 ![Envara 中文原生工作區](../media/workspace-zh-CN.png)
+
+## 1.1.0：更順手的工作台
+
+- **精簡介面與可收合導覽**：收合左側導覽，為瀏覽器、終端與應用程式內容留出更多空間，常用操作維持集中。
+- **具名儲存終端**：普通與 Claude 終端都有持久入口；可返回執行中的工作階段，或依儲存的設定重開閒置 shell，不會重播命令。
+- **自訂 MCP 與外掛**：官方 Claude CLI 可探索境艙內的使用者、專案與本地設定，同時保留固定瀏覽器工具與工作階段網路限制。
+- **依目標選擇 SSH 路線**：macOS 已儲存主機使用本機出口，未儲存目標使用環境代理；連線失敗不會切換路線。
 
 <p align="center"><sub>原生 Electron 工作區，截圖使用合成範例資料。</sub></p>
 
@@ -45,7 +52,7 @@
 
 建立工作階段時，選擇**網路、開啟連結用的瀏覽器與專案資料夾**，設定與歷史紀錄依環境保存。真實 PTY、多工作階段、拖曳調整高度、展開工作區、獨立視窗，讓命令列成為工作台中順手的一部分。
 
-macOS 支援透過所選代理建立[受控 SSH 連線](../claude-code-sessions.md)，私鑰保留在本機。
+macOS 的[受控 SSH 連線](../claude-code-sessions.md)對已儲存的主機與連接埠組合使用本機目前的網路出口（包括既有系統 VPN/TUN），遠端可見該出口 IP；未儲存的組合可用 `ssh user@host` 經境艙代理連線。已儲存連線尚未授權時會拒絕，不會改走代理；私鑰保留在本機。1.1.0 的新建終端使用這些路線；既有工作階段保留原本的設定。
 
 複製終端會在同一套環境設定中開啟新的閒置程序；關閉面板後，仍能回來繼續使用。支援的 macOS 受管回環路由使用網路圍欄，不支援代理的程式會連線失敗，避免悄悄改走直連。專案資料夾仍在原來的位置，方便繼續使用你熟悉的工具鏈。
 

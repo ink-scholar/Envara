@@ -65,8 +65,8 @@ export function LanguageWelcome() {
         </fieldset>
         {error && <p className="language-welcome-error" role="alert"><WarningCircle size={17} />{t(error)}</p>}
         <button className="button primary language-start-button" type="submit" disabled={saving}>{saving ? <ArrowsClockwise size={18} className="spin" /> : null}{t(saving ? '正在保存…' : '开始使用')}{!saving && <ArrowRight size={18} />}</button>
-        <p className="language-welcome-hint">{t('以后可以在设置中随时更改。')}</p>
-        <p className="language-welcome-scope">{t('界面语言不会更改境舱的浏览器语言或网络。')}</p>
+        <p className="language-welcome-hint">{t('可在设置中更改。')}</p>
+        <p className="language-welcome-scope">{t('不影响浏览器语言和网络。')}</p>
       </form>}
     </section>
   </div>;

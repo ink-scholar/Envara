@@ -5,7 +5,7 @@ const identifier = (value) => {
   return value;
 };
 
-export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'deleteClaudeAccount', 'claudeInstallationStatus', 'listTerminalSshConnections', 'prepareTerminalSshIdentity', 'prepareTerminalSshPassword', 'setTerminalSshPassword', 'saveTerminalSshConnection', 'removeTerminalSshConnection']);
+export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'renameSavedTerminal', 'removeSavedTerminal', 'reopenSavedTerminal', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'deleteClaudeAccount', 'claudeInstallationStatus', 'listTerminalSshConnections', 'prepareTerminalSshIdentity', 'prepareTerminalSshPassword', 'setTerminalSshPassword', 'saveTerminalSshConnection', 'removeTerminalSshConnection']);
 const PROFILE_CONFIGURATION = new Set(['updateProfile', 'deleteProfile']);
 const PROXY_CONFIGURATION = new Set(['saveProxy', 'deleteProxy']);
 const GROUP_CONFIGURATION = new Set(['saveGroup', 'deleteGroup', 'clearGroupProxy']);
@@ -187,6 +187,16 @@ export class TerminalController {
   async dispatch(method, args = {}, context = {}) {
     if (!TERMINAL_METHODS.has(method)) throw fail('不支持的终端操作。');
     if (!args || typeof args !== 'object' || Array.isArray(args)) throw fail('终端参数格式无效。', 'VALIDATION_ERROR');
+    if (['renameSavedTerminal', 'removeSavedTerminal', 'reopenSavedTerminal'].includes(method)) {
+      const keys = method === 'renameSavedTerminal' ? ['id', 'entryId', 'name'] : method === 'reopenSavedTerminal' ? ['id', 'entryId', 'requestId'] : ['id', 'entryId'];
+      if (Object.keys(args).some(key => !keys.includes(key)) || typeof args.entryId !== 'string') throw fail('终端参数格式无效。', 'VALIDATION_ERROR');
+      const release = method === 'reopenSavedTerminal' ? await this.terminal.reserveSavedTerminalStart({ id: args.id, entryId: args.entryId }) : null;
+      return this.serialize(async () => {
+        await this.profile(args.id);
+        return this.terminal[method]({ id: args.id, entryId: args.entryId, ...(method === 'renameSavedTerminal' ? { name: args.name } : {}),
+          ...(method === 'reopenSavedTerminal' ? { requestId: args.requestId } : {}) });
+      }).finally(() => release?.());
+    }
     if (method === 'terminalSnapshot') {
       if (args.id != null) await this.profile(args.id);
       return this.terminal.snapshot(args);

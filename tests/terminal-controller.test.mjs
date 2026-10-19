@@ -383,3 +383,24 @@ test('password preparation refuses stale windows and foreign or expired selectio
   await assert.rejects(fresh.controller.dispatch('saveTerminalSshConnection', args, fresh.context), { code: 'SSH_SELECTION_EXPIRED' });
   assert.equal(fresh.calls.some(([type]) => type === 'save'), false);
 });
+
+test('saved terminal RPC uses only a bound entry id and never accepts renderer directory or account injection', async () => {
+  const f = fixture(async () => { throw new Error('saved entries never invoke a directory picker'); }), entryId = 'savedterm_1234567890abcdef1234567890abcdef';
+  let reserved = 0, released = 0;
+  f.terminal.reserveSavedTerminalStart = async args => { assert.deepEqual(args, { id: 'prof_a', entryId }); reserved++; return () => { released++; }; };
+  for (const method of ['reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal']) f.terminal[method] = async args => { f.calls.push([method, args]); return { accepted: method }; };
+  assert.deepEqual(await f.controller.dispatch('reopenSavedTerminal', { id: 'prof_a', entryId, requestId: 'request_1' }), { accepted: 'reopenSavedTerminal' });
+  assert.deepEqual(f.calls, [['reopenSavedTerminal', { id: 'prof_a', entryId, requestId: 'request_1' }]]);
+  assert.equal(reserved, 1); assert.equal(released, 1);
+  assert.deepEqual(await f.controller.dispatch('renameSavedTerminal', { id: 'prof_a', entryId, name: 'Named terminal' }), { accepted: 'renameSavedTerminal' });
+  assert.deepEqual(await f.controller.dispatch('removeSavedTerminal', { id: 'prof_a', entryId }), { accepted: 'removeSavedTerminal' });
+  const count = f.calls.length;
+  for (const [method, extra] of [['reopenSavedTerminal', { cwd: '/renderer/path' }], ['reopenSavedTerminal', { directoryToken: 'injected' }],
+    ['reopenSavedTerminal', { claudeAccountId: 'default' }], ['reopenSavedTerminal', { browserProfileId: 'other' }],
+    ['renameSavedTerminal', { path: '/renderer/path' }], ['removeSavedTerminal', { confirmed: true }]])
+    await assert.rejects(f.controller.dispatch(method, { id: 'prof_a', entryId, ...extra }), { code: 'VALIDATION_ERROR' });
+  assert.equal(f.calls.length, count); assert.equal(reserved, 1);
+  f.profiles.length = 0;
+  await assert.rejects(f.controller.dispatch('reopenSavedTerminal', { id: 'prof_a', entryId }), { code: 'PROFILE_NOT_FOUND' });
+  assert.equal(released, 2); assert.equal(f.calls.length, count);
+});

@@ -1,4 +1,5 @@
-/** Opt-in, disposable password SSH acceptance. No user passwords/accounts,
+/** Opt-in, disposable saved-password SSH acceptance through host-direct relays.
+ * Only an owned loopback SSH server is used. No user passwords/accounts,
  * external SSH endpoints, model calls, real remote shell or host settings.
  * ELECTRON_RUN_AS_NODE=1 <Electron-or-Envara> scripts/verify-terminal-ssh-password-fixture.mjs --run
  * Optional --packaged /absolute/Envara.app --claude /absolute/native/versions/X.Y.Z
@@ -22,7 +23,8 @@ for (let i = 0; i < argv.length; i++) {
 const option = name => argv.includes(name) ? argv[argv.indexOf(name) + 1] : null;
 if (!argv.includes('--run')) {
   console.log(JSON.stringify({ schema: 'envara.ssh-password-fixture-plan/v1', optIn: true, productionReady: false,
-    ownedLoopbackOnly: true, syntheticPasswordsOnly: true, remoteShell: false, downloads: false, modelCalls: false, hostSettingsModified: false }));
+    savedHostRoute: 'host-direct', ownedLoopbackOnly: true, syntheticPasswordsOnly: true,
+    remoteShell: false, downloads: false, modelCalls: false, hostSettingsModified: false }));
   process.exit(0);
 }
 assert.equal(process.platform, 'darwin'); assert(process.versions.electron, 'Use ELECTRON_RUN_AS_NODE=1 and Electron.');
@@ -56,10 +58,11 @@ const password = randomBytes(24).toString('hex'), wrongPassword = randomBytes(24
 const proxyUser = randomBytes(12).toString('hex'), proxyPassword = randomBytes(24).toString('hex');
 const secrets = [password, wrongPassword];
 const proof = { schema: 'envara.ssh-password-app-lifetime-fixture/v1', passed: false, packagedModules: !!resources, checks: [],
-  limitations: ['Owned loopback Paramiko fixture only, no real account or public upstream acceptance.',
+  limitations: ['Saved key/password SSH uses host-direct relays to an owned loopback Paramiko server; no real account, public host exit or external endpoint is tested.',
+    'The environment proxy rejects all CONNECT requests and must remain unused; unsaved-host proxy routing is covered by the separate routing fixture.',
     'Optional official Claude runs --version only. MCP bindings are synthetic; no model request or browser launch.',
     'Time advancement uses only injected clocks, never the system clock. Route revocation uses the real service failure callback, not a real core crash.'] };
-const stats = { proxyConnections: 0, mapped: 0, passwordAttempts: 0, passwordRejected: 0, authenticated: 0,
+const stats = { proxyConnections: 0, serverConnections: 0, passwordAttempts: 0, passwordRejected: 0, authenticated: 0,
   publicKeyAttempts: 0, executions: 0, ptyRequests: 0, interactive: 0, pong: 0, active: 0, closed: 0 };
 const peers = new Set(), output = new Map(), managersChildren = [], brokerDirectories = new Set(), passwordBrokerPaths = new Map(), lifecycle = [];
 let launchSpecificationsChecked = 0;
@@ -70,6 +73,9 @@ let finiteAlias = null, finiteClock = Date.now(), finiteDeadline = null;
 const now = () => Date.now() + clockOffset;
 const check = text => { proof.checks.push(text); console.log(`PASS ${text}`); };
 const countSnapshot = () => ({ ...stats });
+const assertNoConnection = before => {
+  for (const key of ['serverConnections', 'proxyConnections', 'passwordAttempts', 'publicKeyAttempts']) assert.equal(stats[key], before[key], key);
+};
 const serverSource = String.raw`import json,sys,socket,threading,time,paramiko,base64
 root=sys.argv[1]; secret=json.loads(sys.stdin.readline())['password']
 client=base64.b64decode(open(root+'/client.pub').read().split()[1])
@@ -122,7 +128,7 @@ def serve(sock):
   if transport: transport.close()
   sock.close();event('closed')
 while True:
- sock,_=listener.accept();threading.Thread(target=serve,args=(sock,),daemon=True).start()
+ sock,_=listener.accept();event('accepted');threading.Thread(target=serve,args=(sock,),daemon=True).start()
 `;
 async function ownedProcesses() {
   const { stdout } = await run('/bin/ps', ['-axo', 'pid=,ppid=,lstart=,comm=']);
@@ -173,6 +179,7 @@ try {
     for (;;) { const end = buffered.indexOf('\n'); if (end < 0) break; const line = buffered.slice(0, end); buffered = buffered.slice(end + 1);
       try { const item = JSON.parse(line);
         if (item.event === 'ready') sshPort = item.port;
+        if (item.event === 'accepted') stats.serverConnections++;
         if (item.event === 'passwordAttempt') { stats.passwordAttempts++; if (!item.accepted) stats.passwordRejected++; }
         if (item.event === 'publicKeyAttempt') stats.publicKeyAttempts++;
         if (item.event === 'authenticated') stats.authenticated++;
@@ -192,10 +199,9 @@ try {
       buffer = Buffer.concat([buffer, chunk]); if (buffer.length > 16384) return socket.destroy(); const at = buffer.indexOf('\r\n\r\n'); if (at < 0) return;
       socket.off('data', parse); socket.pause(); const header = buffer.subarray(0, at).toString('latin1');
       if (!header.split('\r\n').includes(`Proxy-Authorization: ${basic}`)) return socket.end('HTTP/1.1 407 Refused\r\n\r\n');
-      if (!header.startsWith('CONNECT ssh-password.envara.invalid:1030 HTTP/1.1\r\n')) return socket.end('HTTP/1.1 403 Refused\r\n\r\n');
-      const upstream = net.connect({ host: '127.0.0.1', port: sshPort }); peers.add(upstream);
-      upstream.on('error', () => socket.destroy()); upstream.once('close', () => { peers.delete(upstream); socket.destroy(); }); socket.once('close', () => upstream.destroy());
-      upstream.once('connect', () => { stats.mapped++; socket.write('HTTP/1.1 200 OK\r\n\r\n'); const tail = buffer.subarray(at + 4); if (tail.length) upstream.write(tail); upstream.pipe(socket); socket.pipe(upstream); socket.resume(); });
+      // Saved SSH must use its main-process relay. This context-only proxy
+      // cannot map a synthetic hostname or silently provide the saved route.
+      socket.end('HTTP/1.1 403 Refused\r\n\r\n');
     });
   });
   await new Promise((resolve, reject) => { proxyServer.once('error', reject); proxyServer.listen(0, '127.0.0.1', resolve); });
@@ -203,7 +209,7 @@ try {
   for (const directory of [dataDir, hostHome, working]) await mkdir(directory, { mode: 0o700 });
   await mkdir(path.join(hostHome, '.ssh'), { mode: 0o700 });
   const hostPublic = (await readFile(path.join(temporary, 'server.pub'), 'utf8')).trim().split(/\s+/).slice(0, 2).join(' ');
-  await writeFile(path.join(hostHome, '.ssh/known_hosts'), `[ssh-password.envara.invalid]:1030 ${hostPublic}\n`, { mode: 0o600 });
+  await writeFile(path.join(hostHome, '.ssh/known_hosts'), `[127.0.0.1]:${sshPort} ${hostPublic}\n`, { mode: 0o600 });
   manager = new TerminalSshManager({ dataDir, hostHome, nodeExecutable: node, agentRoot: path.join(temporary, 'agents'), now,
     spawn: (...args) => { const child = spawn(...args); managersChildren.push(child); return child; } });
   const actualBrokerFactory = manager.createPasswordBroker;
@@ -240,11 +246,11 @@ try {
   await manager.ready;
   const records = new Map();
   for (const id of ['pw-main', 'pw-wrong', 'pw-revoke', 'pw-mixed', 'pw-finite']) {
-    const prepared = await manager.preparePassword({ id, host: 'ssh-password.envara.invalid', port: 1030, user: 'fixture' });
+    const prepared = await manager.preparePassword({ id, host: '127.0.0.1', port: sshPort, user: 'fixture' });
     records.set(id, await manager.save({ id, name: 'Disposable password SSH', selectionToken: prepared.selectionToken, password: id === 'pw-wrong' ? wrongPassword : password }));
   }
   finiteAlias = records.get('pw-finite').alias;
-  const mixedIdentity = await manager.prepareIdentity({ id: 'pw-mixed', host: 'ssh-password.envara.invalid', port: 1030, user: 'fixture', keyPath: path.join(temporary, 'client') });
+  const mixedIdentity = await manager.prepareIdentity({ id: 'pw-mixed', host: '127.0.0.1', port: sshPort, user: 'fixture', keyPath: path.join(temporary, 'client') });
   const mixedKey = await manager.save({ id: 'pw-mixed', name: 'Disposable app-lifetime key authority', selectionToken: mixedIdentity.selectionToken });
   check('Temporary password grants use existing isolated host trust and main memory; connection records contain no password.');
   const proxy = { protocol: 'http', host: '127.0.0.1', port: proxyServer.address().port, username: proxyUser, password: proxyPassword };
@@ -271,12 +277,14 @@ try {
   const create = id => terminal.create({ id, directory: working, fresh: true });
   const invoke = (session, id = 'pw-main') => command(session, `ssh -T ${records.get(id).alias} envara-fixture`);
   phase = 'plain-password-command'; const first = await create('pw-main'); assert(first.networkFence && first.ssh.privateKeyProtection);
+  const beforeFirst = countSnapshot();
   const firstResult = await invoke(first); assert.equal(firstResult.code, 0); assert(firstResult.text.includes('ENVARA_PASSWORD_EXEC_OK'));
-  check('Ordinary fenced PTY performs real native password SSH authentication and receives the fixed command marker.');
-  phase = 'duplicate'; const beforeDuplicate = stats.passwordAttempts, second = await terminal.duplicate({ sessionId: first.sessionId });
-  assert(second.sessionId !== first.sessionId); assert.equal(stats.passwordAttempts, beforeDuplicate);
+  assert.equal(stats.serverConnections, beforeFirst.serverConnections + 1); assert.equal(stats.proxyConnections, 0);
+  check('Ordinary fenced PTY authenticates saved password SSH through its host-direct relay to the owned server without contacting the environment proxy.');
+  phase = 'duplicate'; const beforeDuplicate = countSnapshot(), second = await terminal.duplicate({ sessionId: first.sessionId });
+  assert(second.sessionId !== first.sessionId); assertNoConnection(beforeDuplicate);
   const secondResult = await invoke(second); assert.equal(secondResult.code, 0); assert(secondResult.text.includes('ENVARA_PASSWORD_EXEC_OK'));
-  check('Duplicated shell is idle and independent, then authenticates through its own password broker on explicit SSH.');
+  check('Duplicated shell is idle and independent, then authenticates through its own password broker and host-direct relay on explicit SSH.');
   phase = 'mixed-key-password'; const mixed = await create('pw-mixed');
   assert(terminal.sessions.get(mixed.sessionId).sshBinding.agentSocket);
   const keyResult = await command(mixed, `ssh -T ${mixedKey.alias} envara-fixture`);
@@ -364,7 +372,7 @@ try {
   await wait(() => new RegExp(`${abruptDone}:\\d+`).test(text(first).slice(start)), 'FIXTURE_ABRUPT_CLIENT_HANG', 15000);
   assert.notEqual(Number(new RegExp(`${abruptDone}:(\\d+)`).exec(text(first).slice(start))[1]), 0);
   proof.abruptTransportEOF = { remoteClosedWithoutChannelClose: true, nativeClientReturnedFailure: true, noHang: true };
-  check('Abrupt remote transport EOF without SSH channel-close returns a native failure promptly rather than retaining the client or proxy command.');
+  check('Abrupt remote transport EOF without SSH channel-close returns a native failure promptly through the saved host-direct route.');
   phase = 'cancel-interactive';
   const beforeCancelOwned = await ownedProcesses(), cancelSession = await terminal.duplicate({ sessionId: first.sessionId });
   start = text(cancelSession).length;
@@ -380,13 +388,15 @@ try {
   proof.cancellation = { terminalClose: true, observedOwnedFamilyCount: cancelOwned.length, observedFamilyAbsent: true };
   assert.equal((await command(second, 'true')).code, 0);
   check('Closing an owned interactive terminal cancels native SSH and removes its observed process family and broker; another session remains usable.');
-  phase = 'wrong-password'; const wrong = await create('pw-wrong'), beforeWrong = stats.passwordAttempts, rejected = await invoke(wrong, 'pw-wrong');
-  assert.notEqual(rejected.code, 0); assert.equal(stats.passwordAttempts - beforeWrong, 1); assert(stats.passwordRejected > 0);
+  phase = 'wrong-password'; const wrong = await create('pw-wrong'), beforeWrong = countSnapshot(), rejected = await invoke(wrong, 'pw-wrong');
+  assert.notEqual(rejected.code, 0); assert.equal(stats.passwordAttempts - beforeWrong.passwordAttempts, 1); assert(stats.passwordRejected > 0);
+  assert.equal(stats.serverConnections, beforeWrong.serverConnections + 1); assert.equal(stats.proxyConnections, beforeWrong.proxyConnections);
   await terminal.close({ sessionId: wrong.sessionId });
   check('A wrong synthetic password makes exactly one server authentication attempt and never succeeds.');
   phase = 'changed-host-key'; await writeFile(path.join(temporary, 'mode'), 'changed');
-  const attemptsBeforeChanged = stats.passwordAttempts, changed = await invoke(first);
-  assert.notEqual(changed.code, 0); assert.equal(stats.passwordAttempts, attemptsBeforeChanged);
+  const beforeChanged = countSnapshot(), changed = await invoke(first);
+  assert.notEqual(changed.code, 0); assert.equal(stats.passwordAttempts, beforeChanged.passwordAttempts);
+  assert.equal(stats.serverConnections, beforeChanged.serverConnections + 1); assert.equal(stats.proxyConnections, beforeChanged.proxyConnections);
   await writeFile(path.join(temporary, 'mode'), 'normal');
   check('Changed host key is refused before any password authentication attempt.');
   let dedicated = null, excludedProgram = null;
@@ -398,7 +408,7 @@ try {
     const result = await invoke(dedicated); assert.equal(result.code, 0); assert(result.text.includes('ENVARA_PASSWORD_EXEC_OK')); assert.equal(browserLaunches, 0);
     excludedProgram = terminal.sessions.get(dedicated.sessionId).claudeLaunch.executable;
     proof.claude = { version: path.basename(claude), versionOnly: true, modelCalled: false, deviceIdentifierRestrictions: true };
-    check('Dedicated Claude session runs only the unchanged native CLI version, then real password SSH, retaining device and browser-session restrictions.');
+    check('Dedicated Claude session runs only the unchanged native CLI version, then saved password SSH through its host-direct relay, retaining device and browser-session restrictions.');
   }
   phase = 'broker-fence';
   const firstLease = manager.sessions.get(first.sessionId), otherLease = manager.sessions.get(second.sessionId);
@@ -432,10 +442,11 @@ try {
   await wait(() => stats.closed > closedBeforeRevoke, 'FIXTURE_REVOKE_ACTIVE_REMAINS');
   await wait(() => new RegExp(`${revokedDone}:\\d+`).test(text(revoked).slice(revokedStart)), 'FIXTURE_REVOKE_CLIENT_REMAINS');
   assert.notEqual(Number(new RegExp(`${revokedDone}:(\\d+)`).exec(text(revoked).slice(revokedStart))[1]), 0);
-  const beforeRevoked = stats.passwordAttempts, revokedResult = await command(revoked, `ssh -T ${records.get('pw-revoke').alias} envara-fixture`);
-  assert.notEqual(revokedResult.code, 0); assert.equal(stats.passwordAttempts, beforeRevoked); await original.dispose(); await terminal.close({ sessionId: revoked.sessionId });
-  proof.routeRevocation = { activeConnectionClosed: true, clientReturned: true, subsequentAuthenticationRefused: true };
-  check('Production route-failure callback closes active password SSH and revokes further authentication in the retained shell.');
+  const beforeRevoked = countSnapshot(), revokedResult = await command(revoked, `ssh -T ${records.get('pw-revoke').alias} envara-fixture`);
+  assert.notEqual(revokedResult.code, 0); assertNoConnection(beforeRevoked); await original.dispose(); await terminal.close({ sessionId: revoked.sessionId });
+  proof.routeRevocation = { activeConnectionClosed: true, clientReturned: true, subsequentAuthenticationRefused: true,
+    subsequentServerContacted: false, subsequentProxyContacted: false };
+  check('Production route-failure callback closes active saved password SSH and refuses further server or proxy contact in the retained shell.');
   phase = 'finite-broker-authorization';
   const finite = await create('pw-finite'), finiteStart = text(finite).length, finiteDone = `EVPW_FINITE_${randomBytes(7).toString('hex')}`;
   assert(Number.isSafeInteger(finiteDeadline));
@@ -452,10 +463,10 @@ try {
   await wait(() => new RegExp(`${finiteDone}:\\d+`).test(text(finite).slice(finiteStart)), 'FIXTURE_FINITE_CLIENT_RETURN');
   assert.equal(Number(new RegExp(`${finiteDone}:(\\d+)`).exec(text(finite).slice(finiteStart))[1]), 0);
   const beforeFiniteNew = countSnapshot(), finiteRefused = await invoke(finite, 'pw-finite');
-  assert.notEqual(finiteRefused.code, 0); assert.equal(stats.passwordAttempts, beforeFiniteNew.passwordAttempts); assert.equal(stats.proxyConnections, beforeFiniteNew.proxyConnections);
+  assert.notEqual(finiteRefused.code, 0); assertNoConnection(beforeFiniteNew);
   await terminal.close({ sessionId: finite.sessionId });
   proof.finiteBrokerAuthorization = { factoryFiniteDeadlineOnly: true, existingConnectionPongAfterExpiry: true,
-    naturalExitCode: 0, newAuthenticationRefused: true, newAuthenticationContactedProxy: false };
+    naturalExitCode: 0, newAuthenticationRefused: true, newAuthenticationContactedServer: false, newAuthenticationContactedProxy: false };
   check('The real broker finite-deadline compatibility path refuses new authentication after expiry while the already authenticated SSH connection still carries PONG and exits normally.');
   if (dedicated) await terminal.close({ sessionId: dedicated.sessionId });
   await terminal.close({ sessionId: first.sessionId }); await terminal.close({ sessionId: second.sessionId });
@@ -475,13 +486,17 @@ try {
   const restartedDescription = terminal.readSessionSshConnections(terminal.sessions.get(afterRestart.sessionId));
   assert.equal(restartedDescription.status, 'empty'); assert.equal(restartedDescription.expiresAt, null);
   const restartResult = await invoke(afterRestart); assert.notEqual(restartResult.code, 0);
-  assert.equal(stats.proxyConnections, trafficBeforeRestart.proxyConnections); assert.equal(stats.passwordAttempts, trafficBeforeRestart.passwordAttempts);
+  assertNoConnection(trafficBeforeRestart);
   await terminal.close({ sessionId: afterRestart.sessionId });
-  proof.applicationRestart = { savedConnectionPreserved: true, passwordReady: false, newConnectionRefused: true, proxyContacted: false };
+  proof.applicationRestart = { savedConnectionPreserved: true, passwordReady: false, newConnectionRefused: true,
+    serverContacted: false, proxyContacted: false };
   check('Closing and recreating the manager models an application restart: public connection settings remain but the memory-only password is unavailable and no route or authentication is attempted.');
   proof.secretChecks.boundedConfigurationFilesChecked = await inspectSecretFiles(temporary, excludedProgram);
   proof.secretChecks.launchSpecificationsChecked = launchSpecificationsChecked;
   for (const secret of secrets) for (const value of output.values()) assert(!value.includes(secret));
+  assert(stats.serverConnections > 0); assert.equal(stats.proxyConnections, 0);
+  proof.savedRoute = { route: 'host-direct', ownedLoopbackOnly: true,
+    acceptedServerConnections: stats.serverConnections, environmentProxyConnections: stats.proxyConnections };
   proof.passed = true;
 } catch (error) {
   proof.failure = { phase, code: /^[A-Z_\d]+$/.test(String(error?.code ?? '')) ? String(error.code) : 'FIXTURE_ASSERTION' };

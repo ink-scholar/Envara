@@ -19,14 +19,22 @@ async function waitFor(predicate, message = 'condition', timeout = 1500) {
   while (!predicate()) { if (Date.now() > deadline) throw new Error(`Timed out waiting for ${message}`); await delay(5); }
 }
 async function fixture(t, overrides = {}) {
+  const { withDirectTransport = false, ...brokerOverrides } = overrides;
   const root = await mkdtemp(path.join(await realpath('/tmp'), 'evsb-'));
   const directory = path.join(root, 'lease'), publicDirectory = path.join(directory, 'public');
   await mkdir(publicDirectory, { recursive: true, mode: 0o700 });
   const configPath = path.join(publicDirectory, 'config'), targetsPath = path.join(publicDirectory, 'targets.json');
   await writeFile(configPath, 'Host synthetic\n', { mode: 0o400 });
   await writeFile(targetsPath, JSON.stringify([{ host: connection.host, port: connection.port }]), { mode: 0o400 });
+  let transportServer;
+  const transportSocket = path.join(directory, 'transport.sock');
+  if (withDirectTransport) {
+    transportServer = net.createServer(client => client.destroy());
+    await new Promise((resolve, reject) => { transportServer.once('error', reject); transportServer.listen(transportSocket, resolve); });
+    const { chmod } = await import('node:fs/promises'); await chmod(transportSocket, 0o600);
+  }
   let clock = Date.now(), elapsed = 0, active = true, broker;
-  t.after(async () => { await broker?.dispose(); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { await broker?.dispose(); if (transportServer?.listening) await new Promise(resolve => transportServer.close(resolve)); await rm(root, { recursive: true, force: true }); });
   const children = [], wrapped = [], closed = [];
   const makeChild = (tty = false) => {
     const child = new EventEmitter(); child.pid = 20000 + children.length; child.fd = 100 + children.length; child.writes = []; child.resizes = [];
@@ -53,13 +61,32 @@ async function fixture(t, overrides = {}) {
     ptyFactory: (file, args, settings) => { const child = makeChild(true); child.launch = { file, args, settings }; return child; },
     writePty: async (fd, buffer, offset) => { const child = children.find(item => item.fd === fd); child.writes.push(Buffer.from(buffer.subarray(offset))); return buffer.length - offset; },
     processControl: { capture: async pid => ({ pid }), close: async ({ pty, identity }) => { assert.equal(pty.pid, identity.pid); closed.push(pty.pid); pty.kill('SIGTERM'); return { ok: true }; } },
-    ...overrides,
+    ...(withDirectTransport ? { transportSocket, directToken: 'a'.repeat(64) } : {}), ...brokerOverrides,
   };
   broker = await createPasswordSshBroker(options);
   return { root, directory, publicDirectory, broker, options, children, wrapped, closed,
     advance: milliseconds => { clock += milliseconds; }, advanceMonotonic: milliseconds => { elapsed += milliseconds; },
     revoke: () => { active = false; } };
 }
+
+test('password SSH receives only its exact session direct socket capability inside the existing fence', async t => {
+  const f = await fixture(t, { withDirectTransport: true }), c = await connect(f);
+  await waitFor(() => c.frames[0]?.type === 'ready');
+  const { command, settings } = f.wrapped[0];
+  assert.deepEqual(settings.sshProtection.allowedSockets, [path.join(f.directory, 'auth.sock'), path.join(f.directory, 'transport.sock')]);
+  assert.equal(command.environment.ENVARA_SSH_DIRECT_SOCKET, path.join(f.directory, 'transport.sock'));
+  assert.equal(command.environment.ENVARA_SSH_DIRECT_TOKEN, 'a'.repeat(64));
+  for (const key of ['SSH_AUTH_SOCK', 'USER', 'LOGNAME', 'HOSTNAME', 'PWD', 'TZ', 'DISPLAY']) assert.equal(command.environment[key], undefined, key);
+  assert.equal(command.environment.HOME, f.publicDirectory); assert.equal(command.environment.LC_ALL, 'C');
+  f.children[0].finish(); await waitFor(() => c.frames.some(frame => frame.type === 'exit')); c.channel.destroy();
+});
+
+test('password SSH rejects foreign transport paths and incomplete session capabilities before spawning', async t => {
+  for (const values of [{ transportSocket: '/tmp/foreign.sock', directToken: 'a'.repeat(64) },
+    { transportSocket: null, directToken: 'a'.repeat(64) }, { transportSocket: '/tmp/transport.sock', directToken: null }]) {
+    await assert.rejects(fixture(t, values), { code: 'SSH_BROKER_INVALID' });
+  }
+});
 async function connect(f, argv = [connection.alias, 'id'], extra = {}) {
   const channel = net.createConnection({ path: f.broker.socket }), frames = []; let buffer = '';
   channel.on('error', () => {});

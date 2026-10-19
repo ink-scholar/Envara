@@ -1,6 +1,6 @@
 # Claude Code sessions
 
-This document describes Envara 1.0.2. Terminal input and package checks are recorded in [1.0.2 verification](verification.md#102-发布验证). The release target is macOS arm64; published 1.0.1 package verification and the maintainer's confirmed payment-flow result are recorded in [release verification](verification.md#101-发布验证). Historical measurements retain their original package scope; they do not establish final-package Claude account or model-call acceptance. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
+This document describes Envara 1.0.3. Controlled SSH and package checks are recorded in [1.0.3 verification](verification.md#103-发布验证); terminal input checks remain in [1.0.2 verification](verification.md#102-发布验证). The release target is macOS arm64; published 1.0.1 package verification and the maintainer's confirmed payment-flow result are recorded in [release verification](verification.md#101-发布验证). Historical measurements retain their original package scope; they do not establish final-package Claude account or model-call acceptance. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
 
 ## Start and installation
 
@@ -54,6 +54,22 @@ The ordinary link-routing switch does not replace a dedicated Claude session's p
 When the owned route core exits, matching Claude processes and browser capabilities are revoked. Other nodes retain their lifecycle. Provider/API errors with the core still alive are reported by the official CLI; Envara does not rotate accounts or nodes.
 
 Implementation: [browser broker](../electron/terminal-browser-broker.mjs), [network fence](../electron/terminal-network-fence.mjs), [terminal lifecycle](../electron/terminal-service.mjs).
+
+## SSH through the environment route
+
+From 1.0.3, in **Terminal → SSH connections**, enter a connection name, server, port and user, then select a private key with the native file picker. The key must have its matching `.pub` file, permissions exactly `0600` and an existing trusted host entry in the host's `known_hosts`. Confirm the displayed public fingerprints and save. End active sessions before changing connections, then start a new ordinary or Claude terminal and use the displayed `ssh envara-…` command. Do not pass a host private-key path with `-i`.
+
+Saved aliases support interactive SSH and remote commands, with optional `-T`, `-t`, `-v`, `-vv` or `-vvv`. This entry point does not integrate `scp`, `sftp`, `ProxyJump`, port forwarding or arbitrary OpenSSH configuration arguments such as `-i`, `-p`, `-F` and `-o`.
+
+The native SSH client uses an authenticated CONNECT helper through the selected loopback route, without local destination DNS or direct fallback. Each terminal owns a separate OpenSSH agent containing only the selected identities, constrained to the saved server host keys and usernames. Agent forwarding, password fallback and host-key auto-acceptance are disabled. Agent authorization lasts one hour; start a new terminal to renew it. An established SSH connection is not immediately disconnected when that authorization expires.
+
+Private keys remain in their original location. Only native `ssh-add` loads them; the application stores references and public identity information outside exported profile data. New fenced terminals cannot read the registered private-key paths or the host `.ssh` directory, modify their generated SSH configuration, or use other managed sessions' agents. Encrypted keys requiring an interactive passphrase are currently refused. Removing a connection or closing a terminal preserves the original key and account data.
+
+These protections apply to new macOS fenced process trees and require OpenSSH 8.9 or later. Existing processes cannot receive a new Seatbelt profile. The boundary does not isolate unrelated applications running as the same macOS user, copies of keys at unknown locations, or an agent's destination host key reused on another server. The agent constraint identifies host keys and usernames; the connection helper additionally checks the configured hostname and port. Existing device restrictions and privacy opt-outs remain in place, with no guarantee against account restrictions.
+
+A local proxy's HTTP 200 is only a transport acknowledgement. SSH success requires host-key verification, authentication and a server response. An upstream 502, missing banner or timeout leaves the connection failed; changing the client helper cannot make an unreachable server or an unsupported upstream route reachable.
+
+Implementation: [SSH manager](../electron/terminal-ssh-manager.mjs), [CONNECT helper](../electron/terminal-ssh-proxy.mjs). The [owned local acceptance](../scripts/verify-terminal-ssh-fixture.mjs) uses disposable keys and a loopback server; [opt-in server acceptance](../scripts/verify-terminal-ssh.mjs) uses an explicitly selected existing route and checks a read-only remote command. Neither substitutes for a model-directed tool invocation or general SSH/server compatibility testing.
 
 ## Privacy and verification boundaries
 

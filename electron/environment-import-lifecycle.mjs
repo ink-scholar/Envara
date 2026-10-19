@@ -8,7 +8,8 @@ const dataMutations = new Set(['createProfile', 'updateProfile', 'cloneProfile',
   'saveProxy', 'deleteProxy', 'saveGroup', 'deleteGroup', 'clearGroupProxy', 'bulkProfiles', 'migrateLegacy', 'saveSettings', 'installEngine',
   'chooseWorkspaceDirectory', 'setTerminalLinkBrowser', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'createClaudeAccount',
   'renameClaudeAccount', 'deleteClaudeAccount', 'saveApplication', 'startApplication', 'runNotionTrial', 'deleteApplication', 'clearApplicationData',
-  'deleteSignInData', 'setApplicationLinkBrowser', 'setupApplicationRouting', 'reclaimApplicationStorage']);
+  'deleteSignInData', 'setApplicationLinkBrowser', 'setupApplicationRouting', 'reclaimApplicationStorage',
+  'saveTerminalSshConnection', 'removeTerminalSshConnection']);
 
 export function isEnvironmentDataMutation(method, args = {}) {
   return dataMutations.has(method) && !(method === 'bulkProfiles' && args?.action === 'stop');

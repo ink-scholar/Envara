@@ -47,6 +47,22 @@ test('account deletion excludes a same-environment export or import while other 
   deletionGate.resolve(); await deletion;
   assert.equal(await lock.transfer(async () => 'ready', 'env_one'), 'ready');
 });
+
+test('SSH configuration changes respect environment transfer locks while read-only selection remains available', async () => {
+  const lock = new DesktopEnvironmentTransferLock(), gate = deferred();
+  const transfer = lock.transfer(() => gate.promise, 'env_one');
+  for (const method of ['saveTerminalSshConnection', 'removeTerminalSshConnection']) {
+    assert.equal(isEnvironmentDataMutation(method), true);
+    assert.equal(environmentMutationProfile(method, { id: 'env_one' }), 'env_one');
+    await assert.rejects(lock.mutate(method, {}, async () => assert.fail('configuration must not change during transfer'), 'env_one'), { code: 'ENVIRONMENT_TRANSFER_BUSY' });
+    assert.equal(await lock.mutate(method, {}, async () => 'other allowed', 'env_two'), 'other allowed');
+  }
+  for (const method of ['listTerminalSshConnections', 'prepareTerminalSshIdentity']) {
+    assert.equal(isEnvironmentDataMutation(method), false);
+    assert.equal(await lock.mutate(method, {}, async () => 'metadata only', 'env_one'), 'metadata only');
+  }
+  gate.resolve(); await transfer;
+});
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'envara-import-lifecycle-'));
   t.after(() => rm(root, { recursive: true, force: true }));

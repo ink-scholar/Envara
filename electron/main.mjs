@@ -18,6 +18,7 @@ import { BrowserRuntime } from './runtime.mjs';
 import { SidecarManager } from './sidecar-manager.mjs';
 import { BrowseForgeService } from './browseforge-service.mjs';
 import { TerminalService } from './terminal-service.mjs';
+import { TerminalSshManager } from './terminal-ssh-manager.mjs';
 import { TerminalBrowserBroker } from './terminal-browser-broker.mjs';
 import { TerminalController, TERMINAL_METHODS } from './terminal-controller.mjs';
 import { resolveTerminalView, terminalViewSnapshot } from './terminal-view.mjs';
@@ -771,6 +772,8 @@ async function initializeDesktopServices({ checkOpen }) {
     terminal = new TerminalService({
       dataDir,
       linkChannel,
+      sshManager: new TerminalSshManager({ dataDir, hostHome: app.getPath('home'),
+        nodeExecutable: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'backend', 'playwright-driver', process.platform === 'win32' ? 'node.exe' : 'node') }),
       browserBroker: terminalBrowserBroker,
       additionalExecutablePaths: [path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'backend', 'playwright-driver')],
       resolveContext: id => service.resolveWorkspaceContext(id),
@@ -797,6 +800,14 @@ async function initializeDesktopServices({ checkOpen }) {
       if (!parent || parent.isDestroyed()) throw new Error('终端窗口已关闭。');
       parent.show(); parent.focus();
       const choice = await dialog.showOpenDialog(parent, { title: '选择此境舱的工作目录', properties: ['openDirectory'], ...(currentPath ? { defaultPath: currentPath } : {}) });
+      return { canceled: choice.canceled, path: choice.filePaths[0] };
+    }, pickSSHIdentity: async (_target, context) => {
+      const parent = context?.window;
+      if (!parent || parent.isDestroyed()) throw Object.assign(new Error('终端窗口已关闭。'), { code: 'SSH_WINDOW_CLOSED' });
+      if (process.platform !== 'darwin') throw Object.assign(new Error('SSH 连接目前仅支持 macOS。'), { code: 'SSH_UNSUPPORTED' });
+      parent.show(); parent.focus();
+      const choice = await dialog.showOpenDialog(parent, { properties: ['openFile'] });
+      if (parent.isDestroyed()) throw Object.assign(new Error('终端窗口已关闭。'), { code: 'SSH_WINDOW_CLOSED' });
       return { canceled: choice.canceled, path: choice.filePaths[0] };
     } });
     const routingRoot = path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'app-routing');

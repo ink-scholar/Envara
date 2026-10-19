@@ -76,6 +76,24 @@
 .terminal-new-session-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2, 8px); }
 .terminal-new-session > label > .terminal-new-session-egress { color: var(--accent-text); font-size: var(--font-size-xs, 12px); font-variant-numeric: tabular-nums; line-height: 1.5; }
 .terminal-new-session-field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; font-size: var(--font-size-xs, 12px); color: var(--text-muted); }
+.terminal-ssh-note { margin: 0; color: var(--text-muted); font-size: var(--font-size-xs, 12px); line-height: 1.5; overflow-wrap: anywhere; }
+.terminal-ssh-fields, .terminal-ssh-list, .terminal-ssh-identity { display: grid; gap: 10px; min-width: 0; }
+.terminal-ssh-fields label, .terminal-ssh-connection > label { display: grid; gap: 6px; min-width: 0; color: var(--text-muted); font-size: var(--font-size-xs, 12px); }
+.terminal-ssh-fields input, .terminal-ssh-connection > label > input { width: 100%; min-width: 0; min-height: var(--control-height, 36px); padding: 6px 8px; border: 1px solid var(--input-border); border-radius: var(--radius-control, 8px); background: var(--input-bg); color: var(--text); font: inherit; font-size: var(--font-size-sm, 13px); }
+.terminal-ssh-target { display: grid; grid-template-columns: minmax(0, 1fr) 88px; gap: 8px; }
+.terminal-ssh-connection { display: grid; gap: 7px; min-width: 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-control, 8px); background: var(--bg-surface); font-size: var(--font-size-xs, 12px); overflow-wrap: anywhere; }
+.terminal-ssh-connection > strong { color: var(--text); font-weight: var(--weight-medium, 500); }
+.terminal-ssh-connection > span, .terminal-ssh-connection summary { color: var(--text-muted); }
+.terminal-ssh-connection > label > input { font-family: var(--font-mono); user-select: text; }
+.terminal-ssh-remove-button { justify-self: end; }
+.terminal-ssh-remove p { margin: 0 0 8px; line-height: 1.5; }
+.terminal-ssh-connections dl { display: grid; gap: 8px; margin: 8px 0 0; font-size: var(--font-size-xs, 12px); }
+.terminal-ssh-connections dt { margin-bottom: 4px; color: var(--text-muted); }
+.terminal-ssh-connections dd { margin: 0; color: var(--text-secondary); font-family: var(--font-mono); overflow-wrap: anywhere; user-select: text; }
+.terminal-ssh-connections code { display: block; font: inherit; }
+.terminal-ssh-identity { padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-control, 8px); background: var(--bg-surface); }
+.terminal-ssh-identity > label { display: flex; align-items: flex-start; gap: 8px; color: var(--text-secondary); font-size: var(--font-size-xs, 12px); line-height: 1.5; }
+.terminal-ssh-identity input { margin-top: 3px; flex: none; }
 .terminal-session-kind { display: flex; gap: var(--space-1, 4px); padding: var(--space-1, 4px); border: 1px solid var(--border); border-radius: var(--radius-control, 8px); background: var(--bg-inset); }
 .terminal-session-kind button { flex: 1; min-width: 0; min-height: var(--control-height-sm, 30px); padding: var(--space-1, 4px) var(--space-2, 8px); border: 0; border-radius: var(--radius-sm, 7px); background: transparent; color: var(--text-muted); font-size: var(--font-size-xs, 12px); line-height: 1.4; }
 .terminal-session-kind button:hover:not(:disabled, [aria-disabled="true"], [aria-busy="true"]) { background: var(--icon-hover); color: var(--text); }

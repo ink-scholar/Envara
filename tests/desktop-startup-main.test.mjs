@@ -174,6 +174,23 @@ test('an independent terminal window cannot dispatch workspace actions or anothe
   assert.equal(f.calls.length, 2);
 });
 
+test('all SSH connection actions remain inside the independent terminal window environment', async () => {
+  const f = fixture();
+  Object.assign(f.views.get(f.event.sender), { kind: 'terminal', profileId: 'prof_fixture' });
+  await f.startup.start();
+  const methods = ['listTerminalSshConnections', 'prepareTerminalSshIdentity', 'saveTerminalSshConnection', 'removeTerminalSshConnection'];
+  for (const method of methods) {
+    await assert.rejects(f.api.call(method, { id: 'other-profile' }), /此窗口仅操作当前环境/);
+    await assert.rejects(f.api.call(method, {}), /此窗口仅操作当前环境/);
+  }
+  assert.equal(f.calls.length, 0);
+  for (const method of methods) await f.api.call(method, { id: 'prof_fixture' });
+  assert.deepEqual(f.calls.map(item => item.method), methods);
+  f.event.senderFrame = {};
+  await assert.rejects(f.api.call('prepareTerminalSshIdentity', { id: 'prof_fixture' }), /不允许的请求来源/);
+  assert.equal(f.calls.length, methods.length);
+});
+
 test('terminal bootstrap uses its bound environment and workspace snapshots omit proxy credentials', async () => {
   const f = fixture();
   Object.assign(f.views.get(f.event.sender), { kind: 'terminal', profileId: 'prof_fixture' });

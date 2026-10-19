@@ -5,7 +5,7 @@
 <p align="center"><strong>作業ごとに、独立したひとつの環境を。</strong><br />ブラウザーも、ターミナルも、アプリも。同じ作業環境で。</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="独自コードのライセンス：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.2-475569" alt="Envara 1.0.2" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.3-475569" alt="Envara 1.0.3" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 言語の README" /></a>
 </p>
 <p align="center">
@@ -44,6 +44,8 @@ Envara は、ネットワーク出口、ブラウザープロファイル、タ�
 ### ⌨️ ターミナルにも、独立した作業環境を
 
 新しいセッションでは、**ネットワーク、リンクを開くブラウザー、プロジェクトフォルダー**を選択。設定と履歴は環境ごとに保存します。実際の PTY、複数セッション、高さを調整できるパネル、ワークスペースへの展開、独立ウィンドウで、コマンドラインも作業台の使いやすい一部になります。
+
+macOS では、選択したプロキシを経由する[管理下の SSH 接続](../claude-code-sessions.md)に対応し、秘密鍵は Mac 上に保持されます。
 
 ターミナルの複製では、同じ設定で新しい待機中のプロセスを作成します。パネルを閉じても、セッションに戻って作業を続けられます。対応する macOS の管理下ループバック経路にはネットワーク制限を適用し、プロキシ非対応のプログラムは接続に失敗するため、意図しない直接接続を防ぎます。プロジェクトフォルダーは元の場所にあり、使い慣れたツールチェーンを引き続き利用できます。
 

@@ -201,3 +201,124 @@ test('Claude install source and read-only status are explicitly scoped to the se
   assert.deepEqual(seen[0], ['status', { id: 'prof_a' }]);
   assert.equal(seen[1][1].claudeInstallSource, 'local');
 });
+
+function sshFixture(pickSSHIdentity) {
+  const f = fixture();
+  const sourceWindow = { destroyed: false, isDestroyed() { return this.destroyed; } };
+  const publicConnection = { id: 'ssh_a', name: 'Fixture server', alias: 'envara-0123456789ab', host: 'server.example', port: 2222,
+    user: 'fixture', keyLabel: 'fixture_key', keyFingerprint: 'SHA256:fixture-key', hostFingerprints: ['SHA256:fixture-host'] };
+  const calls = [];
+  f.controller.pickSSHIdentity = pickSSHIdentity ?? (async (args, context) => {
+    calls.push(['pick', args, context.window]); return { canceled: false, path: '/native-picker/fixture_key' };
+  });
+  f.terminal.listTerminalSshConnections = async args => { calls.push(['list', args]); return { supported: true, connections: [publicConnection] }; };
+  f.terminal.prepareTerminalSshIdentity = async args => { calls.push(['prepare', args]); return { ...publicConnection, selectionToken: 'manager-token', keyPath: '/never-public/key', privateBytes: 'not-public' }; };
+  f.terminal.saveTerminalSshConnection = async args => { calls.push(['save', args]); return publicConnection; };
+  f.terminal.removeTerminalSshConnection = async args => { calls.push(['remove', args]); return { removed: true }; };
+  return { ...f, calls, sourceWindow, context: { window: sourceWindow }, publicConnection,
+    request: { id: 'prof_a', host: 'server.example', port: 2222, user: 'fixture' } };
+}
+
+test('SSH listing and native key selection expose only public metadata and a window-sealed capability', async () => {
+  const f = sshFixture();
+  f.terminal.listTerminalSshConnections = async args => { f.calls.push(['list', args]); return { supported: true,
+    connections: [{ ...f.publicConnection, keyPath: '/never-public/key', routeCredentials: 'not-public' }], agentSocket: '/never-public/socket' }; };
+  assert.deepEqual(await f.controller.dispatch('listTerminalSshConnections', { id: 'prof_a', keyPath: '/renderer/key' }),
+    { supported: true, connections: [f.publicConnection] });
+  const prepared = await f.controller.dispatch('prepareTerminalSshIdentity', { ...f.request, keyPath: '/renderer/key', hostFingerprints: ['forged'] }, f.context);
+  assert.match(prepared.selectionToken, /^[0-9a-f-]{36}$/);
+  assert.notEqual(prepared.selectionToken, 'manager-token');
+  assert.equal(Object.hasOwn(prepared, 'keyPath'), false);
+  assert.equal(Object.hasOwn(prepared, 'privateBytes'), false);
+  assert.deepEqual(prepared.hostFingerprints, ['SHA256:fixture-host']);
+  assert.deepEqual(f.calls.find(([type]) => type === 'pick'), ['pick', f.request, f.sourceWindow]);
+  assert.deepEqual(f.calls.find(([type]) => type === 'prepare'), ['prepare', { ...f.request, keyPath: '/native-picker/fixture_key' }]);
+  const saved = await f.controller.dispatch('saveTerminalSshConnection', { id: 'prof_a', name: 'Saved name', selectionToken: prepared.selectionToken,
+    host: 'forged.example', keyPath: '/renderer/key', hostFingerprints: ['forged'] }, f.context);
+  assert.deepEqual(saved, { supported: true, connections: [f.publicConnection] });
+  assert.deepEqual(f.calls.find(([type]) => type === 'save'), ['save', { id: 'prof_a', name: 'Saved name', selectionToken: 'manager-token' }]);
+  await assert.rejects(f.controller.dispatch('saveTerminalSshConnection', { id: 'prof_a', name: 'Again', selectionToken: prepared.selectionToken }, f.context), { code: 'SSH_SELECTION_EXPIRED' });
+});
+
+test('SSH selections cannot cross windows or environments and cannot be supplied as manager tokens', async () => {
+  const f = sshFixture();
+  f.profiles.push({ id: 'prof_b', name: 'Other' });
+  const prepared = await f.controller.dispatch('prepareTerminalSshIdentity', f.request, f.context);
+  const save = { id: 'prof_a', name: 'Fixture', selectionToken: prepared.selectionToken };
+  const otherWindow = { isDestroyed: () => false };
+  await assert.rejects(f.controller.dispatch('saveTerminalSshConnection', save, { window: otherWindow }), { code: 'SSH_SELECTION_MISMATCH' });
+  await assert.rejects(f.controller.dispatch('saveTerminalSshConnection', { ...save, id: 'prof_b' }, f.context), { code: 'SSH_SELECTION_MISMATCH' });
+  await assert.rejects(f.controller.dispatch('saveTerminalSshConnection', { ...save, selectionToken: 'manager-token' }, f.context), { code: 'SSH_SELECTION_EXPIRED' });
+  assert.equal(f.calls.some(([type]) => type === 'save'), false);
+  await f.controller.dispatch('saveTerminalSshConnection', save, f.context);
+  assert.equal(f.calls.filter(([type]) => type === 'save').length, 1, 'a rejected foreign window does not consume the owner’s token');
+});
+
+test('active SSH configuration is read-only while selection remains available and becomes savable after sessions close', async () => {
+  const f = sshFixture();
+  const prepared = await f.controller.dispatch('prepareTerminalSshIdentity', f.request, f.context);
+  for (const status of ['starting', 'running', 'closing']) {
+    f.state.profiles[0].sessions = [{ sessionId: 'active', status }];
+    await f.controller.dispatch('listTerminalSshConnections', { id: 'prof_a' }, f.context);
+    await assert.rejects(f.controller.dispatch('saveTerminalSshConnection', { id: 'prof_a', name: 'Fixture', selectionToken: prepared.selectionToken }, f.context), { code: 'SSH_TERMINAL_BUSY' });
+    await assert.rejects(f.controller.dispatch('removeTerminalSshConnection', { id: 'prof_a', connectionId: 'ssh_a' }, f.context), { code: 'SSH_TERMINAL_BUSY' });
+  }
+  const replacement = await f.controller.dispatch('prepareTerminalSshIdentity', f.request, f.context);
+  assert.equal(f.calls.filter(([type]) => ['save', 'remove'].includes(type)).length, 0);
+  f.state.profiles[0].sessions = [{ sessionId: 'ended', status: 'exited' }];
+  await f.controller.dispatch('saveTerminalSshConnection', { id: 'prof_a', name: 'Fixture', selectionToken: replacement.selectionToken }, f.context);
+  await f.controller.dispatch('removeTerminalSshConnection', { id: 'prof_a', connectionId: 'ssh_a', keyPath: '/renderer/key' }, f.context);
+  assert.deepEqual(f.calls.filter(([type]) => ['save', 'remove'].includes(type)), [
+    ['save', { id: 'prof_a', name: 'Fixture', selectionToken: 'manager-token' }], ['remove', { id: 'prof_a', connectionId: 'ssh_a' }],
+  ]);
+});
+
+test('cancelled SSH key selection and invalid targets never reach the identity manager', async () => {
+  const f = sshFixture(async () => ({ canceled: true }));
+  assert.deepEqual(await f.controller.dispatch('prepareTerminalSshIdentity', f.request, f.context), { canceled: true });
+  for (const change of [{ host: '' }, { host: '-option' }, { host: 'bad\nhost' }, { port: 0 }, { port: '22' }, { port: 65536 }, { user: 'bad\nuser' }])
+    await assert.rejects(f.controller.dispatch('prepareTerminalSshIdentity', { ...f.request, ...change }, f.context), { code: 'SSH_INVALID_INPUT' });
+  await assert.rejects(f.controller.dispatch('prepareTerminalSshIdentity', f.request), { code: 'SSH_WINDOW_CLOSED' });
+  assert.equal(f.calls.some(([type]) => type === 'prepare'), false);
+});
+
+test('closing the source window or deleting its environment during the SSH picker prevents preparation', async () => {
+  for (const action of ['close', 'delete']) {
+    let f;
+    f = sshFixture(async () => {
+      if (action === 'close') f.sourceWindow.destroyed = true;
+      else f.profiles.length = 0;
+      return { canceled: false, path: '/native-picker/fixture_key' };
+    });
+    await assert.rejects(f.controller.dispatch('prepareTerminalSshIdentity', f.request, f.context), { code: action === 'close' ? 'SSH_WINDOW_CLOSED' : 'PROFILE_NOT_FOUND' });
+    assert.equal(f.calls.some(([type]) => type === 'prepare'), false);
+    assert.equal(f.controller.pickedSSHIdentities.size, 0);
+  }
+});
+
+test('SSH preparation rechecks source lifetime after the manager returns and selections expire', async () => {
+  const f = sshFixture();
+  f.terminal.prepareTerminalSshIdentity = async () => { f.sourceWindow.destroyed = true; return { ...f.publicConnection, selectionToken: 'manager-token' }; };
+  await assert.rejects(f.controller.dispatch('prepareTerminalSshIdentity', f.request, f.context), { code: 'SSH_WINDOW_CLOSED' });
+  assert.equal(f.controller.pickedSSHIdentities.size, 0);
+  const fresh = sshFixture();
+  const prepared = await fresh.controller.dispatch('prepareTerminalSshIdentity', fresh.request, fresh.context);
+  fresh.controller.pickedSSHIdentities.get(prepared.selectionToken).expiresAt = Date.now() - 1;
+  await assert.rejects(fresh.controller.dispatch('saveTerminalSshConnection', { id: 'prof_a', name: 'Fixture', selectionToken: prepared.selectionToken }, fresh.context), { code: 'SSH_SELECTION_EXPIRED' });
+  assert.equal(fresh.calls.some(([type]) => type === 'save'), false);
+});
+
+test('a queued SSH save rechecks running terminals after an in-progress launch finishes', async () => {
+  const f = sshFixture();
+  const prepared = await f.controller.dispatch('prepareTerminalSshIdentity', f.request, f.context);
+  f.state.profiles[0].cwd = '/selected/workspace';
+  let resolveLaunch, entered;
+  const starting = new Promise(resolve => { entered = resolve; });
+  f.terminal.create = async () => { entered(); await new Promise(resolve => { resolveLaunch = resolve; }); f.state.profiles[0].sessions = [{ sessionId: 'new', status: 'running' }]; return f.state.profiles[0].sessions[0]; };
+  const launch = f.controller.dispatch('openTerminal', { id: 'prof_a', fresh: true });
+  await starting;
+  const save = f.controller.dispatch('saveTerminalSshConnection', { id: 'prof_a', name: 'Fixture', selectionToken: prepared.selectionToken }, f.context);
+  const rejected = assert.rejects(save, { code: 'SSH_TERMINAL_BUSY' });
+  resolveLaunch(); await launch; await rejected;
+  assert.equal(f.calls.some(([type]) => type === 'save'), false);
+});

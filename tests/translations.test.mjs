@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { languages, english, translationCatalog, translate } from '../src/i18n.mjs';
 
 const variables = value => [...value.matchAll(/\{([A-Za-z][A-Za-z0-9_]*)\}/g)].map(match => match[1]).sort();
@@ -65,5 +66,32 @@ test('routing boundaries and incomplete cleanup messages are available in all ni
     const route = translate(messages[0], language, { name: 'Owned route' });
     assert(route.includes('Owned route'));
     assert.equal(route.includes('{name}'), false);
+  }
+});
+
+test('SSH setup, key protection and trusted host instructions are available in all nine languages', () => {
+  const messages = ['SSH 连接', '连接名称', '连接命令', '选择私钥', '更换私钥', '保存连接', '确认移除',
+    '通过环境代理连接；私钥不复制到环境。', '主机指纹（来自本机 known_hosts）', '我已核对密钥和已信任的主机指纹',
+    '本机 known_hosts 没有匹配的可信主机记录，无法保存此连接。', '此密钥需要口令，当前版本暂不支持。',
+    '请先关闭此环境的终端会话，再保存或移除 SSH 连接。更改在新会话中生效。', 'SSH 连接目前仅支持 macOS。',
+    'SSH 密钥授权有效 1 小时；过期后请新建终端会话。'];
+  for (const language of languages) for (const key of messages) {
+    assert(Object.hasOwn(translationCatalog[language], key), `${language}: ${key}`);
+    if (!language.startsWith('zh')) assert.notEqual(translate(key, language), key, `${language}: ${key}`);
+  }
+});
+
+test('SSH runtime failures remain localized through the terminal error message path', () => {
+  const messages = new Set();
+  for (const file of ['terminal-service.mjs', 'terminal-ssh-manager.mjs']) {
+    const source = readFileSync(new URL(`../electron/${file}`, import.meta.url), 'utf8');
+    for (const match of source.matchAll(/(?:fail|codeError)\((?:'[^'\n]+',\s*)?'([^'\n]*[\u4e00-\u9fff][^'\n]*)'/g)) {
+      if (file === 'terminal-ssh-manager.mjs' || match[1].includes('SSH')) messages.add(match[1]);
+    }
+  }
+  assert(messages.size >= 40);
+  for (const language of languages) for (const key of messages) {
+    assert(Object.hasOwn(translationCatalog[language], key), `${language}: ${key}`);
+    if (!language.startsWith('zh')) assert.notEqual(translate(key, language), key, `${language}: ${key}`);
   }
 });

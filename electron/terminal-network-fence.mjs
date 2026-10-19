@@ -10,6 +10,7 @@
 import { execFile } from 'node:child_process';
 import { lstat } from 'node:fs/promises';
 import { promisify } from 'node:util';
+import path from 'node:path';
 
 export const TERMINAL_FENCE_EXECUTABLE = '/usr/bin/sandbox-exec';
 // Default local listeners of common proxy clients (Clash/mihomo and Clash Verge,
@@ -22,6 +23,7 @@ export const KNOWN_LOCAL_PROXY_PORTS = Object.freeze([53, 853, 1053, 1080, 1081,
 const DNSSD_SOCKETS = Object.freeze(['/private/var/run/mDNSResponder', '/var/run/mDNSResponder', '/private/var/tmp/mDNSResponder', '/var/tmp/mDNSResponder']);
 const fail = message => Object.assign(new Error(message), { code: 'TERMINAL_NETWORK_FENCE_UNAVAILABLE' });
 const deviceRestrictionFailure = () => Object.assign(new Error('设备标识读取限制不可用，未启动终端。'), { code: 'TERMINAL_DEVICE_IDENTIFIERS_UNAVAILABLE' });
+const sshProtectionFailure = () => Object.assign(new Error('SSH 私钥读取保护不可用，未启动终端。'), { code: 'TERMINAL_SSH_PROTECTION_UNAVAILABLE' });
 const validPort = value => { const number = Number(value); return Number.isInteger(number) && number >= 1 && number <= 65535 ? number : null; };
 const loopback = host => ['localhost', '::1', '[::1]'].includes(host) || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 
@@ -62,7 +64,52 @@ export function environmentProxyPorts(environment = {}) {
   return ports;
 }
 
-export function terminalFenceProfile({ deniedLoopbackPorts = [], restrictDeviceIdentifiers = false } = {}) {
+function sshProtectionRules(value) {
+  if (value == null) return [];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw sshProtectionFailure();
+  const checkedPath = name => {
+    if (typeof name !== 'string' || !path.isAbsolute(name) || path.normalize(name) !== name || name === '/'
+      || name.length > 4096 || /[\x00-\x1f\x7f]/.test(name)) throw sshProtectionFailure();
+    return name;
+  };
+  const paths = field => {
+    const items = value[field] ?? [];
+    if (!Array.isArray(items) || items.length > 256) throw sshProtectionFailure();
+    return [...new Set(items.map(checkedPath))];
+  };
+  const protectedPaths = paths('protectedPaths'), readablePaths = paths('readablePaths');
+  const readOnlyPaths = paths('readOnlyPaths'), deniedAgentSockets = paths('deniedAgentSockets');
+  const agentRoot = checkedPath(value.agentRoot);
+  const agentSocket = value.agentSocket == null ? null : checkedPath(value.agentSocket);
+  const inside = filename => filename.startsWith(`${agentRoot}/`);
+  if (!protectedPaths.includes(agentRoot) || readablePaths.some(filename => !inside(filename))
+      || agentSocket && !inside(agentSocket)) throw sshProtectionFailure();
+  const filter = (kind, filename) => `(${kind} ${JSON.stringify(filename)})`;
+  const rules = [
+    `(deny file-read* file-write* ${protectedPaths.map(filename => filter('subpath', filename)).join(' ')})`,
+    `(deny network-outbound (remote unix-socket ${filter('subpath', agentRoot)})${deniedAgentSockets.map(filename => ` (remote unix-socket ${filter('literal', filename)})`).join(' ')})`,
+  ];
+  // Only public session configuration is readable. The store, key files and
+  // other sessions' agents remain inaccessible to this process tree.
+  const traversalPaths = new Set();
+  for (const filename of readablePaths) {
+    for (let parent = path.dirname(filename); parent === agentRoot || inside(parent); parent = path.dirname(parent)) traversalPaths.add(parent);
+  }
+  // The helper verifies every ancestor with lstat before opening its public
+  // target file. Permit metadata for those exact directories, not listing or
+  // reading their contents or another session's files.
+  if (traversalPaths.size) rules.push(`(allow file-read-metadata ${[...traversalPaths].map(filename => filter('literal', filename)).join(' ')})`);
+  if (readablePaths.length) rules.push(`(allow file-read* ${readablePaths.map(filename => filter('subpath', filename)).join(' ')})`);
+  if (readOnlyPaths.length) rules.push(`(deny file-write* ${readOnlyPaths.map(filename => filter('subpath', filename)).join(' ')})`);
+  if (agentSocket) {
+    if (deniedAgentSockets.includes(agentSocket)) throw sshProtectionFailure();
+    rules.push(`(allow file-read* file-write-data ${filter('literal', agentSocket)})`,
+      `(allow network-outbound (remote unix-socket ${filter('literal', agentSocket)}))`);
+  }
+  return rules;
+}
+
+export function terminalFenceProfile({ deniedLoopbackPorts = [], restrictDeviceIdentifiers = false, sshProtection = null } = {}) {
   if (typeof restrictDeviceIdentifiers !== 'boolean') throw deviceRestrictionFailure();
   const denied = [...new Set([...KNOWN_LOCAL_PROXY_PORTS, ...deniedLoopbackPorts].map(validPort).filter(Boolean))].sort((a, b) => a - b);
   // Later Seatbelt rules take precedence, so each refusal follows its allowance.
@@ -81,6 +128,7 @@ export function terminalFenceProfile({ deniedLoopbackPorts = [], restrictDeviceI
       '(deny syscall-unix (syscall-number SYS_gethostuuid))',
       '(deny sysctl-read (sysctl-name "kern.uuid"))',
     ] : []),
+    ...sshProtectionRules(sshProtection),
   ].join('\n');
 }
 
@@ -89,7 +137,7 @@ export class TerminalNetworkFence {
     this.platform = platform; this.execute = execute; this.inspect = inspect; this.environment = environment;
   }
   /** Wraps a shell launch; refuses rather than starting an unfenced shell. */
-  async wrap(shell, { routePort, restrictDeviceIdentifiers = false } = {}) {
+  async wrap(shell, { routePort, restrictDeviceIdentifiers = false, sshProtection = null } = {}) {
     if (typeof restrictDeviceIdentifiers !== 'boolean') throw deviceRestrictionFailure();
     if (this.platform !== 'darwin') throw fail('此系统没有终端网络围栏，未启动终端。');
     const allowed = validPort(routePort);
@@ -102,17 +150,18 @@ export class TerminalNetworkFence {
     catch { throw fail('无法读取系统代理设置，未启动终端。'); }
     const denied = new Set([...KNOWN_LOCAL_PROXY_PORTS, ...systemProxyPorts(text), ...environmentProxyPorts(this.environment)]);
     if (denied.has(allowed)) throw fail('终端网络通道与本机代理端口冲突，未启动终端。');
-    const profile = terminalFenceProfile({ deniedLoopbackPorts: [...denied], restrictDeviceIdentifiers });
-    if (restrictDeviceIdentifiers) {
+    const profile = terminalFenceProfile({ deniedLoopbackPorts: [...denied], restrictDeviceIdentifiers, sshProtection });
+    if (restrictDeviceIdentifiers || sshProtection != null) {
       // Validate this OS's interpreter before returning launch authority. This
       // disposable child is separate from the shell; the shell gets one fence.
       try {
         await this.execute(TERMINAL_FENCE_EXECUTABLE, ['-p', profile, '/usr/bin/true'], {
           timeout: 5000, maxBuffer: 4096, env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C' },
         });
-      } catch { throw deviceRestrictionFailure(); }
+      } catch { throw sshProtection != null ? sshProtectionFailure() : deviceRestrictionFailure(); }
     }
     return { executable: TERMINAL_FENCE_EXECUTABLE, args: ['-p', profile, shell.executable, ...shell.args],
-      environment: shell.environment, deniedLoopbackPorts: [...denied].sort((a, b) => a - b), deviceIdentifierRestrictions: restrictDeviceIdentifiers };
+      environment: shell.environment, deniedLoopbackPorts: [...denied].sort((a, b) => a - b), deviceIdentifierRestrictions: restrictDeviceIdentifiers,
+      ...(sshProtection != null ? { sshPrivateKeyProtection: true } : {}) };
   }
 }

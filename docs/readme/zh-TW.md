@@ -5,7 +5,7 @@
 <p align="center"><strong>讓每一套工作，都有獨立的境艙。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原創程式碼授權：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.2-475569" alt="Envara 1.0.2" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.3-475569" alt="Envara 1.0.3" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 種 README 語言" /></a>
 </p>
 <p align="center">
@@ -44,6 +44,8 @@
 ### ⌨️ 終端，也有自己的工作環境
 
 建立工作階段時，選擇**網路、開啟連結用的瀏覽器與專案資料夾**，設定與歷史紀錄依環境保存。真實 PTY、多工作階段、拖曳調整高度、展開工作區、獨立視窗，讓命令列成為工作台中順手的一部分。
+
+macOS 支援透過所選代理建立[受控 SSH 連線](../claude-code-sessions.md)，私鑰保留在本機。
 
 複製終端會在同一套環境設定中開啟新的閒置程序；關閉面板後，仍能回來繼續使用。支援的 macOS 受管回環路由使用網路圍欄，不支援代理的程式會連線失敗，避免悄悄改走直連。專案資料夾仍在原來的位置，方便繼續使用你熟悉的工具鏈。
 

@@ -5,20 +5,33 @@ const identifier = (value) => {
   return value;
 };
 
-export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'deleteClaudeAccount', 'claudeInstallationStatus']);
+export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'deleteClaudeAccount', 'claudeInstallationStatus', 'listTerminalSshConnections', 'prepareTerminalSshIdentity', 'saveTerminalSshConnection', 'removeTerminalSshConnection']);
 const PROFILE_CONFIGURATION = new Set(['updateProfile', 'deleteProfile']);
 const PROXY_CONFIGURATION = new Set(['saveProxy', 'deleteProxy']);
 const GROUP_CONFIGURATION = new Set(['saveGroup', 'deleteGroup', 'clearGroupProxy']);
+const SSH_SELECTION_LIFETIME = 30 * 60 * 1000;
+const sshPublicFields = ['id', 'name', 'alias', 'host', 'port', 'user', 'keyLabel', 'keyFingerprint'];
+const sshPublicIdentity = value => ({ ...Object.fromEntries(sshPublicFields.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])),
+  hostFingerprints: Array.isArray(value.hostFingerprints) ? value.hostFingerprints.filter(item => typeof item === 'string') : [] });
+const sshPublicList = value => ({ supported: value?.supported === true,
+  connections: Array.isArray(value?.connections) ? value.connections.map(sshPublicIdentity) : [] });
+const sshWindow = context => {
+  const source = context?.window;
+  if (!source || typeof source.isDestroyed !== 'function' || source.isDestroyed()) throw fail('终端窗口已关闭。', 'SSH_WINDOW_CLOSED');
+  return source;
+};
 
 /** Serializes directory selection / launch against edits affecting a live PTY. */
 export class TerminalController {
-  constructor({ terminal, service, pickDirectory }) {
+  constructor({ terminal, service, pickDirectory, pickSSHIdentity }) {
     this.terminal = terminal;
     this.service = service;
     this.pickDirectory = pickDirectory;
+    this.pickSSHIdentity = pickSSHIdentity;
     /* Folders picked in the native dialog for one new terminal. The renderer
      * holds only a token, so a directory always comes from the user's pick. */
     this.pickedDirectories = new Map();
+    this.pickedSSHIdentities = new Map();
     this.queue = Promise.resolve();
   }
 
@@ -76,12 +89,70 @@ export class TerminalController {
     return item.path;
   }
 
+  async prepareSSHIdentity(args, context) {
+    const sourceWindow = sshWindow(context);
+    await this.profile(args.id);
+    const host = typeof args.host === 'string' ? args.host.trim() : '';
+    const user = typeof args.user === 'string' ? args.user.trim() : '';
+    if (!host || host.length > 253 || /[\s/\\\x00-\x1f\x7f]/.test(host) || host.startsWith('-')
+      || !/^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/.test(user)
+      || !Number.isInteger(args.port) || args.port < 1 || args.port > 65535) throw fail('请填写有效的 SSH 主机、端口和用户名。', 'SSH_INVALID_INPUT');
+    if (typeof this.pickSSHIdentity !== 'function') throw fail('SSH 连接目前仅支持 macOS。', 'SSH_UNSUPPORTED');
+    sshWindow(context);
+    const choice = await this.pickSSHIdentity({ id: args.id, host, port: args.port, user }, context);
+    sshWindow(context);
+    if (choice?.canceled || !choice?.path) return { canceled: true };
+    await this.profile(args.id);
+    sshWindow(context);
+    // A private key path is obtained only from the native picker. The manager
+    // returns public fingerprints and its own one-use selection capability.
+    const prepared = await this.terminal.prepareTerminalSshIdentity({ id: args.id, host, port: args.port, user, keyPath: choice.path });
+    sshWindow(context);
+    await this.profile(args.id);
+    sshWindow(context);
+    if (typeof prepared?.selectionToken !== 'string' || !prepared.selectionToken) throw fail('无法准备 SSH 密钥，请重新选择。', 'SSH_KEY_INVALID');
+    const now = Date.now();
+    for (const [token, item] of this.pickedSSHIdentities) if (item.expiresAt <= now || item.window.isDestroyed()) this.pickedSSHIdentities.delete(token);
+    // Keep only the latest selection for this environment in this window.
+    for (const [token, item] of this.pickedSSHIdentities) if (item.id === args.id && item.window === sourceWindow) this.pickedSSHIdentities.delete(token);
+    const selectionToken = randomUUID();
+    this.pickedSSHIdentities.set(selectionToken, { id: args.id, window: sourceWindow, selectionToken: prepared.selectionToken,
+      host: prepared.host, port: prepared.port, user: prepared.user, expiresAt: now + SSH_SELECTION_LIFETIME });
+    return { ...sshPublicIdentity(prepared), selectionToken };
+  }
+
+  async assertSSHIdle(id) {
+    const state = await this.terminal.snapshot({ id });
+    if (state.profiles?.find(row => row.profileId === id)?.sessions?.some(row => ['starting', 'running', 'closing'].includes(row.status)))
+      throw fail('请先关闭此环境的终端会话，再保存或移除 SSH 连接。更改在新会话中生效。', 'SSH_TERMINAL_BUSY');
+  }
+
+  async saveSSHConnection(args, context) {
+    const sourceWindow = sshWindow(context);
+    const item = typeof args.selectionToken === 'string' ? this.pickedSSHIdentities.get(args.selectionToken) : null;
+    if (!item || item.expiresAt <= Date.now()) {
+      this.pickedSSHIdentities.delete(args.selectionToken);
+      throw fail('所选 SSH 密钥已失效，请重新选择。', 'SSH_SELECTION_EXPIRED');
+    }
+    if (item.id !== args.id || item.window !== sourceWindow) throw fail('所选 SSH 密钥不属于当前窗口或环境，请重新选择。', 'SSH_SELECTION_MISMATCH');
+    await this.assertSSHIdle(args.id);
+    sshWindow(context);
+    this.pickedSSHIdentities.delete(args.selectionToken);
+    await this.terminal.saveTerminalSshConnection({ id: args.id, name: args.name, selectionToken: item.selectionToken });
+    sshWindow(context);
+    return sshPublicList(await this.terminal.listTerminalSshConnections({ id: args.id }));
+  }
+
   async dispatch(method, args = {}, context = {}) {
     if (!TERMINAL_METHODS.has(method)) throw fail('不支持的终端操作。');
     if (!args || typeof args !== 'object' || Array.isArray(args)) throw fail('终端参数格式无效。', 'VALIDATION_ERROR');
     if (method === 'terminalSnapshot') {
       if (args.id != null) await this.profile(args.id);
       return this.terminal.snapshot(args);
+    }
+    if (method === 'listTerminalSshConnections') {
+      await this.profile(args.id);
+      return sshPublicList(await this.terminal.listTerminalSshConnections({ id: args.id }));
     }
     if (method === 'writeTerminal') return this.terminal.write(args);
     if (method === 'resizeTerminal') return this.terminal.resize(args);
@@ -112,10 +183,20 @@ export class TerminalController {
       identifier(args.id);
       if (method === 'chooseWorkspaceDirectory') return this.selectDirectory(args.id, context);
       if (method === 'pickTerminalDirectory') return this.pickNewDirectory(args.id, context);
+      if (method === 'prepareTerminalSshIdentity') return this.prepareSSHIdentity(args, context);
       /* Which browser this environment's links open in. Allowed while it runs:
        * a link resolves the setting when it is opened. */
       if (method === 'setTerminalLinkBrowser') return this.setLinkBrowser(args);
       await this.profile(args.id);
+      if (method === 'saveTerminalSshConnection') return this.saveSSHConnection(args, context);
+      if (method === 'removeTerminalSshConnection') {
+        sshWindow(context);
+        await this.assertSSHIdle(args.id);
+        sshWindow(context);
+        await this.terminal.removeTerminalSshConnection({ id: args.id, connectionId: args.connectionId });
+        sshWindow(context);
+        return sshPublicList(await this.terminal.listTerminalSshConnections({ id: args.id }));
+      }
       if (method === 'createClaudeAccount') return this.terminal.createClaudeAccount({ id: args.id, name: args.name });
       if (method === 'renameClaudeAccount') return this.terminal.renameClaudeAccount({ id: args.id, accountId: args.accountId, name: args.name });
       // Only the fields a caller may set; a directory comes from a picked token.

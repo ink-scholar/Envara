@@ -5,7 +5,7 @@
 <p align="center"><strong>Um espaço próprio para cada fluxo de trabalho.</strong><br />Um ambiente. Seu navegador, terminal e aplicativos.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licença do código original: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.2-475569" alt="Envara 1.0.2" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.3-475569" alt="Envara 1.0.3" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README em 9 idiomas" /></a>
 </p>
 <p align="center">
@@ -44,6 +44,8 @@ Ao criar um ambiente de rede, o Envara verifica a **saída real com autenticaç�
 ### ⌨️ O terminal também tem seu próprio ambiente de trabalho
 
 Ao criar uma sessão, escolha a **rede, o navegador para abrir links e a pasta do projeto**. As configurações e o histórico são salvos por ambiente. PTYs reais, várias sessões, altura ajustável, expansão na área de trabalho e janelas independentes tornam a linha de comando uma parte prática do espaço de trabalho.
+
+No macOS, as [conexões SSH controladas](../claude-code-sessions.md) usam o proxy selecionado e mantêm as chaves privadas no seu Mac.
 
 Duplicar um terminal abre um novo processo ocioso no mesmo contexto. Você pode fechar o painel e voltar à sessão depois. As rotas de loopback gerenciadas compatíveis no macOS usam uma barreira de rede: programas sem suporte a proxy não conseguem se conectar, evitando conexões diretas silenciosas. A pasta do projeto continua no local original, para que você possa seguir usando suas ferramentas habituais.
 

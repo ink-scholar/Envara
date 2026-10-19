@@ -5,7 +5,7 @@
 <p align="center"><strong>작업마다, 하나의 독립된 환경을.</strong><br />브라우저도, 터미널도, 앱도. 하나의 작업 환경에서.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="자체 코드 라이선스: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.2-475569" alt="Envara 1.0.2" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.3-475569" alt="Envara 1.0.3" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9개 언어의 README" /></a>
 </p>
 <p align="center">
@@ -44,6 +44,8 @@ Envara는 네트워크 경로, 브라우저 프로필, 터미널 도구와 지�
 ### ⌨️ 터미널에도 독립된 작업 환경
 
 새 세션을 만들 때 **네트워크, 링크를 열 브라우저와 프로젝트 폴더**를 선택합니다. 설정과 기록은 환경마다 보관합니다. 실제 PTY, 여러 세션, 높이 조절 패널, 작업 공간으로 확장하기, 독립 창까지 제공해 명령줄도 작업 공간의 편리한 일부가 됩니다.
+
+macOS에서는 선택한 프록시를 통한 [관리형 SSH 연결](../claude-code-sessions.md)을 지원하며, 개인 키는 Mac에 그대로 보관합니다.
 
 터미널을 복제하면 같은 설정을 사용하는 새로운 대기 프로세스가 생성됩니다. 패널을 닫아도 세션으로 돌아와 작업을 이어 갈 수 있습니다. 지원되는 macOS 관리형 루프백 경로에는 네트워크 격리 경계를 적용해, 프록시를 지원하지 않는 프로그램은 연결에 실패하도록 하여 조용히 직접 연결로 우회하는 일을 막습니다. 프로젝트 폴더는 원래 위치에 있으므로 기존 도구 체인을 계속 활용할 수 있습니다.
 

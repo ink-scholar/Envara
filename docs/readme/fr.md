@@ -5,7 +5,7 @@
 <p align="center"><strong>Un environnement dédié à chaque contexte de travail.</strong><br />Votre navigateur, votre terminal et vos applications, dans un même environnement.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licence du code original : MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.2-475569" alt="Envara 1.0.2" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.3-475569" alt="Envara 1.0.3" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README en 9 langues" /></a>
 </p>
 <p align="center">
@@ -44,6 +44,8 @@ Lors de la création d’un environnement réseau, Envara détecte la **sortie r
 ### ⌨️ Un vrai environnement de travail pour le terminal
 
 À la création d’une session, choisissez **le réseau, le navigateur pour les liens et le dossier du projet**. Configurations et historique sont conservés par environnement. Vrais PTY, sessions multiples, hauteur réglable, agrandissement dans l’espace principal et fenêtres indépendantes rendent la ligne de commande facile à intégrer à votre travail.
+
+Sur macOS, les [connexions SSH contrôlées](../claude-code-sessions.md) passent par le proxy sélectionné, tandis que les clés privées restent sur votre Mac.
 
 Dupliquer un terminal ouvre un nouveau processus au repos dans le même contexte. Fermer le panneau laisse la session disponible pour y revenir. Les routes gérées via un relais local prises en charge sur macOS utilisent une barrière réseau : les programmes incompatibles avec le proxy échouent à se connecter plutôt que de passer silencieusement en connexion directe. Vos dossiers de projet restent à leur emplacement d’origine, avec votre chaîne d’outils habituelle.
 

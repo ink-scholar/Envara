@@ -135,7 +135,7 @@ export class TerminalService {
     networkFence = process.platform === 'darwin' ? new TerminalNetworkFence() : null,
     /* Links a fenced terminal asks to open come back through this channel and
      * are opened by the app, never by the host's default browser. */
-    linkChannel = null, browserBroker = null, claudeExecutableResolver = findClaudeExecutable, claudeInstaller = ensureClaudeInstallation, availableLocales = null }) {
+    linkChannel = null, browserBroker = null, sshManager = null, claudeExecutableResolver = findClaudeExecutable, claudeInstaller = ensureClaudeInstallation, availableLocales = null }) {
     if (!path.isAbsolute(dataDir ?? '') || typeof resolveContext !== 'function') throw codeError('终端数据目录或环境解析器无效。');
     this.dataDir = path.resolve(dataDir);
     this.onEvent = onEvent;
@@ -149,6 +149,9 @@ export class TerminalService {
     if (linkChannel != null && (typeof linkChannel.environment !== 'function' || typeof linkChannel.executableDirectory !== 'function')) throw codeError('终端链接通道无效。');
     this.linkChannel = linkChannel;
     this.browserBroker = browserBroker;
+    if (sshManager != null && ['list', 'prepareIdentity', 'save', 'remove', 'createSession', 'close'].some(method => typeof sshManager[method] !== 'function'))
+      throw codeError('SSH 连接服务不可用。', 'TERMINAL_SSH_UNAVAILABLE');
+    this.sshManager = sshManager;
     this.claudeExecutableResolver = claudeExecutableResolver;
     this.claudeInstaller = claudeInstaller;
     if (availableLocales !== null && (!Array.isArray(availableLocales) || availableLocales.some(value => typeof value !== 'string'))) throw codeError('终端语言区域列表无效。');
@@ -176,6 +179,7 @@ export class TerminalService {
     this.settingsFile = path.join(this.root, 'workspace.json');
     this.claudeAccounts = new ClaudeAccountStore({ root: this.root });
     await this.claudeAccounts.ready;
+    await this.sshManager?.ready;
     await this.recoverClaudeAccountDeletions();
     try {
       const info = await lstat(this.settingsFile);
@@ -227,8 +231,38 @@ export class TerminalService {
       ...(session.kind === 'claude-code' ? { claudeAccountId: session.claudeAccountId, claudeAccountName: session.claudeAccountName ?? null, claudeInstallSource: session.claudeInstallSource,
         deviceIdentifierRestrictions: session.deviceIdentifierRestrictions === true } : {}),
       ...(session.claudeInstall ? { claudeInstall: { ...session.claudeInstall } } : {}),
+      ...(session.sshConnections ? { ssh: { privateKeyProtection: session.sshPrivateKeyProtection === true,
+        available: !!session.sshBinding && !session.sshRevocation && session.status === 'running' && session.sshConnections.length > 0,
+        connections: session.sshConnections } } : {}),
       ...(session.exitCode != null ? { exitCode: session.exitCode } : {}), ...(session.error ? { error: session.error } : {}),
       ...(session.errorCode ? { errorCode: session.errorCode } : {}), ...(session.cleanupError ? { cleanupError: session.cleanupError } : {}) };
+  }
+  async listTerminalSshConnections({ id }) {
+    await this.ready; validId(id);
+    return this.sshManager ? this.sshManager.list({ id }) : { supported: false, connections: [] };
+  }
+  async prepareTerminalSshIdentity({ id, host, port, user, keyPath }) {
+    await this.ready; validId(id);
+    if (this.closed || !this.sshManager) throw codeError('SSH 连接服务不可用。', 'TERMINAL_SSH_UNAVAILABLE');
+    return this.sshManager.prepareIdentity({ id, host, port, user, keyPath });
+  }
+  saveTerminalSshConnection({ id, name, selectionToken }) {
+    validId(id);
+    return this.serialized(id, async () => {
+      if (this.closed || !this.sshManager) throw codeError('SSH 连接服务不可用。', 'TERMINAL_SSH_UNAVAILABLE');
+      if (this.active(id)) throw codeError('请先结束此环境的终端会话，再保存 SSH 连接。', 'TERMINAL_SSH_BUSY');
+      await this.sshManager.save({ id, name, selectionToken });
+      return this.sshManager.list({ id });
+    });
+  }
+  removeTerminalSshConnection({ id, connectionId }) {
+    validId(id);
+    return this.serialized(id, async () => {
+      if (this.closed || !this.sshManager) throw codeError('SSH 连接服务不可用。', 'TERMINAL_SSH_UNAVAILABLE');
+      if (this.active(id)) throw codeError('请先结束此环境的终端会话，再移除 SSH 连接。', 'TERMINAL_SSH_BUSY');
+      await this.sshManager.remove({ id, connectionId });
+      return this.sshManager.list({ id });
+    });
   }
   async snapshot({ id } = {}) {
     await this.ready;
@@ -422,16 +456,28 @@ export class TerminalService {
       catch (error) { session.browserRevocation = Promise.reject(error); }
       session.browserRevocation.catch(() => {});
     }
+    this.revokeSsh(session);
+  }
+  revokeSsh(session) {
+    if (!session.sshBinding || session.sshRevocation) return session.sshRevocation;
+    try { session.sshRevocation = Promise.resolve(session.sshBinding.dispose()); }
+    catch (error) { session.sshRevocation = Promise.reject(error); }
+    session.sshRevocation.catch(() => {});
+    return session.sshRevocation;
   }
   /** Called by the owned proxy core's failed event; never repairs/restarts it.
    * Ordinary terminals and sessions using other nodes keep their lifecycle. */
   invalidateManagedProxy(proxyId) {
     if (typeof proxyId !== 'string' || !proxyId) return Promise.resolve([]);
     this.managedProxyFailures.set(proxyId, (this.managedProxyFailures.get(proxyId) ?? 0) + 1);
+    // Ordinary shells keep their existing lifecycle, but a lost route must
+    // revoke their SSH signing capability just as it does for Claude sessions.
+    const sshRevocations = [...this.sessions.values()].filter(session => !session.finished && session.sshBinding
+      && this.managedProxyId(session) === proxyId).map(session => this.revokeSsh(session));
     const affected = [...this.sessions.values()].filter(session => session.kind === 'claude-code' && !session.finished
       && ['starting', 'running'].includes(session.status) && this.managedProxyId(session) === proxyId);
     for (const session of affected) this.markManagedProxyFailure(session);
-    return Promise.allSettled(affected.map(session => this.close({ sessionId: session.sessionId })));
+    return Promise.allSettled([...sshRevocations, ...affected.map(session => this.close({ sessionId: session.sessionId }))]);
   }
   async setDirectory({ id, path: selectedPath }) {
     return this.serialized(id, async () => {
@@ -637,6 +683,22 @@ export class TerminalService {
         try { linkShim = { directory: await this.linkChannel.executableDirectory(id), ...this.linkChannel.environment(id) }; }
         catch (error) { this.assertStarting(session); throw codeError(`终端链接通道不可用，未启动终端：${error.message}`, 'TERMINAL_LINK_CHANNEL_UNAVAILABLE'); }
       }
+      const routePort = loopbackRoutePort(session.bridge, endpoint);
+      const sshConfiguration = await this.listTerminalSshConnections({ id });
+      this.assertStarting(session);
+      if (sshConfiguration.connections?.length && (!routePort || !this.networkFence || !sshConfiguration.supported))
+        throw codeError('SSH 连接需要支持网络围栏的认证代理线路。', 'TERMINAL_SSH_ROUTE_REQUIRED');
+      if (this.sshManager && sshConfiguration.supported && routePort && this.networkFence) {
+        const binding = await this.sshManager.createSession({ profileId: id, sessionId: session.sessionId, directories, proxyUrl: endpoint });
+        try { this.assertStarting(session); }
+        catch (error) { await this.retainLaunchCleanup(session, 'sshBinding', binding); throw error; }
+        session.sshBinding = binding;
+        session.sshConnections = (sshConfiguration.connections ?? []).map(({ id: connectionId, alias, name }) => ({ id: connectionId, alias, name }));
+        if (managedProxyId && (this.managedProxyFailures.get(managedProxyId) ?? 0) !== (proxyFailuresAtStart.get(managedProxyId) ?? 0))
+          throw codeError('SSH 所选网络已停止，请检查线路后新建终端。', 'TERMINAL_SSH_ROUTE_LOST');
+      }
+      const withSsh = environment => ({ ...environment, ...session.sshBinding?.environment,
+        PATH: [session.sshBinding?.binDirectory, environment.PATH].filter(Boolean).join(path.delimiter) });
       let claudeLaunch = null;
       if (kind === 'claude-code') {
         if (!proxy || !loopbackRoutePort(session.bridge, endpoint) || !this.networkFence) throw codeError('Claude Code 专用会话需要支持网络围栏的代理线路。', 'CLAUDE_NETWORK_FENCE_REQUIRED');
@@ -653,7 +715,7 @@ export class TerminalService {
         session.browserName = binding.browser.name;
         linkShim = { directory: linkShim.directory, ...binding.environment };
         for (const [key, value] of Object.entries(binding.environment)) if (/TOKEN|SECRET/.test(key) && typeof value === 'string') session.secrets.push(value);
-        const environment = { ...this.childEnvironment(directories, timezone, endpoint, session.launchContext.privacy, linkShim, session.launchContext.locale), ...binding.environment };
+        const environment = { ...withSsh(this.childEnvironment(directories, timezone, endpoint, session.launchContext.privacy, linkShim, session.launchContext.locale)), ...binding.environment };
         const prepared = await prepareClaudeSession({ sessionId: session.sessionId, directories, installation, mcpServer: binding.mcpServer, environment, privacy: session.launchContext.privacy });
         try { this.assertStarting(session); }
         catch (error) { await this.retainLaunchCleanup(session, 'claudeLaunch', prepared); throw error; }
@@ -664,14 +726,23 @@ export class TerminalService {
       this.assertStarting(session);
       // Dedicated Claude terminals start at a normal prompt. Their private
       // PATH wrapper supplies the binding only when the user runs `claude`.
-      let shell = this.shell(claudeLaunch?.environment ?? this.childEnvironment(directories, timezone, endpoint, session.launchContext.privacy, linkShim, session.launchContext.locale));
+      let shell = this.shell(claudeLaunch?.environment ?? withSsh(this.childEnvironment(directories, timezone, endpoint, session.launchContext.privacy, linkShim, session.launchContext.locale)));
       // A loopback route (this session's bridge or the managed core listener)
       // is the environment's only network path for this whole process tree.
       // Fence it or refuse to start; never run it unfenced.
       session.networkFence = false;
-      const routePort = loopbackRoutePort(session.bridge, endpoint);
       if (routePort && this.networkFence) {
-        shell = await this.networkFence.wrap(shell, { routePort, ...(kind === 'claude-code' ? { restrictDeviceIdentifiers: true } : {}) });
+        const sshProtection = session.sshBinding ? { protectedPaths: session.sshBinding.protectedPaths,
+          readablePaths: session.sshBinding.readablePaths ?? session.sshBinding.readOnlyPaths,
+          readOnlyPaths: session.sshBinding.readOnlyPaths, agentRoot: session.sshBinding.agentRoot,
+          agentSocket: session.sshBinding.agentSocket,
+          deniedAgentSockets: typeof process.env.SSH_AUTH_SOCK === 'string' && path.isAbsolute(process.env.SSH_AUTH_SOCK)
+            ? [process.env.SSH_AUTH_SOCK] : [] } : null;
+        shell = await this.networkFence.wrap(shell, { routePort, ...(kind === 'claude-code' ? { restrictDeviceIdentifiers: true } : {}),
+          ...(sshProtection ? { sshProtection } : {}) });
+        if (session.sshBinding && shell.sshPrivateKeyProtection !== true)
+          throw codeError('SSH 私钥读取保护未确认，未启动终端。', 'TERMINAL_SSH_PROTECTION_UNAVAILABLE');
+        session.sshPrivateKeyProtection = !!session.sshBinding && shell.sshPrivateKeyProtection === true;
         if (kind === 'claude-code' && shell.deviceIdentifierRestrictions !== true)
           throw codeError('设备标识读取限制未确认，未启动 Claude 终端。', 'TERMINAL_DEVICE_IDENTIFIERS_UNAVAILABLE');
         session.deviceIdentifierRestrictions = kind === 'claude-code' && shell.deviceIdentifierRestrictions === true;
@@ -704,6 +775,7 @@ export class TerminalService {
       this.pruneSessions();
       return this.metadata(session);
     } catch (error) {
+      if (error.sshCleanup) await this.retainLaunchCleanup(session, 'sshBinding', { dispose: error.sshCleanup });
       if (typeof error?.claudeCleanup === 'function') {
         // Failed preparation returns the same private retry authority.
         await this.retainLaunchCleanup(session, 'claudeLaunch', { cleanup: error.claudeCleanup });
@@ -730,6 +802,8 @@ export class TerminalService {
     session.capturePromise = null;
     session.browserBinding = null;
     session.browserRevocation = null;
+    session.sshBinding = null;
+    session.sshRevocation = null;
     session.claudeLaunch = null;
     for (const disposable of session.disposables) disposable?.dispose?.();
     session.disposables = [];
@@ -842,6 +916,11 @@ export class TerminalService {
       // Revoke first. A private-directory removal failure must never skip the
       // process family, proxy bridge, or other independently owned resources.
       await attempt(async () => {
+        if (session.sshRevocation) {
+          try { await session.sshRevocation; } catch (error) { session.sshRevocation = null; throw error; }
+        } else await session.sshBinding?.dispose();
+      });
+      await attempt(async () => {
         if (session.browserRevocation) {
           try { await session.browserRevocation; } catch (error) { session.browserRevocation = null; throw error; }
         } else await session.browserBinding?.dispose();
@@ -924,6 +1003,7 @@ export class TerminalService {
       await this.updateSettings(id, () => undefined);
       if (exists && !preserve) await rm(namespace, { recursive: true, force: true });
       await this.claudeAccounts.removeProfile(id);
+      await this.sshManager?.removeProfile?.({ id });
       this.contexts.delete(id);
       for (const session of this.sessions.values()) if (session.profileId === id) this.sessions.delete(session.sessionId);
       return { profileId: id, removed: true, configRemoved: !preserve, ...(preserve ? { reason: 'SELECTED_DIRECTORY_PRESERVED' } : {}) };
@@ -939,6 +1019,9 @@ export class TerminalService {
     await this.settingsQueue;
     const results = await Promise.allSettled([...this.sessions.values()].filter(session => !session.finished).map(session => this.close({ sessionId: session.sessionId })));
     const rejected = results.find(result => result.status === 'rejected');
+    let sshFailure;
+    try { await this.sshManager?.close(); } catch (error) { sshFailure = error; }
     if (rejected) throw rejected.reason;
+    if (sshFailure) throw sshFailure;
   }
 }

@@ -6,6 +6,8 @@ import { execFile, spawn as spawnChild } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { validateSshProxyUrl, validateSshTarget } from './terminal-ssh-proxy.mjs';
+import { describeSshSession, SSH_SESSION_SCHEMA, SSH_SESSION_VERSION } from './terminal-ssh-command.mjs';
+import { createPasswordSshBroker } from './terminal-ssh-broker.mjs';
 
 const STORE_SCHEMA = 'envara.terminal-ssh';
 const MAX_STORE_BYTES = 1024 * 1024;
@@ -48,10 +50,23 @@ const fingerprint = blob => `SHA256:${createHash('sha256').update(blob).digest('
 const keyIdentity = info => ({ dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs });
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const endpoint = ({ host, port }) => port === 22 ? host : `[${host}]:${port}`;
-const publicConnection = value => ({ id: value.id, name: value.name, alias: value.alias, host: value.host, port: value.port,
-  user: value.user, keyLabel: value.keyLabel, keyFingerprint: value.keyFingerprint, hostFingerprints: [...value.hostFingerprints] });
+const authType = record => record.authType ?? 'publickey';
+const passwordBytes = value => {
+  if (typeof value !== 'string' || !value.length || Buffer.byteLength(value) > 1024 || /[\x00\r\n]/.test(value)) throw fail('SSH_PASSWORD_INVALID', '请输入有效的 SSH 密码。');
+  return Buffer.from(value, 'utf8');
+};
+const publicConnection = (value, passwordReady = false) => ({ id: value.id, name: value.name, alias: value.alias, host: value.host, port: value.port,
+  user: value.user, authType: authType(value), passwordReady,
+  ...(authType(value) === 'publickey' ? { keyLabel: value.keyLabel, keyFingerprint: value.keyFingerprint } : {}),
+  hostFingerprints: [...value.hostFingerprints] });
 const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`;
 const configQuote = value => `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+const runtimeRoot = filename => {
+  const components = filename.split(path.sep);
+  const bundle = components.findIndex((component, index) => component.endsWith('.app') && components[index + 1] === 'Contents');
+  return bundle >= 0 ? components.slice(0, bundle + 1).join(path.sep) : path.dirname(filename);
+};
+const moduleCodeRoot = runtimeRoot(fileURLToPath(import.meta.url));
 
 function nativeExecute(command, args, options) {
   return new Promise((resolve, reject) => {
@@ -159,20 +174,12 @@ function trustedHostKeys(output) {
   return [...result].sort(([a], [b]) => a.localeCompare(b)).map(([fingerprint, text]) => ({ fingerprint, text }));
 }
 
-function launchScript(config, aliases) {
-  return `import { spawn } from 'node:child_process';
-const args = process.argv.slice(2), flags = [];
-const refuse = () => { process.stderr.write('Envara SSH: use ssh [-T|-t|-v|-vv|-vvv] saved-alias [command...]. Custom connection options are not allowed.\\n'); process.exit(2); };
-while (args.length && args[0].startsWith('-')) {
-  if (!['-T','-t','-v','-vv','-vvv'].includes(args[0])) refuse();
-  flags.push(args.shift());
-}
-const alias = args.shift();
-if (!${JSON.stringify(aliases)}.includes(alias)) refuse();
-const child = spawn('/usr/bin/ssh', ['-F', ${JSON.stringify(config)}, ...flags, '--', alias, ...args], { stdio: 'inherit', env: { ...process.env, SSH_ASKPASS_REQUIRE: 'never', SSH_ASKPASS: '/usr/bin/false' } });
-for (const signal of ['SIGTERM','SIGINT','SIGHUP']) process.on(signal, () => { try { child.kill(signal); } catch {} });
-child.once('error', () => { process.stderr.write('Envara SSH: the protected client could not start.\\n'); process.exitCode = 1; });
-child.once('exit', (code, signal) => { if (signal) { process.exitCode = 1; } else process.exitCode = Number.isInteger(code) ? code : 1; });
+function launchScript(config, manifest, passwordBroker) {
+  return `import { runSshCommand } from './terminal-ssh-command.mjs';
+// This manifest and configuration are fixed when the session starts. Discovery
+// and expiry never read caller-controlled environment overrides or renew keys.
+const manifest = ${JSON.stringify(manifest)};
+process.exitCode = await runSshCommand({ argv: process.argv.slice(3), entry: process.argv[2], manifest, configPath: ${JSON.stringify(config)}${passwordBroker ? `, passwordBroker: ${JSON.stringify(passwordBroker)}` : ''} });
 `;
 }
 
@@ -180,15 +187,19 @@ function configuration(records, files, nodeExecutable) {
   const proxy = `${shellQuote(nodeExecutable).replaceAll('%', '%%')} ${shellQuote(files.proxy).replaceAll('%', '%%')} --host '%h' --port '%p'`;
   return records.map(record => [
     `Host ${record.alias}`, `  HostName ${record.host}`, `  Port ${record.port}`, `  User ${record.user}`,
-    `  HostKeyAlias ${record.alias}`, `  IdentityFile ${configQuote(files.publicKeys.get(record.id))}`,
-    `  IdentityAgent ${configQuote(files.socket)}`, '  IdentitiesOnly yes',
+    `  HostKeyAlias ${record.alias}`,
+    ...(authType(record) === 'password' ? ['  IdentityFile none', '  IdentityAgent none', '  IdentitiesOnly yes']
+      : [`  IdentityFile ${configQuote(files.publicKeys.get(record.id))}`, `  IdentityAgent ${configQuote(files.socket)}`, '  IdentitiesOnly yes']),
     `  UserKnownHostsFile ${configQuote(files.knownHosts)}`, '  GlobalKnownHostsFile /dev/null',
     '  StrictHostKeyChecking yes', '  VerifyHostKeyDNS no', '  UpdateHostKeys no',
-    '  PreferredAuthentications publickey', '  PasswordAuthentication no', '  KbdInteractiveAuthentication no',
-    '  BatchMode yes', '  NumberOfPasswordPrompts 0', '  ConnectTimeout 15', '  ConnectionAttempts 1',
+    ...(authType(record) === 'password'
+      ? ['  PreferredAuthentications password', '  PubkeyAuthentication no', '  PasswordAuthentication yes', '  KbdInteractiveAuthentication no', '  BatchMode no', '  NumberOfPasswordPrompts 1']
+      : ['  PreferredAuthentications publickey', '  PasswordAuthentication no', '  KbdInteractiveAuthentication no', '  BatchMode yes', '  NumberOfPasswordPrompts 0']),
+    '  ConnectTimeout 15', '  ConnectionAttempts 1',
     '  AddKeysToAgent no', '  UseKeychain no', '  PKCS11Provider none',
     '  ForwardAgent no', '  ForwardX11 no', '  ClearAllForwardings yes',
     '  ControlMaster no', '  ControlPath none', '  ControlPersist no', '  CanonicalizeHostname no',
+    '  PermitLocalCommand no', '  EnableEscapeCommandline no', '  EscapeChar none',
     '  ServerAliveInterval 30', '  ServerAliveCountMax 3', `  ProxyCommand ${proxy}`, '',
   ].join('\n')).join('\n');
 }
@@ -198,15 +209,16 @@ function configuration(records, files, nodeExecutable) {
  * File modes and unpredictable sockets do not isolate hostile same-UID host
  * processes; new terminal fences protect the returned paths and sockets. */
 export class TerminalSshManager {
+  #passwordGrants = new Map();
   constructor({ dataDir, hostHome, nodeExecutable, platform = process.platform, execute = nativeExecute, spawn = spawnChild,
     now = Date.now, agentRoot = platform === 'darwin' ? `/private/tmp/envara-ssh-${uid() ?? 'unsupported'}`
-      : path.join(dataDir ?? '', 'terminal', 'ssh-access-runtime'), agentLifetimeSeconds = 3600 } = {}) {
+      : path.join(dataDir ?? '', 'terminal', 'ssh-access-runtime'),
+    createPasswordBroker = createPasswordSshBroker } = {}) {
     this.dataDir = absolute(dataDir); this.hostHome = absolute(hostHome);
     this.nodeExecutable = nodeExecutable == null ? null : absolute(nodeExecutable);
     this.root = path.join(this.dataDir, 'terminal', 'ssh-access'); this.filename = path.join(this.root, 'connections.json');
     this.agentRoot = absolute(agentRoot); this.platform = platform; this.execute = execute; this.spawn = spawn; this.now = now;
-    if (!Number.isInteger(agentLifetimeSeconds) || agentLifetimeSeconds < 60 || agentLifetimeSeconds > 86400) throw invalid();
-    this.agentLifetimeSeconds = agentLifetimeSeconds;
+    this.createPasswordBroker = createPasswordBroker;
     this.profiles = new Map(); this.pending = new Map(); this.sessions = new Map(); this.queue = Promise.resolve();
     this.closed = false; this.supported = false; this.ready = this.initialize();
   }
@@ -227,13 +239,15 @@ export class TerminalSshManager {
     try {
       const document = JSON.parse(await safeRead(this.filename, MAX_STORE_BYTES, { privateMode: true }));
       if (document?.schema !== STORE_SCHEMA || document.version !== 1 || !Array.isArray(document.profiles) || document.profiles.length > 512) throw storageInvalid();
+      const connectionIds = new Set();
       for (const profile of document.profiles) {
         const profileId = id(profile?.id);
         if (this.profiles.has(profileId) || !Array.isArray(profile.connections) || profile.connections.length > MAX_CONNECTIONS) throw storageInvalid();
         const names = new Set(), ids = new Set(), aliases = new Set();
         const records = profile.connections.map(record => {
           const value = this.validateRecord(record);
-          if (names.has(nameKey(value.name)) || ids.has(value.id) || aliases.has(value.alias)) throw storageInvalid();
+          if (names.has(nameKey(value.name)) || ids.has(value.id) || aliases.has(value.alias) || connectionIds.has(value.id)) throw storageInvalid();
+          connectionIds.add(value.id);
           names.add(nameKey(value.name)); ids.add(value.id); aliases.add(value.alias); return value;
         });
         this.profiles.set(profileId, records);
@@ -251,13 +265,20 @@ export class TerminalSshManager {
     }
   }
   validateRecord(record) {
-    const checkedTarget = target(record ?? {}), key = publicKey(record?.publicKey);
+    const checkedTarget = target(record ?? {}), authentication = authType(record ?? {});
+    if (!['publickey', 'password'].includes(authentication)) throw storageInvalid();
+    if (authentication === 'password') {
+      const allowed = new Set(['id', 'name', 'alias', 'host', 'port', 'user', 'authType', 'hostKeys', 'hostFingerprints']);
+      if (Object.keys(record).some(key => !allowed.has(key))) throw storageInvalid();
+    }
+    const key = authentication === 'publickey' ? publicKey(record?.publicKey) : null;
     const value = { id: connectionId(record?.id), name: label(record?.name), alias: record?.alias, ...checkedTarget,
-      keyPath: absolute(record?.keyPath), keyStat: record?.keyStat, publicKey: key.text,
-      keyLabel: label(record?.keyLabel), keyFingerprint: key.fingerprint, hostKeys: record?.hostKeys };
-    if (!/^envara-[a-f0-9]{12}$/.test(value.alias ?? '') || !same(record.keyFingerprint, value.keyFingerprint)
-      || !value.keyStat || Object.keys(value.keyStat).sort().join(',') !== 'ctimeMs,dev,ino,mtimeMs,size'
-      || Object.values(value.keyStat).some(number => !Number.isFinite(number) || number < 0)
+      authType: authentication, ...(key ? { keyPath: absolute(record?.keyPath), keyStat: record?.keyStat, publicKey: key.text,
+        keyLabel: label(record?.keyLabel), keyFingerprint: key.fingerprint } : {}), hostKeys: record?.hostKeys };
+    if (!/^envara-[a-f0-9]{12}$/.test(value.alias ?? '')
+      || key && (!same(record.keyFingerprint, value.keyFingerprint) || !value.keyStat
+        || Object.keys(value.keyStat).sort().join(',') !== 'ctimeMs,dev,ino,mtimeMs,size'
+        || Object.values(value.keyStat).some(number => !Number.isFinite(number) || number < 0))
       || !Array.isArray(value.hostKeys) || !value.hostKeys.length || value.hostKeys.length > 32) throw storageInvalid();
     value.hostKeys = value.hostKeys.map(item => { const key = publicKey(item?.text); if (key.fingerprint !== item.fingerprint) throw storageInvalid(); return { fingerprint: key.fingerprint, text: key.text }; });
     value.hostKeys.sort((a, b) => a.fingerprint.localeCompare(b.fingerprint));
@@ -269,7 +290,22 @@ export class TerminalSshManager {
   assertSupported() { this.assertOpen(); if (!this.supported) throw fail('SSH_UNSUPPORTED', '此系统未提供所需的受约束 OpenSSH 代理。'); }
   async list({ id: profileId }) {
     id(profileId); await this.ready;
-    return { supported: this.supported, connections: (this.profiles.get(profileId) ?? []).map(publicConnection) };
+    return { supported: this.supported, connections: (this.profiles.get(profileId) ?? [])
+      .map(record => publicConnection(record, Boolean(this.passwordGrant(record.id)))) };
+  }
+  passwordGrant(selectedId) {
+    return this.#passwordGrants.get(selectedId);
+  }
+  clearPassword(selectedId) {
+    const grant = this.#passwordGrants.get(selectedId);
+    if (grant) { grant.secret.fill(0); this.#passwordGrants.delete(selectedId); }
+  }
+  grantPassword(selectedId, secret) {
+    this.clearPassword(selectedId);
+    // This authorization exists only in this manager's memory. App shutdown or
+    // explicit revocation erases it; elapsed time does not end a live session.
+    const grant = { secret, expiresAt: null };
+    this.#passwordGrants.set(selectedId, grant);
   }
   async readTrust(checkedTarget) {
     const filename = path.join(this.hostHome, '.ssh', 'known_hosts');
@@ -301,15 +337,29 @@ export class TerminalSshManager {
     for (const [token, item] of this.pending) if (item.expiresAt <= this.now()) this.pending.delete(token);
     if (this.pending.size >= 64) throw fail('SSH_CONNECTION_LIMIT', '待确认的 SSH 密钥过多，请稍后重试。');
     const selectionToken = `sshsel_${randomBytes(24).toString('hex')}`;
-    const value = { profileId, ...checkedTarget, ...identity, hostKeys,
+    const value = { profileId, ...checkedTarget, authType: 'publickey', ...identity, hostKeys,
       hostFingerprints: hostKeys.map(item => item.fingerprint), expiresAt: this.now() + TOKEN_TTL };
     this.pending.set(selectionToken, value);
-    return { selectionToken, ...checkedTarget, keyLabel: identity.keyLabel, keyFingerprint: identity.keyFingerprint, hostFingerprints: [...value.hostFingerprints] };
+    return { selectionToken, ...checkedTarget, authType: 'publickey', keyLabel: identity.keyLabel, keyFingerprint: identity.keyFingerprint, hostFingerprints: [...value.hostFingerprints] };
+  }
+  async preparePassword({ id: profileId, host, port, user }) {
+    id(profileId); await this.ready; this.assertSupported();
+    const checkedTarget = target({ host, port, user }), hostKeys = await this.readTrust(checkedTarget);
+    this.assertOpen();
+    for (const [token, item] of this.pending) if (item.expiresAt <= this.now()) this.pending.delete(token);
+    if (this.pending.size >= 64) throw fail('SSH_CONNECTION_LIMIT', '待确认的 SSH 密钥过多，请稍后重试。');
+    const selectionToken = `sshsel_${randomBytes(24).toString('hex')}`;
+    const value = { profileId, ...checkedTarget, authType: 'password', hostKeys,
+      hostFingerprints: hostKeys.map(item => item.fingerprint), expiresAt: this.now() + TOKEN_TTL };
+    this.pending.set(selectionToken, value);
+    return { selectionToken, ...checkedTarget, authType: 'password', hostFingerprints: [...value.hostFingerprints] };
   }
   async revalidate(record, { trust = false } = {}) {
-    let current;
-    try { current = await this.identity(record.keyPath); } catch { throw identityChanged(); }
-    if (!same(current.keyStat, record.keyStat) || current.publicKey !== record.publicKey) throw identityChanged();
+    if (authType(record) === 'publickey') {
+      let current;
+      try { current = await this.identity(record.keyPath); } catch { throw identityChanged(); }
+      if (!same(current.keyStat, record.keyStat) || current.publicKey !== record.publicKey) throw identityChanged();
+    }
     if (trust && !same(await this.readTrust(record), record.hostKeys)) throw identityChanged();
   }
   mutate(operation) {
@@ -317,7 +367,8 @@ export class TerminalSshManager {
     this.queue = task.catch(() => {}); return task;
   }
   async persist(profiles) {
-    const source = JSON.stringify({ schema: STORE_SCHEMA, version: 1, profiles: [...profiles].map(([id, connections]) => ({ id, connections })) });
+    const source = JSON.stringify({ schema: STORE_SCHEMA, version: 1, profiles: [...profiles]
+      .map(([id, connections]) => ({ id, connections: connections.map(record => this.validateRecord(record)) })) });
     if (Buffer.byteLength(source) > MAX_STORE_BYTES) throw storageInvalid();
     await checkedDirectory(this.root, { privateMode: true });
     try { await safeRead(this.filename, MAX_STORE_BYTES, { privateMode: true }); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -331,57 +382,87 @@ export class TerminalSshManager {
       throw fail('SSH_STORAGE_UNAVAILABLE', 'SSH 连接配置未保存，请检查应用数据目录。');
     } finally { await rm(temporary, { force: true }); }
   }
-  save({ id: profileId, name, selectionToken }) {
+  save({ id: profileId, name, selectionToken, password }) {
     id(profileId); name = label(name);
     return this.mutate(async () => {
       this.assertSupported();
       const selected = this.pending.get(selectionToken);
       if (!selected || selected.expiresAt <= this.now()) { this.pending.delete(selectionToken); throw fail('SSH_SELECTION_EXPIRED', '密钥选择已失效，请重新选择并核对。'); }
       if (selected.profileId !== profileId) throw fail('SSH_SELECTION_MISMATCH', '密钥选择不属于此境舱。');
+      if (authType(selected) === 'password' && [...this.sessions.values()].some(session => session.profileId === profileId)) throw fail('SSH_CONNECTION_IN_USE', '请先结束使用此 SSH 连接的终端会话。');
       const previous = this.profiles.get(profileId) ?? [];
       if (previous.length >= MAX_CONNECTIONS) throw fail('SSH_CONNECTION_LIMIT', '一个境舱最多保存 20 个 SSH 连接。');
       if ([...this.profiles.values()].reduce((sum, records) => sum + records.length, 0) >= MAX_TOTAL_CONNECTIONS) throw fail('SSH_CONNECTION_LIMIT', '已保存的 SSH 连接数量达到上限。');
       if (previous.some(record => nameKey(record.name) === nameKey(name))) throw fail('SSH_NAME_EXISTS', '此境舱已存在同名 SSH 连接。');
       await this.revalidate(selected, { trust: true });
+      let secret;
+      if (authType(selected) === 'password') secret = passwordBytes(password);
+      else if (password !== undefined) throw invalid();
       const uuid = randomUUID().replaceAll('-', '');
       const { profileId: ignored, expiresAt, ...identity } = selected;
       const record = { id: `ssh_${uuid}`, name, alias: `envara-${uuid.slice(0, 12)}`, ...structuredClone(identity) };
       const next = new Map(this.profiles); next.set(profileId, [...previous, record]);
-      await this.persist(next); this.profiles = next; this.pending.delete(selectionToken);
-      return publicConnection(record);
+      try { await this.persist(next); } catch (error) { secret?.fill(0); throw error; }
+      this.profiles = next; this.pending.delete(selectionToken);
+      if (this.closed) { secret?.fill(0); this.assertOpen(); }
+      if (secret) this.grantPassword(record.id, secret);
+      return publicConnection(record, Boolean(secret));
+    });
+  }
+  setPassword({ id: profileId, connectionId: selectedId, password }) {
+    id(profileId); connectionId(selectedId);
+    return this.mutate(async () => {
+      this.assertSupported();
+      const record = (this.profiles.get(profileId) ?? []).find(record => record.id === selectedId);
+      if (!record) throw fail('SSH_CONNECTION_NOT_FOUND', '此 SSH 连接已不存在。');
+      if (authType(record) !== 'password') throw invalid();
+      if ([...this.sessions.values()].some(session => session.profileId === profileId)) throw fail('SSH_CONNECTION_IN_USE', '请先结束使用此 SSH 连接的终端会话。');
+      await this.revalidate(record, { trust: true });
+      this.assertOpen();
+      this.grantPassword(selectedId, passwordBytes(password));
+      return publicConnection(record, true);
     });
   }
   remove({ id: profileId, connectionId: selectedId }) {
     id(profileId); connectionId(selectedId);
     return this.mutate(async () => {
       const previous = this.profiles.get(profileId) ?? [];
-      if (!previous.some(record => record.id === selectedId)) throw fail('SSH_CONNECTION_NOT_FOUND', '此 SSH 连接已不存在。');
-      if ([...this.sessions.values()].some(session => session.records.some(record => record.id === selectedId))) throw fail('SSH_CONNECTION_IN_USE', '请先结束使用此 SSH 连接的终端会话。');
+      const record = previous.find(record => record.id === selectedId);
+      if (!record) throw fail('SSH_CONNECTION_NOT_FOUND', '此 SSH 连接已不存在。');
+      if ([...this.sessions.values()].some(session => session.records.some(record => record.id === selectedId)
+        || authType(record) === 'password' && session.profileId === profileId)) throw fail('SSH_CONNECTION_IN_USE', '请先结束使用此 SSH 连接的终端会话。');
       const next = new Map(this.profiles); next.set(profileId, previous.filter(record => record.id !== selectedId));
-      await this.persist(next); this.profiles = next; return { removed: true };
+      await this.persist(next); this.profiles = next; this.clearPassword(selectedId); return { removed: true };
     });
   }
   removeProfile({ id: profileId }) {
     id(profileId);
     return this.mutate(async () => {
       if ([...this.sessions.values()].some(session => session.profileId === profileId)) throw fail('SSH_CONNECTION_IN_USE', '请先结束此境舱的终端会话。');
+      const previousRecords = this.profiles.get(profileId) ?? [];
       const next = new Map(this.profiles); next.delete(profileId);
       if (this.profiles.has(profileId)) { await this.persist(next); this.profiles = next; }
+      for (const record of previousRecords) this.clearPassword(record.id);
       for (const [token, selected] of this.pending) if (selected.profileId === profileId) this.pending.delete(token);
       return { removed: true };
     });
   }
-  protection(records = []) {
+  protection(records = [], nodeExecutable = this.nodeExecutable) {
     // A newly launched environment also protects keys selected for other
     // environments, including references outside the host's .ssh directory.
-    const privateKeys = [...this.profiles.values()].flat().concat(records, [...this.pending.values()]).map(record => record.keyPath);
+    const privateKeys = [...this.profiles.values()].flat().concat(records, [...this.pending.values()]).map(record => record.keyPath).filter(Boolean);
+    const readOnlyPaths = this.platform === 'darwin' ? [...new Set([moduleCodeRoot,
+      ...[this.nodeExecutable, nodeExecutable].filter(Boolean).map(filename => runtimeRoot(absolute(filename)))])] : [];
     return { protectedPaths: [...new Set([path.join(this.hostHome, '.ssh'), this.root, this.agentRoot, ...privateKeys])],
-      readablePaths: [], readOnlyPaths: [], agentSocket: null, allowedAgentSocket: null, agentRoot: this.agentRoot };
+      readablePaths: [], readOnlyPaths, runtimeReadOnlyPaths: readOnlyPaths,
+      agentSocket: null, allowedAgentSocket: null, agentRoot: this.agentRoot };
   }
   async createSession({ profileId, sessionId, directories, proxyUrl, nodeExecutable = this.nodeExecutable } = {}) {
     id(profileId); id(sessionId); await this.ready; await this.queue; this.assertOpen();
-    const records = structuredClone(this.profiles.get(profileId) ?? []), base = this.protection(records);
-    if (!records.length) return { ...base, environment: {}, binDirectory: null, dispose: async () => {} };
+    const allRecords = structuredClone(this.profiles.get(profileId) ?? []), base = this.protection(allRecords, nodeExecutable);
+    // Unsupported platforms remain unaffected. Supported fenced sessions always
+    // receive discovery/refusal shims, including when no connection was saved.
+    if (!this.supported && !allRecords.length) return { ...base, environment: {}, binDirectory: null, dispose: async () => {} };
     this.assertSupported();
     if (this.sessions.has(sessionId)) throw fail('SSH_SESSION_EXISTS', 'SSH 终端会话标识已被使用。');
     try { validateSshProxyUrl(proxyUrl); } catch { throw fail('SSH_PROXY_REQUIRED', 'SSH 需要此会话的已认证境舱代理通道。'); }
@@ -389,11 +470,27 @@ export class TerminalSshManager {
     const nodeInfo = await checkedPath(nodeExecutable);
     if (!nodeInfo.isFile() || !(nodeInfo.mode & 0o111)) throw unsafe();
     if (directories?.home != null) absolute(directories.home);
+    const grants = new Map(allRecords.filter(record => authType(record) === 'password')
+      .map(record => [record.id, this.passwordGrant(record.id)]).filter(([, grant]) => grant));
+    const records = allRecords.filter(record => authType(record) === 'publickey' || grants.has(record.id));
+    const keyRecords = records.filter(record => authType(record) === 'publickey');
+    const passwords = new Map(records.filter(record => authType(record) === 'password')
+      .map(record => [record.alias, Buffer.from(grants.get(record.id).secret)]));
     let settleSetup;
     const lease = { profileId, sessionId, records, revoked: false, child: null, directory: null, directoryIdentity: null,
       publicDirectory: null, publicIdentity: null, binIdentity: null, processError: false, stopped: false, cleanup: null,
+      passwords, passwordBroker: null,
       setup: new Promise(resolve => { settleSetup = resolve; }) };
+    // Every new binding uses the current application lifetime. Null is an
+    // explicit v2 authorization scope, not an extended numeric timeout.
+    const manifest = { schema: SSH_SESSION_SCHEMA, version: SSH_SESSION_VERSION,
+      expiresAt: null,
+      connections: records.map(record => ({ id: record.id, name: record.name, alias: record.alias,
+        host: record.host, port: record.port, user: record.user, authType: authType(record), expiresAt: null })) };
+    describeSshSession(manifest, this.now());
     const check = () => { this.assertOpen(); if (lease.revoked) throw fail('SSH_SESSION_CLOSED', 'SSH 会话已取消。'); };
+    // Object identity prevents a later grant from resurrecting a revoked lease.
+    const passwordGrantsActive = () => [...grants].every(([selectedId, grant]) => this.passwordGrant(selectedId) === grant);
     const dispose = () => this.disposeSession(lease);
     this.sessions.set(sessionId, lease);
     let result, failure;
@@ -411,12 +508,13 @@ export class TerminalSshManager {
       lease.publicIdentity = keyIdentity(await lstat(lease.publicDirectory));
       const binDirectory = await privateDirectory(lease.publicDirectory, 'bin');
       lease.binIdentity = keyIdentity(await lstat(binDirectory));
-      const socket = path.join(lease.directory, 'agent.sock');
-      if (Buffer.byteLength(socket) > 100) throw fail('SSH_UNSAFE_PATH', 'SSH 代理通道路径过长。');
+      const socket = keyRecords.length ? path.join(lease.directory, 'agent.sock') : null;
+      if (socket && Buffer.byteLength(socket) > 100) throw fail('SSH_UNSAFE_PATH', 'SSH 代理通道路径过长。');
       const files = { socket, knownHosts: path.join(lease.publicDirectory, 'known_hosts'),
         config: path.join(lease.publicDirectory, 'config'), targets: path.join(lease.publicDirectory, 'targets.json'),
-        proxy: path.join(lease.publicDirectory, 'proxy.mjs'), launcher: path.join(lease.publicDirectory, 'launch.mjs'), publicKeys: new Map() };
-      for (const record of records) {
+        manifest: path.join(lease.publicDirectory, 'connections.json'), command: path.join(lease.publicDirectory, 'terminal-ssh-command.mjs'),
+        proxy: path.join(lease.publicDirectory, 'terminal-ssh-proxy.mjs'), launcher: path.join(lease.publicDirectory, 'launch.mjs'), publicKeys: new Map() };
+      for (const record of keyRecords) {
         const file = path.join(lease.publicDirectory, `${record.id}.pub`); files.publicKeys.set(record.id, file);
         await writeFile(file, `${record.publicKey}\n`, { mode: 0o400, flag: 'wx' }); check();
       }
@@ -425,11 +523,36 @@ export class TerminalSshManager {
       const targets = [...new Map(records.map(record => [`${record.host}:${record.port}`, { host: record.host, port: record.port }])).values()];
       await writeFile(files.targets, JSON.stringify(targets), { mode: 0o400, flag: 'wx' });
       await writeFile(files.proxy, await readFile(fileURLToPath(new URL('./terminal-ssh-proxy.mjs', import.meta.url))), { mode: 0o400, flag: 'wx' });
+      await writeFile(files.command, await readFile(fileURLToPath(new URL('./terminal-ssh-command.mjs', import.meta.url))), { mode: 0o400, flag: 'wx' });
+      await writeFile(path.join(lease.publicDirectory, 'terminal-ssh-client.mjs'), await readFile(fileURLToPath(new URL('./terminal-ssh-client.mjs', import.meta.url))), { mode: 0o400, flag: 'wx' });
+      await writeFile(files.manifest, JSON.stringify(manifest), { mode: 0o400, flag: 'wx' });
       await writeFile(files.config, configuration(records, files, nodeExecutable), { mode: 0o400, flag: 'wx' });
-      await writeFile(files.launcher, launchScript(files.config, records.map(record => record.alias)), { mode: 0o400, flag: 'wx' });
-      for (const name of ['ssh', 'envara-ssh']) await writeFile(path.join(binDirectory, name), `#!/bin/sh\nexec ${shellQuote(nodeExecutable)} ${shellQuote(files.launcher)} "$@"\n`, { mode: 0o500, flag: 'wx' });
+      if (passwords.size) {
+        try {
+          lease.passwordBroker = await this.createPasswordBroker({ directory: lease.directory, publicDirectory: lease.publicDirectory,
+            nodeExecutable, configPath: files.config, proxyUrl, targetsPath: files.targets, manifest, passwords,
+            runtimeReadOnlyPaths: base.readOnlyPaths,
+            now: this.now, expiresAt: manifest.expiresAt, isActive: () => !lease.revoked && !this.closed && passwordGrantsActive() });
+        } catch (error) {
+          if (typeof error.sshCleanup === 'function') lease.passwordBroker = { dispose: error.sshCleanup };
+          throw error;
+        } finally {
+          // The broker owns its own memory-only copy after construction. The
+          // per-lease transfer buffers are never retained for the session.
+          for (const secret of passwords.values()) secret.fill(0);
+        }
+        if (lease.passwordBroker?.socket !== path.join(lease.directory, 'command.sock')
+          || Buffer.byteLength(lease.passwordBroker.socket) > 100 || typeof lease.passwordBroker.dispose !== 'function') throw unsafe();
+        const commandSocket = await checkedPath(lease.passwordBroker.socket);
+        if (!commandSocket.isSocket() || uid() !== undefined && commandSocket.uid !== uid() || commandSocket.mode & 0o077) throw unsafe();
+        check();
+      }
+      const passwordBroker = lease.passwordBroker ? { socket: lease.passwordBroker.socket, aliases: [...passwords.keys()] } : undefined;
+      await writeFile(files.launcher, launchScript(files.config, manifest, passwordBroker), { mode: 0o400, flag: 'wx' });
+      for (const name of ['ssh', 'envara-ssh']) await writeFile(path.join(binDirectory, name), `#!/bin/sh\nexec ${shellQuote(nodeExecutable)} ${shellQuote(files.launcher)} ${shellQuote(name)} "$@"\n`, { mode: 0o500, flag: 'wx' });
       check();
-      lease.child = this.spawn('/usr/bin/ssh-agent', ['-D', '-a', socket, '-P', '', '-t', String(this.agentLifetimeSeconds)],
+      if (keyRecords.length) {
+      lease.child = this.spawn('/usr/bin/ssh-agent', ['-D', '-a', socket, '-P', ''],
         { env: this.nativeEnvironment(lease.publicDirectory), stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
       lease.child.stderr?.resume();
       lease.child.once('error', () => { lease.processError = true; if (!lease.child.pid) lease.stopped = true; });
@@ -447,12 +570,12 @@ export class TerminalSshManager {
         await delay(20);
       }
       const groups = new Map();
-      for (const record of records) { const group = groups.get(record.keyFingerprint) ?? []; group.push(record); groups.set(record.keyFingerprint, group); }
+      for (const record of keyRecords) { const group = groups.get(record.keyFingerprint) ?? []; group.push(record); groups.set(record.keyFingerprint, group); }
       for (const group of groups.values()) {
         const record = group[0];
         await this.revalidate(record); check();
         const constraints = group.flatMap(item => ['-h', `${item.user}@${item.alias}`]);
-        try { await this.execute('/usr/bin/ssh-add', ['-q', '-k', '-t', String(this.agentLifetimeSeconds), '-H', files.knownHosts, ...constraints, record.keyPath], this.nativeOptions(lease.publicDirectory, socket)); }
+        try { await this.execute('/usr/bin/ssh-add', ['-q', '-k', '-H', files.knownHosts, ...constraints, record.keyPath], this.nativeOptions(lease.publicDirectory, socket)); }
         catch { throw fail('SSH_KEY_LOCKED', '私钥未解锁或无法受约束加载；没有读取钥匙串，也没有改用其他密钥。'); }
         await this.revalidate(record); check();
       }
@@ -462,11 +585,23 @@ export class TerminalSshManager {
       const expected = [...groups.keys()].sort(), actual = loaded.map(key => key.fingerprint).sort();
       if (!same(expected, actual)) throw identityChanged();
       check();
+      }
       await chmod(binDirectory, 0o500); await chmod(lease.publicDirectory, 0o500);
       check();
-      result = { ...base, environment: { SSH_AUTH_SOCK: socket, ENVARA_SSH_PROXY_URL: proxyUrl, ENVARA_SSH_TARGETS: files.targets },
-        binDirectory, readablePaths: [lease.publicDirectory], readOnlyPaths: [lease.publicDirectory],
-        agentSocket: socket, allowedAgentSocket: socket, dispose };
+      result = { ...base, environment: { ENVARA_SSH_CONFIG: files.config, ENVARA_SSH_CONNECTIONS: files.manifest,
+        ...(socket ? { SSH_AUTH_SOCK: socket } : {}),
+        ...(records.length ? { ENVARA_SSH_PROXY_URL: proxyUrl, ENVARA_SSH_TARGETS: files.targets } : {}) },
+        binDirectory, readablePaths: [lease.publicDirectory], readOnlyPaths: [...new Set([lease.publicDirectory, ...base.readOnlyPaths])],
+        agentSocket: socket, allowedAgentSocket: socket,
+        allowedSockets: [socket, lease.passwordBroker?.socket].filter(Boolean), dispose,
+        describe: () => {
+          const now = this.now(), passwordsActive = passwordGrantsActive();
+          const keysUnavailable = keyRecords.length > 0 && (!lease.child?.pid || lease.processError || lease.stopped
+            || lease.child.exitCode != null || lease.child.signalCode != null);
+          return describeSshSession(manifest, now, { closed: lease.revoked || this.closed,
+            unavailableAliases: records.filter(record => authType(record) === 'password' ? !passwordsActive : keysUnavailable)
+              .map(record => record.alias) });
+        } };
     } catch (error) {
       failure = error.code?.startsWith('SSH_') ? error : fail('SSH_AGENT_FAILED', '受保护的 SSH 通道未能创建。');
     } finally { settleSetup(); }
@@ -483,6 +618,11 @@ export class TerminalSshManager {
     lease.cleanup = (async () => {
       await lease.setup;
       let failure;
+      for (const secret of lease.passwords?.values() ?? []) secret.fill(0);
+      if (lease.passwordBroker) {
+        try { await lease.passwordBroker.dispose(); lease.passwordBroker = null; }
+        catch { failure = fail('SSH_CLEANUP_FAILED', 'SSH 临时资料清理尚未确认，请重试结束会话。'); }
+      }
       if (lease.child && !lease.stopped && lease.child.exitCode == null && lease.child.signalCode == null) {
         const wait = async milliseconds => {
           const deadline = Date.now() + milliseconds;
@@ -519,6 +659,7 @@ export class TerminalSshManager {
   }
   async close() {
     this.closed = true; this.pending.clear();
+    for (const selectedId of this.#passwordGrants.keys()) this.clearPassword(selectedId);
     const results = await Promise.allSettled([...this.sessions.values()].map(session => this.disposeSession(session)));
     const first = results.find(result => result.status === 'rejected');
     if (first) throw first.reason;

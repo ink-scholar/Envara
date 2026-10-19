@@ -213,6 +213,8 @@ function sshFixture(pickSSHIdentity) {
   });
   f.terminal.listTerminalSshConnections = async args => { calls.push(['list', args]); return { supported: true, connections: [publicConnection] }; };
   f.terminal.prepareTerminalSshIdentity = async args => { calls.push(['prepare', args]); return { ...publicConnection, selectionToken: 'manager-token', keyPath: '/never-public/key', privateBytes: 'not-public' }; };
+  f.terminal.prepareTerminalSshPassword = async args => { calls.push(['prepare-password', args]); return { ...publicConnection, authType: 'password', selectionToken: 'manager-password-token', password: 'synthetic-hidden-value' }; };
+  f.terminal.setTerminalSshPassword = async args => { calls.push(['set-password', args]); };
   f.terminal.saveTerminalSshConnection = async args => { calls.push(['save', args]); return publicConnection; };
   f.terminal.removeTerminalSshConnection = async args => { calls.push(['remove', args]); return { removed: true }; };
   return { ...f, calls, sourceWindow, context: { window: sourceWindow }, publicConnection,
@@ -321,4 +323,63 @@ test('a queued SSH save rechecks running terminals after an in-progress launch f
   const rejected = assert.rejects(save, { code: 'SSH_TERMINAL_BUSY' });
   resolveLaunch(); await launch; await rejected;
   assert.equal(f.calls.some(([type]) => type === 'save'), false);
+});
+
+test('password preparation seals host trust without forwarding credentials or invoking a key picker', async () => {
+  const f = sshFixture();
+  const prepared = await f.controller.dispatch('prepareTerminalSshPassword', { ...f.request,
+    password: 'synthetic-discarded-input', keyPath: '/renderer/key', hostFingerprints: ['forged'] }, f.context);
+  assert.equal(prepared.authType, 'password');
+  assert.notEqual(prepared.selectionToken, 'manager-password-token');
+  assert.equal(prepared.password, undefined);
+  assert.deepEqual(prepared.hostFingerprints, ['SHA256:fixture-host']);
+  assert.deepEqual(f.calls, [['prepare-password', f.request]]);
+  assert.ok(!JSON.stringify([...f.controller.pickedSSHIdentities.values()]).includes('synthetic-hidden-value'));
+  const args = { id: 'prof_a', name: 'Password server', selectionToken: prepared.selectionToken, password: 'synthetic-password' };
+  await assert.rejects(f.controller.dispatch('saveTerminalSshConnection', args, { window: { isDestroyed: () => false } }), { code: 'SSH_SELECTION_MISMATCH' });
+  const saved = await f.controller.dispatch('saveTerminalSshConnection', { ...args, host: 'forged.example' }, f.context);
+  assert.deepEqual(f.calls.find(([type]) => type === 'save'), ['save', {
+    id: 'prof_a', name: 'Password server', selectionToken: 'manager-password-token', password: 'synthetic-password',
+  }]);
+  assert.ok(!JSON.stringify(saved).includes('synthetic-password'));
+  await assert.rejects(f.controller.dispatch('saveTerminalSshConnection', args, f.context), { code: 'SSH_SELECTION_EXPIRED' });
+});
+
+test('password grants require a live owning window, an idle environment and a bounded single-line secret', async () => {
+  const f = sshFixture();
+  const args = { id: 'prof_a', connectionId: 'ssh_a', password: 'synthetic-password', host: 'forged.example' };
+  await assert.rejects(f.controller.dispatch('setTerminalSshPassword', args), { code: 'SSH_WINDOW_CLOSED' });
+  for (const password of [undefined, '', 'x\ny', 'x\ry', 'x\0y', 'x'.repeat(1025), '密'.repeat(400)])
+    await assert.rejects(f.controller.dispatch('setTerminalSshPassword', { ...args, password }, f.context), { code: 'SSH_PASSWORD_INVALID' });
+  for (const status of ['starting', 'running', 'closing']) {
+    f.state.profiles[0].sessions = [{ sessionId: 'active', status }];
+    await assert.rejects(f.controller.dispatch('setTerminalSshPassword', args, f.context), { code: 'SSH_TERMINAL_BUSY' });
+  }
+  assert.equal(f.calls.some(([type]) => type === 'set-password'), false);
+  f.state.profiles[0].sessions = [];
+  f.terminal.listTerminalSshConnections = async () => ({ supported: true, connections: [{ ...f.publicConnection,
+    authType: 'password', passwordReady: true, password: 'synthetic-password', privateGrant: Buffer.from('synthetic-password') }] });
+  const result = await f.controller.dispatch('setTerminalSshPassword', args, f.context);
+  assert.deepEqual(f.calls.find(([type]) => type === 'set-password'), ['set-password', { id: 'prof_a', connectionId: 'ssh_a', password: 'synthetic-password' }]);
+  assert.equal(result.connections[0].passwordReady, true);
+  assert.ok(!JSON.stringify(result).includes('synthetic-password'));
+  f.sourceWindow.destroyed = true;
+  await assert.rejects(f.controller.dispatch('setTerminalSshPassword', args, f.context), { code: 'SSH_WINDOW_CLOSED' });
+});
+
+test('password preparation refuses stale windows and foreign or expired selection capabilities', async () => {
+  const f = sshFixture();
+  f.terminal.prepareTerminalSshPassword = async () => {
+    f.sourceWindow.destroyed = true;
+    return { ...f.publicConnection, authType: 'password', selectionToken: 'manager-password-token' };
+  };
+  await assert.rejects(f.controller.dispatch('prepareTerminalSshPassword', f.request, f.context), { code: 'SSH_WINDOW_CLOSED' });
+  assert.equal(f.controller.pickedSSHIdentities.size, 0);
+  const fresh = sshFixture(); fresh.profiles.push({ id: 'prof_b' });
+  const prepared = await fresh.controller.dispatch('prepareTerminalSshPassword', fresh.request, fresh.context);
+  const args = { id: 'prof_a', name: 'Password', selectionToken: prepared.selectionToken, password: 'synthetic-password' };
+  await assert.rejects(fresh.controller.dispatch('saveTerminalSshConnection', { ...args, id: 'prof_b' }, fresh.context), { code: 'SSH_SELECTION_MISMATCH' });
+  fresh.controller.pickedSSHIdentities.get(prepared.selectionToken).expiresAt = Date.now() - 1;
+  await assert.rejects(fresh.controller.dispatch('saveTerminalSshConnection', args, fresh.context), { code: 'SSH_SELECTION_EXPIRED' });
+  assert.equal(fresh.calls.some(([type]) => type === 'save'), false);
 });

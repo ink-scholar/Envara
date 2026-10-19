@@ -34,6 +34,8 @@ async function fixture(t) {
   const environment = { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: claude, ANTHROPIC_CONFIG_DIR: anthropic, TMPDIR: temp, TZ: 'Asia/Manila', LANG: 'en_PH.UTF-8', LC_ALL: 'en_PH.UTF-8',
     PATH: '/owned/bin:/usr/bin:/bin', BROWSER: '/owned/bin/browser', ENVARA_LINK_SOCKET: '/owned/links.sock',
     ENVARA_BROWSER_SOCKET: '/owned/browser.sock', ENVARA_LINK_TOKEN: 'synthetic-link-secret', ENVARA_BROWSER_TOKEN: 'synthetic-browser-secret',
+    SSH_AUTH_SOCK: '/owned/ssh/agent.sock', ENVARA_SSH_CONFIG: '/owned/ssh/config', ENVARA_SSH_TARGETS: '/owned/ssh/targets.json', ENVARA_SSH_CONNECTIONS: '/owned/ssh/connections.json',
+    ENVARA_SSH_PROXY_URL: 'http://fixture:synthetic-ssh-proxy-secret@127.0.0.1:1234',
     HTTPS_PROXY: 'http://user:synthetic-proxy-secret@127.0.0.1:1234', HTTP_PROXY: 'http://user:synthetic-proxy-secret@127.0.0.1:1234',
     ALL_PROXY: 'http://user:synthetic-proxy-secret@127.0.0.1:1234', NO_PROXY: 'localhost,127.0.0.1,::1', NODE_USE_ENV_PROXY: '1' };
   const request = { sessionId: 'term_one', directories: { temp, home, claude, anthropic }, installation, environment, privacy: { mode: 'standard' }, mcpServer: { command: process.execPath, args: ['/owned/envara-browser-mcp.mjs'] } };
@@ -193,11 +195,12 @@ test('private settings pin context without persisting proxy credentials or MCP/l
   await saveSettings(f, { env: { HTTPS_PROXY: f.request.environment.HTTPS_PROXY, ANTHROPIC_MODEL: 'sonnet' }, model: 'sonnet' });
   const launch = await prepareClaudeSession(f.request);
   const serialized = await readFile(settingsFile(launch), 'utf8');
-  for (const secret of ['synthetic-proxy-secret', 'synthetic-browser-secret', 'synthetic-link-secret']) assert.ok(!serialized.includes(secret));
+  for (const secret of ['synthetic-proxy-secret', 'synthetic-browser-secret', 'synthetic-link-secret', 'synthetic-ssh-proxy-secret']) assert.ok(!serialized.includes(secret));
   const pins = JSON.parse(serialized).env;
-  for (const key of ['HOME', 'USERPROFILE', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_CONFIG_DIR', 'TMPDIR', 'TZ', 'LANG', 'LC_ALL', 'BROWSER', 'ENVARA_LINK_SOCKET', 'ENVARA_BROWSER_SOCKET', 'NODE_USE_ENV_PROXY', 'NO_PROXY']) assert.equal(pins[key], f.request.environment[key]);
+  for (const key of ['HOME', 'USERPROFILE', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_CONFIG_DIR', 'TMPDIR', 'TZ', 'LANG', 'LC_ALL', 'BROWSER', 'ENVARA_LINK_SOCKET', 'ENVARA_BROWSER_SOCKET', 'NODE_USE_ENV_PROXY', 'NO_PROXY',
+    'SSH_AUTH_SOCK', 'ENVARA_SSH_CONFIG', 'ENVARA_SSH_TARGETS', 'ENVARA_SSH_CONNECTIONS']) assert.equal(pins[key], f.request.environment[key], key);
   assert.equal(pins.PATH, launch.environment.PATH);
-  for (const key of ['HTTPS_PROXY', 'ENVARA_LINK_TOKEN', 'ENVARA_BROWSER_TOKEN']) {
+  for (const key of ['HTTPS_PROXY', 'ENVARA_LINK_TOKEN', 'ENVARA_BROWSER_TOKEN', 'ENVARA_SSH_PROXY_URL']) {
     assert.equal(pins[key], undefined);
     assert.equal(launch.environment[key], f.request.environment[key]);
   }
@@ -229,13 +232,32 @@ test('refuses API keys, helpers, gateway and external tokens before launch witho
 test('rejects saved network, tool directory, link and subprocess-scrub overrides', async t => {
   const f = await fixture(t);
   for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'NO_PROXY', 'no_proxy', 'TZ', 'HOME',
-    'CLAUDE_CONFIG_DIR', 'ANTHROPIC_CONFIG_DIR', 'LANG', 'LC_ALL', 'PATH', 'BROWSER', 'ENVARA_LINK_TOKEN', 'ENVARA_BROWSER_TOKEN', 'ENVARA_BROWSER_SOCKET', 'ENVARA_LINK_SOCKET', 'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB', 'NODE_OPTIONS']) {
+    'CLAUDE_CONFIG_DIR', 'ANTHROPIC_CONFIG_DIR', 'LANG', 'LC_ALL', 'PATH', 'BROWSER', 'ENVARA_LINK_TOKEN', 'ENVARA_BROWSER_TOKEN', 'ENVARA_BROWSER_SOCKET', 'ENVARA_LINK_SOCKET',
+    'SSH_AUTH_SOCK', 'ENVARA_SSH_CONFIG', 'ENVARA_SSH_TARGETS', 'ENVARA_SSH_CONNECTIONS', 'ENVARA_SSH_PROXY_URL', 'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB', 'NODE_OPTIONS']) {
     await saveSettings(f, { env: { [key]: 'synthetic-conflicting-value' } });
     await assert.rejects(prepareClaudeSession(f.request), { code: 'CLAUDE_CODE_SESSION_POLICY_CONFLICT' });
   }
   await saveSettings(f, { proxyAuthHelper: 'echo synthetic-token' });
   await assert.rejects(prepareClaudeSession(f.request), { code: 'CLAUDE_CODE_SESSION_POLICY_CONFLICT' });
   assert.deepEqual(await readdir(f.temp), []);
+});
+
+test('matching SSH manifest settings preserve the selected paths and never persist the route credential', async t => {
+  const f = await fixture(t);
+  const matching = Object.fromEntries(['SSH_AUTH_SOCK', 'ENVARA_SSH_CONFIG', 'ENVARA_SSH_TARGETS', 'ENVARA_SSH_CONNECTIONS', 'ENVARA_SSH_PROXY_URL']
+    .map(key => [key, f.request.environment[key]]));
+  await saveSettings(f, { env: matching });
+  const original = await readFile(path.join(f.claude, 'settings.json'), 'utf8');
+  const launch = await prepareClaudeSession(f.request), settings = JSON.parse(await readFile(settingsFile(launch), 'utf8'));
+  for (const key of ['SSH_AUTH_SOCK', 'ENVARA_SSH_CONFIG', 'ENVARA_SSH_TARGETS', 'ENVARA_SSH_CONNECTIONS']) {
+    assert.equal(settings.env[key], matching[key]); assert.equal(launch.environment[key], matching[key]);
+  }
+  assert.equal(settings.env.ENVARA_SSH_PROXY_URL, undefined);
+  assert.equal(launch.environment.ENVARA_SSH_PROXY_URL, matching.ENVARA_SSH_PROXY_URL);
+  for (const filename of [settingsFile(launch), launch.args[launch.args.indexOf('--mcp-config') + 1], launch.wrapperPath]) {
+    assert.ok(!(await readFile(filename, 'utf8')).includes('synthetic-ssh-proxy-secret'));
+  }
+  assert.equal(await readFile(path.join(f.claude, 'settings.json'), 'utf8'), original);
 });
 
 test('requires the selected private Anthropic directory in both launch context and settings', async t => {

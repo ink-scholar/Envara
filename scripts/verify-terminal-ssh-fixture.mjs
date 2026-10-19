@@ -65,8 +65,11 @@ const children = new Set(), knownPids = new Set(), peers = new Set(), output = n
 let stage = 'prepare', terminal, manager, server, pythonChild, broker, linkChannel, proxyMode = 'normal', serverPort;
 const brokerDirectories = new Set();
 let browserLaunchAttempts = 0;
-const stats = { authenticated: 0, executions: 0, mapped: 0, refused407: 0, rejectedTargets: 0, rejectedAuth: 0 };
+const stats = { proxyConnections: 0, authenticated: 0, executions: 0, mapped: 0, refused407: 0, rejectedTargets: 0, rejectedAuth: 0 };
 const check = name => { proof.checks.push(name); console.log(`PASS ${name}`); };
+const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+const jsonLine = text => { for (const line of text.split('\n')) { try { const value = JSON.parse(line.trim()); if (value && typeof value === 'object') return value; } catch {} } throw Object.assign(new Error('No structured fixture result.'), { code: 'FIXTURE_JSON_MISSING' }); };
+const traffic = () => ({ ...stats });
 const pythonSource = String.raw`import sys,json,socket,threading,time,paramiko,base64
 root=sys.argv[1]
 client=base64.b64decode(open(root+'/client.pub').read().split()[1])
@@ -122,6 +125,7 @@ try {
   const user = randomBytes(12).toString('hex'), password = randomBytes(20).toString('hex');
   const authorization = `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}`;
   server = net.createServer(socket => {
+    stats.proxyConnections++;
     peers.add(socket); socket.on('error', () => {}); socket.once('close', () => peers.delete(socket)); let header = Buffer.alloc(0);
     socket.on('data', function handshake(chunk) {
       header = Buffer.concat([header, chunk]); if (header.length > 16384) return socket.destroy();
@@ -165,13 +169,10 @@ try {
   }
   terminal = new TerminalService({ dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'],
     ...(claudeExecutable ? { browserBroker: broker, linkChannel, claudeExecutableResolver: async () => claudeExecutable } : {}),
-    additionalExecutablePaths: [path.dirname(runtime)], resolveContext: async id => { assert.equal(id, context.id); return structuredClone(context); },
+    additionalExecutablePaths: [path.dirname(runtime)], resolveContext: async id => { assert(['ssh-fixture', 'ssh-empty'].includes(id)); return { ...structuredClone(context), id }; },
     ptyFactory: (executable, argv, options) => { const pty = require('node-pty').spawn(executable, argv, options); knownPids.add(pty.pid); return pty; },
     onEvent: event => { if (event.type === 'data') output.set(event.sessionId, (output.get(event.sessionId) ?? '') + event.data); } });
   await terminal.ready; terminal.hostHome = hostHome;
-  stage = 'terminal-create';
-  const first = await terminal.create({ id: 'ssh-fixture', directory: working, fresh: true });
-  assert(first.networkFence && first.ssh?.privateKeyProtection && first.ssh.available);
   const runCommand = async (session, command) => {
     const tag = `EVSSH_${randomBytes(6).toString('hex')}`, before = (output.get(session.sessionId) ?? '').length;
     await terminal.write({ sessionId: session.sessionId, data: `${command}; printf '\\n${tag}:%d\\n' "$?"\r` });
@@ -185,9 +186,55 @@ try {
       hostRefused: /REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed/.test(text),
       routeRefused: text.includes('SSH proxy authentication was refused'), agentRefused: /agent refused operation/.test(text) };
   };
+  stage = 'empty-configuration';
+  const empty = await terminal.create({ id: 'ssh-empty', directory: working, fresh: true });
+  assert(empty.networkFence);
+  const beforeEmpty = traffic();
+  const emptyListResult = await runCommand(empty, 'envara-ssh list --json'); assert.equal(emptyListResult.code, 0);
+  const emptyList = jsonLine(emptyListResult.text);
+  assert.equal(emptyList.schema, 'envara.ssh-session'); assert.equal(emptyList.version, 2);
+  assert.equal(emptyList.status, 'empty'); assert.equal(emptyList.expiresAt, null); assert.deepEqual(emptyList.connections, []);
+  for (const command of ['ssh', 'ssh fixture@ssh.envara.invalid -p1030 envara-fixture']) {
+    const result = await runCommand(empty, command); assert.equal(result.code, 2); assert(result.text.includes('SSH_CONNECTIONS_EMPTY'));
+  }
+  assert.deepEqual(traffic(), beforeEmpty);
+  await terminal.close({ sessionId: empty.sessionId });
+  check('Empty SSH configuration reports setup guidance and structured empty discovery without opening a proxy or authenticating.');
+  stage = 'terminal-create';
+  const first = await terminal.create({ id: 'ssh-fixture', directory: working, fresh: true });
+  assert(first.networkFence && first.ssh?.privateKeyProtection && first.ssh.available);
+  const discover = async session => {
+    const before = traffic(), result = await runCommand(session, 'envara-ssh list --json'); assert.equal(result.code, 0);
+    const value = jsonLine(result.text); assert.equal(value.schema, 'envara.ssh-session'); assert.equal(value.version, 2); assert.equal(value.status, 'ready');
+    assert.equal(value.expiresAt, null);
+    assert.deepEqual(value.connections, [{ id: saved.id, name: saved.name, alias: saved.alias, host: 'ssh.envara.invalid', port: 1030, user: 'fixture',
+      authType: 'publickey', expiresAt: null, status: 'ready', available: true }]);
+    for (const secret of [user, password, path.join(temporary, 'client'), manager.filename]) assert(!JSON.stringify(value).includes(secret));
+    assert.deepEqual(traffic(), before); return value;
+  };
+  stage = 'discover'; await discover(first);
+  check('Structured connection discovery exposes only saved public destinations and aliases, with no route or authentication.');
   stage = 'first-protected-ssh'; const firstResult = await invoke(first); proof.firstResult = firstResult;
   assert.equal(firstResult.code, 0); assert(firstResult.marker); assert(stats.authenticated >= 1 && stats.executions >= 1);
   check('Real protected native SSH authenticates through constrained agent and selected authenticated CONNECT route.');
+  stage = 'standard-target';
+  for (const command of ['ssh fixture@ssh.envara.invalid -p1030 envara-fixture', 'ssh -p 1030 fixture@ssh.envara.invalid envara-fixture']) {
+    const result = await runCommand(first, command); assert.equal(result.code, 0); assert(result.text.includes('ENVARA_SSH_FIXTURE_OK'));
+  }
+  check('Common user@host and -pPORT/-p PORT forms resolve only to the registered connection.');
+  stage = 'refused-targets-options';
+  const beforeRefusals = traffic();
+  for (const command of [
+    'ssh fixture@unknown.envara.invalid -p1030 envara-fixture', 'ssh fixture@ssh.envara.invalid -p1031 envara-fixture',
+    'ssh other@ssh.envara.invalid -p1030 envara-fixture', `ssh -o ProxyCommand=/usr/bin/true ${saved.alias}`,
+    `ssh -F /dev/null ${saved.alias}`, `ssh -i ${quote(path.join(temporary, 'client'))} ${saved.alias}`,
+    `ssh -A ${saved.alias}`, `ssh -L 22222:127.0.0.1:22 ${saved.alias}`,
+  ]) {
+    const result = await runCommand(first, command); assert.equal(result.code, 2);
+    assert(/SSH_(TARGET_NOT_AUTHORIZED|OPTIONS_UNSUPPORTED|ARGUMENT_INVALID)/.test(result.text));
+  }
+  assert.deepEqual(traffic(), beforeRefusals);
+  check('Unknown destinations, mismatched users or ports and client/identity/forwarding overrides refuse before proxy contact.');
   stage = 'duplicate';
   const beforeDuplicate = stats.executions, second = await terminal.duplicate({ sessionId: first.sessionId });
   assert(second.sessionId !== first.sessionId && second.ssh.privateKeyProtection && second.networkFence);
@@ -195,6 +242,23 @@ try {
   const sockets = [...manager.sessions.values()].map(lease => lease.directory); assert.equal(new Set(sockets).size, 2);
   const secondResult = await invoke(second); assert.equal(secondResult.code, 0); assert(secondResult.marker);
   check('Duplicate is independent and idle, with a distinct constrained agent, and authenticates only after explicit SSH.');
+  stage = 'private-key-network-fence';
+  const firstSocket = terminal.sessions.get(first.sessionId).sshBinding.agentSocket,
+    otherSocket = terminal.sessions.get(second.sessionId).sshBinding.agentSocket;
+  const probe = `const fs=require('node:fs'),net=require('node:net');
+    const denied=operation=>{try{operation();return false;}catch(error){return ['EPERM','EACCES'].includes(error.code);}};
+    const connect=address=>new Promise(resolve=>{let done=false;const socket=net.connect(address);const finish=value=>{if(done)return;done=true;clearTimeout(timer);socket.destroy();resolve(value);};const timer=setTimeout(()=>finish({ok:false,denied:false}),1500);socket.once('connect',()=>finish({ok:true,denied:false}));socket.once('error',error=>finish({ok:false,denied:['EPERM','EACCES'].includes(error.code)}));});
+    (async()=>console.log(JSON.stringify({privateReadDenied:denied(()=>fs.readFileSync(${JSON.stringify(path.join(temporary, 'client'))})),
+      privateWriteDenied:denied(()=>fs.appendFileSync(${JSON.stringify(path.join(temporary, 'client'))},'x')),
+      storeReadDenied:denied(()=>fs.readFileSync(${JSON.stringify(manager.filename)})),
+      ownAgent:await connect(${JSON.stringify(firstSocket)}),otherAgent:await connect(${JSON.stringify(otherSocket)}),
+      direct:await connect({host:'203.0.113.1',port:443})})))();`;
+  const probeFile = path.join(working, 'owned-network-probe.cjs');
+  await writeFile(probeFile, probe, { mode: 0o400, flag: 'wx' });
+  const fenceResult = await runCommand(first, `${quote(runtime)} ${quote(probeFile)}`); assert.equal(fenceResult.code, 0);
+  assert.deepEqual(jsonLine(fenceResult.text), { privateReadDenied: true, privateWriteDenied: true, storeReadDenied: true,
+    ownAgent: { ok: true, denied: false }, otherAgent: { ok: false, denied: true }, direct: { ok: false, denied: true } });
+  check('Real PTY descendants cannot read or change registered keys/store, use another session agent or connect directly; own agent remains reachable.');
   let dedicated = null;
   if (claudeExecutable) {
     stage = 'dedicated-claude-create';
@@ -203,6 +267,34 @@ try {
     assert(dedicated.networkFence && dedicated.ssh.privateKeyProtection && dedicated.deviceIdentifierRestrictions);
     assert.equal(broker.sessions.size, 1);
     for (const item of broker.sessions.values()) brokerDirectories.add(item.directory);
+    stage = 'dedicated-claude-discovery'; const cliDescription = await discover(dedicated);
+    stage = 'dedicated-claude-mcp-discovery';
+    const internal = terminal.sessions.get(dedicated.sessionId), mcp = internal.browserBinding.mcpServer;
+    assert.equal(mcp.command, runtime); assert(mcp.args.length > 0);
+    const beforeMcp = traffic(), rpc = [
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'owned-ssh-fixture', version: '1.0.0' } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'envara_ssh_connections', arguments: {} } },
+    ];
+    // Use the actual copied production bridge and this PTY's existing private
+    // environment. No direct broker call or mock transport replaces stdio/IPC.
+    const mcpCommand = `printf '%s\\n' ${rpc.map(item => quote(JSON.stringify(item))).join(' ')} | ${[mcp.command, ...mcp.args].map(quote).join(' ')}`;
+    const mcpResult = await runCommand(dedicated, mcpCommand); assert.equal(mcpResult.code, 0);
+    const responses = mcpResult.text.split('\n').flatMap(line => { try { const item = JSON.parse(line.trim()); return item?.jsonrpc === '2.0' ? [item] : []; } catch { return []; } });
+    assert.equal(responses.length, 3); assert(responses.every(item => !item.error));
+    const tools = responses.find(item => item.id === 2)?.result?.tools;
+    assert(Array.isArray(tools)); assert(tools.some(tool => tool.name === 'envara_ssh_connections' && tool.annotations?.readOnlyHint === true));
+    const response = responses.find(item => item.id === 3)?.result;
+    assert(response && response.isError !== true && response.content?.length === 1 && response.content[0].type === 'text');
+    assert.deepEqual(JSON.parse(response.content[0].text), { ...cliDescription,
+      connections: cliDescription.connections.map(connection => ({ ...connection, command: `ssh ${connection.alias}` })) });
+    const publicReply = JSON.stringify(responses);
+    for (const secret of [user, password, path.join(temporary, 'client'), manager.filename,
+      ...Object.values(internal.browserBinding.environment), mcp.command, ...mcp.args]) assert(!publicReply.includes(secret));
+    assert.deepEqual(traffic(), beforeMcp); assert.equal(browserLaunchAttempts, 0);
+    proof.mcpDiscovery = { actualCopiedStdioBridge: true, fencedPty: true, sshToolListed: true,
+      sameSessionDescription: true, noProxyOrAuthentication: true, noBrowserLaunch: true, noPrivateFields: true };
+    check('Dedicated fenced PTY runs the real MCP stdio bridge: SSH discovery matches its session, leaks no private fields and causes no SSH or browser traffic.');
     stage = 'dedicated-claude-version';
     const versionResult = await runCommand(dedicated, 'claude --version');
     assert.equal(versionResult.code, 0);

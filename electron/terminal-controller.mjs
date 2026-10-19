@@ -5,13 +5,15 @@ const identifier = (value) => {
   return value;
 };
 
-export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'deleteClaudeAccount', 'claudeInstallationStatus', 'listTerminalSshConnections', 'prepareTerminalSshIdentity', 'saveTerminalSshConnection', 'removeTerminalSshConnection']);
+export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'deleteClaudeAccount', 'claudeInstallationStatus', 'listTerminalSshConnections', 'prepareTerminalSshIdentity', 'prepareTerminalSshPassword', 'setTerminalSshPassword', 'saveTerminalSshConnection', 'removeTerminalSshConnection']);
 const PROFILE_CONFIGURATION = new Set(['updateProfile', 'deleteProfile']);
 const PROXY_CONFIGURATION = new Set(['saveProxy', 'deleteProxy']);
 const GROUP_CONFIGURATION = new Set(['saveGroup', 'deleteGroup', 'clearGroupProxy']);
 const SSH_SELECTION_LIFETIME = 30 * 60 * 1000;
 const sshPublicFields = ['id', 'name', 'alias', 'host', 'port', 'user', 'keyLabel', 'keyFingerprint'];
 const sshPublicIdentity = value => ({ ...Object.fromEntries(sshPublicFields.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])),
+  ...(['password', 'publickey'].includes(value.authType) ? { authType: value.authType } : {}),
+  ...(value.authType === 'password' ? { passwordReady: value.passwordReady === true } : {}),
   hostFingerprints: Array.isArray(value.hostFingerprints) ? value.hostFingerprints.filter(item => typeof item === 'string') : [] });
 const sshPublicList = value => ({ supported: value?.supported === true,
   connections: Array.isArray(value?.connections) ? value.connections.map(sshPublicIdentity) : [] });
@@ -19,6 +21,11 @@ const sshWindow = context => {
   const source = context?.window;
   if (!source || typeof source.isDestroyed !== 'function' || source.isDestroyed()) throw fail('终端窗口已关闭。', 'SSH_WINDOW_CLOSED');
   return source;
+};
+const sshPassword = value => {
+  if (typeof value !== 'string' || value.length < 1 || Buffer.byteLength(value) > 1024 || /[\x00\r\n]/.test(value))
+    throw fail('请输入有效的 SSH 密码。', 'SSH_PASSWORD_INVALID');
+  return value;
 };
 
 /** Serializes directory selection / launch against edits affecting a live PTY. */
@@ -111,14 +118,36 @@ export class TerminalController {
     await this.profile(args.id);
     sshWindow(context);
     if (typeof prepared?.selectionToken !== 'string' || !prepared.selectionToken) throw fail('无法准备 SSH 密钥，请重新选择。', 'SSH_KEY_INVALID');
+    return this.retainSSHSelection(args.id, sourceWindow, prepared);
+  }
+
+  retainSSHSelection(id, sourceWindow, prepared) {
     const now = Date.now();
     for (const [token, item] of this.pickedSSHIdentities) if (item.expiresAt <= now || item.window.isDestroyed()) this.pickedSSHIdentities.delete(token);
     // Keep only the latest selection for this environment in this window.
-    for (const [token, item] of this.pickedSSHIdentities) if (item.id === args.id && item.window === sourceWindow) this.pickedSSHIdentities.delete(token);
+    for (const [token, item] of this.pickedSSHIdentities) if (item.id === id && item.window === sourceWindow) this.pickedSSHIdentities.delete(token);
     const selectionToken = randomUUID();
-    this.pickedSSHIdentities.set(selectionToken, { id: args.id, window: sourceWindow, selectionToken: prepared.selectionToken,
+    this.pickedSSHIdentities.set(selectionToken, { id, window: sourceWindow, selectionToken: prepared.selectionToken,
+      authType: prepared.authType === 'password' ? prepared.authType : 'publickey',
       host: prepared.host, port: prepared.port, user: prepared.user, expiresAt: now + SSH_SELECTION_LIFETIME });
     return { ...sshPublicIdentity(prepared), selectionToken };
+  }
+
+  async prepareSSHPassword(args, context) {
+    const sourceWindow = sshWindow(context);
+    await this.profile(args.id);
+    sshWindow(context);
+    // Preparation only inspects already trusted host keys. It accepts neither
+    // a renderer-selected key path nor a password and does not authenticate.
+    const prepared = await this.terminal.prepareTerminalSshPassword({ id: args.id,
+      host: typeof args.host === 'string' ? args.host.trim() : '', port: args.port,
+      user: typeof args.user === 'string' ? args.user.trim() : '' });
+    sshWindow(context);
+    await this.profile(args.id);
+    sshWindow(context);
+    if (prepared?.authType !== 'password' || typeof prepared.selectionToken !== 'string' || !prepared.selectionToken)
+      throw fail('无法准备 SSH 连接，请重新核对。', 'SSH_INVALID_INPUT');
+    return this.retainSSHSelection(args.id, sourceWindow, prepared);
   }
 
   async assertSSHIdle(id) {
@@ -135,10 +164,22 @@ export class TerminalController {
       throw fail('所选 SSH 密钥已失效，请重新选择。', 'SSH_SELECTION_EXPIRED');
     }
     if (item.id !== args.id || item.window !== sourceWindow) throw fail('所选 SSH 密钥不属于当前窗口或环境，请重新选择。', 'SSH_SELECTION_MISMATCH');
+    const password = item.authType === 'password' ? sshPassword(args.password) : undefined;
     await this.assertSSHIdle(args.id);
     sshWindow(context);
     this.pickedSSHIdentities.delete(args.selectionToken);
-    await this.terminal.saveTerminalSshConnection({ id: args.id, name: args.name, selectionToken: item.selectionToken });
+    await this.terminal.saveTerminalSshConnection({ id: args.id, name: args.name, selectionToken: item.selectionToken,
+      ...(password !== undefined ? { password } : {}) });
+    sshWindow(context);
+    return sshPublicList(await this.terminal.listTerminalSshConnections({ id: args.id }));
+  }
+
+  async setSSHPassword(args, context) {
+    sshWindow(context);
+    const password = sshPassword(args.password);
+    await this.assertSSHIdle(args.id);
+    sshWindow(context);
+    await this.terminal.setTerminalSshPassword({ id: args.id, connectionId: args.connectionId, password });
     sshWindow(context);
     return sshPublicList(await this.terminal.listTerminalSshConnections({ id: args.id }));
   }
@@ -184,11 +225,13 @@ export class TerminalController {
       if (method === 'chooseWorkspaceDirectory') return this.selectDirectory(args.id, context);
       if (method === 'pickTerminalDirectory') return this.pickNewDirectory(args.id, context);
       if (method === 'prepareTerminalSshIdentity') return this.prepareSSHIdentity(args, context);
+      if (method === 'prepareTerminalSshPassword') return this.prepareSSHPassword(args, context);
       /* Which browser this environment's links open in. Allowed while it runs:
        * a link resolves the setting when it is opened. */
       if (method === 'setTerminalLinkBrowser') return this.setLinkBrowser(args);
       await this.profile(args.id);
       if (method === 'saveTerminalSshConnection') return this.saveSSHConnection(args, context);
+      if (method === 'setTerminalSshPassword') return this.setSSHPassword(args, context);
       if (method === 'removeTerminalSshConnection') {
         sshWindow(context);
         await this.assertSSHIdle(args.id);

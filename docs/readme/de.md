@@ -5,7 +5,7 @@
 <p align="center"><strong>Eine eigene Umgebung für jeden Arbeitskontext.</strong><br />Dein Browser, dein Terminal und deine Apps in einer gemeinsamen Umgebung.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Lizenz des Originalcodes: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.3-475569" alt="Envara 1.0.3" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.4-475569" alt="Envara 1.0.4" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README in 9 Sprachen" /></a>
 </p>
 <p align="center">

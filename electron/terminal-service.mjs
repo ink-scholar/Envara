@@ -225,14 +225,27 @@ export class TerminalService {
     return task;
   }
   active(id, kind = null, accountId = null) { return [...this.sessions.values()].find(session => session.profileId === id && (!kind || session.kind === kind) && (!accountId || session.claudeAccountId === accountId) && ['starting', 'running', 'closing'].includes(session.status)); }
+  readSessionSshConnections(session) {
+    // Describe this process tree's loaded authority, never the mutable store or
+    // another session. Revocation is immediate even when cleanup is pending.
+    if (this.closed || session.finished || session.finishing || session.status !== 'running' || !session.networkFence || session.sshRevocation
+      || !session.sshPrivateKeyProtection || typeof session.sshBinding?.describe !== 'function')
+      return { schema: 'envara.ssh-session', version: 1, status: 'unavailable', available: false, connections: [], expiresAt: null };
+    return session.sshBinding.describe();
+  }
   metadata(session) {
+    let sshAvailable = false;
+    if (session.sshConnections) {
+      try { const description = this.readSessionSshConnections(session); sshAvailable = description.status === 'ready' && description.available === true; }
+      catch { /* A failed authority description cannot advertise SSH access. */ }
+    }
     return { sessionId: session.sessionId, profileId: session.profileId, kind: session.kind ?? 'shell', ...(session.browserProfileId ? { browserProfileId: session.browserProfileId, browserName: session.browserName ?? null } : {}), status: session.status, cwd: session.cwd, timezone: session.timezone ?? null, language: session.language ?? null, networkFence: session.networkFence === true, privacy: session.launchContext?.privacy ?? { mode: 'standard' }, geolocation: session.launchContext?.geolocation ?? null, network: session.network ?? unknownNetwork(), columns: session.columns, rows: session.rows, startedAt: session.startedAt, sequence: session.sequence, replay: session.replay,
       ...(session.requestId ? { requestId: session.requestId } : {}),
       ...(session.kind === 'claude-code' ? { claudeAccountId: session.claudeAccountId, claudeAccountName: session.claudeAccountName ?? null, claudeInstallSource: session.claudeInstallSource,
         deviceIdentifierRestrictions: session.deviceIdentifierRestrictions === true } : {}),
       ...(session.claudeInstall ? { claudeInstall: { ...session.claudeInstall } } : {}),
       ...(session.sshConnections ? { ssh: { privateKeyProtection: session.sshPrivateKeyProtection === true,
-        available: !!session.sshBinding && !session.sshRevocation && session.status === 'running' && session.sshConnections.length > 0,
+        available: sshAvailable,
         connections: session.sshConnections } } : {}),
       ...(session.exitCode != null ? { exitCode: session.exitCode } : {}), ...(session.error ? { error: session.error } : {}),
       ...(session.errorCode ? { errorCode: session.errorCode } : {}), ...(session.cleanupError ? { cleanupError: session.cleanupError } : {}) };
@@ -246,12 +259,26 @@ export class TerminalService {
     if (this.closed || !this.sshManager) throw codeError('SSH 连接服务不可用。', 'TERMINAL_SSH_UNAVAILABLE');
     return this.sshManager.prepareIdentity({ id, host, port, user, keyPath });
   }
-  saveTerminalSshConnection({ id, name, selectionToken }) {
+  async prepareTerminalSshPassword({ id, host, port, user }) {
+    await this.ready; validId(id);
+    if (this.closed || !this.sshManager) throw codeError('SSH 连接服务不可用。', 'TERMINAL_SSH_UNAVAILABLE');
+    return this.sshManager.preparePassword({ id, host, port, user });
+  }
+  saveTerminalSshConnection({ id, name, selectionToken, password }) {
     validId(id);
     return this.serialized(id, async () => {
       if (this.closed || !this.sshManager) throw codeError('SSH 连接服务不可用。', 'TERMINAL_SSH_UNAVAILABLE');
       if (this.active(id)) throw codeError('请先结束此环境的终端会话，再保存 SSH 连接。', 'TERMINAL_SSH_BUSY');
-      await this.sshManager.save({ id, name, selectionToken });
+      await this.sshManager.save({ id, name, selectionToken, ...(password !== undefined ? { password } : {}) });
+      return this.sshManager.list({ id });
+    });
+  }
+  setTerminalSshPassword({ id, connectionId, password }) {
+    validId(id);
+    return this.serialized(id, async () => {
+      if (this.closed || !this.sshManager) throw codeError('SSH 连接服务不可用。', 'TERMINAL_SSH_UNAVAILABLE');
+      if (this.active(id)) throw codeError('请先结束此环境的终端会话，再授权 SSH 密码。', 'TERMINAL_SSH_BUSY');
+      await this.sshManager.setPassword({ id, connectionId, password });
       return this.sshManager.list({ id });
     });
   }
@@ -693,7 +720,8 @@ export class TerminalService {
         try { this.assertStarting(session); }
         catch (error) { await this.retainLaunchCleanup(session, 'sshBinding', binding); throw error; }
         session.sshBinding = binding;
-        session.sshConnections = (sshConfiguration.connections ?? []).map(({ id: connectionId, alias, name }) => ({ id: connectionId, alias, name }));
+        const loadedConnections = typeof binding.describe === 'function' ? binding.describe().connections : sshConfiguration.connections;
+        session.sshConnections = (loadedConnections ?? []).map(({ id: connectionId, alias, name }) => ({ id: connectionId, alias, name }));
         if (managedProxyId && (this.managedProxyFailures.get(managedProxyId) ?? 0) !== (proxyFailuresAtStart.get(managedProxyId) ?? 0))
           throw codeError('SSH 所选网络已停止，请检查线路后新建终端。', 'TERMINAL_SSH_ROUTE_LOST');
       }
@@ -708,7 +736,8 @@ export class TerminalService {
           downloadContext: { proxyUrl: endpoint, signal: session.abortController.signal },
           onProgress: progress => this.installProgress(session, progress) });
         this.assertStarting(session);
-        const binding = await this.browserBroker.createSession({ sessionId: session.sessionId, profileId: id, browserProfileId, context: session.launchContext });
+        const binding = await this.browserBroker.createSession({ sessionId: session.sessionId, profileId: id, browserProfileId, context: session.launchContext,
+          readSshConnections: () => this.readSessionSshConnections(session) });
         try { this.assertStarting(session); }
         catch (error) { await this.retainLaunchCleanup(session, 'browserBinding', binding); throw error; }
         session.browserBinding = binding;
@@ -736,6 +765,7 @@ export class TerminalService {
           readablePaths: session.sshBinding.readablePaths ?? session.sshBinding.readOnlyPaths,
           readOnlyPaths: session.sshBinding.readOnlyPaths, agentRoot: session.sshBinding.agentRoot,
           agentSocket: session.sshBinding.agentSocket,
+          allowedSockets: session.sshBinding.allowedSockets ?? [],
           deniedAgentSockets: typeof process.env.SSH_AUTH_SOCK === 'string' && path.isAbsolute(process.env.SSH_AUTH_SOCK)
             ? [process.env.SSH_AUTH_SOCK] : [] } : null;
         shell = await this.networkFence.wrap(shell, { routePort, ...(kind === 'claude-code' ? { restrictDeviceIdentifiers: true } : {}),

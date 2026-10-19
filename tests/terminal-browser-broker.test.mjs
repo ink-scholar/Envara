@@ -6,7 +6,8 @@ import os from 'node:os';
 import { chmod, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { TerminalBrowserBroker, browserContextSignature, browserRouteSignature } from '../electron/terminal-browser-broker.mjs';
-import { BROWSER_TOOLS, requestBrowserBroker } from '../electron/terminal-browser-mcp.mjs';
+import { BROWSER_TOOLS, TERMINAL_TOOLS, requestBrowserBroker } from '../electron/terminal-browser-mcp.mjs';
+import { describeSshSession } from '../electron/terminal-ssh-command.mjs';
 
 const clone = value => structuredClone(value);
 const seed = { id: 'prof_a', proxyId: 'node_a', proxy: { protocol: 'http', host: '127.0.0.1', port: 19321, username: 'local-user', password: 'fixture-local-secret' },
@@ -28,10 +29,14 @@ async function fixture(t) {
   };
   const broker = new TerminalBrowserBroker({ service, dataDir: root, nodeExecutable: process.execPath, onError: event => errors.push(event) });
   t.after(async () => { await broker.shutdown(); await rm(root, { recursive: true, force: true }); });
-  const create = (sessionId = 'term_a', browserProfileId = 'prof_b') => broker.createSession({ sessionId, profileId: 'prof_a', browserProfileId, context: clone(contexts.get('prof_a')) });
+  const create = (sessionId = 'term_a', browserProfileId = 'prof_b', readSshConnections = null) => broker.createSession({ sessionId, profileId: 'prof_a', browserProfileId, context: clone(contexts.get('prof_a')), readSshConnections });
   return { broker, service, contexts, state, calls, errors, create };
 }
 const send = (binding, request) => requestBrowserBroker(request, { socketPath: binding.environment.ENVARA_BROWSER_SOCKET, token: binding.environment.ENVARA_BROWSER_TOKEN });
+const sshConnection = suffix => ({ id: `ssh_${suffix.repeat(32)}`, alias: `envara-${suffix.repeat(12)}`,
+  name: 'Disposable SSH server', host: `server-${suffix}.invalid`, port: 2222, user: 'fixture' });
+const sshView = (status, connections = [], expiresAt = null) => ({ schema: 'envara.ssh-session', version: 1,
+  status, available: status === 'ready', connections, expiresAt });
 const postLink = (binding, payload) => new Promise((resolve, reject) => {
   const body = JSON.stringify(payload);
   const request = http.request({ socketPath: binding.environment.ENVARA_LINK_SOCKET, path: '/link', method: 'POST', headers: { Authorization: `Bearer ${binding.environment.ENVARA_LINK_TOKEN}`, 'Content-Length': Buffer.byteLength(body) } }, response => {
@@ -69,6 +74,124 @@ test('one private channel grants only its terminal browser, with no global crede
   assert.equal(status.result.isError, undefined);
   assert.match(status.result.content[0].text, /Chosen browser/);
   assert.equal(f.calls.filter(call => call.kind === 'ensure').length, 0, 'status stays read-only');
+});
+
+test('SSH discovery is always advertised, read-only and empty without granting a connection', async t => {
+  const f = await fixture(t);
+  f.broker.protectBrowserOperation = () => { throw new Error('Read-only SSH discovery must not reserve a browser'); };
+  let reads = 0;
+  const binding = await f.create('term_a', 'prof_b', () => { reads++; return sshView('empty'); });
+  const initialized = await send(binding, { jsonrpc: '2.0', id: 1, method: 'initialize' });
+  assert.match(initialized.result.instructions, /envara_ssh_connections/);
+  const list = await send(binding, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
+  assert.deepEqual(list.result.tools.map(item => item.name), [...BROWSER_TOOLS.map(item => item.name), 'envara_ssh_connections']);
+  const tool = list.result.tools.at(-1);
+  assert.equal(tool.annotations.readOnlyHint, true);
+  assert.deepEqual(tool.inputSchema.properties, {}); assert.equal(tool.inputSchema.additionalProperties, false);
+  const result = JSON.parse((await send(binding, rpc('envara_ssh_connections'))).result.content[0].text);
+  assert.equal(result.status, 'empty'); assert.equal(result.available, false);
+  assert.deepEqual(result.connections, []); assert.equal(result.expiresAt, null); assert.equal(reads, 1);
+  assert.match(JSON.stringify(result.usage), /SSH connections/);
+  assert.equal(f.calls.filter(call => ['ensure', 'rest', 'mcp'].includes(call.kind)).length, 0);
+});
+
+test('SSH discovery is session-scoped, rejects target selectors, and projects only public fields', async t => {
+  const f = await fixture(t), expiresAt = Date.now() + 60000;
+  const secrets = ['synthetic-key-path-private', 'synthetic-proxy-credential', 'untrusted usage text'];
+  const selected = { ...sshConnection('a'), keyPath: secrets[0], proxyPassword: secrets[1] };
+  const a = await f.create('term_a', 'prof_b', () => ({ ...sshView('ready', [selected], expiresAt), usage: secrets[2] }));
+  const b = await f.create('term_b', 'prof_b', () => sshView('ready', [sshConnection('b')], expiresAt));
+  for (const [binding, expected] of [[a, sshConnection('a')], [b, sshConnection('b')]]) {
+    const answer = await send(binding, rpc('envara_ssh_connections'));
+    const view = JSON.parse(answer.result.content[0].text);
+    assert.equal(view.status, 'ready'); assert.equal(view.available, true);
+    assert.deepEqual(view.connections, [{ ...expected, command: `ssh ${expected.alias}` }]);
+    for (const secret of secrets) assert.ok(!JSON.stringify(answer).includes(secret));
+  }
+  for (const args of [{ profileId: 'prof_b' }, { sessionId: 'term_b' }, { host: 'outside.invalid' }, { refresh: true }])
+    assert.equal((await send(a, rpc('envara_ssh_connections', args))).result.isError, true);
+  await assert.rejects(requestBrowserBroker(rpc('envara_ssh_connections'), {
+    socketPath: a.environment.ENVARA_BROWSER_SOCKET, token: b.environment.ENVARA_BROWSER_TOKEN,
+  }));
+  assert.equal(f.calls.filter(call => ['ensure', 'rest', 'mcp'].includes(call.kind)).length, 0);
+});
+
+test('SSH discovery reports expiry and unavailable leases without renewing or leaking errors', async t => {
+  const f = await fixture(t);
+  let view = sshView('expired', [sshConnection('a')], Date.now() - 1000);
+  const binding = await f.create('term_a', 'prof_b', () => {
+    if (view instanceof Error) throw view;
+    return view;
+  });
+  const read = async () => (await send(binding, rpc('envara_ssh_connections'))).result;
+  let result = JSON.parse((await read()).content[0].text);
+  assert.equal(result.status, 'expired'); assert.equal(result.available, false);
+  assert.equal(result.expiresAt, view.expiresAt);
+  for (const status of ['closed', 'unavailable']) {
+    view = sshView(status);
+    result = JSON.parse((await read()).content[0].text);
+    assert.equal(result.status, status); assert.equal(result.available, false); assert.deepEqual(result.connections, []);
+  }
+  for (const bad of [
+    { ...sshView('ready', [sshConnection('a')], Date.now() + 60000), available: false },
+    { ...sshView('ready', [{ ...sshConnection('a'), alias: 'malformed;synthetic-secret' }], Date.now() + 60000) },
+    Object.assign(new Error('synthetic-secret'), { code: 'CLAUDE_BROWSER_PRIVATE' }),
+  ]) {
+    view = bad;
+    result = await read();
+    assert.equal(result.isError, true); assert.match(result.content[0].text, /CLAUDE_BROWSER_SSH_UNAVAILABLE/);
+    assert.ok(!JSON.stringify(result).includes('synthetic-secret'));
+  }
+  assert.equal(f.calls.filter(call => ['ensure', 'rest', 'mcp'].includes(call.kind)).length, 0);
+});
+
+test('SSH discovery preserves app-run grants and per-connection unavailability without disclosing private fields', async t => {
+  const f = await fixture(t), now = Date.now();
+  const password = { ...sshConnection('a'), authType: 'password', expiresAt: null };
+  const key = { ...sshConnection('b'), authType: 'publickey', expiresAt: null };
+  const manifest = { schema: 'envara.ssh-session', version: 2, expiresAt: null, connections: [password, key] };
+  let view = describeSshSession(manifest, now + 86400000);
+  const binding = await f.create('term_app_run', 'prof_b', () => ({ ...view,
+    connections: view.connections.map(connection => ({ ...connection, password: 'synthetic-private-password', keyPath: 'synthetic-private-path' })) }));
+  const read = async () => (await send(binding, rpc('envara_ssh_connections'))).result;
+  let result = await read(), visible = JSON.parse(result.content[0].text);
+  assert.equal(visible.status, 'ready'); assert.equal(visible.expiresAt, null);
+  assert.equal(visible.connections.length, 2);
+  for (const connection of visible.connections) {
+    assert.equal(connection.expiresAt, null); assert.equal(connection.status, 'ready'); assert.equal(connection.available, true);
+  }
+  for (const secret of ['synthetic-private-password', 'synthetic-private-path']) assert.ok(!JSON.stringify(result).includes(secret));
+  view = describeSshSession(manifest, now, { unavailableAliases: [key.alias] });
+  visible = JSON.parse((await read()).content[0].text);
+  assert.equal(visible.status, 'ready'); assert.equal(visible.connections[0].available, true);
+  assert.equal(visible.connections[1].status, 'unavailable'); assert.equal(visible.connections[1].available, false);
+  const finiteManifest = { ...manifest, connections: [password, { ...key, expiresAt: now - 1000 }] };
+  view = describeSshSession(finiteManifest, now);
+  visible = JSON.parse((await read()).content[0].text);
+  assert.equal(visible.status, 'ready'); assert.equal(visible.connections[1].status, 'expired');
+  view = { ...view, connections: view.connections.map(connection => ({ ...connection, status: 'ready', available: true })) };
+  assert.equal((await read()).isError, true, 'stale per-connection availability must not be advertised');
+});
+
+test('SSH discovery revalidates the route and refuses a revoked session before reading its lease', async t => {
+  const f = await fixture(t);
+  let reads = 0;
+  const binding = await f.create('term_a', 'prof_b', () => { reads++; return sshView('ready', [sshConnection('a')], Date.now() + 60000); });
+  f.contexts.get('prof_a').managedRoute.coreGeneration = 'changed';
+  assert.equal((await send(binding, rpc('envara_ssh_connections'))).result.isError, true);
+  assert.equal(reads, 0);
+  f.contexts.get('prof_a').managedRoute.coreGeneration = seed.managedRoute.coreGeneration;
+  let release, started;
+  const pendingCheck = new Promise(resolve => { started = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const resolveContext = f.service.resolveWorkspaceContext;
+  f.service.resolveWorkspaceContext = async profileId => { started(); await gate; return resolveContext(profileId); };
+  const pending = send(binding, rpc('envara_ssh_connections')).catch(error => error);
+  await pendingCheck; await binding.dispose(); release();
+  assert.ok(await pending instanceof Error);
+  await Promise.allSettled([...f.broker.pending]);
+  assert.equal(reads, 0);
+  assert.equal(f.calls.filter(call => ['ensure', 'rest', 'mcp'].includes(call.kind)).length, 0);
 });
 
 test('wrong or other-session tokens are refused before any operation', async t => {
@@ -229,14 +352,16 @@ test('copied physical stdio client completes MCP initialization, listing and bro
     { jsonrpc: '2.0', id: 2, method: 'tools/list' },
     { ...rpc('browser_navigate', { url: 'https://example.test/protocol' }), id: 3 },
     { ...rpc('browser_click', { selector: '#ok', profileId: 'other' }), id: 4 },
+    { ...rpc('envara_ssh_connections'), id: 5 },
   ];
   child.stdin.end(requests.map(item => JSON.stringify(item)).join('\n') + '\n');
   assert.deepEqual(await exited, { code: 0, signal: null }, stderr);
   const replies = stdout.trim().split('\n').map(line => JSON.parse(line));
-  assert.deepEqual(replies.map(item => item.id), [1, 2, 3, 4]);
+  assert.deepEqual(replies.map(item => item.id), [1, 2, 3, 4, 5]);
   assert.equal(replies[0].result.protocolVersion, '2025-11-25');
-  assert.deepEqual(replies[1].result.tools.map(tool => tool.name), BROWSER_TOOLS.map(tool => tool.name));
+  assert.deepEqual(replies[1].result.tools.map(tool => tool.name), TERMINAL_TOOLS.map(tool => tool.name));
   assert.equal(replies[2].result.isError, undefined); assert.equal(replies[3].result.isError, true);
+  assert.equal(JSON.parse(replies[4].result.content[0].text).status, 'unavailable');
   assert.ok(!stdout.includes(seed.proxy.password)); assert.equal(stderr, '');
 });
 

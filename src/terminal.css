@@ -78,14 +78,15 @@
 .terminal-new-session-field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; font-size: var(--font-size-xs, 12px); color: var(--text-muted); }
 .terminal-ssh-note { margin: 0; color: var(--text-muted); font-size: var(--font-size-xs, 12px); line-height: 1.5; overflow-wrap: anywhere; }
 .terminal-ssh-fields, .terminal-ssh-list, .terminal-ssh-identity { display: grid; gap: 10px; min-width: 0; }
-.terminal-ssh-fields label, .terminal-ssh-connection > label { display: grid; gap: 6px; min-width: 0; color: var(--text-muted); font-size: var(--font-size-xs, 12px); }
-.terminal-ssh-fields input, .terminal-ssh-connection > label > input { width: 100%; min-width: 0; min-height: var(--control-height, 36px); padding: 6px 8px; border: 1px solid var(--input-border); border-radius: var(--radius-control, 8px); background: var(--input-bg); color: var(--text); font: inherit; font-size: var(--font-size-sm, 13px); }
+.terminal-ssh-fields label, .terminal-ssh-connection > label, .terminal-ssh-unlock label { display: grid; gap: 6px; min-width: 0; color: var(--text-muted); font-size: var(--font-size-xs, 12px); }
+.terminal-ssh-fields input, .terminal-ssh-fields select, .terminal-ssh-connection > label > input, .terminal-ssh-unlock input { width: 100%; min-width: 0; min-height: var(--control-height, 36px); padding: 6px 8px; border: 1px solid var(--input-border); border-radius: var(--radius-control, 8px); background: var(--input-bg); color: var(--text); font: inherit; font-size: var(--font-size-sm, 13px); }
 .terminal-ssh-target { display: grid; grid-template-columns: minmax(0, 1fr) 88px; gap: 8px; }
 .terminal-ssh-connection { display: grid; gap: 7px; min-width: 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-control, 8px); background: var(--bg-surface); font-size: var(--font-size-xs, 12px); overflow-wrap: anywhere; }
 .terminal-ssh-connection > strong { color: var(--text); font-weight: var(--weight-medium, 500); }
 .terminal-ssh-connection > span, .terminal-ssh-connection summary { color: var(--text-muted); }
 .terminal-ssh-connection > label > input { font-family: var(--font-mono); user-select: text; }
 .terminal-ssh-remove-button { justify-self: end; }
+.terminal-ssh-unlock { display: grid; gap: 8px; min-width: 0; }
 .terminal-ssh-remove p { margin: 0 0 8px; line-height: 1.5; }
 .terminal-ssh-connections dl { display: grid; gap: 8px; margin: 8px 0 0; font-size: var(--font-size-xs, 12px); }
 .terminal-ssh-connections dt { margin-bottom: 4px; color: var(--text-muted); }

@@ -6,7 +6,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { BROWSER_TOOLS } from './terminal-browser-mcp.mjs';
+import { TERMINAL_TOOLS } from './terminal-browser-mcp.mjs';
+import { describeSshSession } from './terminal-ssh-command.mjs';
 
 const fail = (message, code = 'CLAUDE_BROWSER_UNAVAILABLE') => Object.assign(new Error(message), { code });
 const id = value => { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(value)) throw fail('Invalid browser binding.', 'CLAUDE_BROWSER_INVALID_BINDING'); return value; };
@@ -54,7 +55,7 @@ function validate(value, schema, name = 'arguments') {
   }
 }
 function checkedTool(name, args) {
-  const tool = BROWSER_TOOLS.find(item => item.name === name);
+  const tool = TERMINAL_TOOLS.find(item => item.name === name);
   if (!tool) throw fail('Unknown browser tool.', 'CLAUDE_BROWSER_UNKNOWN_TOOL');
   validate(args, tool.inputSchema);
   if (name === 'browser_navigate') webURL(args.url);
@@ -63,6 +64,27 @@ function checkedTool(name, args) {
     else if (args.index != null || args.action === 'list' && args.url != null) throw fail('Unexpected tab argument.', 'CLAUDE_BROWSER_INVALID_ARGUMENT');
     if (args.url != null) webURL(args.url);
   }
+}
+
+function publicSshDescription(value) {
+  // Only bounded, authored output crosses into the model transcript. Never
+  // forward a provider's arbitrary metadata, usage text, or error message.
+  if (!value || !['empty', 'ready', 'expired', 'closed', 'unavailable'].includes(value.status)) throw fail('SSH connection status is unavailable. Start a new terminal session.', 'CLAUDE_BROWSER_SSH_UNAVAILABLE');
+  const unavailableAliases = [];
+  if (value.version === 2 && Array.isArray(value.connections)) {
+    for (const connection of value.connections) {
+      if (!connection || !['ready', 'expired', 'unavailable'].includes(connection.status)
+        || connection.available !== (connection.status === 'ready')) throw fail('SSH connection status is unavailable. Start a new terminal session.', 'CLAUDE_BROWSER_SSH_UNAVAILABLE');
+      if (connection.status === 'unavailable') unavailableAliases.push(connection.alias);
+    }
+  }
+  const result = describeSshSession({ schema: value.schema, version: value.version,
+    connections: value.connections, expiresAt: value.expiresAt }, Date.now(),
+  { closed: value.status === 'closed', unavailable: value.status === 'unavailable', unavailableAliases });
+  if (result.status !== value.status || result.available !== value.available) throw fail('SSH connection status changed. Refresh the connection list.', 'CLAUDE_BROWSER_SSH_UNAVAILABLE');
+  if (result.version === 2 && result.connections.some((connection, index) => connection.status !== value.connections[index].status
+    || connection.available !== value.connections[index].available)) throw fail('SSH connection status changed. Refresh the connection list.', 'CLAUDE_BROWSER_SSH_UNAVAILABLE');
+  return { ...result, connections: result.connections.map(connection => ({ ...connection, command: `ssh ${connection.alias}` })) };
 }
 const SNAPSHOT = `(() => {
   const visible = e => !!(e.getClientRects().length) && getComputedStyle(e).visibility !== 'hidden';
@@ -89,13 +111,14 @@ export class TerminalBrowserBroker {
     this.protectBrowserOperation = protectBrowserOperation;
     this.sessions = new Map(); this.pending = new Set(); this.closed = false;
   }
-  async createSession({ sessionId, profileId, browserProfileId, context }) {
+  async createSession({ sessionId, profileId, browserProfileId, context, readSshConnections = null }) {
     id(sessionId); id(profileId);
     if (!browserProfileId || browserProfileId === 'system') throw fail('Choose an Envara browser for Claude Code.', 'CLAUDE_BROWSER_REQUIRED');
     id(browserProfileId);
+    if (readSshConnections !== null && typeof readSshConnections !== 'function') throw fail('Invalid SSH discovery binding.', 'CLAUDE_BROWSER_INVALID_BINDING');
     if (this.closed || this.sessions.has(sessionId)) throw fail('Browser session is unavailable.');
     if (context?.id !== profileId || !context.proxy || !context.proxyId || context.network?.ok !== true) throw fail('Verify the selected network before starting Claude Code.', 'CLAUDE_BROWSER_NETWORK_REQUIRED');
-    const session = { sessionId, profileId, browserProfileId, routeSignature: browserRouteSignature(context), sourceSignature: browserContextSignature(context), token: randomBytes(32).toString('hex'), disposed: false, queue: Promise.resolve(), sockets: new Set() };
+    const session = { sessionId, profileId, browserProfileId, readSshConnections, routeSignature: browserRouteSignature(context), sourceSignature: browserContextSignature(context), token: randomBytes(32).toString('hex'), disposed: false, queue: Promise.resolve(), sockets: new Set() };
     this.sessions.set(sessionId, session);
     try {
       const chosen = await this.validateBinding(session, { initial: true });
@@ -156,10 +179,19 @@ export class TerminalBrowserBroker {
     const operation = () => this.operateBound(session, name, args);
     // A tool can start the browser, then write its storage through REST or MCP.
     // Hold one target-browser reservation across that entire operation.
-    return name === 'browser_status' ? operation() : this.protectBrowserOperation(session.browserProfileId, operation);
+    return ['browser_status', 'envara_ssh_connections'].includes(name) ? operation() : this.protectBrowserOperation(session.browserProfileId, operation);
   }
   async operateBound(session, name, args) {
     const chosen = await this.validateBinding(session);
+    if (name === 'envara_ssh_connections') {
+      try {
+        return text(publicSshDescription(session.readSshConnections?.() ?? {
+          schema: 'envara.ssh-session', version: 1, status: 'unavailable', available: false, connections: [], expiresAt: null,
+        }));
+      } catch {
+        throw fail('SSH connection status is unavailable. Check Envara and start a new terminal session.', 'CLAUDE_BROWSER_SSH_UNAVAILABLE');
+      }
+    }
     if (name === 'browser_status') return text({ browser: session.browser, network: { proxyId: chosen.proxyId, timezone: session.browserContext.timezone, egress: session.browserContext.network?.ip ?? null }, binding: 'terminal-session', engine: 'Playwright' });
     // This service method validates its launch receipt for an already-running
     // browser. It must never silently reuse a session with an unknown route.
@@ -200,10 +232,10 @@ export class TerminalBrowserBroker {
     const response = result => ({ jsonrpc: '2.0', id: request.id, result });
     if (request.method === 'initialize') {
       const requested = request.params?.protocolVersion;
-      return response({ protocolVersion: ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'].includes(requested) ? requested : '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'envara-browser', version: '1.0.0' }, instructions: 'These tools operate only the browser and network selected for this terminal. Use them for browser tasks; do not launch a separate browser or use other browser MCP servers.' });
+      return response({ protocolVersion: ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'].includes(requested) ? requested : '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'envara-browser', version: '1.0.0' }, instructions: 'Browser tools operate only the browser and network selected for this terminal. Use them for browser tasks; do not launch a separate browser or use other browser MCP servers. For SSH tasks, first call envara_ssh_connections to discover this session\'s authorized connections and usage. It is read-only and does not connect or authorize servers. Execute returned SSH aliases through the terminal; do not read host private keys or change routes. Remote commands run under the server\'s permissions and network, outside this Mac\'s process fence.' });
     }
     if (request.method === 'ping') return response({});
-    if (request.method === 'tools/list') return response({ tools: BROWSER_TOOLS });
+    if (request.method === 'tools/list') return response({ tools: TERMINAL_TOOLS });
     if (request.method !== 'tools/call') return { jsonrpc: '2.0', id: request.id, error: { code: -32601, message: 'Method not found.' } };
     try {
       const params = request.params;
@@ -249,6 +281,7 @@ export class TerminalBrowserBroker {
     // Creation may still be yielding while disposal happens. A second cleanup
     // must collect resources that creation allocated before noticing revocation.
     session.disposed = true; session.token = ''; this.sessions.delete(session.sessionId);
+    session.readSshConnections = null;
     // Keep cleanup attempts serialized, but a failed filesystem removal must
     // not poison every later Close. Revocation above never depends on cleanup.
     session.disposal = Promise.resolve(session.disposal).catch(() => {}).then(async () => {

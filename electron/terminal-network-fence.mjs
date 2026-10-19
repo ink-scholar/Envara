@@ -81,9 +81,10 @@ function sshProtectionRules(value) {
   const readOnlyPaths = paths('readOnlyPaths'), deniedAgentSockets = paths('deniedAgentSockets');
   const agentRoot = checkedPath(value.agentRoot);
   const agentSocket = value.agentSocket == null ? null : checkedPath(value.agentSocket);
+  const allowedSockets = [...new Set([...paths('allowedSockets'), ...(agentSocket ? [agentSocket] : [])])];
   const inside = filename => filename.startsWith(`${agentRoot}/`);
   if (!protectedPaths.includes(agentRoot) || readablePaths.some(filename => !inside(filename))
-      || agentSocket && !inside(agentSocket)) throw sshProtectionFailure();
+      || allowedSockets.length > 32 || allowedSockets.some(filename => !inside(filename) || deniedAgentSockets.includes(filename))) throw sshProtectionFailure();
   const filter = (kind, filename) => `(${kind} ${JSON.stringify(filename)})`;
   const rules = [
     `(deny file-read* file-write* ${protectedPaths.map(filename => filter('subpath', filename)).join(' ')})`,
@@ -92,7 +93,7 @@ function sshProtectionRules(value) {
   // Only public session configuration is readable. The store, key files and
   // other sessions' agents remain inaccessible to this process tree.
   const traversalPaths = new Set();
-  for (const filename of readablePaths) {
+  for (const filename of [...readablePaths, ...allowedSockets]) {
     for (let parent = path.dirname(filename); parent === agentRoot || inside(parent); parent = path.dirname(parent)) traversalPaths.add(parent);
   }
   // The helper verifies every ancestor with lstat before opening its public
@@ -100,11 +101,22 @@ function sshProtectionRules(value) {
   // reading their contents or another session's files.
   if (traversalPaths.size) rules.push(`(allow file-read-metadata ${[...traversalPaths].map(filename => filter('literal', filename)).join(' ')})`);
   if (readablePaths.length) rules.push(`(allow file-read* ${readablePaths.map(filename => filter('subpath', filename)).join(' ')})`);
-  if (readOnlyPaths.length) rules.push(`(deny file-write* ${readOnlyPaths.map(filename => filter('subpath', filename)).join(' ')})`);
-  if (agentSocket) {
-    if (deniedAgentSockets.includes(agentSocket)) throw sshProtectionFailure();
-    rules.push(`(allow file-read* file-write-data ${filter('literal', agentSocket)})`,
-      `(allow network-outbound (remote unix-socket ${filter('literal', agentSocket)}))`);
+  if (readOnlyPaths.length) {
+    rules.push(`(deny file-write* ${readOnlyPaths.map(filename => filter('subpath', filename)).join(' ')})`);
+    // A trusted runtime cannot be replaced by renaming one of its ancestors.
+    // Literal ancestor rules leave sibling projects and their contents writable.
+    const ancestors = new Set();
+    for (const filename of readOnlyPaths) {
+      for (let parent = path.dirname(filename); ; parent = path.dirname(parent)) {
+        ancestors.add(parent);
+        if (path.dirname(parent) === parent) break;
+      }
+    }
+    rules.push(`(deny file-write* ${[...ancestors].map(filename => filter('literal', filename)).join(' ')})`);
+  }
+  for (const socket of allowedSockets) {
+    rules.push(`(allow file-read* file-write-data ${filter('literal', socket)})`,
+      `(allow network-outbound (remote unix-socket ${filter('literal', socket)}))`);
   }
   return rules;
 }

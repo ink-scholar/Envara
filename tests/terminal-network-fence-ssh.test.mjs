@@ -20,6 +20,10 @@ test('SSH protection rejects malformed or cross-session public paths before laun
     { ...validProtection(), protectedPaths: ['/owned/store'] },
     { ...validProtection(), readablePaths: ['/other/public'] },
     { ...validProtection(), agentSocket: '/other/agent.sock' },
+    { ...validProtection(), allowedSockets: ['/other/broker.sock'] },
+    { ...validProtection(), allowedSockets: ['/owned/agents'] },
+    { ...validProtection(), allowedSockets: Array.from({ length: 33 }, (_, index) => `/owned/agents/a/${index}.sock`) },
+    { ...validProtection(), allowedSockets: ['/owned/agents/a/command.sock'], deniedAgentSockets: ['/owned/agents/a/command.sock'] },
     { ...validProtection(), deniedAgentSockets: ['/owned/agents/a/agent.sock'] },
     { ...validProtection(), protectedPaths: ['/owned/agents', '/owned/../store'] },
     { ...validProtection(), readOnlyPaths: ['relative'] },
@@ -60,6 +64,32 @@ const listen = async (address, peers) => {
   return server;
 };
 
+test('real Seatbelt prevents trusted runtime replacement and ancestor renames while preserving sibling edits', onlyMac, async t => {
+  const directory = await realpath(await mkdtemp('/private/tmp/envara-ssh-runtime-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const runtime = path.join(directory, 'runtime/engine'), agents = path.join(directory, 'agents');
+  const scratch = path.join(directory, 'project'), executable = path.join(runtime, 'node');
+  await Promise.all([mkdir(runtime, { recursive: true }), mkdir(agents), mkdir(scratch)]);
+  await writeFile(executable, 'owned-runtime-fixture');
+  const profile = terminalFenceProfile({ sshProtection: { protectedPaths: [agents], agentRoot: agents,
+    readablePaths: [], readOnlyPaths: [runtime], allowedSockets: [] } });
+  const probe = `const fs=require('node:fs'),path=require('node:path');
+    const runtime=${JSON.stringify(runtime)},file=${JSON.stringify(executable)},scratch=${JSON.stringify(scratch)};
+    const denied=fn=>{try{fn();return false;}catch(e){return ['EPERM','EACCES'].includes(e.code);}};
+    const result={write:denied(()=>fs.appendFileSync(file,'changed')),unlink:denied(()=>fs.unlinkSync(file)),
+      replace:denied(()=>{const from=path.join(scratch,'replacement');fs.writeFileSync(from,'other');fs.renameSync(from,file);}),
+      hardlink:denied(()=>fs.linkSync(file,path.join(scratch,'alias'))),
+      runtimeRename:denied(()=>fs.renameSync(runtime,runtime+'-moved')),
+      ancestorRename:denied(()=>fs.renameSync(path.dirname(runtime),path.dirname(runtime)+'-moved')),
+      outerRename:denied(()=>fs.renameSync(path.dirname(path.dirname(runtime)),path.dirname(path.dirname(runtime))+'-moved'))};
+    const a=path.join(scratch,'a'),b=path.join(scratch,'b');fs.writeFileSync(a,'editable');fs.renameSync(a,b);fs.appendFileSync(b,' project');fs.unlinkSync(b);
+    result.siblingEdits=true;console.log(JSON.stringify(result));`;
+  const result = JSON.parse((await execute(TERMINAL_FENCE_EXECUTABLE, ['-p', profile, process.execPath, '-e', probe], { timeout: 10000 })).stdout);
+  assert.deepEqual(result, { write: true, unlink: true, replace: true, hardlink: true, runtimeRename: true,
+    ancestorRename: true, outerRename: true, siblingEdits: true });
+  assert.equal(await readFile(executable, 'utf8'), 'owned-runtime-fixture');
+});
+
 // Every path and socket is disposable and owned by this test. No host SSH file,
 // agent, public Internet endpoint or actual key material is inspected.
 test('real Seatbelt confines SSH files and agent sockets while preserving network and device restrictions', onlyMac, async t => {
@@ -86,12 +116,13 @@ test('real Seatbelt confines SSH files and agent sockets while preserving networ
   await writeFile(files.otherConfig, 'Host other-fixture\n', { mode: 0o600 });
   await chmod(filename('agents/a/public'), 0o700);
   await symlink(files.privateKey, files.symlinkAlias);
-  const sockets = { own: filename('agents/a/agent.sock'), other: filename('agents/b/agent.sock'), host: filename('host-agent.sock') };
+  const sockets = { own: filename('agents/a/agent.sock'), command: filename('agents/a/command.sock'),
+    password: filename('agents/a/password.sock'), other: filename('agents/b/agent.sock'), host: filename('host-agent.sock') };
   for (const socket of Object.values(sockets)) servers.push(await listen(socket, peers));
   const loopback = await listen({ host: '127.0.0.1', port: 0 }, peers); servers.push(loopback);
   const protection = { protectedPaths: [filename('store'), filename('host-ssh'), filename('agents')],
     agentRoot: filename('agents'), agentSocket: sockets.own, readablePaths: [filename('agents/a/public')],
-    readOnlyPaths: [filename('agents/a/public')], deniedAgentSockets: [sockets.host] };
+    readOnlyPaths: [filename('agents/a/public')], allowedSockets: [sockets.command], deniedAgentSockets: [sockets.host] };
   const profile = terminalFenceProfile({ sshProtection: protection, restrictDeviceIdentifiers: true });
   const options = { timeout: 12000, maxBuffer: 16384,
     env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C' } };
@@ -109,7 +140,8 @@ test('real Seatbelt confines SSH files and agent sockets while preserving networ
       publicRead:check(()=>fs.readFileSync(files.publicConfig)),publicWrite:check(()=>fs.appendFileSync(files.publicConfig,'x')),
       publicCreate:check(()=>fs.writeFileSync(files.publicNewFile,'x')),otherPublicRead:check(()=>fs.readFileSync(files.otherConfig)),
       scratchWrite:check(()=>fs.writeFileSync(files.scratch,'owned-fixture')),
-      ownAgent:await connect(sockets.own),otherAgent:await connect(sockets.other),hostAgent:await connect(sockets.host),
+      ownAgent:await connect(sockets.own),commandBroker:await connect(sockets.command),passwordBroker:await connect(sockets.password),
+      otherAgent:await connect(sockets.other),hostAgent:await connect(sockets.host),
       loopback:await connect({host:'127.0.0.1',port:${loopback.address().port}}),direct:await connect({host:'203.0.113.1',port:443})};
       console.log(JSON.stringify(result));})();`;
   const baselineProbe = `const fs=require('node:fs'),net=require('node:net');
@@ -123,8 +155,8 @@ test('real Seatbelt confines SSH files and agent sockets while preserving networ
   const allowed = { ok: true, denied: false }, denied = { ok: false, denied: true };
   const expected = Object.fromEntries(['privateRead', 'privateWrite', 'storeRead', 'storeWrite', 'symlinkRead', 'symlinkWrite',
     'createHardlink', 'protectedSymlink', 'publicWrite', 'publicCreate', 'otherPublicRead',
-    'otherAgent', 'hostAgent', 'direct'].map(key => [key, denied]));
-  Object.assign(expected, { publicRead: allowed, scratchWrite: allowed, ownAgent: allowed, loopback: allowed });
+    'passwordBroker', 'otherAgent', 'hostAgent', 'direct'].map(key => [key, denied]));
+  Object.assign(expected, { publicRead: allowed, scratchWrite: allowed, ownAgent: allowed, commandBroker: allowed, loopback: allowed });
   const observations = [];
   for (const child of [false, true]) {
     const command = child ? ['/bin/sh', '-c', 'exec "$1" -e "$2"', 'owned-ssh-fence-child', process.execPath, probe] : [process.execPath, '-e', probe];

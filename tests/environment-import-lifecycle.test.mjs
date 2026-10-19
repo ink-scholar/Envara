@@ -51,13 +51,13 @@ test('account deletion excludes a same-environment export or import while other 
 test('SSH configuration changes respect environment transfer locks while read-only selection remains available', async () => {
   const lock = new DesktopEnvironmentTransferLock(), gate = deferred();
   const transfer = lock.transfer(() => gate.promise, 'env_one');
-  for (const method of ['saveTerminalSshConnection', 'removeTerminalSshConnection']) {
+  for (const method of ['saveTerminalSshConnection', 'setTerminalSshPassword', 'removeTerminalSshConnection']) {
     assert.equal(isEnvironmentDataMutation(method), true);
     assert.equal(environmentMutationProfile(method, { id: 'env_one' }), 'env_one');
     await assert.rejects(lock.mutate(method, {}, async () => assert.fail('configuration must not change during transfer'), 'env_one'), { code: 'ENVIRONMENT_TRANSFER_BUSY' });
     assert.equal(await lock.mutate(method, {}, async () => 'other allowed', 'env_two'), 'other allowed');
   }
-  for (const method of ['listTerminalSshConnections', 'prepareTerminalSshIdentity']) {
+  for (const method of ['listTerminalSshConnections', 'prepareTerminalSshIdentity', 'prepareTerminalSshPassword']) {
     assert.equal(isEnvironmentDataMutation(method), false);
     assert.equal(await lock.mutate(method, {}, async () => 'metadata only', 'env_one'), 'metadata only');
   }

@@ -178,7 +178,7 @@ test('all SSH connection actions remain inside the independent terminal window e
   const f = fixture();
   Object.assign(f.views.get(f.event.sender), { kind: 'terminal', profileId: 'prof_fixture' });
   await f.startup.start();
-  const methods = ['listTerminalSshConnections', 'prepareTerminalSshIdentity', 'saveTerminalSshConnection', 'removeTerminalSshConnection'];
+  const methods = ['listTerminalSshConnections', 'prepareTerminalSshIdentity', 'prepareTerminalSshPassword', 'setTerminalSshPassword', 'saveTerminalSshConnection', 'removeTerminalSshConnection'];
   for (const method of methods) {
     await assert.rejects(f.api.call(method, { id: 'other-profile' }), /此窗口仅操作当前环境/);
     await assert.rejects(f.api.call(method, {}), /此窗口仅操作当前环境/);

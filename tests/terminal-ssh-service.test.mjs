@@ -7,10 +7,12 @@ import { TerminalService } from '../electron/terminal-service.mjs';
 import { ensureClaudeInstallation } from '../electron/claude-code-installation.mjs';
 import { exportEnvironment } from '../electron/environment-transfer.mjs';
 import { readEnvironmentExport } from '../electron/environment-export.mjs';
+import { describeSshSession } from '../electron/terminal-ssh-command.mjs';
 
-const connections = [{ id: 'ssh_fixture', alias: 'envara-fixture', name: 'Synthetic server', host: 'host.invalid', port: 22, user: 'fixture',
+const connections = [{ id: 'ssh_fixture', alias: 'envara-aaaaaaaaaaaa', name: 'Synthetic server', host: 'host.invalid', port: 22, user: 'fixture',
   keyLabel: 'Synthetic identity', keyFingerprint: 'SHA256:synthetic-key', hostFingerprints: ['SHA256:synthetic-host'] }];
 const publicConnections = connections.map(({ id, alias, name }) => ({ id, alias, name }));
+const manifestConnections = values => values.map(({ id, alias, name, host, port, user }) => ({ id, alias, name, host, port, user }));
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 
 class FakePty {
@@ -31,26 +33,38 @@ async function fixture(t, options = {}) {
   await writeFile(privateRecord, JSON.stringify({ keyPath: privateKey }), { mode: 0o600 });
   const context = { id: 'chosen', name: 'Synthetic environment', timezone: 'UTC', locale: 'en-US', proxyId: 'route_a', managedProxy: true,
     proxy: { protocol: 'http', host: '127.0.0.1', port: 49123, username: 'fixture', password: 'synthetic-route-password' }, ...options.context };
-  const fakes = [], bindings = [], browserBindings = [], wraps = [];
-  const calls = { create: [], save: [], remove: [], prepare: [], close: 0, processClose: 0, installer: 0 };
+  const fakes = [], bindings = [], browserBindings = [], wraps = [], clock = { now: Date.now() };
+  const savedConnections = new Map([['chosen', structuredClone(options.connections ?? connections)]]);
+  const selectedConnections = id => savedConnections.get(id) ?? options.connections ?? connections;
+  const calls = { list: [], describe: [], browserCreate: [], create: [], save: [], remove: [], prepare: [], preparePassword: [], setPassword: [], close: 0, processClose: 0, installer: 0 };
   const sshManager = { ready: Promise.resolve(),
-    list: async ({ id }) => ({ supported: options.supported !== false, connections: structuredClone(options.connections ?? connections) }),
+    list: async ({ id }) => { calls.list.push({ id }); return { supported: options.supported !== false, connections: structuredClone(selectedConnections(id)) }; },
     prepareIdentity: async args => { calls.prepare.push(args); return { selectionToken: 'synthetic-selection' }; },
+    preparePassword: async args => { calls.preparePassword.push(args); return { authType: 'password', selectionToken: 'synthetic-password-selection' }; },
+    setPassword: async args => { calls.setPassword.push(args); },
     save: async args => { calls.save.push(args); }, remove: async args => { calls.remove.push(args); },
     close: async () => { calls.close++; },
     async createSession(args) {
       calls.create.push(args); await options.beforeBinding?.(args);
       const agentRoot = path.join(args.directories.temp, `ssh-${args.sessionId}`), binDirectory = path.join(agentRoot, 'bin');
       await mkdir(binDirectory, { recursive: true, mode: 0o700 });
-      const config = path.join(agentRoot, 'config'), targets = path.join(agentRoot, 'targets.json');
-      const selected = (options.connections ?? connections).length > 0;
+      const config = path.join(agentRoot, 'config'), targets = path.join(agentRoot, 'targets.json'), manifestPath = path.join(agentRoot, 'connections.json');
+      const selectedRecords = structuredClone(selectedConnections(args.profileId)).filter(item => item.authType !== 'password' || item.passwordReady === true);
+      const loaded = manifestConnections(selectedRecords).map((record, index) => options.sessionVersion === 2
+        ? { ...record, authType: selectedRecords[index].authType ?? 'publickey', expiresAt: null } : record), selected = loaded.length > 0;
       const agentSocket = selected ? path.join(agentRoot, 'agent.sock') : null;
-      await writeFile(config, `IdentityFile ${privateKey}\n`, { mode: 0o600 });
-      await writeFile(targets, JSON.stringify({ 'envara-fixture': { host: 'host.invalid', port: 22, user: 'fixture' } }), { mode: 0o600 });
-      const binding = { binDirectory: selected ? binDirectory : null, agentRoot, agentSocket, allowedAgentSocket: agentSocket,
-        protectedPaths: [privateRoot, privateKey, privateRecord], readablePaths: [config, targets], readOnlyPaths: [config, targets], disposed: 0,
-        environment: selected ? { SSH_AUTH_SOCK: agentSocket, ENVARA_SSH_TARGETS: targets, ENVARA_SSH_PROXY_URL: args.proxyUrl } : {},
-        async dispose() { binding.disposed++; await options.disposeBinding?.(binding); await rm(agentRoot, { recursive: true, force: true }); } };
+      const manifest = { schema: 'envara.ssh-session', version: options.sessionVersion ?? 1, connections: loaded,
+        expiresAt: options.sessionVersion === 2 ? null : selected ? clock.now + 3600000 : null };
+      await writeFile(config, '# Synthetic protected SSH configuration\n', { mode: 0o400 });
+      if (selected) await writeFile(targets, JSON.stringify(loaded.map(({ host, port }) => ({ host, port }))), { mode: 0o400 });
+      await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o400 });
+      for (const name of ['ssh', 'envara-ssh']) await writeFile(path.join(binDirectory, name), '#!/bin/sh\nexit 64\n', { mode: 0o500 });
+      const binding = { binDirectory, agentRoot, agentSocket, allowedAgentSocket: agentSocket, allowedSockets: [path.join(agentRoot, 'command.sock')], manifest, closed: false,
+        protectedPaths: [privateRoot, privateKey, privateRecord], readablePaths: [agentRoot], readOnlyPaths: [agentRoot], disposed: 0,
+        environment: { ENVARA_SSH_CONFIG: config, ENVARA_SSH_CONNECTIONS: manifestPath,
+          ...(selected ? { ENVARA_SSH_TARGETS: targets, SSH_AUTH_SOCK: agentSocket, ENVARA_SSH_PROXY_URL: args.proxyUrl } : {}) },
+        describe() { calls.describe.push(args.sessionId); return describeSshSession(manifest, clock.now, { closed: binding.closed }); },
+        async dispose() { binding.closed = true; binding.disposed++; await options.disposeBinding?.(binding); await rm(agentRoot, { recursive: true, force: true }); } };
       bindings.push(binding); return binding;
     },
   };
@@ -58,6 +72,7 @@ async function fixture(t, options = {}) {
     availableLocales: ['C', 'en_US.UTF-8'], resolveContext: async id => ({ ...structuredClone(context), id }),
     linkChannel: { executableDirectory: async () => '/owned/link-bin', environment: () => ({ ENVARA_LINK_SOCKET: '/owned/link.sock', ENVARA_LINK_TOKEN: 'synthetic-link-token' }) },
     browserBroker: { createSession: async args => {
+      calls.browserCreate.push(args);
       const binding = { browser: { name: 'Selected browser' }, environment: { ENVARA_BROWSER_SOCKET: '/owned/browser.sock', ENVARA_BROWSER_TOKEN: `synthetic-browser-token-${browserBindings.length}` },
         mcpServer: { command: process.execPath, args: ['/owned/browser-mcp.mjs'] }, disposed: 0, dispose: async () => { binding.disposed++; } };
       browserBindings.push(binding); return binding;
@@ -78,7 +93,7 @@ async function fixture(t, options = {}) {
   t.after(async () => { try { await service.shutdown(); } finally { await rm(root, { recursive: true, force: true }); } });
   await service.ready;
   const start = (kind = 'shell', id = 'chosen') => service.create({ id, directory: cwd, fresh: true, kind, ...(kind === 'claude-code' ? { browserProfileId: id } : {}) });
-  return { root, cwd, privateKey, privateRecord, privateRoot, context, service, sshManager, fakes, bindings, browserBindings, wraps, calls, start };
+  return { root, cwd, privateKey, privateRecord, privateRoot, context, service, sshManager, fakes, bindings, browserBindings, wraps, calls, start, savedConnections, clock };
 }
 
 for (const kind of ['shell', 'claude-code']) {
@@ -91,17 +106,19 @@ for (const kind of ['shell', 'claude-code']) {
     assert.equal(f.calls.create[0].proxyUrl, env.HTTPS_PROXY);
     assert.deepEqual(f.wraps[0].settings.sshProtection.protectedPaths, binding.protectedPaths);
     assert.equal(f.wraps[0].settings.sshProtection.agentSocket, binding.agentSocket);
+    assert.deepEqual(f.wraps[0].settings.sshProtection.allowedSockets, binding.allowedSockets);
     assert.equal(f.wraps[0].settings.routePort, f.context.proxy.port);
     assert.deepEqual(result.ssh, { privateKeyProtection: true, available: true, connections: publicConnections });
     const snapshot = JSON.stringify(await f.service.snapshot());
-    for (const secret of [f.privateKey, binding.agentSocket, binding.environment.ENVARA_SSH_TARGETS, 'synthetic-route-password']) assert.ok(!snapshot.includes(secret));
+    for (const secret of [f.privateKey, binding.agentSocket, ...['ENVARA_SSH_CONFIG', 'ENVARA_SSH_CONNECTIONS', 'ENVARA_SSH_TARGETS'].map(key => binding.environment[key]), 'synthetic-route-password']) assert.ok(!snapshot.includes(secret));
     if (kind === 'claude-code') {
       assert.equal(result.browserProfileId, 'chosen'); assert.equal(result.deviceIdentifierRestrictions, true);
       const prepared = internal.claudeLaunch;
       const settings = JSON.parse(await readFile(prepared.args[prepared.args.indexOf('--settings') + 1], 'utf8'));
       assert.equal(settings.env.SSH_AUTH_SOCK, binding.agentSocket);
-      assert.equal(settings.env.ENVARA_SSH_TARGETS, binding.environment.ENVARA_SSH_TARGETS);
+      for (const key of ['ENVARA_SSH_CONFIG', 'ENVARA_SSH_CONNECTIONS', 'ENVARA_SSH_TARGETS']) assert.equal(settings.env[key], binding.environment[key], key);
       assert.equal(settings.env.ENVARA_SSH_PROXY_URL, undefined);
+      assert.ok(!JSON.stringify(settings).includes('synthetic-route-password'));
       assert.equal(f.calls.installer, 1);
     } else assert.equal(f.calls.installer, 0);
     await f.service.close({ sessionId: result.sessionId });
@@ -142,6 +159,42 @@ test('SSH selection forwards explicit fields, but save/remove refuse any live te
   assert.deepEqual(f.calls.remove, [{ id: 'chosen', connectionId: 'ssh_fixture' }]);
 });
 
+test('password preparation and grants forward only selected fields and refuse mutation while a session is active', async t => {
+  const f = await fixture(t);
+  const target = { id: 'chosen', host: 'host.invalid', port: 2222, user: 'fixture' };
+  const prepared = await f.service.prepareTerminalSshPassword({ ...target, password: 'not-forwarded', keyPath: '/not-forwarded' });
+  assert.deepEqual(prepared, { authType: 'password', selectionToken: 'synthetic-password-selection' });
+  assert.deepEqual(f.calls.preparePassword, [target]);
+  const args = { id: 'chosen', connectionId: 'ssh_fixture', password: 'synthetic-ssh-secret' };
+  const save = { id: 'chosen', name: 'Password server', selectionToken: prepared.selectionToken, password: args.password };
+  const session = await f.start();
+  await assert.rejects(f.service.setTerminalSshPassword(args), { code: 'TERMINAL_SSH_BUSY' });
+  await assert.rejects(f.service.saveTerminalSshConnection(save), { code: 'TERMINAL_SSH_BUSY' });
+  assert.deepEqual(f.calls.setPassword, []); assert.deepEqual(f.calls.save, []);
+  await f.service.close({ sessionId: session.sessionId });
+  assert.equal((await f.service.setTerminalSshPassword({ ...args, host: 'forged.invalid' })).supported, true);
+  assert.deepEqual(f.calls.setPassword, [args]);
+  await f.service.saveTerminalSshConnection({ ...save, keyPath: '/not-forwarded' });
+  assert.deepEqual(f.calls.save, [save]);
+  assert.ok(!JSON.stringify(await f.service.snapshot()).includes(args.password));
+});
+
+test('locked password metadata is not advertised as loaded SSH authority in terminal or Claude discovery', async t => {
+  const locked = { ...connections[0], authType: 'password', passwordReady: false };
+  const f = await fixture(t, { connections: [locked] });
+  for (const kind of ['shell', 'claude-code']) {
+    const started = await f.start(kind);
+    assert.deepEqual(started.ssh.connections, []);
+    assert.equal(started.ssh.available, false);
+    if (kind === 'claude-code') {
+      const description = f.calls.browserCreate.at(-1).readSshConnections();
+      assert.equal(description.status, 'empty'); assert.deepEqual(description.connections, []);
+    }
+    await f.service.close({ sessionId: started.sessionId });
+  }
+  assert.equal(f.savedConnections.get('chosen')[0].authType, 'password');
+});
+
 test('configured SSH refuses unsupported or unfenced routes before binding, Claude installation or PTY creation', async t => {
   for (const kind of ['shell', 'claude-code']) for (const [name, options] of [
     ['remote upstream', { context: { proxy: { protocol: 'https', host: 'remote.invalid', port: 443 } } }],
@@ -163,13 +216,134 @@ test('SSH private-key protection requires a literal positive fence attestation a
   });
 });
 
-test('a supported workspace without selected connections still receives basic key protection without an agent or SSH environment', async t => {
-  const f = await fixture(t, { connections: [] }), session = await f.start();
-  assert.equal(f.calls.create.length, 1);
-  assert.deepEqual(f.bindings[0].environment, {}); assert.equal(f.bindings[0].agentSocket, null);
-  for (const key of ['SSH_AUTH_SOCK', 'ENVARA_SSH_TARGETS', 'ENVARA_SSH_PROXY_URL']) assert.equal(f.fakes[0].options.env[key], undefined);
-  assert.deepEqual(f.wraps[0].settings.sshProtection.protectedPaths, f.bindings[0].protectedPaths);
-  assert.deepEqual(session.ssh, { privateKeyProtection: true, available: false, connections: [] });
+test('empty SSH workspaces retain protected discovery shims and pinned manifests without an agent', async t => {
+  for (const kind of ['shell', 'claude-code']) await t.test(kind, async subtest => {
+    const f = await fixture(subtest, { connections: [] }), session = await f.start(kind), binding = f.bindings[0];
+    assert.equal(f.calls.create.length, 1); assert.equal(binding.agentSocket, null);
+    assert.ok(f.fakes[0].options.env.PATH.split(path.delimiter).includes(binding.binDirectory));
+    for (const name of ['ssh', 'envara-ssh']) assert.ok((await stat(path.join(binding.binDirectory, name))).isFile());
+    for (const key of ['ENVARA_SSH_CONFIG', 'ENVARA_SSH_CONNECTIONS']) {
+      assert.equal(f.fakes[0].options.env[key], binding.environment[key]); assert.ok((await stat(binding.environment[key])).isFile());
+    }
+    for (const key of ['SSH_AUTH_SOCK', 'ENVARA_SSH_TARGETS', 'ENVARA_SSH_PROXY_URL']) assert.equal(f.fakes[0].options.env[key], undefined);
+    assert.deepEqual(JSON.parse(await readFile(binding.environment.ENVARA_SSH_CONNECTIONS, 'utf8')), binding.manifest);
+    assert.equal(binding.describe().status, 'empty'); assert.equal(binding.describe().available, false);
+    assert.deepEqual(f.wraps[0].settings.sshProtection.protectedPaths, binding.protectedPaths);
+    assert.deepEqual(session.ssh, { privateKeyProtection: true, available: false, connections: [] });
+    if (kind === 'claude-code') {
+      const view = f.calls.browserCreate[0].readSshConnections();
+      assert.equal(view.status, 'empty'); assert.equal(view.available, false); assert.deepEqual(view.connections, []);
+      const prepared = f.service.sessions.get(session.sessionId).claudeLaunch;
+      const settings = JSON.parse(await readFile(prepared.args[prepared.args.indexOf('--settings') + 1], 'utf8'));
+      for (const key of ['ENVARA_SSH_CONFIG', 'ENVARA_SSH_CONNECTIONS']) assert.equal(settings.env[key], binding.environment[key]);
+      for (const key of ['SSH_AUTH_SOCK', 'ENVARA_SSH_TARGETS', 'ENVARA_SSH_PROXY_URL']) assert.equal(settings.env[key], undefined);
+    }
+  });
+});
+
+test('Claude SSH discovery reads only its session snapshot, reports expiry and never rereads the saved store', async t => {
+  const f = await fixture(t), first = await f.start('claude-code');
+  const otherConnection = { ...connections[0], id: 'ssh_other', alias: 'envara-bbbbbbbbbbbb', name: 'Other server', host: 'other.invalid' };
+  f.savedConnections.set('other', [otherConnection]);
+  const second = await f.start('claude-code', 'other');
+  const [firstBinding, secondBinding] = f.bindings, [firstBrowser, secondBrowser] = f.calls.browserCreate;
+  assert.equal(firstBrowser.sessionId, first.sessionId); assert.equal(secondBrowser.sessionId, second.sessionId);
+  assert.equal(typeof firstBrowser.readSshConnections, 'function');
+  const beforeList = f.calls.list.length, beforeCreate = f.calls.create.length;
+  f.savedConnections.set('chosen', [otherConnection]);
+  f.sshManager.list = async () => { throw new Error('Discovery must not read the mutable saved store'); };
+  const a = firstBrowser.readSshConnections(), b = secondBrowser.readSshConnections();
+  assert.equal(a?.then, undefined, 'the lease description must be synchronous');
+  assert.equal(a.status, 'ready'); assert.equal(a.available, true); assert.deepEqual(a.connections, manifestConnections(connections));
+  assert.equal(b.status, 'ready'); assert.deepEqual(b.connections, manifestConnections([otherConnection]));
+  for (const secret of [f.privateKey, firstBinding.agentSocket, firstBinding.environment.ENVARA_SSH_PROXY_URL]) assert.ok(!JSON.stringify(a).includes(secret));
+  const firstInternal = f.service.sessions.get(first.sessionId), secondInternal = f.service.sessions.get(second.sessionId);
+  assert.equal(f.service.metadata(firstInternal).ssh.available, true);
+  f.clock.now = firstBinding.manifest.expiresAt;
+  assert.equal(firstBrowser.readSshConnections().status, 'expired');
+  assert.equal(firstBrowser.readSshConnections().available, false);
+  assert.equal(f.service.metadata(firstInternal).ssh.available, false);
+  assert.equal(firstBinding.disposed, 0); assert.equal(secondBinding.disposed, 0);
+  assert.equal(f.calls.create.length, beforeCreate); assert.equal(f.calls.list.length, beforeList);
+  f.clock.now--;
+  await f.service.close({ sessionId: first.sessionId });
+  assert.equal(firstBinding.describe().status, 'closed'); assert.deepEqual(firstBinding.describe().connections, []);
+  assert.equal(firstBrowser.readSshConnections().status, 'unavailable');
+  assert.deepEqual(firstBrowser.readSshConnections().connections, []);
+  assert.equal(f.service.metadata(firstInternal).ssh.available, false);
+  assert.equal(secondBrowser.readSshConnections().status, 'ready'); assert.equal(f.service.metadata(secondInternal).ssh.available, true);
+  assert.equal(f.calls.list.length, beforeList);
+});
+
+for (const kind of ['shell', 'claude-code']) {
+  test(`${kind}: app-run password and key grants remain available across clock advances and duplication`, async t => {
+    const password = { ...connections[0], id: 'ssh_password', alias: 'envara-bbbbbbbbbbbb', authType: 'password', passwordReady: true };
+    const f = await fixture(t, { sessionVersion: 2, connections: [connections[0], password] });
+    const first = await f.start(kind), firstInternal = f.service.sessions.get(first.sessionId), binding = f.bindings[0];
+    for (const advance of [3600000, 86400000]) {
+      f.clock.now += advance;
+      const view = f.service.readSessionSshConnections(firstInternal);
+      assert.equal(view.available, true); assert.equal(view.expiresAt, null);
+      assert.equal(view.connections.length, 2);
+      for (const connection of view.connections) {
+        assert.equal(connection.expiresAt, null); assert.equal(connection.status, 'ready'); assert.equal(connection.available, true);
+      }
+      assert.equal(f.service.metadata(firstInternal).ssh.available, true);
+      assert.equal(binding.disposed, 0); assert.equal(f.fakes[0].kills, 0);
+      if (kind === 'claude-code') assert.deepEqual(f.calls.browserCreate[0].readSshConnections(), view);
+    }
+    const second = await f.service.duplicate({ sessionId: first.sessionId });
+    assert.equal(second.ssh.available, true); assert.equal(f.bindings[1].manifest.expiresAt, null);
+    assert.deepEqual(f.fakes[1].written, []);
+    await f.service.close({ sessionId: first.sessionId });
+    assert.equal(f.service.readSessionSshConnections(firstInternal).available, false);
+    assert.equal(binding.disposed, 1); assert.equal(f.bindings[1].disposed, 0);
+    assert.equal(f.service.metadata(f.service.sessions.get(second.sessionId)).ssh.available, true);
+  });
+}
+
+test('discovery and public metadata refuse finishing, revoked, unfenced or unprotected session authority', async t => {
+  const f = await fixture(t), started = await f.start('claude-code');
+  const session = f.service.sessions.get(started.sessionId), read = f.calls.browserCreate[0].readSshConnections;
+  const cases = [
+    ['finished', true], ['finishing', Promise.resolve()], ['status', 'closing'], ['status', 'exited'],
+    ['sshRevocation', Promise.resolve()], ['networkFence', false], ['sshPrivateKeyProtection', false], ['sshBinding', null],
+    ['sshBinding', { describe: null }],
+  ];
+  for (const [field, value] of cases) {
+    const original = session[field]; session[field] = value;
+    try {
+      const description = read();
+      assert.equal(description.status, 'unavailable', field); assert.equal(description.available, false, field);
+      assert.deepEqual(description.connections, [], field); assert.equal(description.expiresAt, null, field);
+      assert.equal(f.service.metadata(session).ssh.available, false, field);
+    } finally { session[field] = original; }
+  }
+  const binding = session.sshBinding, originalDescribe = binding.describe;
+  binding.describe = () => { throw new Error('Synthetic lease failure'); };
+  try { assert.equal(f.service.metadata(session).ssh.available, false, 'metadata must fail closed when describing a lease fails'); }
+  finally { binding.describe = originalDescribe; }
+  assert.equal(read().status, 'ready'); assert.equal(f.service.metadata(session).ssh.available, true);
+  const beforeDescribe = f.calls.describe.length, wasClosed = f.service.closed; f.service.closed = true;
+  try {
+    assert.equal(read().status, 'unavailable'); assert.equal(f.service.metadata(session).ssh.available, false);
+    assert.equal(f.calls.describe.length, beforeDescribe, 'closed service must not consult the lease');
+  } finally { f.service.closed = wasClosed; }
+});
+
+test('discovery becomes unavailable before asynchronous SSH cleanup finishes', async t => {
+  const entered = deferred(), release = deferred();
+  const f = await fixture(t, { disposeBinding: async () => { entered.resolve(); await release.promise; } });
+  const result = await f.start('claude-code'), session = f.service.sessions.get(result.sessionId), read = f.calls.browserCreate[0].readSshConnections;
+  const closing = f.service.close({ sessionId: result.sessionId });
+  await entered.promise;
+  try {
+    assert.equal(f.browserBindings[0].disposed, 0, 'browser IPC is still waiting behind SSH cleanup');
+    assert.equal(f.bindings[0].describe().status, 'closed'); assert.equal(read().status, 'unavailable');
+    assert.deepEqual(read().connections, []); assert.equal(f.service.metadata(session).ssh.available, false);
+  } finally { release.resolve(); }
+  await closing;
+  assert.equal(f.browserBindings[0].disposed, 1); assert.equal(read().status, 'unavailable');
 });
 
 test('closing while SSH preparation is pending reclaims a late binding without ever spawning the PTY', async t => {
@@ -258,6 +432,6 @@ test('terminal workspace and encrypted exports preserve user state without SSH p
     } }
     await scan(staging);
     const exported = [workspace, JSON.stringify(manifest), ...contents].join('\n');
-    for (const privateValue of [f.privateKey, f.privateRecord, 'synthetic-private-key-not-a-real-key', 'SSH_AUTH_SOCK', 'ENVARA_SSH_CONFIG', 'ENVARA_SSH_PROXY_URL', 'synthetic-route-password']) assert.ok(!exported.includes(privateValue), `${scope}: ${privateValue}`);
+    for (const privateValue of [f.privateKey, f.privateRecord, 'synthetic-private-key-not-a-real-key', 'SSH_AUTH_SOCK', 'ENVARA_SSH_CONFIG', 'ENVARA_SSH_CONNECTIONS', 'ENVARA_SSH_TARGETS', 'ENVARA_SSH_PROXY_URL', 'synthetic-route-password']) assert.ok(!exported.includes(privateValue), `${scope}: ${privateValue}`);
   }
 });

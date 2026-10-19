@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { chmod, link, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { chmod, link, mkdtemp, open, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -172,6 +173,84 @@ test('propagates backpressure in both directions without losing bytes', async t 
   assert.deepEqual(bytes(), serverData);
 });
 
+test('waits for pending output writes and final flush after the tunnel closes', { timeout: 5000 }, async t => {
+  let closed, writing, finalizing, releaseWrite, releaseFinal;
+  const transportClosed = new Promise(resolve => { closed = resolve; });
+  const writeStarted = new Promise(resolve => { writing = resolve; });
+  const finalStarted = new Promise(resolve => { finalizing = resolve; });
+  const payload = Buffer.from('final remote bytes');
+  const chunks = [];
+  const output = new Writable({
+    write(chunk, _encoding, callback) {
+      chunks.push(Buffer.from(chunk)); releaseWrite = callback; writing();
+    },
+    final(callback) { releaseFinal = callback; finalizing(); },
+  });
+  t.after(() => { releaseWrite?.(); releaseFinal?.(); output.destroy(); });
+  const proxy = await proxyFixture(t, socket => {
+    socket.once('close', closed);
+    socket.write('HTTP/1.1 200 OK\r\n\r\n');
+    socket.on('end', () => socket.end(payload));
+  });
+  let completed = false;
+  const result = run(proxy, { output }).then(() => { completed = true; });
+  await Promise.all([writeStarted, transportClosed]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(completed, false, 'transport closure cannot discard a pending output write');
+  const write = releaseWrite; releaseWrite = null; write();
+  await finalStarted;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(completed, false, 'transport closure cannot skip the final output flush');
+  const final = releaseFinal; releaseFinal = null; final();
+  await result;
+  assert.equal(output.writableFinished, true);
+  assert.deepEqual(Buffer.concat(chunks), payload);
+});
+
+test('refuses premature output closure and write errors and closes the tunnel', { timeout: 5000 }, async t => {
+  for (const mode of ['close', 'error']) {
+    let closed;
+    const transportClosed = new Promise(resolve => { closed = resolve; });
+    const proxy = await proxyFixture(t, socket => {
+      socket.once('close', closed);
+      socket.on('end', () => socket.end());
+      socket.write('HTTP/1.1 200 OK\r\n\r\nremote payload');
+    });
+    const output = new Writable({ write(_chunk, _encoding, callback) {
+      if (mode === 'error') callback(Object.assign(new Error('private-output-detail'), { code: 'EPIPE' }));
+      else { this.destroy(); callback(); }
+    } });
+    await assert.rejects(run(proxy, { output }), error => {
+      assert.equal(error.code, 'SSH_PROXY_IO');
+      assert.doesNotMatch(error.message, /private-output-detail|EPIPE|fixture/);
+      return true;
+    });
+    await transportClosed;
+  }
+});
+
+test('retains error handling while the final output flush is pending', { timeout: 5000 }, async t => {
+  let closed, finalizing, releaseFinal;
+  const transportClosed = new Promise(resolve => { closed = resolve; });
+  const finalStarted = new Promise(resolve => { finalizing = resolve; });
+  const output = new Writable({
+    write(_chunk, _encoding, callback) { callback(); },
+    final(callback) { releaseFinal = callback; finalizing(); },
+  });
+  t.after(() => { releaseFinal?.(); output.destroy(); });
+  const proxy = await proxyFixture(t, socket => {
+    socket.once('close', closed);
+    socket.write('HTTP/1.1 200 OK\r\n\r\n');
+    socket.on('end', () => socket.end('final remote bytes'));
+  });
+  const rejected = assert.rejects(run(proxy, { output }), { code: 'SSH_PROXY_IO' });
+  await Promise.all([finalStarted, transportClosed]);
+  await new Promise(resolve => setImmediate(resolve));
+  const final = releaseFinal; releaseFinal = null;
+  final(new Error('private final flush failure'));
+  await rejected;
+});
+
 for (const status of [407, 403, 502]) {
   test(`refuses HTTP ${status} without exposing proxy response or credentials`, async t => {
     const proxy = await proxyFixture(t, socket => socket.end(`HTTP/1.1 ${status} private-server-detail\r\n\r\nprivate-body`));
@@ -285,16 +364,103 @@ test('CLI forwards remote EOF while its stdin half remains open', { timeout: 500
     env: { ...process.env, ENVARA_SSH_TARGETS: file, ENVARA_SSH_PROXY_URL: proxy.url }, stdio: ['pipe', 'pipe', 'pipe'],
   });
   t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
-  let stdout = '';
+  let stdout = '', stderr = '';
   child.stdout.on('data', chunk => { stdout += chunk; });
-  child.stderr.resume();
+  child.stderr.on('data', chunk => { stderr += chunk; });
   await once(child.stdout, 'end');
   assert.equal(stdout, 'remote finished');
   assert.equal(child.exitCode, null);
   const exit = once(child, 'exit');
   child.stdin.end('input after remote EOF');
-  assert.deepEqual(await exit, [0, null]);
+  assert.deepEqual(await exit, [0, null], stderr);
   assert.equal(received, 'input after remote EOF');
+});
+
+test('CLI closes a POSIX stdout pipe on remote EOF before stdin ends', { timeout: 5000, skip: process.platform === 'win32' }, async t => {
+  const { file } = await targetFile(t);
+  let received = '';
+  const proxy = await proxyFixture(t, socket => {
+    socket.on('data', chunk => { received += chunk; });
+    socket.end('HTTP/1.1 200 OK\r\n\r\nremote pipe finished');
+  });
+  // Node spawn pipes use sockets on POSIX. A shell pipeline makes fd 1 a
+  // real pipe, matching the descriptors supplied by OpenSSH ProxyCommand.
+  const child = spawn('/bin/sh', ['-c', '"$1" "$2" --host "$3" --port "$4" | { /bin/cat; /bin/echo PIPE_EOF >&2; }', 'ssh-pipe-fixture',
+    process.execPath, helperPath, target.host, String(target.port)], {
+    env: { ...process.env, ENVARA_SSH_TARGETS: file, ENVARA_SSH_PROXY_URL: proxy.url },
+    detached: true, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  t.after(() => {
+    if (child.exitCode === null) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
+  });
+  let stdout = '', stderr = '';
+  const payload = new Promise(resolve => child.stdout.on('data', chunk => {
+    stdout += chunk;
+    if (stdout === 'remote pipe finished') resolve();
+  }));
+  // The waiting shell retains its own stdout descriptor. The consumer reports
+  // EOF independently, while the first pipeline process still owns stdin.
+  const eof = new Promise(resolve => child.stderr.on('data', chunk => {
+    stderr += chunk;
+    if (stderr.includes('PIPE_EOF\n')) resolve();
+  }));
+  await Promise.all([payload, eof]);
+  assert.equal(stdout, 'remote pipe finished');
+  assert.equal(child.exitCode, null);
+  const exit = once(child, 'exit');
+  child.stdin.end('input after pipe EOF');
+  assert.deepEqual(await exit, [0, null]);
+  assert.equal(received, 'input after pipe EOF');
+});
+
+test('CLI cancellation exits even when a POSIX stdout pipe remains blocked', { timeout: 6000, skip: process.platform === 'win32' }, async t => {
+  const { root, file } = await targetFile(t);
+  const fifo = path.join(root, 'blocked-output');
+  const mkfifo = spawn('mkfifo', [fifo], { env: { PATH: '/usr/bin:/bin' }, stdio: 'ignore' });
+  assert.deepEqual(await once(mkfifo, 'exit'), [0, null]);
+  const reader = await open(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+  t.after(() => reader.close());
+  const proxy = await proxyFixture(t, socket => {
+    socket.write('HTTP/1.1 200 OK\r\n\r\n');
+    socket.write(Buffer.alloc(4 * 1024 * 1024, 0x69));
+  });
+  // Have the shell open the write end: Node's inherited stdio setup can mark
+  // an already-open FIFO nonblocking, unlike OpenSSH's blocking POSIX pipe.
+  const child = spawn('/bin/sh', ['-c',
+    '"$1" "$2" --host "$3" --port "$4" <&0 > "$5" & helper=$!; printf "HELPER_PID:%s\\n" "$helper" >&2; wait "$helper"',
+    'ssh-blocked-pipe-fixture', process.execPath, helperPath, target.host, String(target.port), fifo], {
+    env: { ...process.env, ENVARA_SSH_TARGETS: file, ENVARA_SSH_PROXY_URL: proxy.url },
+    detached: true, stdio: ['pipe', 'ignore', 'pipe'],
+  });
+  const exited = once(child, 'exit');
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+    }
+    await exited.catch(() => {});
+  });
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  // Confirm a real pipe write has begun, then keep its read end open without
+  // consuming the remaining bytes. The owned helper must cancel independently.
+  const firstByte = Buffer.alloc(1);
+  let received = false;
+  for (let attempt = 0; attempt < 80 && !received; attempt++) {
+    try { received = (await reader.read(firstByte, 0, 1, null)).bytesRead === 1; }
+    catch (error) { if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw error; }
+    if (!received) await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(received, true, 'the helper must enter the POSIX pipe write');
+  await new Promise(resolve => setTimeout(resolve, 25));
+  const helperPid = Number(/^HELPER_PID:(\d+)$/m.exec(stderr)?.[1]);
+  assert.ok(Number.isSafeInteger(helperPid) && helperPid > 1, 'only the fixture-owned helper may be signalled');
+  process.kill(helperPid, 'SIGTERM');
+  let timer;
+  const result = await Promise.race([exited,
+    new Promise(resolve => { timer = setTimeout(() => resolve(null), 2500); }),
+  ]).finally(() => clearTimeout(timer));
+  assert.deepEqual(result, [143, null], `cancellation must not wait for the pipe consumer to resume: ${stderr}`);
+  assert.doesNotMatch(stderr, /fixture-user|fixture-password|Basic|127\.0\.0\.1|\.json/);
 });
 
 test('CLI reads session targets and SIGTERM cleans up its owned tunnel without revealing secrets', { timeout: 5000 }, async t => {

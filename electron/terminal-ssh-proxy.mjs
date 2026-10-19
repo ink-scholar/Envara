@@ -1,6 +1,6 @@
 // Copied into the terminal's protected runtime. Keep this module standalone:
 // OpenSSH runs it as a ProxyCommand, without access to application dependencies.
-import { constants } from 'node:fs';
+import { constants, createWriteStream } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
@@ -119,12 +119,15 @@ export async function runSshProxy({ host, port, proxyUrl, allowedTargets, input 
     let settled = false;
     let timer;
     let ended = false;
+    let transportClosed = false;
     const cleanup = () => {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
       input.off('error', onStreamError);
+      input.off('end', onInputEnd);
       output.off('error', onStreamError);
       output.off('close', onOutputClose);
+      output.off('finish', onOutputFinish);
       input.unpipe(socket);
       input.pause();
       socket?.unpipe(output);
@@ -140,7 +143,9 @@ export async function runSshProxy({ host, port, proxyUrl, allowedTargets, input 
     };
     const onAbort = () => finish(failure('SSH_PROXY_CANCELLED', 'SSH proxy connection was cancelled.'));
     const onStreamError = () => finish(failure('SSH_PROXY_IO', 'SSH proxy transport closed unexpectedly.'));
-    const onOutputClose = () => { if (!ended) onStreamError(); };
+    const onInputEnd = () => { if (connected && !socket.writableEnded) socket.end(); };
+    const onOutputClose = () => { if (!ended || !output.writableFinished) onStreamError(); };
+    const onOutputFinish = () => { if (transportClosed) finish(); };
     const onData = chunk => {
       buffer = Buffer.concat([buffer, chunk]);
       const boundary = buffer.indexOf('\r\n\r\n');
@@ -169,16 +174,20 @@ export async function runSshProxy({ host, port, proxyUrl, allowedTargets, input 
       // explicitly on remote FIN so OpenSSH observes EOF even while its input
       // side is still open; the independent input half may finish afterward.
       socket.pipe(output, { end: false });
-      input.pipe(socket);
-      if (input.readableEnded && !socket.writableEnded) socket.end();
+      // Default pipe ending inspects process.stdout and initializes another
+      // owner of fd 1. End the input half explicitly to keep our output alone.
+      input.pipe(socket, { end: false });
+      if (input.readableEnded) onInputEnd();
     };
     const onConnect = () => {
       const authority = `${net.isIP(target.host) === 6 ? `[${target.host}]` : target.host}:${target.port}`;
       socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\nProxy-Authorization: ${proxy.authorization}\r\n\r\n`);
     };
     input.once('error', onStreamError);
+    input.once('end', onInputEnd);
     output.once('error', onStreamError);
     output.once('close', onOutputClose);
+    output.once('finish', onOutputFinish);
     signal?.addEventListener('abort', onAbort, { once: true });
     const options = { host: proxy.host, port: proxy.port, allowHalfOpen: true };
     // No custom resolver and no destination socket. HTTPS always verifies the
@@ -191,12 +200,17 @@ export async function runSshProxy({ host, port, proxyUrl, allowedTargets, input 
       if (!connected) return finish(failure('SSH_PROXY_RESPONSE', 'SSH proxy closed before establishing the tunnel.'));
       output.end();
     });
-    socket.once('close', () => finish(connected && ended ? undefined : failure('SSH_PROXY_CONNECT', 'SSH proxy connection closed unexpectedly.')));
+    socket.once('close', () => {
+      if (!connected || !ended) return finish(failure('SSH_PROXY_CONNECT', 'SSH proxy connection closed unexpectedly.'));
+      transportClosed = true;
+      // Retain output error handling until every final byte has been flushed.
+      if (output.writableFinished) finish();
+    });
     timer = setTimeout(() => finish(failure('SSH_PROXY_TIMEOUT', 'SSH proxy connection timed out.')), connectTimeoutMs);
   });
 }
 
-export async function runSshProxyCli(argv = process.argv.slice(2), env = process.env) {
+export async function runSshProxyCli(argv = process.argv.slice(2), env = process.env, { output = process.stdout } = {}) {
   let signalNumber = 0;
   const abort = new AbortController();
   const onTerm = () => { signalNumber = 143; abort.abort(); };
@@ -206,7 +220,7 @@ export async function runSshProxyCli(argv = process.argv.slice(2), env = process
   try {
     if (argv.length !== 4 || argv[0] !== '--host' || argv[2] !== '--port') throw invalid();
     const allowedTargets = await readSshTargets(env.ENVARA_SSH_TARGETS);
-    await runSshProxy({ host: argv[1], port: argv[3], proxyUrl: env.ENVARA_SSH_PROXY_URL, allowedTargets, signal: abort.signal });
+    await runSshProxy({ host: argv[1], port: argv[3], proxyUrl: env.ENVARA_SSH_PROXY_URL, allowedTargets, output, signal: abort.signal });
     return 0;
   } catch (error) {
     // Never include native socket errors, URLs, host names or credentials.
@@ -220,5 +234,22 @@ export async function runSshProxyCli(argv = process.argv.slice(2), env = process
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  process.exitCode = await runSshProxyCli();
+  // Initialize stderr before releasing fd 1. Lazy stdio initialization during
+  // later socket cleanup must not reuse that now-available standard descriptor.
+  void process.stderr;
+  // process.stdout.end() does not close fd 1 when OpenSSH supplies a POSIX
+  // pipe. Own that descriptor so remote EOF reaches SSH before stdin ends.
+  const output = createWriteStream(null, { fd: 1, autoClose: true });
+  output.on('error', () => {});
+  let exitCode = 1;
+  try { process.exitCode = exitCode = await runSshProxyCli(undefined, undefined, { output }); }
+  finally {
+    output.destroy();
+    // A blocking pipe write can outlive destroy() while its reader stops
+    // consuming. Failed or cancelled helpers must not wait for that reader;
+    // successful transfers have already flushed and never use this deadline.
+    // process.exit() also waits for a blocked filesystem worker. Our signal
+    // listeners are already removed; the OS can end this helper directly.
+    if (exitCode !== 0) setTimeout(() => process.kill(process.pid, 'SIGTERM'), 1000).unref();
+  }
 }

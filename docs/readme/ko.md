@@ -5,7 +5,7 @@
 <p align="center"><strong>작업마다, 하나의 독립된 환경을.</strong><br />브라우저도, 터미널도, 앱도. 하나의 작업 환경에서.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="자체 코드 라이선스: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.3-475569" alt="Envara 1.0.3" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.0.4-475569" alt="Envara 1.0.4" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9개 언어의 README" /></a>
 </p>
 <p align="center">

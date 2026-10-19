@@ -22,6 +22,13 @@ export const BROWSER_TOOLS = Object.freeze([
   tool('browser_tabs', 'List, create, select or close tabs belonging to the chosen Envara browser only. Tab indexes come from list.', { action: { type: 'string', enum: ['list', 'new', 'select', 'close'] }, index: integer(0, 1000, 'Required for select and close.'), url: string('Optional HTTP or HTTPS URL for new.', 8192) }, ['action']),
 ]);
 
+// Kept in the existing session channel so discovery grants no new authority.
+// This tool never connects to a server or starts a browser.
+export const TERMINAL_TOOLS = Object.freeze([...BROWSER_TOOLS, {
+  ...tool('envara_ssh_connections', 'Before an SSH task, list this terminal session\'s authorized SSH connections and usage. Reports missing configuration or expired authorization. Read-only: does not connect, load keys, or authorize new targets. Use the returned SSH alias with the terminal Bash tool; ready means authorized, not verified reachable.'),
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}]);
+
 const fail = (message, code = 'BROWSER_CHANNEL_UNAVAILABLE') => Object.assign(new Error(message), { code });
 /** One authenticated local request. Never uses host HTTP_PROXY or a TCP fallback. */
 export function requestBrowserBroker(payload, { socketPath = process.env.ENVARA_BROWSER_SOCKET, token = process.env.ENVARA_BROWSER_TOKEN, timeoutMs = 210000 } = {}) {

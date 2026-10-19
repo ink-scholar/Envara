@@ -1645,7 +1645,7 @@ function WorkspaceApp() {
       })} onStop={() => perform("stopProfile", {
         id: selected.id
       }, t("会话已停止"))} onEdit={() => editSelected(selected)} onClear={() => confirmClear(selected)} onExport={() => setModal({ type: "exportData", scope: "browser", profile: selected })} editingDisabled={activeInEnvironment(selected)} t={t} /> : <ContextDetail profile={selected} proxy={selectedProxy} workspace={selectedWorkspace} onEdit={() => editSelected(selected)} onDirectory={chooseDirectory} directoryDisabled={!api.isDesktop || !selected || activeInEnvironment(selected) || !!pending[`chooseWorkspaceDirectory:${selected?.id}`]} onNavigate={navigate} onClone={() => cloneProfile(selected)} onDelete={() => confirmDelete(selected)} editingDisabled={activeInEnvironment(selected)} t={t} />}</aside>}
-    <TerminalDock profiles={terminalContextProfiles} selectedProfileId={selectedId} onSelectProfile={setSelectedId} visible={terminalVisible} onHide={() => {
+    <TerminalDock profiles={terminalContextProfiles} screenReaderMode={snapshot.system?.accessibilitySupportEnabled === true} selectedProfileId={selectedId} onSelectProfile={setSelectedId} visible={terminalVisible} onHide={() => {
       setTerminalVisible(false);
       setTerminalExpanded(false);
       if (page === "terminals") setPage("profiles");

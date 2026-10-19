@@ -6,6 +6,7 @@ import { api } from './client.js';
 import { useI18n } from './i18n.jsx';
 import { useAppearance } from './appearance.jsx';
 import { getTerminalTheme, terminalFontFamily } from './terminal-theme.mjs';
+import { attachTerminalKeyboard } from './terminal-keyboard.mjs';
 import { SYSTEM_BROWSER, terminalNetworks } from './link-browser.mjs';
 import { CLAUDE_SESSION, sessionNetworks, sessionChoiceHost, changeSessionKind, terminalSessionOptions } from './terminal-session-choice.mjs';
 import { TerminalErrorNotices } from './terminal-error-notices.mjs';
@@ -26,11 +27,13 @@ const statusLabels = { starting: '启动中', running: '运行中', closing: '�
 const timezoneSources = { proxy: '代理出口检测', 'proxy-egress': '代理出口检测', 'saved-configuration': '已保存配置', direct: '直连出口检测', manual: '手动设置', local: '本机时区回退', unknown: '来源未确认' };
 const bounds = (value, low, high) => Math.max(low, Math.min(high, value));
 
-function TerminalSession({ session, active, visible, focusRequest, preserveTabFocusRef, register, onError }) {
+function TerminalSession({ session, active, visible, focusRequest, preserveTabFocusRef, register, onError, screenReaderMode }) {
   const { t } = useI18n();
   const { effective } = useAppearance();
   const themeRef = useRef(effective);
   themeRef.current = effective;
+  const screenReaderRef = useRef(screenReaderMode === true);
+  screenReaderRef.current = screenReaderMode === true;
   const translationRef = useRef(t);
   translationRef.current = t;
   const containerRef = useRef(null);
@@ -46,7 +49,7 @@ function TerminalSession({ session, active, visible, focusRequest, preserveTabFo
     let resizeQueue = Promise.resolve();
     const terminal = new Terminal({
       cols: bounds(session.columns || 100, 20, 400), rows: bounds(session.rows || 12, 5, 150),
-      cursorBlink: true, fontSize: 13, lineHeight: 1.1, scrollback: 3000, screenReaderMode: true,
+      cursorBlink: true, fontSize: 13, lineHeight: 1.1, scrollback: 3000, screenReaderMode: screenReaderRef.current,
       fontFamily: terminalFontFamily,
       disableStdin: session.status !== 'running' || !visibleRef.current,
       theme: getTerminalTheme(themeRef.current),
@@ -55,6 +58,7 @@ function TerminalSession({ session, active, visible, focusRequest, preserveTabFo
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(containerRef.current);
+    const detachKeyboard = attachTerminalKeyboard(terminal);
     terminal.textarea?.setAttribute('aria-label', translationRef.current('环境终端输入'));
 
     // Serialize xterm writes so a replay repair cannot reset queued live output.
@@ -117,7 +121,7 @@ function TerminalSession({ session, active, visible, focusRequest, preserveTabFo
       clearTimeout(inputTimer); clearTimeout(fitTimer);
       input = ''; output.length = 0;
       window.removeEventListener('focus', focusWindow);
-      observer.disconnect(); inputSubscription.dispose(); unregister();
+      observer.disconnect(); inputSubscription.dispose(); unregister(); detachKeyboard();
       controlRef.current = null; terminal.dispose();
     };
   }, [session.sessionId, register, onError]);
@@ -127,6 +131,13 @@ function TerminalSession({ session, active, visible, focusRequest, preserveTabFo
     const terminal = controlRef.current?.terminal;
     if (terminal) terminal.options.theme = getTerminalTheme(effective);
   }, [effective]);
+
+  // xterm's input-only IME path is disabled in screen reader mode. Enable that
+  // mode only when requested by the OS, without replacing the live terminal.
+  useEffect(() => {
+    const terminal = controlRef.current?.terminal;
+    if (terminal) terminal.options.screenReaderMode = screenReaderMode === true;
+  }, [screenReaderMode]);
 
   useEffect(() => {
     controlRef.current?.terminal.textarea?.setAttribute('aria-label', t('环境终端输入'));
@@ -151,7 +162,7 @@ function TerminalSession({ session, active, visible, focusRequest, preserveTabFo
   </div>;
 }
 
-export function TerminalDock({ profiles = [], visible = true, onHide, openRequest = null, onError, onProfilesChange, onSelectProfile, standalone = false, selectedProfileId = null, refreshKey = 0, expanded = false, onToggleExpanded, onHeightChange, onResizeStart, minHeight = 320, maxHeight }) {
+export function TerminalDock({ profiles = [], visible = true, onHide, openRequest = null, onError, onProfilesChange, onSelectProfile, standalone = false, selectedProfileId = null, refreshKey = 0, expanded = false, onToggleExpanded, onHeightChange, onResizeStart, minHeight = 320, maxHeight, screenReaderMode = false }) {
   const { t } = useI18n();
   const desktopAvailable = api.isDesktop && typeof api.onTerminalEvent === 'function';
   const storeRef = useRef(new TerminalStreamStore());
@@ -632,7 +643,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
       <div className="terminal-context-bar"><div className="terminal-directory" title={sessionDirectory || t('尚未选择工作目录')}><FolderOpen size={15} /><span>{sessionDirectory || t('尚未选择工作目录')}</span></div>{selectedSession?.kind === CLAUDE_SESSION && <span className="terminal-bound-browser" title={t('浏览器固定为：{name}', { name: selectedSession.browserName || selectedSession.browserProfileId })}><span>Claude Code · {selectedSession.browserName || selectedSession.browserProfileId}</span></span>}{languageLabel && <span className={`terminal-language ${sessionLanguage.fallback ? 'is-fallback' : ''}`} title={languageLabel}>{sessionLanguage.fallback ? `${sessionLanguage.requested} → ${sessionLanguage.effective}` : sessionLanguage.effective}</span>}<span className={`terminal-timezone ${timezoneSource === 'local' ? 'is-fallback' : ''}`} title={timezoneLabel}>{timezoneLabel}</span>{selectedSession && <button className="terminal-text-button terminal-start-button" disabled={!desktopAvailable || !selectedProfile || !!pending} onClick={openNewSessionChooser} title={t('选择网络出口、浏览器和工作目录后打开终端')}><Plus size={13} />{t(pending.startsWith('open:') ? '启动中…' : '新建会话')}</button>}</div>
       {sessions.length > 0 && <div className="terminal-session-bar"><div className="terminal-session-tabs" ref={sessionTabsRef} role="tablist" aria-label={t('终端会话')}>{sessions.map((session, index) => <button key={session.sessionId} ref={session.sessionId === selectedSession?.sessionId ? selectedSessionTabRef : undefined} className={`terminal-session-tab ${session.sessionId === selectedSession?.sessionId ? 'is-active' : ''}`} title={sessionName(session, index)} role="tab" aria-selected={session.sessionId === selectedSession?.sessionId} tabIndex={session.sessionId === selectedSession?.sessionId || (!selectedSession && index === 0) ? 0 : -1} onKeyDown={event => navigateTabs(event, sessions, index, target => setActiveSessions(value => ({ ...value, [activeProfileId]: target.sessionId })))} onClick={() => setActiveSessions(value => ({ ...value, [activeProfileId]: session.sessionId }))}><span className={`terminal-tab-dot ${session.status === 'running' ? 'is-running' : ''}`} /><span className="terminal-session-name">{sessionName(session, index)}</span><small>{t(statusLabels[session.status] || session.status)}</small></button>)}</div><div className="terminal-session-actions"><button className="terminal-duplicate-session" disabled={!desktopAvailable || selectedSession?.status !== 'running' || !!pending} onClick={() => void duplicateSession(selectedSession)} title={t('创建新进程，共享环境工具配置与历史；不复制正在运行的命令')}><Copy size={13} />{t(pending.startsWith('duplicate:') ? '复制中…' : '复制会话')}</button><button className="terminal-close-session" disabled={!canCloseSelected} onClick={() => void closeSession(selectedSession)} title={t('关闭当前终端会话')}><X size={13} />{t(pending.startsWith('close:') || cancellingSessionId ? '关闭中…' : selectedSession?.status === 'starting' && selectedSession?.kind === CLAUDE_SESSION ? '取消安装' : '关闭会话')}</button></div></div>}
       <div className="terminal-content">
-        {allSessions.map(session => <TerminalSession key={session.sessionId} session={session} active={session.sessionId === selectedSession?.sessionId && session.profileId === activeProfileId} visible={shown} focusRequest={`${openRequest?.profileId === session.profileId ? `${openRequest.nonce}:${openRequest.sessionId || ''}` : ''}:${focusVersion}`} preserveTabFocusRef={preserveTabFocusRef} register={register} onError={reportError} />)}
+        {allSessions.map(session => <TerminalSession key={session.sessionId} session={session} active={session.sessionId === selectedSession?.sessionId && session.profileId === activeProfileId} visible={shown} focusRequest={`${openRequest?.profileId === session.profileId ? `${openRequest.nonce}:${openRequest.sessionId || ''}` : ''}:${focusVersion}`} preserveTabFocusRef={preserveTabFocusRef} register={register} onError={reportError} screenReaderMode={screenReaderMode} />)}
         {!selectedSession && <div className="terminal-empty"><TerminalWindow size={25} /><div><strong>{t(!desktopAvailable ? '真实终端需使用桌面应用' : !selectedProfile ? '先创建一个环境' : loading ? '正在读取终端会话…' : sessionUnavailable ? '该会话已不可用' : '打开此环境的终端')}</strong>{(!desktopAvailable || sessionUnavailable) && <p>{t(!desktopAvailable ? '网页预览不连接本机 Shell。' : '可选择其他会话或新建会话。')}</p>}</div>{desktopAvailable && selectedProfile && <button className="terminal-empty-start" disabled={!!pending || loading} onClick={openNewSessionChooser}>{t(pending.startsWith('open:') ? '启动中…' : sessionUnavailable ? '新建会话' : '打开终端')}</button>}</div>}
       </div>
       {newSession && (() => {

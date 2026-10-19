@@ -23,6 +23,14 @@ test('independent terminal workspace notifications omit credentials and privileg
   assert.equal(terminalViewSnapshot(event), event);
 });
 
+test('independent terminals follow only the explicit system accessibility state', () => {
+  for (const state of [true, false, undefined, null, 1, 'true', {}]) {
+    const value = terminalViewSnapshot({ profiles: [], system: { accessibilitySupportEnabled: state, localApi: 'excluded' } });
+    assert.equal(value.system.accessibilitySupportEnabled, state === true);
+    assert.equal(value.system.localApi, undefined);
+  }
+});
+
 test('detached terminal retains saved timezone and failed-context provenance without private network details', () => {
   const profile = { id: 'prof_a', resolvedTimezone: null, timezoneSource: null,
     selectedLocation: { confirmed: true, timezone: 'Asia/Manila', label: 'private address' },

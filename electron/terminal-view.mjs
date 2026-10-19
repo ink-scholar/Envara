@@ -31,5 +31,5 @@ export function terminalViewSnapshot(value) {
     if (row.selectedLocation?.confirmed === true && typeof savedTimezone === 'string' && savedTimezone.length <= 128) profile.savedNetworkTimezone = savedTimezone;
     if (row.network?.ok === false || row.networkLastError) profile.networkContextUnavailable = true;
     return profile;
-  }), proxies: [], engines: [], settings: { ...(value.settings?.language ? { language: value.settings.language } : {}), ...(isAppearancePreference(value.settings?.appearance) ? { appearance: value.settings.appearance } : {}) }, events: [], system: { appVersion: value.system.appVersion, platform: value.system.platform, terminal: value.system.terminal } };
+  }), proxies: [], engines: [], settings: { ...(value.settings?.language ? { language: value.settings.language } : {}), ...(isAppearancePreference(value.settings?.appearance) ? { appearance: value.settings.appearance } : {}) }, events: [], system: { appVersion: value.system.appVersion, platform: value.system.platform, terminal: value.system.terminal, accessibilitySupportEnabled: value.system.accessibilitySupportEnabled === true } };
 }

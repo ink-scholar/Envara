@@ -1,6 +1,6 @@
 # Claude Code sessions
 
-This document describes the Envara 1.0.1 implementation. The release target is macOS arm64; package verification and the maintainer's confirmed payment-flow result are recorded in [release verification](verification.md#101-发布验证). Historical 0.5.24 and 0.5.25 measurements retain their original package scope; they do not establish final-package Claude account or model-call acceptance. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
+This document describes Envara 1.0.2. Terminal input and package checks are recorded in [1.0.2 verification](verification.md#102-发布验证). The release target is macOS arm64; published 1.0.1 package verification and the maintainer's confirmed payment-flow result are recorded in [release verification](verification.md#101-发布验证). Historical measurements retain their original package scope; they do not establish final-package Claude account or model-call acceptance. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
 
 ## Start and installation
 
@@ -14,6 +14,12 @@ Each environment owns its native installation. Reuse a valid existing installati
 Cancellation or failure preserves account data and existing installation state. A missing or invalid source is reported; Envara does not silently use a host executable or another route. Background auto-updates are disabled. An explicit `claude update` affects that environment's next invocation; already-running programs keep their current version.
 
 Implementation: [installer](../electron/claude-code-installation.mjs), [downloader](../electron/claude-code-download.mjs), [session launcher](../electron/claude-code-session.mjs).
+
+## Terminal input
+
+From 1.0.2, **Shift+Enter** sends the same multiline sequence as Option+Enter; plain Enter keeps its normal submit behavior. Confirming an input-method candidate with Enter does not also submit the terminal line. These rules apply to both the workspace panel and independent terminal window.
+
+On macOS, the terminal waits for the input method's confirmed character on the backslash key, so Chinese `、` and English `\` or `|` retain their intended text. Screen-reader support follows the system accessibility state without restarting the session. These input changes preserve the official CLI, network fence, device restrictions and account directories.
 
 ## Login profiles and data
 

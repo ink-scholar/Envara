@@ -117,6 +117,7 @@ function workspaceSnapshot(value) {
   if (!value || !Array.isArray(value.profiles) || !Array.isArray(value.proxies) || !value.system) return value;
   const core = proxyCore?.snapshot();
   return { ...value, settings: { ...value.settings, appearance: appearance.snapshot().preference }, system: { ...value.system,
+    accessibilitySupportEnabled: app.isAccessibilitySupportEnabled?.() === true,
     proxyCore: { supported: core?.available === true, version: core?.version ?? null, protocols: core?.protocols ?? [],
       errorCode: core?.error ?? null, message: core?.available ? '内置 AnyTLS 内核已就绪。' : '内置 AnyTLS 内核不可用，请使用完整安装包。' },
     terminal: { supported: !!terminal, isolation: 'configuration', networkScope: 'proxy-aware-cli' } } };
@@ -701,6 +702,7 @@ async function quitWhenIdle() {
 }
 app.on('window-all-closed', () => { void quitWhenIdle().catch(() => {}); });
 app.on('activate', showWorkspaceWindow);
+app.on('accessibility-support-changed', () => { void publish(); });
 const desktopStartup = createDesktopStartup({ initialize: initializeDesktopServices });
 const ownedQuit = createOwnedQuitController({
   hasResources: () => desktopStartup.phase === 'starting' || !!(service || sidecar || terminal || proxyCore), startup: () => desktopStartup.settled,

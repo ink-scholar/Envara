@@ -49,6 +49,8 @@
 /* xterm keeps this full-height viewport behind its whole-cell-sized screen. */
 .terminal-xterm-host .xterm-viewport { background-color: var(--terminal-bg); scrollbar-color: var(--scrollbar) var(--terminal-bg); scrollbar-width: thin; }
 .terminal-xterm-host .xterm-helper-textarea:focus-visible { outline: none; }
+.terminal-xterm-host .composition-view { background: var(--terminal-bg); color: var(--terminal-fg); overflow: hidden; }
+.terminal-xterm-host .composition-view.terminal-composition-floating { outline: 1px solid var(--border-strong); border-radius: 2px; }
 .terminal-empty { height: 100%; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 13px; padding: 18px; color: var(--text-muted); }
 .terminal-empty strong { display: block; color: var(--text-secondary); font-size: var(--font-size-sm, 13px); font-weight: var(--weight-medium, 500); }
 .terminal-empty p { color: var(--text-muted); font-size: var(--font-size-xs, 12px); line-height: 1.5; margin: var(--space-1, 4px) 0 0; }

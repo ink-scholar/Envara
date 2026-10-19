@@ -7,6 +7,7 @@ import { useI18n } from './i18n.jsx';
 import { useAppearance } from './appearance.jsx';
 import { getTerminalTheme, terminalFontFamily } from './terminal-theme.mjs';
 import { attachTerminalKeyboard } from './terminal-keyboard.mjs';
+import { attachTerminalComposition } from './terminal-composition.mjs';
 import { SYSTEM_BROWSER, terminalNetworks } from './link-browser.mjs';
 import { CLAUDE_SESSION, sessionNetworks, sessionChoiceHost, changeSessionKind, terminalSessionOptions } from './terminal-session-choice.mjs';
 import { TerminalErrorNotices } from './terminal-error-notices.mjs';
@@ -59,6 +60,7 @@ function TerminalSession({ session, active, visible, focusRequest, preserveTabFo
     terminal.loadAddon(fit);
     terminal.open(containerRef.current);
     const detachKeyboard = attachTerminalKeyboard(terminal);
+    const detachComposition = attachTerminalComposition(terminal);
     terminal.textarea?.setAttribute('aria-label', translationRef.current('环境终端输入'));
 
     // Serialize xterm writes so a replay repair cannot reset queued live output.
@@ -121,7 +123,7 @@ function TerminalSession({ session, active, visible, focusRequest, preserveTabFo
       clearTimeout(inputTimer); clearTimeout(fitTimer);
       input = ''; output.length = 0;
       window.removeEventListener('focus', focusWindow);
-      observer.disconnect(); inputSubscription.dispose(); unregister(); detachKeyboard();
+      observer.disconnect(); inputSubscription.dispose(); unregister(); detachKeyboard(); detachComposition();
       controlRef.current = null; terminal.dispose();
     };
   }, [session.sessionId, register, onError]);

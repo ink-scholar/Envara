@@ -16,10 +16,20 @@ const errors = [];
 const fixtureSource = `
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+import { Terminal } from '@xterm/xterm';
 import { TerminalDock } from './src/TerminalPane.jsx';
 import { TerminalWindowApp } from './src/TerminalWindowApp.jsx';
 import { I18nProvider } from './src/i18n.jsx';
 import { AppearanceProvider } from './src/appearance.jsx';
+// The fixture retains the real component-owned terminal through its public
+// entry point. Geometry tests only write/resize/read its public API.
+const openTerminal = Terminal.prototype.open;
+Terminal.prototype.open = function (...args) {
+  const result = openTerminal.apply(this, args);
+  window.fixture.terminal = this;
+  this.onData(data => window.fixture.rawData.push(data));
+  return result;
+};
 const api = window.envara;
 const profile = { id: 'input-fixture', name: 'Input fixture', proxyId: 'fixture-route',
   timezone: 'Asia/Shanghai', locale: 'zh-CN' };
@@ -38,6 +48,8 @@ window.fixture.mount = (next = {}) => {
   root?.unmount();
   options = { visible: true, standalone: false, ...next };
   window.fixture.writes = [];
+  window.fixture.rawData = [];
+  window.fixture.terminal = null;
   window.fixture.unexpected = [];
   window.fixture.snapshot = { profiles: [profile], proxies: [], settings: { language: 'zh-CN', appearance: 'dark' },
     system: { platform: 'darwin', appVersion: 'fixture', accessibilitySupportEnabled: options.screenReaderMode === true } };
@@ -153,6 +165,114 @@ const sent = result => {
   assert.ok(result.writes.every(value => value.sessionId === 'input-session'));
   return result.writes.map(value => value.data).join('');
 };
+
+async function geometryTerminal(output, { standalone = false, columns = 20, rows = 5 } = {}) {
+  await mount({ standalone });
+  // The real component fits after an 80ms debounce. Wait for that initial fit
+  // before setting a deterministic grid, without patching its resize logic.
+  await page.waitForTimeout(140);
+  await page.evaluate(async ({ output, columns, rows }) => {
+    const terminal = window.fixture.terminal;
+    terminal.resize(columns, rows);
+    await new Promise(resolve => terminal.write(output, resolve));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }, { output, columns, rows });
+  const state = await compositionGeometry();
+  assert.equal(state.columns, columns, 'the actual terminal uses the requested column count');
+  assert.equal(state.rows, rows, 'the actual terminal uses the requested row count');
+  return state;
+}
+
+async function compositionGeometry() {
+  return page.evaluate(() => {
+    const terminal = window.fixture.terminal;
+    const screen = terminal.element.querySelector('.xterm-screen');
+    const view = terminal.element.querySelector('.composition-view');
+    const screenBounds = screen.getBoundingClientRect();
+    const relativeBounds = element => {
+      const bounds = element.getBoundingClientRect();
+      return { left: bounds.left - screenBounds.left, top: bounds.top - screenBounds.top,
+        right: bounds.right - screenBounds.left, bottom: bounds.bottom - screenBounds.top,
+        width: bounds.width, height: bounds.height };
+    };
+    const buffer = terminal.buffer.active;
+    return {
+      columns: terminal.cols, rows: terminal.rows,
+      cellWidth: screenBounds.width / terminal.cols, cellHeight: screenBounds.height / terminal.rows,
+      screen: { width: screenBounds.width, height: screenBounds.height },
+      view: relativeBounds(view), textarea: relativeBounds(terminal.textarea),
+      active: view.classList.contains('active'), display: getComputedStyle(view).display,
+      floating: view.classList.contains('terminal-composition-floating'), maxWidth: view.style.maxWidth,
+      text: view.textContent, rawData: window.fixture.rawData.slice(),
+      buffer: { cursorX: buffer.cursorX, cursorY: buffer.cursorY, baseY: buffer.baseY, viewportY: buffer.viewportY,
+        lines: Array.from({ length: buffer.length }, (_, row) => {
+          const line = buffer.getLine(row);
+          return { text: line.translateToString(false), isWrapped: line.isWrapped,
+            cells: Array.from({ length: terminal.cols }, (_, column) => {
+              const cell = line.getCell(column);
+              return { chars: cell.getChars(), width: cell.getWidth() };
+            }) };
+        }) },
+    };
+  });
+}
+
+async function startComposition(text = '拼音') {
+  const alreadySent = await page.evaluate(() => window.fixture.writes.map(value => value.data).join(''));
+  const result = await events([
+    imeKey('keydown'), { type: 'compositionstart', data: '' }, { type: 'compositionupdate', data: text }, { value: text },
+    { type: 'input', inputType: 'insertCompositionText', data: text, isComposing: true },
+  ]);
+  assert.equal(sent(result), alreadySent, 'preedit must not be sent to the session');
+  return compositionGeometry();
+}
+
+function near(actual, expected, message) {
+  assert.ok(Math.abs(actual - expected) <= 0.75, `${message}: ${actual} vs ${expected}`);
+}
+
+function anchoredAt(state, column, row) {
+  assert.equal(state.active, true, 'preedit is visible');
+  assert.notEqual(state.display, 'none');
+  near(state.view.left, column * state.cellWidth, 'preedit column');
+  near(state.view.top, row * state.cellHeight, 'preedit row');
+  near(state.textarea.left, state.view.left, 'native candidate anchor follows preedit horizontally');
+  near(state.textarea.top, state.view.top, 'native candidate anchor follows preedit vertically');
+  near(state.textarea.width, Math.max(state.view.width, 1), 'candidate anchor width follows preedit');
+  near(state.textarea.height, Math.max(state.view.height, 1), 'candidate anchor height follows preedit');
+}
+
+function visibleInsideScreen(state) {
+  for (const [name, bounds] of [['preedit', state.view], ['candidate anchor', state.textarea]]) {
+    assert.ok(bounds.left >= -0.75 && bounds.top >= -0.75, `${name} starts inside the visible screen`);
+    assert.ok(bounds.right <= state.screen.width + 0.75 && bounds.bottom <= state.screen.height + 0.75,
+      `${name} ends inside the visible screen`);
+    assert.ok(bounds.width >= 1 && bounds.height >= 1, `${name} has usable dimensions`);
+  }
+}
+
+async function stableComposition(expected) {
+  const frames = await page.evaluate(async () => {
+    const terminal = window.fixture.terminal;
+    const screen = terminal.element.querySelector('.xterm-screen');
+    const view = terminal.element.querySelector('.composition-view');
+    const frames = [];
+    for (let frame = 0; frame < 6; frame++) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const origin = screen.getBoundingClientRect();
+      const bounds = view.getBoundingClientRect(), anchor = terminal.textarea.getBoundingClientRect();
+      frames.push({ left: bounds.left - origin.left, top: bounds.top - origin.top,
+        textareaLeft: anchor.left - origin.left, textareaTop: anchor.top - origin.top });
+    }
+    return frames;
+  });
+  for (const [index, frame] of frames.entries()) {
+    near(frame.left, expected.view.left, `preedit stays at its horizontal anchor on frame ${index}`);
+    near(frame.top, expected.view.top, `preedit stays at its vertical anchor on frame ${index}`);
+    near(frame.textareaLeft, frame.left, `candidate anchor stays aligned horizontally on frame ${index}`);
+    near(frame.textareaTop, frame.top, `candidate anchor stays aligned vertically on frame ${index}`);
+  }
+}
 
 test('input-only Chinese punctuation reaches the actual terminal IPC once by default', { skip: noDisplay }, async () => {
   await mount();
@@ -314,5 +434,125 @@ test('screen reader support toggles accessibility DOM without replacing the term
       assert.equal(await page.evaluate(() => document.querySelector('.xterm-helper-textarea') === window.fixture.savedTextarea), true);
     }
     assert.equal(sent(await events([{ append: '、' }, input('、')])), '、');
+  }
+});
+
+test('Chinese preedit begins after committed wide glyphs in embedded and independent terminal views', { skip: noDisplay }, async () => {
+  for (const standalone of [false, true]) {
+    const before = await geometryTerminal('你好', { standalone });
+    assert.equal(before.buffer.cursorX, 4);
+    const state = await startComposition();
+    anchoredAt(state, 4, 0);
+    visibleInsideScreen(state);
+    assert.deepEqual(state.buffer, before.buffer, 'displaying preedit never edits the real buffer or cursor');
+    assert.deepEqual(state.rawData, [], 'displaying preedit does not emit terminal input');
+  }
+});
+
+test('a cursor in a Chinese continuation cell puts preedit after the glyph without moving the real cursor', { skip: noDisplay }, async () => {
+  const before = await geometryTerminal('你好\x1b[1D');
+  assert.equal(before.buffer.cursorX, 3);
+  assert.deepEqual(before.buffer.lines[0].cells[3], { chars: '', width: 0 });
+  let state = await startComposition('拼');
+  anchoredAt(state, 4, 0);
+  assert.deepEqual(state.buffer, before.buffer);
+  assert.equal(sent(await events([
+    { type: 'compositionupdate', data: '拼音' }, { value: '拼音' },
+    { type: 'input', inputType: 'insertCompositionText', data: '拼音', isComposing: true },
+  ])), '');
+  state = await compositionGeometry();
+  anchoredAt(state, 4, 0);
+  assert.deepEqual(state.buffer, before.buffer, 'editing preedit preserves even the width-zero cursor position');
+  assert.deepEqual(state.rawData, []);
+});
+
+test('editing at the start of a wide glyph retains the intentional cursor column', { skip: noDisplay }, async () => {
+  const before = await geometryTerminal('你好\x1b[2D');
+  assert.equal(before.buffer.cursorX, 2);
+  assert.equal(before.buffer.lines[0].cells[2].width, 2);
+  const state = await startComposition('拼');
+  anchoredAt(state, 2, 0);
+  assert.deepEqual(state.buffer, before.buffer, 'a real editing position is not advanced across the next glyph');
+});
+
+for (const [label, output] of [['Chinese', '你'.repeat(10)], ['ASCII', 'x'.repeat(20)]]) {
+  test(`${label} pending wrap places preedit at the next visible row rather than on the final glyph`, { skip: noDisplay }, async () => {
+    for (const standalone of [false, true]) {
+      const before = await geometryTerminal(output, { standalone });
+      assert.equal(before.buffer.cursorX, 20, 'fixture reaches xterm pending-wrap state');
+      assert.equal(before.buffer.cursorY, 0);
+      const state = await startComposition();
+      anchoredAt(state, 0, 1);
+      visibleInsideScreen(state);
+      await stableComposition(state);
+      assert.deepEqual(state.buffer, before.buffer, 'the preedit row does not cause an actual terminal wrap');
+      assert.deepEqual(state.rawData, []);
+    }
+  });
+}
+
+test('resizing during composition keeps the displayed preedit and native candidate anchor synchronized', { skip: noDisplay }, async () => {
+  await geometryTerminal('你'.repeat(10));
+  anchoredAt(await startComposition('拼'), 0, 1);
+  await page.evaluate(async () => {
+    window.fixture.terminal.resize(30, 5);
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
+  // Both xterm's deferred composition update and its render callback have run.
+  await page.waitForTimeout(30);
+  const state = await compositionGeometry();
+  assert.equal(state.columns, 30);
+  assert.equal(state.buffer.cursorX, 20);
+  assert.equal(state.buffer.cursorY, 0);
+  anchoredAt(state, 20, 0);
+  visibleInsideScreen(state);
+  await stableComposition(state);
+  assert.deepEqual(state.rawData, [], 'resize does not submit a composition');
+  assert.equal(state.buffer.lines[0].text.trimEnd(), '你'.repeat(10));
+});
+
+test('composition end hides the overlay and the next composition starts from the current terminal position', { skip: noDisplay }, async () => {
+  for (const row of [0, 4]) {
+    await geometryTerminal(`\x1b[${row + 1};1H` + '你'.repeat(10));
+    anchoredAt(await startComposition('中'), 0, row === 4 ? 3 : 1);
+    assert.equal(sent(await events([{ type: 'compositionend', data: '中' }, input('中'), imeKey('keyup')])), '中');
+    const ended = await compositionGeometry();
+    assert.equal(ended.active, false);
+    assert.equal(ended.display, 'none');
+    assert.equal(ended.floating, false, 'composition end removes the floating treatment');
+    assert.equal(ended.maxWidth, '', 'composition end releases the preedit width constraint');
+    near(ended.textarea.left, 19 * ended.cellWidth, 'candidate anchor returns to xterm\'s last-column cursor anchor');
+    near(ended.textarea.top, row * ended.cellHeight, 'candidate anchor returns to the real cursor row');
+    assert.deepEqual(ended.rawData, ['中'], 'composition commits through the existing xterm input path exactly once');
+    await page.evaluate(() => new Promise(resolve => window.fixture.terminal.write('\r\nready ', resolve)));
+    const state = await startComposition('文');
+    anchoredAt(state, 6, Math.min(row + 1, 4));
+    visibleInsideScreen(state);
+    assert.deepEqual(state.rawData, ['中'], 'opening another composition does not repeat the previous commit');
+  }
+});
+
+test('final-row and long preedit remain visible without covering the latest committed glyph', { skip: noDisplay }, async () => {
+  const longPreedit = '这是一段超过终端可见宽度的输入法预编辑文本'.repeat(3);
+  for (const [output, preedit, glyphColumn, glyphRow] of [
+    ['\x1b[5;1H' + '你'.repeat(10), '拼音', 18, 4],
+    ['\x1b[5;1H' + '你'.repeat(10), longPreedit, 18, 4],
+    ['你好', longPreedit, 2, 0],
+  ]) {
+    const before = await geometryTerminal(output);
+    const state = await startComposition(preedit);
+    assert.equal(state.active, true);
+    visibleInsideScreen(state);
+    await stableComposition(state);
+    near(state.textarea.left, state.view.left, 'candidate anchor tracks floated preedit horizontally');
+    near(state.textarea.top, state.view.top, 'candidate anchor tracks floated preedit vertically');
+    near(state.textarea.width, state.view.width, 'candidate anchor tracks clipped preedit width');
+    const glyph = { left: glyphColumn * state.cellWidth, right: (glyphColumn + 2) * state.cellWidth,
+      top: glyphRow * state.cellHeight, bottom: (glyphRow + 1) * state.cellHeight };
+    const overlapWidth = Math.min(state.view.right, glyph.right) - Math.max(state.view.left, glyph.left);
+    const overlapHeight = Math.min(state.view.bottom, glyph.bottom) - Math.max(state.view.top, glyph.top);
+    assert.ok(overlapWidth <= 0.75 || overlapHeight <= 0.75, 'preedit does not paint over the latest committed glyph');
+    assert.deepEqual(state.buffer, before.buffer, 'floating or clipping preedit does not change terminal content');
+    assert.deepEqual(state.rawData, []);
   }
 });

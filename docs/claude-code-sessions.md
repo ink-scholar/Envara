@@ -21,6 +21,8 @@ From 1.0.2, **Shift+Enter** sends the same multiline sequence as Option+Enter; p
 
 On macOS, the terminal waits for the input method's confirmed character on the backslash key, so Chinese `、` and English `\` or `|` retain their intended text. Screen-reader support follows the system accessibility state without restarting the session. These input changes preserve the official CLI, network fence, device restrictions and account directories.
 
+The refreshed 1.0.2 package also keeps IME preedit after a complete wide character and moves it to the next visible row at a pending line wrap. At the bottom edge or when the text is too long, a bounded preedit popup uses an adjacent row; it can temporarily cover nearby output but keeps the current input line readable. The native candidate anchor follows the preedit, and returns to the terminal cursor when composition ends. This changes display positioning only, without rewriting terminal output or the committed input sequence.
+
 ## Login profiles and data
 
 Named profiles use separate Claude configuration directories within one environment. Profiles share that environment's program but retain separate configuration/history storage. The default profile retains its existing directory. Duplication preserves the selected profile and creates an idle shell; it neither replays commands nor clones live process state.

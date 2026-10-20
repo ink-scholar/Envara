@@ -160,17 +160,17 @@ test('an independent terminal window cannot dispatch workspace actions or anothe
     return { profiles: [{ sessions: [{ sessionId: 'owned-session' }] }] };
   };
   await f.startup.start();
-  await assert.rejects(f.api.call('createProfile'), /此窗口仅支持终端操作/);
-  await assert.rejects(f.api.call('openTerminal', { id: 'other-profile' }), /此窗口仅操作当前环境/);
-  await assert.rejects(f.api.call('deleteClaudeAccount', { id: 'other-profile', accountId: 'selected', confirmed: true }), /此窗口仅操作当前环境/);
-  await assert.rejects(f.api.call('closeTerminal', { sessionId: 'other-session' }), /该会话不属于此终端窗口/);
+  await assert.rejects(f.api.call('createProfile'), { message: /此窗口仅支持终端操作/ });
+  await assert.rejects(f.api.call('openTerminal', { id: 'other-profile' }), { message: /此窗口仅操作当前环境/ });
+  await assert.rejects(f.api.call('deleteClaudeAccount', { id: 'other-profile', accountId: 'selected', confirmed: true }), { message: /此窗口仅操作当前环境/ });
+  await assert.rejects(f.api.call('closeTerminal', { sessionId: 'other-session' }), { message: /该会话不属于此终端窗口/ });
   assert.equal(f.calls.length, 0);
   await f.api.call('writeTerminal', { sessionId: 'owned-session', data: 'fixture' });
   assert.deepEqual(f.calls.map(item => item.method), ['writeTerminal']);
   await f.api.call('deleteClaudeAccount', { id: 'prof_fixture', accountId: 'selected', confirmed: true });
   assert.equal(f.calls.at(-1).method, 'deleteClaudeAccount');
   f.event.senderFrame = {};
-  await assert.rejects(f.api.call('deleteClaudeAccount', { id: 'prof_fixture', accountId: 'selected', confirmed: true }), /不允许的请求来源/);
+  await assert.rejects(f.api.call('deleteClaudeAccount', { id: 'prof_fixture', accountId: 'selected', confirmed: true }), { message: /不允许的请求来源/ });
   assert.equal(f.calls.length, 2);
 });
 
@@ -180,14 +180,14 @@ test('all SSH connection actions remain inside the independent terminal window e
   await f.startup.start();
   const methods = ['listTerminalSshConnections', 'prepareTerminalSshIdentity', 'prepareTerminalSshPassword', 'setTerminalSshPassword', 'saveTerminalSshConnection', 'removeTerminalSshConnection'];
   for (const method of methods) {
-    await assert.rejects(f.api.call(method, { id: 'other-profile' }), /此窗口仅操作当前环境/);
-    await assert.rejects(f.api.call(method, {}), /此窗口仅操作当前环境/);
+    await assert.rejects(f.api.call(method, { id: 'other-profile' }), { message: /此窗口仅操作当前环境/ });
+    await assert.rejects(f.api.call(method, {}), { message: /此窗口仅操作当前环境/ });
   }
   assert.equal(f.calls.length, 0);
   for (const method of methods) await f.api.call(method, { id: 'prof_fixture' });
   assert.deepEqual(f.calls.map(item => item.method), methods);
   f.event.senderFrame = {};
-  await assert.rejects(f.api.call('prepareTerminalSshIdentity', { id: 'prof_fixture' }), /不允许的请求来源/);
+  await assert.rejects(f.api.call('prepareTerminalSshIdentity', { id: 'prof_fixture' }), { message: /不允许的请求来源/ });
   assert.equal(f.calls.length, methods.length);
 });
 
@@ -348,7 +348,7 @@ test('independent terminal saved-entry operations retain their bound environment
   const f = fixture(); f.startup.start(); await f.startup.ready;
   f.views.set(f.event.sender, { window: f.view, kind: 'terminal', profileId: 'prof_fixture' });
   for (const method of ['reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal']) {
-    await assert.rejects(f.api.call(method, { id: 'another-profile', entryId: 'savedterm_1234567890abcdef1234567890abcdef' }), /此窗口仅操作当前环境/);
+    await assert.rejects(f.api.call(method, { id: 'another-profile', entryId: 'savedterm_1234567890abcdef1234567890abcdef' }), { message: /此窗口仅操作当前环境/ });
     assert.equal(f.calls.length, 0);
     await f.api.call(method, { id: 'prof_fixture', entryId: 'savedterm_1234567890abcdef1234567890abcdef' });
     assert.equal(f.calls.pop().method, method);

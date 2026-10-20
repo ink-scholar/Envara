@@ -40,7 +40,9 @@ export const api = { get isDesktop() { return window.windowFixture.desktop; }, s
   call: async (method, args) => {
     const fixture = window.windowFixture; fixture.calls.push({ method, args });
     if (method === 'snapshot') return { profiles: fixture.missing ? [] : [fixture.profile], system: { accessibilitySupportEnabled: true } };
-    if (method === 'listTerminalSshConnections') return { supported: true, connections: [{ id: 'demo-host', alias: 'envara-demo', name: 'Demo host', host: 'ssh.example.invalid', port: 22, user: 'demo', authType: 'password', passwordReady: false, hostFingerprints: ['SHA256:synthetic'] }] };
+    if (method === 'listTerminalSshConnections') return { supported: true,
+      routeOptions: [{ route: { kind: 'host' }, label: '本机网络', available: true }], defaultRoute: { kind: 'host' },
+      connections: [{ id: 'demo-host', alias: 'envara-demo', name: 'Demo host', host: 'ssh.example.invalid', port: 22, user: 'demo', authType: 'password', passwordReady: false, hostFingerprints: ['SHA256:synthetic'] }] };
     throw new Error('Unexpected window fixture operation: ' + method);
   } };
 `,

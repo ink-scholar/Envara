@@ -773,10 +773,12 @@ async function initializeDesktopServices({ checkOpen }) {
       dataDir,
       linkChannel,
       sshManager: new TerminalSshManager({ dataDir, hostHome: app.getPath('home'),
+        resolveRoute: settings => terminal.resolveSshRoute(settings),
         nodeExecutable: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'backend', 'playwright-driver', process.platform === 'win32' ? 'node.exe' : 'node') }),
       browserBroker: terminalBrowserBroker,
       additionalExecutablePaths: [path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'backend', 'playwright-driver')],
       resolveContext: id => service.resolveWorkspaceContext(id),
+      resolveSshContext: id => service.resolveWorkspaceContext(id, { requireManagedRoute: true }),
       onEvent: event => {
         for (const { window: view, kind, profileId } of views.values()) if (!view.isDestroyed() && (kind === 'workspace' || profileId === event.profileId)) view.webContents.send('envara:terminal-event', event);
         if (event.type === 'exit' && !views.size) void quitWhenIdle().catch(() => app.quit());

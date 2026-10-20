@@ -247,11 +247,11 @@ try {
   const records = new Map();
   for (const id of ['pw-main', 'pw-wrong', 'pw-revoke', 'pw-mixed', 'pw-finite']) {
     const prepared = await manager.preparePassword({ id, host: '127.0.0.1', port: sshPort, user: 'fixture' });
-    records.set(id, await manager.save({ id, name: 'Disposable password SSH', selectionToken: prepared.selectionToken, password: id === 'pw-wrong' ? wrongPassword : password }));
+    records.set(id, await manager.save({ id, name: 'Disposable password SSH', selectionToken: prepared.selectionToken, hostKeyConfirmed: true, password: id === 'pw-wrong' ? wrongPassword : password }));
   }
   finiteAlias = records.get('pw-finite').alias;
   const mixedIdentity = await manager.prepareIdentity({ id: 'pw-mixed', host: '127.0.0.1', port: sshPort, user: 'fixture', keyPath: path.join(temporary, 'client') });
-  const mixedKey = await manager.save({ id: 'pw-mixed', name: 'Disposable app-lifetime key authority', selectionToken: mixedIdentity.selectionToken });
+  const mixedKey = await manager.save({ id: 'pw-mixed', name: 'Disposable app-lifetime key authority', selectionToken: mixedIdentity.selectionToken, hostKeyConfirmed: true });
   check('Temporary password grants use existing isolated host trust and main memory; connection records contain no password.');
   const proxy = { protocol: 'http', host: '127.0.0.1', port: proxyServer.address().port, username: proxyUser, password: proxyPassword };
   const context = id => ({ id, name: 'Synthetic password fixture', timezone: 'UTC', locale: 'en-US', proxy, proxyId: id === 'pw-revoke' ? 'fixture-revoke' : 'fixture-route', managedProxy: true,

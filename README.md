@@ -5,7 +5,7 @@
 <p align="center"><strong>给每一套工作，一个独立的境舱。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原创代码许可证：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.2-475569" alt="Envara 1.1.2" /></a>
 </p>
 <p align="center">
   <strong>简体中文</strong> · <a href="docs/readme/zh-TW.md">繁體中文</a> · <a href="docs/readme/en.md">English</a> · <a href="docs/readme/ja.md">日本語</a> · <a href="docs/readme/ko.md">한국어</a> · <a href="docs/readme/es.md">Español</a> · <a href="docs/readme/fr.md">Français</a> · <a href="docs/readme/de.md">Deutsch</a> · <a href="docs/readme/pt-BR.md">Português (Brasil)</a>
@@ -20,11 +20,11 @@ Envara 境舱是开源的本地桌面工作台。为不同项目、账号或地�
 
 ![Envara 工作区，使用合成示例数据](docs/media/workspace-zh-CN.png)
 
-## 1.1.1：更专注的 SSH 与终端
+## 1.1.2：选择 SSH 路线，确认首次连接
 
-- **独立 SSH 配置页**：搜索已保存主机、查看连接详情，需要时再添加连接。
-- **更宽敞的终端工作区**：终端铺满右侧区域，单行工具栏搭配已保存终端与设置浮层，关闭入口更清晰。
-- **修正时区变化后的关闭判定**：修复本机时区改变后，关闭终端被误判为失败的问题。
+- **每条连接独立选路**：明确选择本机网络或已配置环境，普通终端、Claude 和复制会话沿用保存的选择。
+- **直接添加新主机**：通过所选路线读取服务器指纹，核对后确认；不再要求预先向宿主 `known_hosts` 添加记录。
+- **清楚呈现失败原因**：保留桌面调用的真实错误码；路线不可用时拒绝连接，既有私钥、凭据与设备读取保护继续保留。
 
 ## Claude Code「防封」与环境隔离
 
@@ -39,15 +39,17 @@ Envara 境舱是开源的本地桌面工作台。为不同项目、账号或地�
 | 🌐 网络环境 | HTTP / HTTPS / SOCKS5 / AnyTLS；检测认证出口，确认地区与时区，AnyTLS 无需外装 Clash |
 | 🧭 独立浏览器 | CloakBrowser、Camoufox 与实验性 BrowseForge Chromium；分开保存资料，重开沿用身份 |
 | 🤖 Claude Code | 环境内安装与更新、命名登录档案、绑定环境浏览器，账号资料按档案保存 |
-| ⌨️ 原生终端 | 选择项目目录，多会话、可伸缩面板与独立窗口，配置和历史按环境保留；macOS [SSH 连接](docs/claude-code-sessions.md#ssh-through-the-environment-route)按保存目标选路线：保存主机走本机出口，未保存地址走境舱代理 |
+| ⌨️ 原生终端 | 选择项目目录，多会话、可伸缩面板与独立窗口，配置和历史按环境保留；macOS [SSH 连接](docs/claude-code-sessions.md#ssh-through-the-environment-route)可为每条已保存连接选择本机或已配置环境的网络路线 |
 | 🧩 附加应用 | 为受支持的 Chromium / Electron 软件绑定环境，管理独立资料与启动、停止 |
 | 🔗 链接与自动化 | 链接交给指定浏览器，提供 REST / MCP / Playwright 浏览器接口 |
 | 📦 加密迁移 | 分别导出浏览器、所选终端档案或单个应用；密码加密，导入新环境 |
 | 🗂️ 工作区管理 | 环境分组、搜索、复制与运行状态；三栏布局与可折叠左侧导航、九种语言、浅色 / 深色 / 跟随系统 |
 
-**终端里的 SSH 按保存目标选择路线。** macOS 普通会话、Claude 会话和复制会话均支持：保存主机走本机网络出口，服从已有 VPN / TUN，服务器可见该出口 IP；未保存的主机与端口可用 `ssh user@host` 经境舱代理连接。已保存目标未解锁、未载入或用户名冲突时拒绝连接，不改走代理。用 `envara-ssh list` 查看本会话已载入的授权；密码和私钥授权在本次 Envara 运行期间不定时到期，密码仅在应用内存保留至退出，私钥保留本机。
+**1.1.2：SSH 路线随每条连接保存。** 添加连接时明确选择本机网络或一个已配置环境，经所选路线读取服务器指纹，核对并确认后保存；新主机信任保存在应用内，不写宿主 `known_hosts`。普通终端、Claude 会话和复制会话沿用该连接的路线；缺少路线字段的旧记录继续使用本机网络。本机路线服从已有 VPN / TUN，服务器可见实际出口 IP。
 
-1.1.0 的新建终端使用双路线，现有终端保留创建时的上下文。支持的参数仍限于端口、用户、TTY 和日志选项，未集成 `scp` / `sftp`、`-i`、跳板或端口转发。主机信任、可达性与认证要求见 [SSH 指南](docs/claude-code-sessions.md#ssh-through-the-environment-route)。
+保存目标未解锁、未载入、用户名冲突，或所选环境缺失、路线改变、连接失败时拒绝，不换用本机或其他环境路线。未保存的主机与端口仍可用 `ssh user@host` 经当前终端所属环境的代理连接，不借用已保存连接的授权或其他环境的路线。用 `envara-ssh list` 查看本会话已载入的授权；密码仅在应用内存保留至退出，私钥保留本机。
+
+现有终端保留创建时的上下文，修改连接后需新建会话。支持的参数仍限于端口、用户、TTY 和日志选项，未集成 `scp` / `sftp`、`-i`、跳板或端口转发。主机信任、可达性与认证要求见 [SSH 指南](docs/claude-code-sessions.md#ssh-through-the-environment-route)。
 
 附加应用的系统授权、沙箱取舍与支持范围见[功能与边界](docs/capability-matrix.md)。停止或解绑会保留登录资料。
 

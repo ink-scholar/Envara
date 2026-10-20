@@ -5,7 +5,7 @@
 <p align="center"><strong>Give each workflow a place of its own.</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="MIT license for original code" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.2-475569" alt="Envara 1.1.2" /></a>
 </p>
 <p align="center">
   <a href="../../README.md">简体中文</a> · <a href="zh-TW.md">繁體中文</a> · <strong>English</strong> · <a href="ja.md">日本語</a> · <a href="ko.md">한국어</a> · <a href="es.md">Español</a> · <a href="fr.md">Français</a> · <a href="de.md">Deutsch</a> · <a href="pt-BR.md">Português (Brasil)</a>
@@ -20,11 +20,11 @@ Envara is an open-source local desktop workspace. Keep separate networks, browse
 
 ![Envara workspace with synthetic example data](../media/workspace-zh-CN.png)
 
-## New in 1.1.1
+## New in 1.1.2
 
-- **A dedicated SSH page.** Search saved hosts, view connection details, and add connections when needed.
-- **More room for the terminal.** It fills the workspace on the right, with a single-row toolbar, popovers for saved terminals and settings, and a clear close action.
-- **Correct close checks after time zone changes.** Fixes a false terminal close failure after the host time zone changes.
+- **Choose a route for each SSH connection.** Select the host network or a configured environment; ordinary, Claude and duplicated sessions keep that choice.
+- **Add a new host directly.** Fetch its fingerprint through the selected route, verify it, then confirm. A pre-existing host `known_hosts` entry is no longer required.
+- **See the actual failure reason.** Desktop calls preserve error codes. Unavailable routes fail closed, while existing private-key, credential and device-read protections remain in place.
 
 ## Concerned about account and environment linking in Claude Code?
 
@@ -39,11 +39,17 @@ Isolation helps reduce configuration mix-ups; it does not guarantee freedom from
 | 🌐 Network environments | Use HTTP / HTTPS / SOCKS5 / AnyTLS, verify authenticated egress, and confirm region and timezone; AnyTLS needs no separate Clash installation |
 | 🧭 Separate browsers | Choose CloakBrowser, Camoufox or experimental BrowseForge Chromium; keep data separate and reuse saved identities when reopening |
 | 🤖 Claude Code | Install and update within an environment, manage named login profiles, and bind the selected environment browser |
-| ⌨️ Native terminals | Choose a project folder, open multiple sessions, resize the panel or use a separate window; retain environment configuration and history. On macOS, [controlled SSH connections](../claude-code-sessions.md) use this device’s current network egress (including an active system VPN/TUN) for saved host/port pairs; the remote host sees that egress IP. Unsaved pairs can use `ssh user@host` through the environment’s proxy. Saved connections without current authorization are blocked and do not switch to the proxy; private keys stay on your Mac. New terminals in 1.1.0 receive these routes; existing sessions retain their original context |
+| ⌨️ Native terminals | Choose a project folder, open multiple sessions, resize the panel or use a separate window; retain environment configuration and history. Each saved macOS [SSH connection](../claude-code-sessions.md#ssh-through-the-environment-route) can use the host network or a configured environment’s route |
 | 🧩 Attached apps | Bind supported Chromium / Electron applications to an environment, with separate data and managed start/stop controls |
 | 🔗 Links and automation | Open links in the chosen browser and use REST / MCP / Playwright browser interfaces |
 | 📦 Encrypted migration | Export a browser, selected terminal profile or individual app with password encryption; import into a new environment |
 | 🗂️ Workspace management | Group, search and duplicate environments; inspect runtime status in a three-column layout with nine languages and light, dark or system appearance |
+
+**In 1.1.2, each SSH connection keeps its chosen route.** When adding a connection, select the host network or a configured environment, fetch the server fingerprint through that route, then verify and confirm it. New trust pins stay in Envara; it does not write them to the host’s `known_hosts`. Ordinary, Claude and duplicated terminal sessions use the saved route. Older records without a route retain the host network, including any active system VPN/TUN; the server sees the actual exit IP.
+
+Missing authorization, an unavailable or changed selected environment route, and connection failures are refused without switching routes. Unsaved `user@host` destinations use the terminal’s own environment proxy, without borrowing a saved connection’s authorization or another environment’s route. Use `envara-ssh list` to inspect loaded authorizations. Passwords stay in application memory until exit; private keys remain on your Mac.
+
+Existing sessions retain their original context; connection changes require a new session. See the [SSH guide](../claude-code-sessions.md#ssh-through-the-environment-route) for trust, authentication and supported command options.
 
 See [capabilities and limits](../capability-matrix.md) for attached-app system authorization, sandbox trade-offs and support. Stopping or unbinding preserves sign-in data.
 

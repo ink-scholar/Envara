@@ -70,6 +70,7 @@ async function fixture(t, options = {}) {
   };
   const service = new TerminalService({ dataDir: path.join(root, 'data'), sshManager,
     availableLocales: ['C', 'en_US.UTF-8'], resolveContext: async id => ({ ...structuredClone(context), id }),
+    ...(options.resolveSshContext ? { resolveSshContext: options.resolveSshContext } : {}),
     linkChannel: { executableDirectory: async () => '/owned/link-bin', environment: () => ({ ENVARA_LINK_SOCKET: '/owned/link.sock', ENVARA_LINK_TOKEN: 'synthetic-link-token' }) },
     browserBroker: { createSession: async args => {
       calls.browserCreate.push(args);
@@ -147,15 +148,15 @@ test('SSH selection forwards explicit fields, but save/remove refuse any live te
   const f = await fixture(t);
   const selected = { id: 'chosen', host: 'host.invalid', port: 2222, user: 'fixture', keyPath: f.privateKey };
   assert.deepEqual(await f.service.prepareTerminalSshIdentity(selected), { selectionToken: 'synthetic-selection' });
-  assert.deepEqual(f.calls.prepare, [selected]);
+  assert.deepEqual(f.calls.prepare, [{ ...selected, route: { kind: 'host' } }]);
   const session = await f.start();
-  await assert.rejects(f.service.saveTerminalSshConnection({ id: 'chosen', name: 'Synthetic', selectionToken: 'synthetic-selection' }), { code: 'TERMINAL_SSH_BUSY' });
+  await assert.rejects(f.service.saveTerminalSshConnection({ hostKeyConfirmed: true, id: 'chosen', name: 'Synthetic', selectionToken: 'synthetic-selection' }), { code: 'TERMINAL_SSH_BUSY' });
   await assert.rejects(f.service.removeTerminalSshConnection({ id: 'chosen', connectionId: 'ssh_fixture' }), { code: 'TERMINAL_SSH_BUSY' });
   assert.deepEqual(f.calls.save, []); assert.deepEqual(f.calls.remove, []);
   await f.service.close({ sessionId: session.sessionId });
-  await f.service.saveTerminalSshConnection({ id: 'chosen', name: 'Synthetic', selectionToken: 'synthetic-selection' });
+  await f.service.saveTerminalSshConnection({ hostKeyConfirmed: true, id: 'chosen', name: 'Synthetic', selectionToken: 'synthetic-selection' });
   await f.service.removeTerminalSshConnection({ id: 'chosen', connectionId: 'ssh_fixture' });
-  assert.deepEqual(f.calls.save, [{ id: 'chosen', name: 'Synthetic', selectionToken: 'synthetic-selection' }]);
+  assert.deepEqual(f.calls.save, [{ id: 'chosen', name: 'Synthetic', selectionToken: 'synthetic-selection', hostKeyConfirmed: true }]);
   assert.deepEqual(f.calls.remove, [{ id: 'chosen', connectionId: 'ssh_fixture' }]);
 });
 
@@ -164,9 +165,9 @@ test('password preparation and grants forward only selected fields and refuse mu
   const target = { id: 'chosen', host: 'host.invalid', port: 2222, user: 'fixture' };
   const prepared = await f.service.prepareTerminalSshPassword({ ...target, password: 'not-forwarded', keyPath: '/not-forwarded' });
   assert.deepEqual(prepared, { authType: 'password', selectionToken: 'synthetic-password-selection' });
-  assert.deepEqual(f.calls.preparePassword, [target]);
+  assert.deepEqual(f.calls.preparePassword, [{ ...target, route: { kind: 'host' } }]);
   const args = { id: 'chosen', connectionId: 'ssh_fixture', password: 'synthetic-ssh-secret' };
-  const save = { id: 'chosen', name: 'Password server', selectionToken: prepared.selectionToken, password: args.password };
+  const save = { id: 'chosen', name: 'Password server', selectionToken: prepared.selectionToken, hostKeyConfirmed: true, password: args.password };
   const session = await f.start();
   await assert.rejects(f.service.setTerminalSshPassword(args), { code: 'TERMINAL_SSH_BUSY' });
   await assert.rejects(f.service.saveTerminalSshConnection(save), { code: 'TERMINAL_SSH_BUSY' });
@@ -177,6 +178,100 @@ test('password preparation and grants forward only selected fields and refuse mu
   await f.service.saveTerminalSshConnection({ ...save, keyPath: '/not-forwarded' });
   assert.deepEqual(f.calls.save, [save]);
   assert.ok(!JSON.stringify(await f.service.snapshot()).includes(args.password));
+});
+
+test('main-only host route has no proxy resolution and cannot be used after disposal', async t => {
+  const f = await fixture(t, { resolveSshContext: async () => { throw new Error('Host route must not resolve an environment.'); } });
+  const lease = await f.service.resolveSshRoute({ ownerProfileId: 'chosen', route: { kind: 'host' }, sessionId: 'sshprep_0123456789abcdef' });
+  assert.deepEqual(lease.route, { kind: 'host' }); assert.equal(lease.proxyUrl, undefined);
+  assert.equal(lease.routeIdentity, 'host'); assert.equal(lease.isActive(), true);
+  assert.deepEqual(f.service.activeSshRouteProfileIds(), []);
+  await lease.dispose(); assert.equal(lease.isActive(), false); assert.equal(f.service.sshRouteLeases.size, 0);
+});
+
+test('cross-environment SSH capability pins configuration rather than temporary listeners and never changes owner context', async t => {
+  let port = 49124, password = 'synthetic-b-first';
+  const f = await fixture(t, { resolveSshContext: async id => {
+    assert.equal(id, 'network_b');
+    return { id, proxyId: 'proxy_b', managedProxy: true, managedRoute: { routeIdentity: 'synthetic-core-b' },
+      proxy: { protocol: 'http', host: '127.0.0.1', port, username: 'synthetic-b', password } };
+  } });
+  const input = { ownerProfileId: 'chosen', route: { kind: 'environment', profileId: 'network_b' }, sessionId: 'sshprep_0123456789abcdef' };
+  const first = await f.service.resolveSshRoute(input);
+  assert.deepEqual(f.service.activeSshRouteProfileIds(), ['network_b']); assert(first.isActive());
+  assert(first.proxyUrl.includes(':49124')); assert.equal(first.routeIdentity.length, 64);
+  port++; password = 'synthetic-b-second';
+  const second = await f.service.resolveSshRoute({ ...input, sessionId: 'sshsave_0123456789abcdef' });
+  assert.equal(first.routeIdentity, second.routeIdentity, 'Temporary listener auth and ports are not saved configuration identity.');
+  const owner = await f.start(); assert.equal(owner.network.mode, 'http');
+  assert.equal(f.fakes[0].options.env.HTTPS_PROXY.includes(':49123'), true, 'B must not replace the owner terminal route.');
+  const publicState = JSON.stringify(await f.service.snapshot());
+  for (const secret of [first.proxyUrl, second.proxyUrl, first.routeIdentity, 'synthetic-b-first', 'synthetic-b-second']) assert(!publicState.includes(secret));
+  await f.service.invalidateSshRouteProfiles(['network_b']); assert(!first.isActive() && !second.isActive());
+  const third = await f.service.resolveSshRoute({ ...input, sessionId: 'sshprep_fedcba9876543210' });
+  assert.notEqual(first.routeIdentity, third.routeIdentity);
+  await Promise.all([first.dispose(), second.dispose(), third.dispose()]);
+  assert.deepEqual(f.service.activeSshRouteProfileIds(), []);
+});
+
+test('environment SSH rejects unconfigured, remote, unauthenticated and unsupported routes without fallback', async t => {
+  const candidates = [null,
+    { protocol: 'http', host: 'remote.invalid', port: 49124, username: 'fixture', password: 'synthetic' },
+    { protocol: 'http', host: '127.0.0.1', port: 49124 },
+    { protocol: 'socks5', host: '127.0.0.1', port: 49124, username: 'fixture', password: 'synthetic' }];
+  for (const proxy of candidates) await t.test(proxy?.protocol + '/' + (proxy?.host ?? 'missing'), async t => {
+    const f = await fixture(t, { resolveSshContext: async id => ({ id, proxyId: 'proxy_b', proxy }) });
+    await assert.rejects(f.service.resolveSshRoute({ ownerProfileId: 'chosen', route: { kind: 'environment', profileId: 'network_b' }, sessionId: 'sshprep_0123456789abcdef' }),
+      { code: 'SSH_ROUTE_UNCONFIGURED' });
+    assert.equal(f.service.sshRouteLeases.size, 0); assert.equal(f.fakes.length, 0);
+  });
+});
+
+test('route resolution reserves a cross-environment dependency before await and releases cancelled or interrupted preparation', async t => {
+  const gate = deferred(), controller = new AbortController();
+  const f = await fixture(t, { resolveSshContext: async id => { await gate.promise; return { id, proxyId: 'proxy_b',
+    proxy: { protocol: 'http', host: '127.0.0.1', port: 49124, username: 'fixture', password: 'synthetic-b' } }; } });
+  const pending = f.service.resolveSshRoute({ ownerProfileId: 'chosen', route: { kind: 'environment', profileId: 'network_b' }, sessionId: 'sshprep_0123456789abcdef', signal: controller.signal });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.service.activeSshRouteProfileIds(), ['network_b']);
+  controller.abort(); gate.resolve(); await assert.rejects(pending, { code: 'SSH_ROUTE_UNAVAILABLE' });
+  assert.equal(f.service.sshRouteLeases.size, 0); assert.equal(f.fakes.length, 0);
+});
+
+test('secondary SSH core failure revokes SSH and duplication without killing the owner shell or its Claude browser route', async t => {
+  for (const kind of ['shell', 'claude-code']) await t.test(kind, async t => {
+    const f = await fixture(t, { resolveSshContext: async id => ({ id, proxyId: 'proxy_b', managedProxy: true,
+      proxy: { protocol: 'http', host: '127.0.0.1', port: 49124, username: 'fixture', password: 'synthetic-b' } }) });
+    const result = await f.start(kind), session = f.service.sessions.get(result.sessionId);
+    const lease = await f.service.resolveSshRoute({ ownerProfileId: 'chosen', route: { kind: 'environment', profileId: 'network_b' }, sessionId: result.sessionId });
+    await f.service.invalidateManagedProxy('proxy_b');
+    assert.equal(lease.isActive(), false); assert.equal(f.bindings[0].disposed, 1);
+    assert.equal(session.status, 'running'); assert.equal(f.fakes[0].kills, 0); assert.equal(session.networkFailure, undefined);
+    if (kind === 'claude-code') assert.equal(f.browserBindings[0].disposed, 0);
+    await assert.rejects(f.service.duplicate({ sessionId: result.sessionId }), { code: 'TERMINAL_NOT_RUNNING' });
+    assert.deepEqual(f.service.activeSshRouteProfileIds(), ['network_b'], 'Retain the dependency until its manager confirms cleanup.');
+    await lease.dispose(); assert.deepEqual(f.service.activeSshRouteProfileIds(), []);
+  });
+});
+
+test('manager-facing save requires literal host-key confirmation even outside renderer/controller', async t => {
+  const f = await fixture(t), input = { id: 'chosen', name: 'Synthetic', selectionToken: 'synthetic-selection' };
+  for (const hostKeyConfirmed of [undefined, false, 1, 'true'])
+    await assert.rejects(f.service.saveTerminalSshConnection({ ...input, hostKeyConfirmed }), { code: 'SSH_HOST_CONFIRMATION_REQUIRED' });
+  assert.deepEqual(f.calls.save, []);
+  await f.service.saveTerminalSshConnection({ ...input, hostKeyConfirmed: true });
+  assert.deepEqual(f.calls.save, [{ ...input, hostKeyConfirmed: true }]);
+});
+
+test('native preparation cancellation remains main-only and reaches the manager before any further probe', async t => {
+  const f = await fixture(t), controller = new AbortController();
+  const input = { id: 'chosen', host: 'host.invalid', port: 2222, user: 'fixture', route: { kind: 'host' }, signal: controller.signal };
+  await f.service.prepareTerminalSshPassword(input);
+  assert.equal(f.calls.preparePassword[0].signal, controller.signal);
+  controller.abort();
+  await assert.rejects(f.service.prepareTerminalSshPassword(input), { code: 'SSH_PREPARATION_CANCELLED' });
+  await assert.rejects(f.service.prepareTerminalSshIdentity({ ...input, keyPath: f.privateKey }), { code: 'SSH_PREPARATION_CANCELLED' });
+  assert.equal(f.calls.preparePassword.length, 1); assert.equal(f.calls.prepare.length, 0);
 });
 
 test('locked password metadata is not advertised as loaded SSH authority in terminal or Claude discovery', async t => {

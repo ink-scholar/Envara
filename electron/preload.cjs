@@ -23,9 +23,9 @@ contextBridge.exposeInMainWorld('envara', Object.freeze({
   call: async (method, args = {}) => {
     const result = await ipcRenderer.invoke('envara:call', { method, args });
     if (!result.ok) {
-      const error = new Error(result.error.message);
-      error.code = result.error.code;
-      throw error;
+      // contextBridge copies Error.message/stack but drops custom properties.
+      // Carry a plain failure across worlds; the renderer restores its Error.
+      throw { name: 'Error', message: result.error.message, code: result.error.code };
     }
     return result.value;
   },

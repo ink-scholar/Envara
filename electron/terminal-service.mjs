@@ -2,7 +2,7 @@ import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
 import { createRequire } from 'node:module';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { access, chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { captureTerminalProcess, closeTerminalProcess } from './terminal-process.mjs';
@@ -12,6 +12,7 @@ import { ensureClaudeInstallation, claudeInstallationStatus as inspectClaudeInst
 import { ClaudeAccountStore, DEFAULT_CLAUDE_ACCOUNT, claudeAccountId as validateClaudeAccountId } from './claude-account-store.mjs';
 import { TerminalEntryStore } from './terminal-entry-store.mjs';
 import { installedProcessLocales, resolveProcessLanguage } from './workspace-context.mjs';
+import { normalizeSshRoute } from './terminal-ssh-route.mjs';
 
 const require = createRequire(import.meta.url);
 const MAX_SESSIONS = 8;
@@ -148,11 +149,15 @@ export class TerminalService {
     networkFence = process.platform === 'darwin' ? new TerminalNetworkFence() : null,
     /* Links a fenced terminal asks to open come back through this channel and
      * are opened by the app, never by the host's default browser. */
-    linkChannel = null, browserBroker = null, sshManager = null, claudeExecutableResolver = findClaudeExecutable, claudeInstaller = ensureClaudeInstallation, availableLocales = null }) {
+    linkChannel = null, browserBroker = null, sshManager = null, resolveSshContext = resolveContext, claudeExecutableResolver = findClaudeExecutable, claudeInstaller = ensureClaudeInstallation, availableLocales = null }) {
     if (!path.isAbsolute(dataDir ?? '') || typeof resolveContext !== 'function') throw codeError('终端数据目录或环境解析器无效。');
     this.dataDir = path.resolve(dataDir);
     this.onEvent = onEvent;
     this.resolveContext = resolveContext;
+    if (typeof resolveSshContext !== 'function') throw codeError('SSH 网络解析器无效。', 'SSH_ROUTE_INVALID');
+    this.resolveSshContext = resolveSshContext;
+    this.sshRouteLeases = new Map();
+    this.sshRouteEpochs = new Map();
     this.ptyFactory = ptyFactory;
     this.processControl = processControl;
     if (networkFence != null && typeof networkFence.wrap !== 'function') throw codeError('终端网络围栏无效。');
@@ -270,22 +275,76 @@ export class TerminalService {
     await this.ready; validId(id);
     return this.sshManager ? this.sshManager.list({ id }) : { supported: false, connections: [] };
   }
-  async prepareTerminalSshIdentity({ id, host, port, user, keyPath }) {
+  /** Main-only route capability. Neither the listener nor its identity is exported. */
+  async resolveSshRoute({ ownerProfileId, route: input, sessionId, signal } = {}) {
+    validId(ownerProfileId); validId(sessionId);
+    const route = normalizeSshRoute(input);
+    await this.ready;
+    const session = this.sessions.get(sessionId);
+    const preparation = /^ssh(?:prep|save)_[a-f0-9]{16,64}$/.test(sessionId);
+    if (this.closed || signal?.aborted || session && session.profileId !== ownerProfileId || !session && !preparation)
+      throw codeError('SSH 所选网络不可用，请重新选择。', 'SSH_ROUTE_UNAVAILABLE');
+    if (this.sshRouteLeases.size >= 256) throw codeError('SSH 网络授权过多，请稍后重试。', 'SSH_ROUTE_UNAVAILABLE');
+    const key = randomUUID(), epoch = route.kind === 'environment' ? this.sshRouteEpochs.get(route.profileId) ?? 0 : 0;
+    const failuresAtStart = new Map(this.managedProxyFailures);
+    const lease = { key, ownerProfileId, sessionId, route, proxyId: null, generation: 0, disposed: false };
+    // Reserve the dependency before resolving another environment asynchronously.
+    this.sshRouteLeases.set(key, lease);
+    const dispose = async () => { lease.disposed = true; this.sshRouteLeases.delete(key); };
+    const isActive = () => !this.closed && !lease.disposed && !signal?.aborted
+      && (!session || !session.startCancelled && !session.finished && !session.finishing && ['starting', 'running'].includes(session.status))
+      && (route.kind === 'host' || (this.sshRouteEpochs.get(route.profileId) ?? 0) === epoch)
+      && (!lease.proxyId || (this.managedProxyFailures.get(lease.proxyId) ?? 0) === lease.generation);
+    lease.isActive = isActive;
+    try {
+      if (!isActive()) throw codeError('SSH 所选网络已停止，请重新选择。', 'SSH_ROUTE_UNAVAILABLE');
+      if (route.kind === 'host') return { route, routeIdentity: 'host', isActive, dispose };
+      const context = await this.resolveSshContext(route.profileId);
+      if (!isActive() || context?.id !== route.profileId) throw codeError('SSH 所选网络不可用，请重新选择。', 'SSH_ROUTE_UNAVAILABLE');
+      const proxy = checkedProxy(context.proxy), proxyId = context.proxyId ?? context.managedRoute?.proxyId;
+      if (!proxy || !['http', 'https'].includes(proxy.protocol) || !['127.0.0.1', '::1'].includes(proxy.host)
+        || !proxy.username || !proxy.password || typeof proxyId !== 'string')
+        throw codeError('SSH 所选环境尚未配置可用的认证代理。', 'SSH_ROUTE_UNCONFIGURED');
+      validId(proxyId);
+      lease.proxyId = proxyId; lease.generation = failuresAtStart.get(proxyId) ?? 0;
+      if (!isActive()) throw codeError('SSH 所选网络在准备期间已停止，请重试。', 'SSH_ROUTE_UNAVAILABLE');
+      // Temporary port/auth changes are not configuration changes. Core identity
+      // and local mutation epochs bind preparation to the selected saved route.
+      const routeIdentity = createHash('sha256').update(JSON.stringify({ route, proxyId, epoch,
+        core: context.managedRoute?.routeIdentity ?? null })).digest('hex');
+      return { route, proxyUrl: proxyURL(proxy), routeIdentity, isActive, dispose };
+    } catch (error) { await dispose(); throw error; }
+  }
+  activeSshRouteProfileIds() {
+    return [...new Set([...this.sshRouteLeases.values()]
+      .filter(lease => !lease.disposed && lease.route.kind === 'environment').map(lease => lease.route.profileId))];
+  }
+  invalidateSshRouteProfiles(ids) {
+    const affected = new Set(ids);
+    for (const id of affected) this.sshRouteEpochs.set(id, (this.sshRouteEpochs.get(id) ?? 0) + 1);
+    const sessions = new Set([...this.sshRouteLeases.values()].filter(lease => lease.route.kind === 'environment' && affected.has(lease.route.profileId))
+      .map(lease => this.sessions.get(lease.sessionId)).filter(Boolean));
+    return Promise.allSettled([...sessions].map(session => this.revokeSsh(session)));
+  }
+  async prepareTerminalSshIdentity({ id, host, port, user, keyPath, route, signal }) {
     await this.ready; validId(id);
     if (this.closed || !this.sshManager) throw codeError('SSH 连接服务不可用。', 'TERMINAL_SSH_UNAVAILABLE');
-    return this.sshManager.prepareIdentity({ id, host, port, user, keyPath });
+    if (signal?.aborted) throw codeError('SSH 主机准备已取消。', 'SSH_PREPARATION_CANCELLED');
+    return this.sshManager.prepareIdentity({ id, host, port, user, keyPath, route: normalizeSshRoute(route, { legacy: true }), ...(signal ? { signal } : {}) });
   }
-  async prepareTerminalSshPassword({ id, host, port, user }) {
+  async prepareTerminalSshPassword({ id, host, port, user, route, signal }) {
     await this.ready; validId(id);
     if (this.closed || !this.sshManager) throw codeError('SSH 连接服务不可用。', 'TERMINAL_SSH_UNAVAILABLE');
-    return this.sshManager.preparePassword({ id, host, port, user });
+    if (signal?.aborted) throw codeError('SSH 主机准备已取消。', 'SSH_PREPARATION_CANCELLED');
+    return this.sshManager.preparePassword({ id, host, port, user, route: normalizeSshRoute(route, { legacy: true }), ...(signal ? { signal } : {}) });
   }
-  saveTerminalSshConnection({ id, name, selectionToken, password }) {
+  saveTerminalSshConnection({ id, name, selectionToken, hostKeyConfirmed, password }) {
     validId(id);
     return this.serialized(id, async () => {
       if (this.closed || !this.sshManager) throw codeError('SSH 连接服务不可用。', 'TERMINAL_SSH_UNAVAILABLE');
       if (this.active(id)) throw codeError('请先结束此环境的终端会话，再保存 SSH 连接。', 'TERMINAL_SSH_BUSY');
-      await this.sshManager.save({ id, name, selectionToken, ...(password !== undefined ? { password } : {}) });
+      if (hostKeyConfirmed !== true) throw codeError('请先核对并确认服务器主机指纹。', 'SSH_HOST_CONFIRMATION_REQUIRED');
+      await this.sshManager.save({ id, name, selectionToken, hostKeyConfirmed: true, ...(password !== undefined ? { password } : {}) });
       return this.sshManager.list({ id });
     });
   }
@@ -595,7 +654,8 @@ export class TerminalService {
     // Ordinary shells keep their existing lifecycle, but a lost route must
     // revoke their SSH signing capability just as it does for Claude sessions.
     const sshRevocations = [...this.sessions.values()].filter(session => !session.finished && session.sshBinding
-      && this.managedProxyId(session) === proxyId).map(session => this.revokeSsh(session));
+      && (this.managedProxyId(session) === proxyId || [...this.sshRouteLeases.values()]
+        .some(lease => lease.sessionId === session.sessionId && lease.proxyId === proxyId))).map(session => this.revokeSsh(session));
     const affected = [...this.sessions.values()].filter(session => session.kind === 'claude-code' && !session.finished
       && ['starting', 'running'].includes(session.status) && this.managedProxyId(session) === proxyId);
     for (const session of affected) this.markManagedProxyFailure(session);
@@ -730,7 +790,7 @@ export class TerminalService {
     }).finally(() => releaseAccount?.());
   }
   requireDuplicable(session) {
-    if (session.status !== 'running' || session.finished || session.finishing || session.cleanupError || session.networkFailure || !session.launchContext ||
+    if (session.status !== 'running' || session.finished || session.finishing || session.cleanupError || session.networkFailure || session.sshRevocation || !session.launchContext ||
         [...this.sessions.values()].some(other => other.profileId === session.profileId && !other.finished && (other.status === 'closing' || other.cleanupError || other.finishing))) throw codeError('只能复制仍在运行的终端。', 'TERMINAL_NOT_RUNNING');
   }
   assertStarting(session) {
@@ -826,6 +886,8 @@ export class TerminalService {
         try { this.assertStarting(session); }
         catch (error) { await this.retainLaunchCleanup(session, 'sshBinding', binding); throw error; }
         session.sshBinding = binding;
+        if ([...this.sshRouteLeases.values()].some(lease => lease.sessionId === session.sessionId && !lease.isActive()))
+          throw codeError('SSH 所选网络在启动期间已停止，请检查后新建终端。', 'TERMINAL_SSH_ROUTE_LOST');
         const loadedConnections = typeof binding.describe === 'function' ? binding.describe().connections : sshConfiguration.connections;
         session.sshConnections = (loadedConnections ?? []).map(({ id: connectionId, alias, name }) => ({ id: connectionId, alias, name }));
         if (managedProxyId && (this.managedProxyFailures.get(managedProxyId) ?? 0) !== (proxyFailuresAtStart.get(managedProxyId) ?? 0))

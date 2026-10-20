@@ -50,6 +50,19 @@ test('discovery projects only public session records and has explicit empty, exp
   assert.equal(describeSshSession(selected, now).connections[0].host, connection.host);
 });
 
+test('explicit saved routes are public references and must match the immutable configured route before native launch', async () => {
+  const route = { kind: 'environment', profileId: 'route-b' }, selected = { ...connection, route };
+  assert.deepEqual(describeSshSession(manifest([selected]), now).connections[0].route, route);
+  assert.equal(Object.hasOwn(describeSshSession(manifest([connection]), now).connections[0], 'route'), false,
+    'legacy manifests retain their original public shape');
+  const configured = [{ ...connection, route: { kind: 'host' } }];
+  const mismatch = await invoke({ argv: [connection.alias], selected: manifest([selected]), configuredConnections: configured });
+  assert.equal(mismatch.code, 2); assert.equal(mismatch.calls.length, 0); assert.match(mismatch.stderr, /SSH_SESSION_INVALID/);
+  for (const invalidRoute of [{ kind: 'environment', profileId: 'route-b', proxyUrl: 'http://user:secret@127.0.0.1:1234' },
+    { kind: 'host', profileId: 'route-b' }, { kind: 'environment' }, null])
+    assert.throws(() => describeSshSession(manifest([{ ...connection, route: invalidRoute }]), now), fail('SSH_SESSION_INVALID'));
+});
+
 test('discovery refuses malformed schemas, records, expiration and duplicate identities', () => {
   for (const selected of [null, {}, { ...manifest(), schema: 'untrusted' }, { ...manifest(), version: 3 },
     manifest([], now + 1), manifest([connection], null), manifest([connection], NaN),

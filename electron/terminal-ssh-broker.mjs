@@ -66,7 +66,7 @@ async function listen(server, socket) {
  * host processes outside Envara's sandbox. */
 export async function createPasswordSshBroker({ directory, publicDirectory, nodeExecutable, configPath, proxyUrl, targetsPath,
   transportSocket = null, directToken = null,
-  manifest, passwords, now = Date.now, expiresAt, isActive, fence = new TerminalNetworkFence(), spawn = spawnChild,
+  manifest, passwords, now = Date.now, expiresAt, isActive, isConnectionActive = null, fence = new TerminalNetworkFence(), spawn = spawnChild,
   runtimeReadOnlyPaths = [], ptyFactory = defaultPtyFactory, writePty = nativePtyWrite, monotonicNow = () => performance.now(),
   processControl = { capture: captureTerminalProcess, close: closeTerminalProcess } } = {}) {
   [directory, publicDirectory, nodeExecutable, configPath, targetsPath].forEach(checkedPath);
@@ -74,6 +74,7 @@ export async function createPasswordSshBroker({ directory, publicDirectory, node
   runtimeReadOnlyPaths.forEach(checkedPath);
   if (publicDirectory !== path.join(directory, 'public') || !configPath.startsWith(`${publicDirectory}/`)
     || !targetsPath.startsWith(`${publicDirectory}/`) || typeof now !== 'function' || typeof monotonicNow !== 'function' || typeof isActive !== 'function'
+    || isConnectionActive !== null && typeof isConnectionActive !== 'function'
     || !(passwords instanceof Map) || !passwords.size || passwords.size > 20) throw fail('SSH_BROKER_INVALID');
   if (transportSocket !== null || directToken !== null) {
     if (transportSocket !== path.join(directory, 'transport.sock') || typeof directToken !== 'string' || !/^[a-f0-9]{64}$/.test(directToken)) throw fail('SSH_BROKER_INVALID');
@@ -135,6 +136,10 @@ export async function createPasswordSshBroker({ directory, publicDirectory, node
   const authorizationAvailable = alias => {
     const authorization = authorizations.get(alias);
     if (!authorization || authorization.expired) return false;
+    if (isConnectionActive) {
+      try { if (isConnectionActive(alias) !== true) { expireAuthorization(alias); return false; } }
+      catch { expireAuthorization(alias); return false; }
+    }
     if (authorization.expiresAt !== null) {
       const wall = now(), monotonic = monotonicNow();
       if (!Number.isFinite(wall) || !Number.isFinite(monotonic)

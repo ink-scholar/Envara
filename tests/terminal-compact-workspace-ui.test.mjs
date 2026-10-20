@@ -46,7 +46,8 @@ window.compactApi = async (method, args = {}) => {
   window.compactCalls.push({ method, args: clone(args) });
   const state = window.compactFixture;
   if (method === 'snapshot') return clone({ profiles: state.environments, system: {} });
-  if (method === 'listTerminalSshConnections') return { supported: true, connections: [] };
+  if (method === 'listTerminalSshConnections') return { supported: true, connections: [],
+    routeOptions: [{ route: { kind: 'host' }, label: '本机网络', available: true }], defaultRoute: { kind: 'host' } };
   if (method === 'terminalSnapshot') return clone({ profiles: state.snapshot.profiles.filter(profile => !args.id || profile.profileId === args.id) });
   if (method === 'resizeTerminal' || method === 'writeTerminal') return {};
   if (method === 'closeTerminal') {

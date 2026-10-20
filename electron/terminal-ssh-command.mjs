@@ -5,6 +5,7 @@ import { spawn as spawnChild } from 'node:child_process';
 import path from 'node:path';
 import { sameSshTarget, validateSshProxyUrl, validateSshTarget } from './terminal-ssh-proxy.mjs';
 import { runPasswordSshClient } from './terminal-ssh-client.mjs';
+import { normalizeSshRoute, sameSshRoute } from './terminal-ssh-route.mjs';
 
 export const SSH_SESSION_SCHEMA = 'envara.ssh-session';
 export const SSH_SESSION_VERSION = 2;
@@ -29,7 +30,7 @@ const usage = () => ({
   alias: 'ssh [-T|-t] [-v|-vv|-vvv] SAVED_ALIAS [COMMAND ...]',
   target: 'ssh [-p PORT] [-l USER] USER@HOST [COMMAND ...]',
   options: 'Connection options may also follow the destination until the first command argument. Use -- to end connection options explicitly. Later command arguments are preserved unchanged.',
-  setup: 'Open Terminal > SSH connections to save or unlock a connection, then start a new terminal session. Saved connections use this computer\'s network; the server can see its network exit IP. Other explicit USER@HOST destinations use the environment proxy; saved connections never fall back to that route.',
+  setup: 'Open Terminal > SSH connections to save or unlock a connection, then start a new terminal session. Saved connections use their selected network route. Other explicit USER@HOST destinations use the current terminal environment proxy. A failed saved route never switches to another network.',
 });
 
 const absolutePath = value => typeof value === 'string' && path.isAbsolute(value) && path.normalize(value) === value
@@ -75,12 +76,13 @@ function publicConnections(value) {
       || typeof record.alias !== 'string' || !ALIAS.test(record.alias)
       || typeof record.user !== 'string' || !USER.test(record.user) || !Number.isInteger(record.port)
       || ids.has(record.id) || aliases.has(record.alias)) throw failure('SSH_SESSION_INVALID');
-    let target;
-    try { target = validateSshTarget(record.host, record.port); } catch { throw failure('SSH_SESSION_INVALID'); }
+    let target, route;
+    try { target = validateSshTarget(record.host, record.port); route = normalizeSshRoute(record.route, { legacy: true }); } catch { throw failure('SSH_SESSION_INVALID'); }
     ids.add(record.id); aliases.add(record.alias);
     // Explicit projection: callers may hold private metadata, but discovery
     // never forwards paths, credentials, arbitrary usage strings or key bytes.
-    return { id: record.id, name: record.name, alias: record.alias, ...target, user: record.user };
+    return { id: record.id, name: record.name, alias: record.alias, ...target, user: record.user,
+      ...(Object.hasOwn(record, 'route') ? { route } : {}) };
   });
 }
 
@@ -245,7 +247,8 @@ export async function runSshCommand({ argv = [], entry = 'ssh', manifest, config
     if (adHocConfigPath !== undefined && !absolutePath(adHocConfigPath)) throw failure('SSH_SESSION_INVALID');
     const configured = configuredConnections === undefined ? description.connections : publicConnections(configuredConnections);
     if (configuredConnections !== undefined && publicConnections(manifest.connections).some(record => !configured.some(candidate =>
-      ['id', 'alias', 'user'].every(key => candidate[key] === record[key]) && sameSshTarget(candidate, record)))) throw failure('SSH_SESSION_INVALID');
+      ['id', 'alias', 'user'].every(key => candidate[key] === record[key]) && sameSshTarget(candidate, record)
+      && sameSshRoute(normalizeSshRoute(candidate.route, { legacy: true }), normalizeSshRoute(record.route, { legacy: true }))))) throw failure('SSH_SESSION_INVALID');
     if (description.status === 'empty' && !adHocConfigPath && !configured.length) throw failure('SSH_CONNECTIONS_EMPTY');
     if (description.status === 'unavailable' || description.status === 'closed') throw failure('SSH_SESSION_INVALID');
     const invocation = parseSshInvocation(argv, { connections: configured, entry, allowAdHoc: adHocConfigPath !== undefined });

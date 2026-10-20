@@ -46,12 +46,13 @@ function bounded(promise, milliseconds) {
   });
 }
 
-export async function createSshDirectTransport({ directory, connections, isActive, connect = net.connect,
+export async function createSshDirectTransport({ directory, connections, isActive, connect = net.connect, openConnection,
   connectTimeoutMs = 10000, handshakeTimeoutMs = 10000, cleanupTimeoutMs = 2000 } = {}) {
   const targets = new Map();
   let directoryIdentity;
   try {
-    if (!Array.isArray(connections) || connections.length > 20 || typeof isActive !== 'function' || typeof connect !== 'function' ||
+    if (!Array.isArray(connections) || connections.length > 20 || typeof isActive !== 'function' || typeof connect !== 'function'
+        || openConnection !== undefined && typeof openConnection !== 'function' ||
         ![connectTimeoutMs, handshakeTimeoutMs, cleanupTimeoutMs].every(deadlineValid)) throw fail('SSH_DIRECT_CONFIGURATION');
     directoryIdentity = await checkedDirectory(directory);
     for (const record of connections) {
@@ -79,10 +80,12 @@ export async function createSshDirectTransport({ directory, connections, isActiv
   const stop = state => {
     clearTimeout(state.handshakeTimer); clearTimeout(state.connectTimer);
     state.stopped = true; state.client.destroy(); state.upstream?.destroy();
+    state.abortController.abort();
     if (!state.opening && (!state.upstream || state.upstream.closed === true)) states.delete(state);
   };
   const refuse = state => {
     clearTimeout(state.handshakeTimer); clearTimeout(state.connectTimer); state.stopped = true;
+    state.abortController.abort();
     state.upstream?.destroy();
     if (!state.client.destroyed) state.client.end('{"ok":false}\n', () => state.client.destroy());
   };
@@ -118,12 +121,15 @@ export async function createSshDirectTransport({ directory, connections, isActiv
       client.on('error', () => {});
       if (closed || states.size >= MAX_CLIENTS) { client.destroy(); return; }
       const state = { client: track(client), upstream: null, opening: null, alias: null, stopped: false,
-        clientEnded: false, upstreamEnded: false, clientClosed: false, upstreamClosed: false, buffer: Buffer.alloc(0) };
+        clientEnded: false, upstreamEnded: false, clientClosed: false, upstreamClosed: false,
+        abortController: new AbortController(), buffer: Buffer.alloc(0) };
       states.add(state);
       client.once('end', () => { state.clientEnded = true; });
       client.once('close', () => {
         state.clientClosed = true; clearTimeout(state.handshakeTimer);
-        if (!state.clientEnded || !state.upstreamEnded) { state.stopped = true; state.upstream?.destroy(); }
+        if (!state.clientEnded || !state.upstreamEnded) {
+          state.stopped = true; state.abortController.abort(); state.upstream?.destroy();
+        }
         if (!state.opening && (!state.upstream || state.upstreamClosed)) states.delete(state);
       });
       state.handshakeTimer = setTimeout(() => stop(state), handshakeTimeoutMs);
@@ -144,7 +150,8 @@ export async function createSshDirectTransport({ directory, connections, isActiv
         const opening = Promise.resolve().then(() => {
           if (state.stopped || !active(state.alias)) throw fail('SSH_DIRECT_AUTHORIZATION');
           const target = targets.get(state.alias);
-          return connect({ host: target.host, port: target.port, allowHalfOpen: true });
+          return openConnection ? openConnection({ alias: state.alias, target: { ...target }, signal: state.abortController.signal })
+            : connect({ host: target.host, port: target.port, allowHalfOpen: true });
         }).then(upstream => {
           state.upstream = track(upstream);
           const onConnected = () => {

@@ -8,6 +8,7 @@ import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { TerminalSshManager } from '../electron/terminal-ssh-manager.mjs';
+import { parseSshPublicKey } from '../electron/terminal-ssh-key.mjs';
 
 const host = 'ssh-fixture.invalid';
 const target = { host, port: 2222, user: 'fixture' };
@@ -63,10 +64,10 @@ async function fixture(t, { real = false, passphrase = '', now = Date.now, execu
   t.after(async () => { await Promise.allSettled(managers.map(value => value.close())); await rm(root, { recursive: true, force: true }); });
   await manager.ready;
   const select = (extra = {}) => manager.prepareIdentity({ id: 'profile-a', ...target, keyPath, ...extra });
-  const save = async (extra = {}) => manager.save({ id: extra.id ?? 'profile-a', name: extra.name ?? 'Fixture server', selectionToken: (await select(extra)).selectionToken });
+  const save = async (extra = {}) => manager.save({ hostKeyConfirmed: true, id: extra.id ?? 'profile-a', name: extra.name ?? 'Fixture server', selectionToken: (await select(extra)).selectionToken });
   const session = (extra = {}) => manager.createSession({ profileId: 'profile-a', sessionId: 'session-a', directories: { home: hostHome }, proxyUrl, ...extra });
   const selectPassword = (extra = {}) => manager.preparePassword({ id: 'profile-a', ...target, ...extra });
-  const savePassword = async (extra = {}) => manager.save({ id: extra.id ?? 'profile-a', name: extra.name ?? 'Password fixture',
+  const savePassword = async (extra = {}) => manager.save({ hostKeyConfirmed: true, id: extra.id ?? 'profile-a', name: extra.name ?? 'Password fixture',
     selectionToken: (await selectPassword(extra)).selectionToken, password: extra.password ?? 'synthetic-password-only' });
   return { root, dataDir, hostHome, hostSsh, keyDirectory, keyPath, hostKeyPath, hostPublicKey, knownHosts, manager, createManager, calls, select, save, selectPassword, savePassword, session, nodeExecutable };
 }
@@ -108,6 +109,117 @@ function directTransports(t, { beforeDispose = async () => {} } = {}) {
     } };
   } };
 }
+
+function selectedRoutes(f, { identity = () => 'stable-fixture-route', unavailable = () => false, probeHost } = {}) {
+  const handles = [], probes = [];
+  const manager = f.createManager({ resolveRoute: async ({ route, sessionId, signal }) => {
+    if (unavailable(sessionId)) throw Object.assign(new Error('Synthetic unavailable route'), { code: 'SSH_ROUTE_UNAVAILABLE' });
+    const handle = { route, routeIdentity: identity(), active: true, disposed: false, sessionId, signal,
+      ...(route.kind === 'environment' ? { proxyUrl } : {}),
+      isActive: () => handle.active && !handle.disposed,
+      dispose: async () => { handle.disposed = true; } };
+    handles.push(handle); return handle;
+  }, probeHost: probeHost ?? (async options => {
+    probes.push(options); return { routeBinding: options.routeBinding, unverified: true, hostKeys: [parseSshPublicKey(f.hostPublicKey)] };
+  }) });
+  return { manager, handles, probes };
+}
+
+test('explicit selected routes probe first-use fingerprints and require confirmation without reading host known_hosts', async t => {
+  const f = await fixture(t), selected = selectedRoutes(f);
+  await rm(f.knownHosts);
+  const route = { kind: 'environment', profileId: 'route-b' };
+  const prepared = await selected.manager.preparePassword({ id: 'profile-a', ...target, route });
+  assert.equal(prepared.trustSource, 'probe'); assert.deepEqual(prepared.route, route);
+  assert.equal(selected.probes.length, 1); assert.match(selected.handles[0].sessionId, /^sshprep_[a-f0-9]{24}$/);
+  assert.equal(selected.handles[0].disposed, true);
+  for (const hostKeyConfirmed of [undefined, false, 'true', 1])
+    await assert.rejects(selected.manager.save({ id: 'profile-a', name: 'First-use host', selectionToken: prepared.selectionToken,
+      password: 'synthetic', hostKeyConfirmed }), code('SSH_HOST_KEY_CONFIRMATION_REQUIRED'));
+  const saved = await selected.manager.save({ id: 'profile-a', name: 'First-use host', selectionToken: prepared.selectionToken,
+    password: 'synthetic', hostKeyConfirmed: true });
+  assert.deepEqual(saved.route, route); assert.equal(saved.trustSource, 'probe');
+  assert.match(selected.handles[1].sessionId, /^sshsave_[a-f0-9]{24}$/); assert.equal(selected.handles[1].disposed, true);
+  const bytes = await readFile(selected.manager.filename, 'utf8');
+  assert.doesNotMatch(bytes, /fixture-password|fixture-user|stable-fixture-route|proxyUrl|routeIdentity|synthetic/);
+  assert.equal(f.calls.filter(call => call.command === '/usr/bin/ssh-keygen').length, 0);
+});
+
+test('fingerprint confirmation is bound to the selected route generation and cannot be saved after it changes', async t => {
+  const f = await fixture(t); let generation = 'first-generation';
+  const selected = selectedRoutes(f, { identity: () => generation });
+  const prepared = await selected.manager.prepareIdentity({ id: 'profile-a', ...target, keyPath: f.keyPath, route: { kind: 'host' } });
+  generation = 'second-generation';
+  await assert.rejects(selected.manager.save({ id: 'profile-a', name: 'Changed route', selectionToken: prepared.selectionToken,
+    hostKeyConfirmed: true }), code('SSH_ROUTE_CHANGED'));
+  assert.deepEqual((await selected.manager.list({ id: 'profile-a' })).connections, []);
+  assert.equal(selected.handles.every(handle => handle.disposed), true);
+});
+
+test('new sessions pin each alias to its saved route and invalidate without changing another alias route', async t => {
+  const relays = directTransports(t), brokers = passwordBrokers(t);
+  const f = await fixture(t, { createPasswordBroker: brokers.create, createDirectTransport: relays.create }), selected = selectedRoutes(f);
+  const saved = [];
+  for (const [name, route] of [['Host route', { kind: 'host' }], ['Environment route', { kind: 'environment', profileId: 'route-b' }]]) {
+    const prepared = await selected.manager.preparePassword({ id: 'profile-a', ...target, route });
+    saved.push(await selected.manager.save({ id: 'profile-a', name, selectionToken: prepared.selectionToken, password: 'synthetic', hostKeyConfirmed: true }));
+  }
+  await rm(f.knownHosts); // Probe-pinned records do not depend on personal trust files later.
+  const binding = await selected.manager.createSession({ profileId: 'profile-a', sessionId: 'route-session', proxyUrl });
+  assert.deepEqual(binding.describe().connections.map(record => record.route), saved.map(record => record.route));
+  const contexts = selected.handles.filter(handle => handle.sessionId === 'route-session');
+  assert.equal(contexts.length, 2); assert.equal(typeof relays.calls[0].options.openConnection, 'function');
+  assert.equal(brokers.calls[0].options.isConnectionActive(saved[0].alias), true);
+  contexts[1].active = false;
+  assert.equal(relays.calls[0].options.isActive(saved[1].alias), false);
+  assert.equal(relays.calls[0].options.isActive(saved[0].alias), true);
+  assert.equal(binding.describe().connections[1].available, false);
+  assert.equal(binding.describe().connections[0].available, true);
+  assert.deepEqual(contexts.map(context => context.route), saved.map(record => record.route));
+  await binding.dispose(); assert.equal(contexts.every(context => context.disposed), true);
+});
+
+test('unavailable saved routes remain in the immutable configured refusal set and never become ad-hoc targets', async t => {
+  const f = await fixture(t), selected = selectedRoutes(f, { unavailable: sessionId => sessionId === 'missing-route' });
+  const prepared = await selected.manager.preparePassword({ id: 'profile-a', ...target, route: { kind: 'environment', profileId: 'route-b' } });
+  const saved = await selected.manager.save({ id: 'profile-a', name: 'Unavailable route', selectionToken: prepared.selectionToken, password: 'synthetic', hostKeyConfirmed: true });
+  const envConfig = path.join(f.root, 'environment-config'); await mkdir(envConfig, { mode: 0o700 });
+  const binding = await selected.manager.createSession({ profileId: 'profile-a', sessionId: 'missing-route', proxyUrl,
+    directories: { home: f.hostHome, config: envConfig } });
+  assert.equal(binding.describe().status, 'empty'); assert.equal(binding.environment.ENVARA_SSH_DIRECT_SOCKET, undefined);
+  const launcher = await readFile(path.join(path.dirname(binding.binDirectory), 'launch.mjs'), 'utf8');
+  assert.ok(launcher.includes(saved.alias)); assert.ok(launcher.includes('"profileId":"route-b"'));
+  const result = await run(f.nodeExecutable, [path.join(path.dirname(binding.binDirectory), 'launch.mjs'), 'ssh', saved.alias],
+    { env: { PATH: '/usr/bin:/bin', ENVARA_SSH_PROXY_URL: proxyUrl } }).catch(error => error);
+  assert.match(result.stderr, /SSH_SAVED_CONNECTION_UNAVAILABLE/); await binding.dispose();
+});
+
+test('uncertain relay cleanup keeps selected route dependencies until the owned cleanup retry succeeds', async t => {
+  let refuse = true;
+  const relays = directTransports(t, { beforeDispose: async () => { if (refuse) throw new Error('Synthetic retained transport'); } });
+  const brokers = passwordBrokers(t), f = await fixture(t, { createPasswordBroker: brokers.create, createDirectTransport: relays.create });
+  const selected = selectedRoutes(f), prepared = await selected.manager.preparePassword({ id: 'profile-a', ...target, route: { kind: 'host' } });
+  await selected.manager.save({ id: 'profile-a', name: 'Retained route', selectionToken: prepared.selectionToken, password: 'synthetic', hostKeyConfirmed: true });
+  const binding = await selected.manager.createSession({ profileId: 'profile-a', sessionId: 'cleanup-route', proxyUrl });
+  const context = selected.handles.find(handle => handle.sessionId === 'cleanup-route');
+  await assert.rejects(binding.dispose(), code('SSH_CLEANUP_FAILED')); assert.equal(context.disposed, false);
+  assert.equal(selected.manager.sessions.has('cleanup-route'), true); refuse = false;
+  await binding.dispose(); assert.equal(context.disposed, true); assert.equal(selected.manager.sessions.size, 0);
+});
+
+test('closing the initiating window cancels the active probe before releasing its route dependency', async t => {
+  const f = await fixture(t); let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const selected = selectedRoutes(f, { probeHost: async ({ signal }) => {
+    started(); return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('Synthetic probe cancel'),
+      { code: 'SSH_HOST_PROBE_CANCELLED' })), { once: true }));
+  } });
+  const controller = new AbortController();
+  const pending = selected.manager.preparePassword({ id: 'profile-a', ...target, route: { kind: 'host' }, signal: controller.signal });
+  const rejected = assert.rejects(pending, code('SSH_HOST_PROBE_CANCELLED')); await ready; controller.abort(); await rejected;
+  assert.equal(selected.handles[0].signal.aborted, true); assert.equal(selected.handles[0].disposed, true);
+  assert.equal(selected.manager.pending.size, 0); assert.equal(selected.manager.preparations.size, 0);
+});
 
 test('saved aliases use only their fixed direct transport and replaced password grants cannot revive an old session', async t => {
   const relays = directTransports(t), brokers = passwordBrokers(t);
@@ -194,20 +306,20 @@ test('selection is redacted, profile-bound, single-use, and persisted outside pr
   assert.match(selected.keyFingerprint, /^SHA256:/);
   assert.equal(selected.keyLabel, 'fixture_ed25519');
   assert.ok(!JSON.stringify(selected).includes(f.keyDirectory));
-  await assert.rejects(f.manager.save({ id: 'profile-b', name: 'Fixture server', selectionToken: selected.selectionToken }), code('SSH_SELECTION_MISMATCH'));
-  const saved = await f.manager.save({ id: 'profile-a', name: '  Fixture server  ', selectionToken: selected.selectionToken });
+  await assert.rejects(f.manager.save({ hostKeyConfirmed: true, id: 'profile-b', name: 'Fixture server', selectionToken: selected.selectionToken }), code('SSH_SELECTION_MISMATCH'));
+  const saved = await f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: '  Fixture server  ', selectionToken: selected.selectionToken });
   assert.equal(saved.name, 'Fixture server');
   assert.match(saved.alias, /^envara-[a-f0-9]{12}$/);
   assert.ok(!JSON.stringify(saved).includes(f.keyDirectory));
   assert.deepEqual(await f.manager.list({ id: 'profile-a' }), { supported: true, connections: [saved] });
   assert.deepEqual(await f.manager.list({ id: 'profile-b' }), { supported: true, connections: [] });
-  await assert.rejects(f.manager.save({ id: 'profile-a', name: 'Replay', selectionToken: selected.selectionToken }), code('SSH_SELECTION_EXPIRED'));
+  await assert.rejects(f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Replay', selectionToken: selected.selectionToken }), code('SSH_SELECTION_EXPIRED'));
   assert.equal((await lstat(f.manager.filename)).mode & 0o777, 0o600);
   assert.equal(f.manager.root, path.join(f.dataDir, 'terminal', 'ssh-access'));
   const reopened = f.createManager(); await reopened.ready;
   assert.deepEqual(await reopened.list({ id: 'profile-a' }), { supported: true, connections: [saved] });
   const duplicate = await f.select();
-  await assert.rejects(f.manager.save({ id: 'profile-a', name: 'Ｆｉｘｔｕｒｅ server', selectionToken: duplicate.selectionToken }), code('SSH_NAME_EXISTS'));
+  await assert.rejects(f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Ｆｉｘｔｕｒｅ server', selectionToken: duplicate.selectionToken }), code('SSH_NAME_EXISTS'));
   await f.manager.remove({ id: 'profile-a', connectionId: saved.id });
   assert.equal((await f.manager.list({ id: 'profile-a' })).connections.length, 0);
   assert.ok((await lstat(f.keyPath)).isFile());
@@ -217,16 +329,16 @@ test('selection expires and failed persistence retains the selection and previou
   let time = 1000;
   const f = await fixture(t, { now: () => time });
   const expired = await f.select(); time += 30 * 60 * 1000;
-  await assert.rejects(f.manager.save({ id: 'profile-a', name: 'Expired', selectionToken: expired.selectionToken }), code('SSH_SELECTION_EXPIRED'));
+  await assert.rejects(f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Expired', selectionToken: expired.selectionToken }), code('SSH_SELECTION_EXPIRED'));
   const saved = await f.save();
   const previous = await readFile(f.manager.filename, 'utf8');
   const selected = await f.select();
   await chmod(f.manager.filename, 0o644);
-  await assert.rejects(f.manager.save({ id: 'profile-a', name: 'Second', selectionToken: selected.selectionToken }), code('SSH_UNSAFE_PATH'));
+  await assert.rejects(f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Second', selectionToken: selected.selectionToken }), code('SSH_UNSAFE_PATH'));
   assert.equal(await readFile(f.manager.filename, 'utf8'), previous);
   assert.deepEqual((await f.manager.list({ id: 'profile-a' })).connections, [saved]);
   await chmod(f.manager.filename, 0o600);
-  await f.manager.save({ id: 'profile-a', name: 'Second', selectionToken: selected.selectionToken });
+  await f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Second', selectionToken: selected.selectionToken });
   assert.equal((await f.manager.list({ id: 'profile-a' })).connections.length, 2);
 });
 
@@ -236,12 +348,12 @@ test('password metadata is trust-bound and persists without secrets or key refer
   const selected = await f.selectPassword();
   assert.equal(selected.authType, 'password'); assert.equal(Object.hasOwn(selected, 'keyLabel'), false);
   assert.deepEqual(selected.hostFingerprints.length, 1);
-  await assert.rejects(f.manager.save({ id: 'profile-b', name: 'Wrong scope', selectionToken: selected.selectionToken, password: 'synthetic' }), code('SSH_SELECTION_MISMATCH'));
-  const saved = await f.manager.save({ id: 'profile-a', name: 'Password fixture', selectionToken: selected.selectionToken, password: 'never-persist-this-synthetic-password' });
+  await assert.rejects(f.manager.save({ hostKeyConfirmed: true, id: 'profile-b', name: 'Wrong scope', selectionToken: selected.selectionToken, password: 'synthetic' }), code('SSH_SELECTION_MISMATCH'));
+  const saved = await f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Password fixture', selectionToken: selected.selectionToken, password: 'never-persist-this-synthetic-password' });
   assert.equal(saved.authType, 'password'); assert.equal(saved.passwordReady, true);
   for (const field of ['password', 'keyLabel', 'keyFingerprint', 'keyPath', 'keyStat', 'publicKey']) assert.equal(Object.hasOwn(saved, field), false);
   const bytes = await readFile(f.manager.filename, 'utf8'), record = JSON.parse(bytes).profiles[0].connections[0];
-  assert.deepEqual(Object.keys(record).sort(), ['alias', 'authType', 'host', 'hostFingerprints', 'hostKeys', 'id', 'name', 'port', 'user'].sort());
+  assert.deepEqual(Object.keys(record).sort(), ['alias', 'authType', 'host', 'hostFingerprints', 'hostKeys', 'id', 'name', 'port', 'route', 'trustSource', 'user'].sort());
   assert.ok(!bytes.includes('never-persist-this-synthetic-password')); assert.ok(!bytes.includes(f.keyDirectory));
   const reopened = f.createManager(); await reopened.ready;
   assert.deepEqual((await reopened.list({ id: 'profile-a' })).connections, [{ ...saved, passwordReady: false }]);
@@ -255,15 +367,15 @@ test('password metadata is trust-bound and persists without secrets or key refer
 test('password validation and failed persistence never grant authorization or consume the selected identity', async t => {
   const f = await fixture(t); const selected = await f.selectPassword();
   for (const password of ['', 'a\0b', 'a\rb', 'a\nb', 'x'.repeat(1025), '密'.repeat(342), undefined]) {
-    await assert.rejects(f.manager.save({ id: 'profile-a', name: 'Invalid', selectionToken: selected.selectionToken, password }), code('SSH_PASSWORD_INVALID'));
+    await assert.rejects(f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Invalid', selectionToken: selected.selectionToken, password }), code('SSH_PASSWORD_INVALID'));
   }
   await f.save(); const previous = await readFile(f.manager.filename, 'utf8');
   await chmod(f.manager.filename, 0o644);
-  await assert.rejects(f.manager.save({ id: 'profile-a', name: 'Password fixture', selectionToken: selected.selectionToken, password: 'synthetic' }), code('SSH_UNSAFE_PATH'));
+  await assert.rejects(f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Password fixture', selectionToken: selected.selectionToken, password: 'synthetic' }), code('SSH_UNSAFE_PATH'));
   assert.equal(await readFile(f.manager.filename, 'utf8'), previous);
   assert.equal((await f.manager.list({ id: 'profile-a' })).connections.filter(record => record.authType === 'password').length, 0);
   await chmod(f.manager.filename, 0o600);
-  const saved = await f.manager.save({ id: 'profile-a', name: 'Password fixture', selectionToken: selected.selectionToken, password: 'x'.repeat(1024) });
+  const saved = await f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Password fixture', selectionToken: selected.selectionToken, password: 'x'.repeat(1024) });
   assert.equal(saved.passwordReady, true);
 });
 
@@ -310,7 +422,7 @@ test('password unlock cannot mutate active leases; duplicates have independent b
   await assert.rejects(f.manager.setPassword({ id: 'profile-a', connectionId: saved.id, password: 'synthetic-replacement' }), code('SSH_CONNECTION_IN_USE'));
   await assert.rejects(f.manager.remove({ id: 'profile-a', connectionId: saved.id }), code('SSH_CONNECTION_IN_USE'));
   const selected = await f.selectPassword();
-  await assert.rejects(f.manager.save({ id: 'profile-a', name: 'Another', selectionToken: selected.selectionToken, password: 'synthetic' }), code('SSH_CONNECTION_IN_USE'));
+  await assert.rejects(f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Another', selectionToken: selected.selectionToken, password: 'synthetic' }), code('SSH_CONNECTION_IN_USE'));
   await first.dispose(); assert.equal(second.describe().status, 'ready');
   assert.equal(brokers.calls[1].passwords.get(saved.alias).toString(), 'synthetic-first-password');
   await second.dispose();
@@ -503,7 +615,7 @@ test('requires existing exact host trust and refuses changed, revoked or CA host
   await assert.rejects(f.select({ port: 22 }), code('SSH_HOST_UNTRUSTED'));
   const selected = await f.select();
   await writeFile(f.knownHosts, `[${host}]:2222 ${publicKey('changed-server')}\n`);
-  await assert.rejects(f.manager.save({ id: 'profile-a', name: 'Changed', selectionToken: selected.selectionToken }), code('SSH_IDENTITY_CHANGED'));
+  await assert.rejects(f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Changed', selectionToken: selected.selectionToken }), code('SSH_IDENTITY_CHANGED'));
   for (const marker of ['@revoked', '@cert-authority']) {
     await writeFile(f.knownHosts, `${marker} [${host}]:2222 ${f.hostPublicKey}\n`);
     await assert.rejects(f.select(), code('SSH_HOST_UNTRUSTED'));
@@ -516,7 +628,7 @@ test('revalidates key inode and public identity before saving and all saved keys
   const selected = await f.select();
   await rename(f.keyPath, `${f.keyPath}.original`);
   await writeFile(f.keyPath, 'DISPOSABLE PRIVATE FIXTURE - NEVER A REAL KEY\n', { mode: 0o600 });
-  await assert.rejects(f.manager.save({ id: 'profile-a', name: 'Replaced', selectionToken: selected.selectionToken }), code('SSH_IDENTITY_CHANGED'));
+  await assert.rejects(f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Replaced', selectionToken: selected.selectionToken }), code('SSH_IDENTITY_CHANGED'));
   await f.save();
   await writeFile(`${f.keyPath}.pub`, `${publicKey('changed-client')}\n`);
   await assert.rejects(f.session(), code('SSH_IDENTITY_CHANGED'));
@@ -547,7 +659,7 @@ test('protects selected keys across environments without starting an agent for e
   assert.equal(f.manager.sessions.size, 1);
   assert.equal([...f.manager.sessions.values()][0].child, null);
   // Discovery describes the loaded session, not later additions to the store.
-  await f.save({ id: 'profile-c', name: 'Added after session creation' });
+  await f.save({ hostKeyConfirmed: true, id: 'profile-c', name: 'Added after session creation' });
   assert.equal((await f.manager.list({ id: 'profile-c' })).connections.length, 1);
   assert.equal(session.describe().status, 'empty');
   assert.equal(JSON.parse((await run(cli, ['list', '--json'], { env })).stdout).status, 'empty');
@@ -634,7 +746,7 @@ test('a single native identity retains constraints for every saved destination',
   const f = await fixture(t, { real: true });
   await f.save();
   await writeFile(f.knownHosts, `[${host}]:2222 ${f.hostPublicKey}\n[second-fixture.invalid]:2200 ${f.hostPublicKey}\n`);
-  await f.save({ name: 'Second fixture', host: 'second-fixture.invalid', port: 2200, user: 'other' });
+  await f.save({ hostKeyConfirmed: true, name: 'Second fixture', host: 'second-fixture.invalid', port: 2200, user: 'other' });
   const calls = [], execute = f.manager.execute;
   f.manager.execute = async (command, args, options) => { calls.push({ command, args, options }); return execute(command, args, options); };
   const session = await f.session();

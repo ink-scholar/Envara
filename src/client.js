@@ -115,4 +115,15 @@ const preview = {
     return commit();
   },
 };
-export const api = window.envara || preview;
+const desktop = window.envara;
+export const api = desktop ? {
+  ...desktop,
+  async call(method, args = {}) {
+    try { return await desktop.call(method, args); }
+    catch (failure) {
+      const error = new Error(typeof failure?.message === 'string' ? failure.message : '操作未完成，请重试。');
+      if (typeof failure?.code === 'string') error.code = failure.code;
+      throw error;
+    }
+  },
+} : preview;

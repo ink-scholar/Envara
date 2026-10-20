@@ -25,7 +25,7 @@ export const BROWSER_TOOLS = Object.freeze([
 // Kept in the existing session channel so discovery grants no new authority.
 // This tool never connects to a server or starts a browser.
 export const TERMINAL_TOOLS = Object.freeze([...BROWSER_TOOLS, {
-  ...tool('envara_ssh_connections', 'Before an SSH task, list this terminal session\'s saved SSH authorizations and routing usage. Saved aliases use the host network; the server can see its exit IP. Unconfigured explicit user@host targets use the environment proxy. Read-only: does not connect, load keys, unlock credentials or grant host-network access to new targets. Use SSH through the terminal tool; ready means authorized, not verified reachable.'),
+  ...tool('envara_ssh_connections', 'Before an SSH task, list this terminal session\'s saved SSH authorizations and routes. Each saved alias uses its chosen host or configured-environment route; older records without a route retain the host network. The server sees the selected route\'s exit IP. Unsaved explicit user@host targets use this terminal\'s own environment proxy, never another saved connection\'s route or credentials. An unavailable or changed saved route is refused without fallback. Read-only: does not connect, confirm host fingerprints, load keys, unlock credentials or grant new access. Use SSH through the terminal tool; ready means authorized, not verified reachable.'),
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 }]);
 

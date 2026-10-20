@@ -155,7 +155,7 @@ try {
   await manager.ready;
   stage = 'select-save';
   const selected = await manager.prepareIdentity({ id: 'ssh-fixture', host: '127.0.0.1', port: serverPort, user: 'fixture', keyPath: path.join(temporary, 'client') });
-  const saved = await manager.save({ id: 'ssh-fixture', name: 'Disposable local SSH', selectionToken: selected.selectionToken });
+  const saved = await manager.save({ id: 'ssh-fixture', name: 'Disposable local SSH', selectionToken: selected.selectionToken, hostKeyConfirmed: true });
   check('Disposable key and existing isolated host trust selected with no host credentials.');
   const route = { protocol: 'http', host: '127.0.0.1', port: server.address().port, username: user, password };
   const context = { id: 'ssh-fixture', timezone: 'UTC', locale: 'en-US', proxy: route, proxyId: 'fixture-route',

@@ -8,12 +8,12 @@ import { build } from 'esbuild';
 import { _electron } from 'playwright-core';
 import { languages, translate } from '../src/i18n.mjs';
 
-// Actual sidebar, preference hook and CSS in a disposable hidden renderer.
+// Actual sidebar/navigation state and CSS in a disposable hidden renderer.
 // Production main, IPC, accounts, terminals and personal browsers are not used.
 const noDisplay = process.platform === 'linux' && !process.env.DISPLAY;
 const project = fileURLToPath(new URL('../', import.meta.url));
 const preferenceKey = 'envara.sidebar.collapsed.v1';
-const labels = ['环境', '网络出口', '浏览器', '终端', '附加软件', '运行监控', '设置'];
+const labels = ['环境', '网络出口', '浏览器', '终端', 'SSH 连接', '附加软件', '运行监控', '设置'];
 let directory, desktop, page;
 
 before(async () => {
@@ -22,7 +22,7 @@ before(async () => {
   const output = await build({ stdin: { resolveDir: project, loader: 'jsx', contents: `
 import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { WorkspaceSidebar, useSidebarPreference } from './src/App.jsx';
+import { WorkspaceSidebar, useSidebarPreference, WorkspaceApp } from './src/App.jsx';
 import { translate } from './src/i18n.mjs';
 const root = createRoot(document.querySelector('#root'));
 window.fixtureLanguage = 'zh-CN';
@@ -45,24 +45,70 @@ window.mountSidebar = (options = {}) => {
   document.documentElement.dataset.theme = options.theme || 'dark';
   root.render(<Fixture key={++revision} {...options} />);
 };
+window.mountWorkspace = () => {
+  window.fixtureLanguage = 'zh-CN';
+  window.fixtureCalls = [];
+  root.render(<WorkspaceApp key={++revision} />);
+};
 window.mountSidebar();
 ` }, bundle: true, write: false, platform: 'browser', format: 'iife', loader: { '.css': 'empty' },
     define: { 'process.env.NODE_ENV': '"test"', 'import.meta.env.BASE_URL': '"./"' },
     plugins: [{ name: 'isolated-production-sidebar', setup(builder) {
       builder.onLoad({ filter: /[/\\]src[/\\]App\.jsx$/ }, async args => ({
-        contents: `${await readFile(args.path, 'utf8')}\nexport { WorkspaceSidebar, useSidebarPreference };`, loader: 'jsx',
+        contents: `${await readFile(args.path, 'utf8')}\nexport { WorkspaceSidebar, useSidebarPreference, WorkspaceApp };`, loader: 'jsx',
       }));
-      builder.onResolve({ filter: /^\.\/(client\.js|i18n\.jsx)$/ }, args => ({ path: args.path, namespace: 'sidebar-fixture' }));
-      builder.onLoad({ filter: /.*/, namespace: 'sidebar-fixture' }, args => ({
-        contents: args.path.endsWith('client.js') ? 'export const api = {};' : `
+      const stubs = {
+        './client.js': `
+const profiles = ['a', 'b'].map(id => ({ id: 'env-' + id, name: 'Demo ' + id.toUpperCase(), status: 'stopped', engine: 'cloakbrowser' }));
+export const api = { isDesktop: true, subscribe: () => () => {}, call: async (method, args) => {
+  (window.fixtureCalls ||= []).push({ method, args });
+  if (method === 'snapshot') return { profiles, proxies: [], settings: {}, system: { platform: 'darwin' } };
+  if (method === 'listClaudeAccounts') return { accounts: [{ id: 'default', name: '默认' }] };
+  throw new Error('Unexpected fixture operation: ' + method);
+} };
+`,
+        './i18n.jsx': `
 import { translate } from ${JSON.stringify(path.join(project, 'src/i18n.mjs'))};
-export const useI18n = () => ({ language: window.fixtureLanguage, t: value => translate(value, window.fixtureLanguage) });
-`, resolveDir: project, loader: 'js',
-      }));
+export const useI18n = () => ({ language: window.fixtureLanguage, phase: 'ready', t: (value, vars) => translate(value, window.fixtureLanguage, vars) });
+`,
+        './TerminalPane.jsx': `
+import React, { useEffect, useRef } from 'react';
+export function TerminalDock(props) {
+  const instance = useRef(null);
+  if (!instance.current) instance.current = ++window.fixtureDockInstances || (window.fixtureDockInstances = 1);
+  window.fixtureDockProps = props;
+  useEffect(() => { props.onProfilesChange?.([{ profileId: 'env-a', sessions: [{ sessionId: 'fixture-a', status: 'running' }] }, { profileId: 'env-b', sessions: [] }]); }, [props.onProfilesChange]);
+  return <section className="terminal-dock" hidden={!props.visible} data-instance={instance.current}
+    data-profile={props.selectedProfileId || ''} data-workspace={String(props.workspace)} data-expanded={String(props.expanded)}>
+    <button onClick={props.onHide}>Fixture close view</button>
+    <button disabled={props.exportDisabled} onClick={() => props.onExport?.(props.selectedProfileId)}>Fixture export terminal</button>
+    <button onClick={() => props.onConfigureLinkBrowser?.(props.selectedProfileId)}>Fixture link browser</button>
+  </section>;
+}
+`,
+        './TerminalSshConnections.jsx': `
+import React from 'react';
+export function SshWorkspace({ profiles, selectedId, onSelect, terminalProfiles, onOpenTerminal }) {
+  return <div className="fixture-ssh-workspace" data-terminal-profiles={terminalProfiles.length}>
+    <select aria-label="Fixture SSH environment" value={selectedId || ''} onChange={event => onSelect(event.target.value)}>{profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select>
+    <button onClick={() => onOpenTerminal(selectedId)}>Fixture open terminal</button>
+  </div>;
+}
+`,
+        './workspace-pages.jsx': `
+import React from 'react';
+export function EnvironmentOverview({ profiles, onSelect }) { return <div>{profiles.map(profile => <button key={profile.id} onClick={() => onSelect(profile.id)}>{'Select ' + profile.name}</button>)}</div>; }
+export function ContextDetail({ profile, onNavigate }) { return <button onClick={() => onNavigate('terminals')}>{'Open ' + (profile?.name || '') + ' terminal'}</button>; }
+export const ApplicationsWorkspace = () => null;
+export const MonitorWorkspace = () => null;
+`,
+      };
+      builder.onResolve({ filter: /^\.\/(client\.js|i18n\.jsx|TerminalPane\.jsx|TerminalSshConnections\.jsx|workspace-pages\.jsx)$/ }, args => ({ path: args.path, namespace: 'sidebar-fixture' }));
+      builder.onLoad({ filter: /.*/, namespace: 'sidebar-fixture' }, args => ({ contents: stubs[args.path], resolveDir: project, loader: 'jsx' }));
     } }],
   });
   await writeFile(path.join(directory, 'fixture.js'), output.outputFiles[0].text);
-  await writeFile(path.join(directory, 'styles.css'), await readFile(new URL('../src/styles.css', import.meta.url), 'utf8'));
+  await writeFile(path.join(directory, 'styles.css'), (await Promise.all(['styles.css', 'terminal.css'].map(name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')))).join('\n'));
   await writeFile(path.join(directory, 'index.html'), '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="styles.css"><div id="root"></div><script src="fixture.js"></script>');
   const entry = path.join(directory, 'main.cjs');
   await writeFile(entry, `const { app, BrowserWindow } = require('electron');
@@ -150,6 +196,10 @@ test('denied localStorage reads and writes preserve interactive navigation witho
 test('all nine languages keep icon hit targets and three columns within wide and narrow desktop layouts in both themes', { skip: noDisplay }, async () => {
   for (const language of Object.keys(languages)) for (const theme of ['light', 'dark']) {
     await mount({ language, theme });
+    assert.deepEqual(await page.locator('.sidebar .nav-item').evaluateAll(items => items.map(item => item.getAttribute('aria-label'))), labels.map(label => translate(label, language)));
+    const ssh = page.getByRole('button', { name: translate('SSH 连接', language), exact: true });
+    await ssh.click();
+    assert.equal(await ssh.getAttribute('aria-current'), 'page');
     for (const width of [900, 1280, 1720]) {
       await page.setViewportSize({ width, height: 900 });
       for (const collapsed of [false, true]) {
@@ -179,4 +229,48 @@ test('collapsed sidebar preserves terminal grid placement and expansion', { skip
   assert.equal(await page.locator('.terminal-dock').evaluate(element => element.getBoundingClientRect().x), 64);
   assert.equal(await page.locator('.main-panel').isVisible(), false);
   assert.equal(await page.locator('.detail-panel').isVisible(), false);
+});
+
+test('SSH navigation and environment terminal entries open the full right workspace without starting or ending sessions', { skip: noDisplay }, async () => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.evaluate(() => { localStorage.setItem('envara.sidebar.collapsed.v1', 'false'); window.mountWorkspace(); });
+  await page.getByRole('button', { name: 'Select Demo A', exact: true }).waitFor();
+  await page.waitForFunction(() => window.fixtureDockProps.selectedProfileId === 'env-a');
+  const instance = await page.locator('.terminal-dock').getAttribute('data-instance');
+  await page.getByRole('button', { name: 'SSH 连接', exact: true }).click();
+  assert.equal(await page.locator('main.ssh-main-panel h1').textContent(), 'SSH 连接');
+  assert.equal(await page.locator('.terminal-dock').isVisible(), false);
+  assert.equal(await page.locator('.fixture-ssh-workspace').getAttribute('data-terminal-profiles'), '2');
+  await page.getByLabel('Fixture SSH environment').selectOption('env-b');
+  await page.getByRole('button', { name: 'Fixture open terminal', exact: true }).click();
+  const dock = page.locator('.terminal-dock');
+  assert.equal(await dock.getAttribute('data-profile'), 'env-b');
+  assert.equal(await dock.getAttribute('data-workspace'), 'true');
+  assert.equal(await dock.getAttribute('data-expanded'), 'true');
+  assert.equal(await page.locator('.app-shell').evaluate(element => element.classList.contains('terminal-expanded')), true);
+  assert.equal(await page.locator('.page-header').count(), 0);
+  assert.equal(await page.locator('.terminal-page-context').count(), 0);
+  assert.equal(await page.locator('.main-panel').isVisible(), false);
+  const area = await dock.boundingBox(), sidebar = await page.locator('.sidebar').boundingBox();
+  assert.equal(area.x, sidebar.width); assert.equal(area.width + area.x, 1280); assert.equal(area.height, 900);
+  assert.deepEqual(await page.evaluate(() => ({ id: window.fixtureDockProps.openRequest.profileId, instance: window.fixtureDockInstances })), { id: 'env-b', instance: Number(instance) });
+  await page.getByRole('button', { name: 'Fixture export terminal', exact: true }).click();
+  await page.getByRole('dialog', { name: '导出终端', exact: true }).waitFor();
+  await page.waitForFunction(() => window.fixtureCalls.some(call => call.method === 'listClaudeAccounts' && call.args.id === 'env-b'));
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+  await page.getByRole('button', { name: 'Fixture link browser', exact: true }).click();
+  await page.getByRole('dialog', { name: '选择此环境的浏览器', exact: true }).waitFor();
+  await page.getByRole('button', { name: '关闭', exact: true }).click();
+  await page.getByRole('button', { name: 'Fixture close view', exact: true }).click();
+  assert.equal(await dock.isVisible(), false);
+  assert.equal(await page.getByRole('button', { name: '环境', exact: true }).getAttribute('aria-current'), 'page');
+  await page.getByRole('button', { name: 'Open Demo B terminal', exact: true }).click();
+  assert.equal(await dock.getAttribute('data-profile'), 'env-b');
+  assert.equal(await dock.getAttribute('data-expanded'), 'true');
+  assert.equal(await dock.getAttribute('data-instance'), instance);
+  await page.getByRole('button', { name: 'Fixture close view', exact: true }).click();
+  await page.getByRole('button', { name: 'Select Demo A', exact: true }).click();
+  await page.getByRole('button', { name: 'Open Demo A terminal', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: 'Fixture export terminal', exact: true }).isDisabled(), true);
+  assert.deepEqual(await page.evaluate(() => [...new Set(window.fixtureCalls.map(call => call.method))]), ['snapshot', 'listClaudeAccounts']);
 });

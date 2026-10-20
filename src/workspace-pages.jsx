@@ -79,7 +79,7 @@ export function ContextDetail({
   editingDisabled,
   t
 }) {
-  if (!profile) return <div className="detail-empty"><Stack size={32} /><h2>{t("环境详情")}</h2><p>{t("选择一个环境")}</p></div>;
+  if (!profile) return <div className="detail-empty"><Stack size={32} /><h2>{t("选择一个环境")}</h2></div>;
   const presentation = savedNetworkPresentation(profile, proxy);
   const { network } = presentation;
   const location = networkLocation(network);

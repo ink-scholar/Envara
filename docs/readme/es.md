@@ -5,7 +5,7 @@
 <p align="center"><strong>Un entorno propio para cada flujo de trabajo.</strong><br />Un entorno. Tu navegador, terminal y aplicaciones.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licencia del código original: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.0-475569" alt="Envara 1.1.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README en 9 idiomas" /></a>
 </p>
 <p align="center">
@@ -21,12 +21,11 @@ Envara es un espacio de trabajo local y de código abierto que reúne la salida 
 
 ![Espacio de trabajo nativo de Envara en chino](../media/workspace-zh-CN.png)
 
-## Novedades de 1.1.0
+## Novedades de 1.1.1
 
-- **Una interfaz más clara y navegación plegable.** Recoge el menú lateral para dar más espacio al navegador, los terminales y las aplicaciones.
-- **Terminales guardados con nombre.** Vuelve a una sesión normal o de Claude en ejecución, o abre un shell inactivo con su contexto guardado. Los comandos no se repiten.
-- **MCP y complementos personalizados.** La CLI oficial de Claude puede descubrir la configuración de usuario, proyecto y ámbito local del entorno, manteniendo las herramientas del navegador fijado y las restricciones de red de Envara.
-- **SSH según el destino.** En macOS, los hosts guardados usan la salida de red del equipo; los destinos no guardados usan el proxy del entorno. Un fallo no cambia la ruta.
+- **Una página propia para SSH.** Busca hosts guardados, consulta los detalles y añade conexiones cuando las necesites.
+- **Más espacio para el terminal.** Ocupa toda el área de trabajo derecha, con una barra de herramientas de una sola fila, paneles emergentes para terminales guardados y ajustes, y un control de cierre claro.
+- **Cierre correcto al cambiar la zona horaria.** Corrige un falso error al cerrar el terminal después de cambiar la zona horaria del equipo.
 
 <p align="center"><sub>Espacio de trabajo nativo de Electron. La captura utiliza datos de ejemplo sintéticos.</sub></p>
 

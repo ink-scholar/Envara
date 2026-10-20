@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { runInNewContext } from 'node:vm';
 import { browserExportActive, environmentTransferModalPending, importedDataLabel, cancelEnvironmentImportModal } from '../src/environment-transfer-ui.mjs';
 import { discardPendingEnvironmentImport } from '../electron/environment-import-lifecycle.mjs';
 import { translationCatalog } from '../src/i18n.mjs';
@@ -107,7 +108,32 @@ test('UI connects all dismissal paths to the reservation and three export entrie
   assert.match(modal, /label=\{t\("关闭"\)\} onClick=\{onClose\}/);
   assert.match(source, /disabled=\{!api\.isDesktop \|\| browserExportActive\(profile, pending\) \|\| busy\}/);
   assert.match(source, /scope: "browser", profile: selected/);
-  assert.match(source, /scope: "terminal", profile: selected/);
+  const terminalExport = source.match(/<TerminalDock[\s\S]*?\bonExport=\{profileId => \{([\s\S]*?)\}\}\s+onConfigureLinkBrowser=/)?.[1];
+  assert.ok(terminalExport, 'the compact terminal menu retains a scoped export callback');
+  const profiles = [{ id: 'terminal_a' }, { id: 'terminal_b' }];
+  for (const [profileId, desktop, active, allowed] of [
+    ['terminal_b', true, false, true],
+    ['unknown', true, false, false],
+    ['terminal_b', true, true, false],
+    ['terminal_b', false, false, false],
+  ]) {
+    const selections = [], modals = [];
+    const callback = runInNewContext(`profileId => {${terminalExport}}`, {
+      profiles, api: { isDesktop: desktop }, terminalActive: () => active,
+      setSelectedId: id => selections.push(id), setModal: modal => modals.push(modal),
+    });
+    callback(profileId);
+    assert.deepEqual(selections, allowed ? [profileId] : []);
+    assert.equal(modals.length, allowed ? 1 : 0, `${profileId}/${desktop}/${active}`);
+    if (allowed) {
+      assert.equal(modals[0].type, 'exportData');
+      assert.equal(modals[0].scope, 'terminal');
+      assert.equal(modals[0].profile, profiles[1], 'the requested terminal environment is exported, not a stale selection');
+    }
+  }
+  assert.match(source, /exportDisabled=\{!api\.isDesktop \|\| !selected \|\| terminalActive\(selected\.id\)\}/);
+  const terminal = await readFile(new URL('../src/TerminalPane.jsx', import.meta.url), 'utf8');
+  assert.match(terminal, /disabled=\{!selectedProfile \|\| exportDisabled \|\| !!pending\}[\s\S]*?onExport\(activeProfileId\)/);
   assert.match(source, /scope: "application", profile, application/);
   assert.match(source, /scope: modal\.scope, password/);
   assert.match(source, /modal\.scope === "terminal" \? \{ accountId \}/);

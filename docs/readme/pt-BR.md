@@ -5,7 +5,7 @@
 <p align="center"><strong>Um espaço próprio para cada fluxo de trabalho.</strong><br />Um ambiente. Seu navegador, terminal e aplicativos.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licença do código original: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.0-475569" alt="Envara 1.1.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README em 9 idiomas" /></a>
 </p>
 <p align="center">
@@ -21,12 +21,11 @@ O Envara é um espaço de trabalho desktop local e de código aberto que reúne 
 
 ![Espaço de trabalho nativo do Envara em chinês](../media/workspace-zh-CN.png)
 
-## Novidades da versão 1.1.0
+## Novidades da versão 1.1.1
 
-- **Interface mais simples e navegação recolhível.** Recolha o menu lateral para dar mais espaço ao navegador, aos terminais e aos aplicativos.
-- **Terminais salvos com nome.** Volte a uma sessão comum ou do Claude em execução, ou abra um shell ocioso com o contexto salvo. Os comandos não são repetidos.
-- **MCP e plugins personalizados.** A CLI oficial do Claude pode encontrar as configurações de usuário, projeto e escopo local do ambiente, mantendo as ferramentas do navegador fixado e os limites de rede do Envara.
-- **Rotas SSH por destino.** No macOS, hosts salvos usam a saída de rede do Mac; destinos não salvos usam o proxy do ambiente. Uma falha não muda a rota.
+- **Uma página dedicada ao SSH.** Pesquise hosts salvos, veja os detalhes da conexão e adicione novas conexões quando precisar.
+- **Mais espaço para o terminal.** Ele ocupa toda a área de trabalho à direita, com barra de ferramentas em uma linha, painéis flutuantes para terminais salvos e configurações, e uma ação clara para fechar.
+- **Fechamento correto após mudar o fuso horário.** Corrige um falso erro ao fechar o terminal depois de mudar o fuso horário do computador.
 
 <p align="center"><sub>Espaço de trabalho nativo em Electron. A captura usa dados de exemplo sintéticos.</sub></p>
 

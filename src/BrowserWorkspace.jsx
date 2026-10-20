@@ -168,7 +168,7 @@ export function BrowserWorkspace({
                       <Browsers size={21} aria-hidden="true" />
                       <span className="browser-profile-meta">
                         <strong title={profile.name}>{profile.name}</strong>
-                        <small>{profile.group || translate('未分组')}</small>
+                        {profile.group && <small>{profile.group}</small>}
                       </span>
                     </button>
                   </td>
@@ -222,7 +222,12 @@ export function BrowserWorkspace({
         <div className="browser-empty">
           <Browsers size={34} weight="duotone" aria-hidden="true" />
           <h2>{translate(profiles.length ? '没有匹配的环境' : '添加第一个浏览器环境')}</h2>
-          {profiles.length === 0 && <p>{translate('先在「环境」页创建浏览器环境。')}</p>}
+          {profiles.length === 0 && (
+            <button type="button" className="button primary" onClick={() => onCreate?.()} disabled={!onCreate}>
+              <Plus size={17} aria-hidden="true" />
+              {translate('新建环境')}
+            </button>
+          )}
           {profiles.length > 0 && (
             <button type="button" className="button" onClick={() => { setQuery(''); setFilter('all'); }}>
               {translate('显示全部')}

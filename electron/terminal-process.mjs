@@ -8,7 +8,9 @@ const WINDOWS_SNAPSHOT = "Get-CimInstance -ClassName Win32_Process | Where-Objec
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function metadataEnvironment(platform) {
-  if (platform !== 'win32') return { LC_ALL: 'C', PATH: '/usr/bin:/bin' };
+  // ps lstart uses local wall time; keep captured birth identities stable even
+  // when the host timezone changes while a terminal remains open.
+  if (platform !== 'win32') return { LC_ALL: 'C', TZ: 'UTC', PATH: '/usr/bin:/bin' };
   const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
   return { SystemRoot: systemRoot, WINDIR: systemRoot, PATH: `${systemRoot}\\System32;${systemRoot}\\System32\\WindowsPowerShell\\v1.0` };
 }

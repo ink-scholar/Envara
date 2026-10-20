@@ -5,7 +5,7 @@
 <p align="center"><strong>Give each workflow a place of its own.</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="MIT license for original code" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.0-475569" alt="Envara 1.1.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
 </p>
 <p align="center">
   <a href="../../README.md">简体中文</a> · <a href="zh-TW.md">繁體中文</a> · <strong>English</strong> · <a href="ja.md">日本語</a> · <a href="ko.md">한국어</a> · <a href="es.md">Español</a> · <a href="fr.md">Français</a> · <a href="de.md">Deutsch</a> · <a href="pt-BR.md">Português (Brasil)</a>
@@ -20,12 +20,11 @@ Envara is an open-source local desktop workspace. Keep separate networks, browse
 
 ![Envara workspace with synthetic example data](../media/workspace-zh-CN.png)
 
-## New in 1.1.0
+## New in 1.1.1
 
-- **A cleaner workspace with collapsible navigation.** Give browsers, terminals and apps more room while keeping common actions close at hand.
-- **Saved terminals with names.** Return to a running ordinary or Claude session, or reopen an idle shell with its saved context. Commands are never replayed.
-- **Custom MCP servers and plugins.** The official Claude CLI can discover environment-local user, project and local configuration alongside Envara’s pinned browser tools and session network controls.
-- **SSH routes chosen by destination.** On macOS, saved hosts use the host network exit; unsaved destinations use the environment proxy. Failures never switch routes.
+- **A dedicated SSH page.** Search saved hosts, view connection details, and add connections when needed.
+- **More room for the terminal.** It fills the workspace on the right, with a single-row toolbar, popovers for saved terminals and settings, and a clear close action.
+- **Correct close checks after time zone changes.** Fixes a false terminal close failure after the host time zone changes.
 
 ## Concerned about account and environment linking in Claude Code?
 

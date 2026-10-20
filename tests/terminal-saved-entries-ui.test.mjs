@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -80,7 +80,7 @@ function Workspace() {
     {!window.savedFixture.standalone && <><aside className="sidebar" /><main className="main-panel">Synthetic renderer</main></>}
     <TerminalDock profiles={window.savedFixture.environments} selectedProfileId={window.savedFixture.selectedProfileId}
       onProfilesChange={value => { window.savedRenderedProfiles = value; }}
-      standalone={window.savedFixture.standalone === true} expanded={expanded} onToggleExpanded={() => setExpanded(value => !value)} onHeightChange={() => {}} />
+      workspace={window.savedFixture.workspace === true} standalone={window.savedFixture.standalone === true} expanded={expanded} onToggleExpanded={() => setExpanded(value => !value)} onHeightChange={() => {}} />
   </div>;
 }
 let version = 0;
@@ -123,6 +123,16 @@ const rows = () => page.locator('.terminal-saved-entry');
 const rowFor = (id = entry.id) => page.locator(`.terminal-saved-entry[data-entry-id="${id}"]`);
 const calls = () => page.evaluate(() => window.savedCalls);
 const methods = async () => (await calls()).map(call => call.method);
+async function selectEnvironment(id) {
+  await page.getByRole('combobox', { name: '终端环境', exact: true }).selectOption(id);
+  assert.equal(await page.getByRole('combobox', { name: '终端环境', exact: true }).inputValue(), id);
+}
+async function revealSettings() {
+  const details = page.locator('.terminal-context-menu');
+  if (!await details.evaluate(element => element.open)) await details.locator('summary').click();
+  await details.locator('.terminal-context-panel').waitFor({ state: 'visible' });
+  return details;
+}
 async function revealEntries() {
   const details = page.locator('.terminal-saved-terminals');
   if (!await details.evaluate(element => element.open)) await details.locator('summary').click();
@@ -133,9 +143,11 @@ async function assertNoFallback() {
   assert.ok(invoked.every(method => ['terminalSnapshot', 'resizeTerminal', 'reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal'].includes(method)), invoked.join(', '));
 }
 
-test('empty saved terminals are honest and open by default without starting a session', { skip: noDisplay }, async () => {
+test('empty saved terminals open on request without covering the workspace or starting a session', { skip: noDisplay }, async () => {
   await mount();
   const details = page.locator('.terminal-saved-terminals');
+  assert.equal(await details.evaluate(element => element.open), false);
+  await revealEntries();
   assert.equal(await details.evaluate(element => element.open), true);
   assert.equal(await details.getByText('新建会话后会自动保存在这里。', { exact: true }).count(), 1);
   assert.equal(await rows().count(), 0);
@@ -182,7 +194,7 @@ test('same-name live tabs are numbered within their environment and the saved en
   await page.waitForFunction(() => document.querySelectorAll('.terminal-session-tab')[1]?.getAttribute('aria-selected') === 'true');
   assert.equal(await page.locator('.terminal-session-view:not([hidden])').evaluate(element => element === window.savedLatestSameNameView), true);
   assert.equal(await page.locator('.terminal-session-tab').count(), 2);
-  await page.locator(`.terminal-environment-tab[title="${secondProfile.name}"]`).click();
+  await selectEnvironment(secondProfileId);
   await page.locator('.terminal-session-tab').filter({ hasText: other.name }).waitFor();
   assert.equal(await page.locator('.terminal-session-tab').count(), 1);
   assert.equal(await page.locator('.terminal-session-tab').getAttribute('title'), other.name, 'another environment does not contribute to duplicate numbering');
@@ -198,7 +210,8 @@ test('reopening a saved Claude entry preserves its named account and folder inst
   assert.equal(await row.locator(`[title="${entry.cwd}"]`).count() > 0, true);
   await row.getByRole('button', { name: `打开终端「${entry.name}」`, exact: true }).click();
   await page.locator('.terminal-session-view:not([hidden]) .xterm').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('.terminal-directory').getAttribute('title'), entry.cwd);
+  await revealSettings();
+  assert.equal(await page.locator('.terminal-directory > span').getAttribute('title'), entry.cwd);
   assert.match(await page.locator('.terminal-session-tab[aria-selected="true"]').textContent(), /Synthetic work terminal/);
   const state = await page.evaluate(() => window.savedFixture);
   assert.equal(state.createdCount, 1);
@@ -248,15 +261,17 @@ test('entries with the same local id remain scoped to the selected environment',
   await mount({ environments: [profile, secondProfile], snapshot: { profiles: [metadata([entry]), metadata([other], [], secondProfileId)] } });
   assert.equal(await rowFor().getByText(entry.name, { exact: true }).count(), 1);
   assert.equal(await rows().getByText(other.name, { exact: true }).count(), 0);
-  await page.locator(`.terminal-environment-tab[title="${secondProfile.name}"]`).click();
+  await selectEnvironment(secondProfileId);
   await rowFor().getByText(other.name, { exact: true }).waitFor();
   await rowFor().getByRole('button', { name: `打开终端「${other.name}」`, exact: true }).click();
-  await page.locator('.terminal-directory').filter({ hasText: other.cwd }).waitFor();
+  const settings = await revealSettings();
+  await settings.locator('.terminal-directory').filter({ hasText: other.cwd }).waitFor();
+  await settings.locator('summary').click();
   await revealEntries();
   await rowFor().getByRole('button', { name: `移除终端入口「${other.name}」`, exact: true }).click();
   await rowFor().getByRole('button', { name: '移除入口', exact: true }).click();
   await rowFor().waitFor({ state: 'detached' });
-  await page.locator(`.terminal-environment-tab[title="${profile.name}"]`).click();
+  await selectEnvironment(profileId);
   await revealEntries();
   await rowFor().getByText(entry.name, { exact: true }).waitFor();
   const invoked = (await calls()).filter(call => ['reopenSavedTerminal', 'removeSavedTerminal'].includes(call.method));
@@ -272,13 +287,13 @@ test('a pending reopen is submitted once and cannot select a session after switc
   await rowFor().locator('.terminal-saved-open').evaluate(element => { element.click(); element.click(); });
   await page.waitForFunction(() => typeof window.savedFinishOperation === 'function');
   assert.equal((await methods()).filter(method => method === 'reopenSavedTerminal').length, 1);
-  await page.locator(`.terminal-environment-tab[title="${secondProfile.name}"]`).click();
+  await selectEnvironment(secondProfileId);
   await rowFor(other.id).getByText(other.name, { exact: true }).waitFor();
   await page.evaluate(() => window.savedFinishOperation());
   await page.waitForFunction(() => window.savedFixture.createdCount === 1
     && window.savedRenderedProfiles?.find(item => item.profileId === 'saved_ui_environment')?.sessions.length === 1);
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  assert.equal(await page.locator(`.terminal-environment-tab[title="${secondProfile.name}"]`).getAttribute('aria-selected'), 'true');
+  assert.equal(await page.getByRole('combobox', { name: '终端环境', exact: true }).inputValue(), secondProfileId);
   assert.equal(await page.locator('.terminal-session-tab').count(), 0);
   assert.equal(await page.locator('.terminal-session-view:not([hidden])').count(), 0);
   assert.equal(await rowFor(other.id).getByText(other.name, { exact: true }).count(), 1);
@@ -348,21 +363,28 @@ test('nine languages keep compact saved-entry names, account names, folders and 
     await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(760, 680));
     await mount({ language, standalone: true, snapshot: { profiles: [metadata([long, shellEntry])] } });
     const details = page.locator('.terminal-saved-terminals');
-    assert.match(await details.locator('summary').textContent(), new RegExp(translate('已保存终端', language)));
+    assert.equal(await details.locator('summary').getAttribute('aria-label'), translate('已保存终端', language));
+    assert.equal(await details.locator('summary').getAttribute('title'), translate('已保存终端', language));
     const row = rowFor();
     assert.equal(await row.getByRole('button', { name: translate('打开终端「{name}」', language, { name: long.name }), exact: true }).count(), 1, language);
     assert.equal(await row.getByRole('button', { name: translate('重命名终端「{name}」', language, { name: long.name }), exact: true }).count(), 1, language);
     assert.equal(await row.getByRole('button', { name: translate('移除终端入口「{name}」', language, { name: long.name }), exact: true }).count(), 1, language);
-    const layout = await details.evaluate(element => {
+    const layout = await details.locator('.terminal-saved-panel').evaluate(element => {
       const box = element.getBoundingClientRect();
       const controls = [...element.querySelectorAll('.terminal-saved-entry button')].map(control => {
         const rect = control.getBoundingClientRect();
         return { width: rect.width, height: rect.height, inside: rect.left >= box.left && rect.right <= box.right };
       });
-      return { overflows: element.scrollWidth > element.clientWidth + 1, controls };
+      return { overflows: element.scrollWidth > element.clientWidth + 1, insideViewport: box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight, controls };
     });
     assert.equal(layout.overflows, false, language);
+    assert.equal(layout.insideViewport, true, `${language} saved panel must remain inside the viewport`);
     assert.ok(layout.controls.every(control => control.inside && control.width >= 24 && control.height >= 24), language);
+    if (language === 'de') {
+      const artifacts = fileURLToPath(new URL('../test-artifacts/terminal-compact-ui/', import.meta.url));
+      await mkdir(artifacts, { recursive: true, mode: 0o700 });
+      await page.screenshot({ path: path.join(artifacts, 'de-saved-panel.png') });
+    }
     await row.getByRole('button', { name: translate('重命名终端「{name}」', language, { name: long.name }), exact: true }).click();
     await row.getByLabel(translate('终端名称', language), { exact: true }).waitFor();
     await row.getByRole('button', { name: translate('取消', language), exact: true }).click();

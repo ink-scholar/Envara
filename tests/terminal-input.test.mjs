@@ -85,7 +85,7 @@ app.whenReady().then(() => {
   page = await desktop.firstWindow();
   page.on('pageerror', error => errors.push(error.message));
   await page.locator('#root').waitFor({ state: 'attached' });
-  const css = await Promise.all(['src/styles.css', 'src/terminal.css', 'node_modules/@xterm/xterm/css/xterm.css']
+  const css = await Promise.all(['src/styles.css', 'src/terminal.css', 'src/terminal-window.css', 'node_modules/@xterm/xterm/css/xterm.css']
     .map(name => readFile(path.join(rootDirectory, name), 'utf8')));
   await page.addStyleTag({ content: `${css.join('\n')}\nhtml,body,#root{height:100%;margin:0}` });
   await page.evaluate(() => {

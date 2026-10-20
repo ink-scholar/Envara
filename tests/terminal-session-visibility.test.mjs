@@ -11,14 +11,17 @@ const pane = await readFile(path.join(root, 'src/TerminalPane.jsx'), 'utf8');
  *  rule is checked rather than assumed. */
 const visibleRule = source => /\(sessions \?\? \[\]\)\.filter\(session => activeStatuses\.has\(session\.status\)\)/.test(source);
 
-test('an ended terminal session is not offered as a tab or in the environment rows', () => {
+test('an ended terminal session is not offered as a tab or an active cross-environment view', () => {
   assert.ok(visibleRule(pane), 'the tab list is built from live sessions only');
   // Every place that lists sessions for the user goes through that filter.
   for (const [name, pattern] of [
     ['selected environment tabs', /const sessions = liveSessions\(selectedMetadata\?\.sessions\);/],
     ['cross-environment list', /flatMap\(profile => liveSessions\(profile\.sessions\)\)/],
-    ['environment tabs', /liveSessions\(terminalState\.profiles\.find\(item => item\.profileId === profile\.id\)\?\.sessions\)/],
   ]) assert.match(pane, pattern, name);
+  // Environment choice is independent of whether that environment has a live
+  // session. Its native select replaces the former environment tabs.
+  assert.match(pane, /<select aria-label=\{t\('终端环境'\)\} value=\{activeProfileId \|\| ''\} disabled=\{!profiles\.length\}/);
+  assert.match(pane, /profiles\.map\(profile => <option key=\{profile\.id\} value=\{profile\.id\}>\{profile\.name\}<\/option>\)/);
   // A closed session must not stay selected, which is what made it look alive.
   assert.match(pane, /const selectedSession = sessions\.find\(session => session\.sessionId === activeSessions\[activeProfileId\]\) \?\? sessions\.at\(-1\) \?\? null;/);
   assert.ok(!/sessions\.at\(-1\)(?! \?\? null)/.test(pane), 'the fallback is the last live session, never the last finished one');

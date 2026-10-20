@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Key, X } from '@phosphor-icons/react';
+import { ArrowRight, CaretRight, Key, LockKey, MagnifyingGlass, Plus, TerminalWindow, X } from '@phosphor-icons/react';
 import { api } from './client.js';
 import { useI18n } from './i18n.jsx';
+import './ssh-workspace.css';
 
 const emptyDraft = () => ({ name: '', host: '', port: '22', user: '' });
 const busyMessage = '先结束此环境的终端会话，再修改连接。';
@@ -48,9 +49,13 @@ function checkedList(value) {
 
 /** Only public connection metadata and one-use authorization tokens enter state.
  * Passwords stay in uncontrolled inputs until submission, then are cleared. */
-export function TerminalSshConnections({ profileId, profileName, hasActiveSessions, onClose }) {
+export function TerminalSshConnections({ profileId, profileName, hasActiveSessions, onClose, onOpenTerminal }) {
   const { t } = useI18n();
-  const [state, setState] = useState({ status: 'loading', supported: false, connections: [] });
+  const desktopAvailable = api.isDesktop === true;
+  const [state, setState] = useState({ profileId, status: 'loading', supported: false, connections: [] });
+  const [selectedId, setSelectedId] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [query, setQuery] = useState('');
   const [draft, setDraft] = useState(emptyDraft);
   const [authType, setAuthType] = useState('password');
   const [prepared, setPrepared] = useState(null);
@@ -63,6 +68,8 @@ export function TerminalSshConnections({ profileId, profileName, hasActiveSessio
   const [error, setError] = useState('');
   const mounted = useRef(false), inFlight = useRef(false), loadVersion = useRef(0);
   const passwordInput = useRef(null), unlockInput = useRef(null);
+  const activeSessions = useRef(hasActiveSessions);
+  activeSessions.current = hasActiveSessions;
   const scope = useRef({ profileId });
   if (scope.current.profileId !== profileId) scope.current = { profileId };
   const clearPasswords = () => {
@@ -71,30 +78,41 @@ export function TerminalSshConnections({ profileId, profileName, hasActiveSessio
     setHasPassword(false); setHasUnlockPassword(false);
   };
 
+  const resetEditor = () => {
+    clearPasswords(); setDraft(emptyDraft()); setAuthType('password');
+    setPrepared(null); setConfirmed(false); setUnlocking(null); setRemoving(null); setError('');
+  };
+  const acceptList = result => {
+    setState({ ...result, profileId, status: 'ready' });
+    setSelectedId(current => result.connections.some(connection => connection.id === current) ? current : result.connections[0]?.id ?? null);
+  };
+
   const load = async () => {
+    if (!desktopAvailable || !profileId) return;
     const version = ++loadVersion.current, requestedScope = scope.current;
-    setError(''); setState(value => ({ ...value, status: 'loading' }));
+    setError(''); setState(value => value.profileId === profileId ? { ...value, status: 'loading' } : { profileId, status: 'loading', supported: false, connections: [] });
     try {
       const result = checkedList(await api.call('listTerminalSshConnections', { id: profileId }));
-      if (mounted.current && requestedScope === scope.current && version === loadVersion.current) setState({ ...result, status: 'ready' });
+      if (mounted.current && requestedScope === scope.current && version === loadVersion.current) acceptList(result);
     } catch (failure) {
       if (mounted.current && requestedScope === scope.current && version === loadVersion.current) { setState(value => ({ ...value, status: 'error' })); setError(sshErrors[failure.code] || '无法读取 SSH 连接，请重试。'); }
     }
   };
   useEffect(() => {
     mounted.current = true; inFlight.current = false; setPending('');
-    clearPasswords(); setDraft(emptyDraft()); setAuthType('password'); setPrepared(null); setConfirmed(false); setUnlocking(null); setRemoving(null);
-    void load();
+    resetEditor(); setSelectedId(null); setAdding(false); setQuery('');
+    if (desktopAvailable && profileId) void load();
+    else setState({ profileId, status: 'ready', supported: false, connections: [] });
     return () => {
       mounted.current = false; loadVersion.current += 1;
       if (passwordInput.current) passwordInput.current.value = '';
       if (unlockInput.current) unlockInput.current.value = '';
     };
-  }, [profileId]);
-  useEffect(() => { if (hasActiveSessions) { clearPasswords(); setUnlocking(null); } }, [hasActiveSessions]);
+  }, [profileId, desktopAvailable]);
+  useEffect(() => { if (hasActiveSessions) { clearPasswords(); setUnlocking(null); setPrepared(null); setConfirmed(false); } }, [hasActiveSessions]);
 
   const run = async (action, operation, fallback = '无法更新 SSH 连接，请重试。') => {
-    if (inFlight.current) return;
+    if (inFlight.current || !desktopAvailable || !profileId) return;
     const operationScope = scope.current;
     const isCurrent = () => mounted.current && operationScope === scope.current;
     inFlight.current = true; setPending(action); setError('');
@@ -110,17 +128,20 @@ export function TerminalSshConnections({ profileId, profileName, hasActiveSessio
     clearPasswords(); setAuthType(value); setPrepared(null); setConfirmed(false); setError('');
   };
   const validTarget = draft.host.trim() && draft.user.trim() && Number.isInteger(Number(draft.port)) && Number(draft.port) >= 1 && Number(draft.port) <= 65535;
-  const chooseIdentity = () => run('pick', async isCurrent => {
-    const result = await api.call(authType === 'password' ? 'prepareTerminalSshPassword' : 'prepareTerminalSshIdentity', {
-      id: profileId, host: draft.host.trim(), port: Number(draft.port), user: draft.user.trim(),
-    });
-    if (!isCurrent() || result?.canceled) return;
-    if (typeof result?.selectionToken !== 'string' || !Array.isArray(result.hostFingerprints) || !result.hostFingerprints.length
-      || (authType === 'password' ? result.authType !== 'password' : typeof result.keyFingerprint !== 'string')) throw new Error();
-    setPrepared({ selectionToken: result.selectionToken, hostFingerprints: result.hostFingerprints,
-      ...(authType === 'publickey' ? { keyLabel: result.keyLabel, keyFingerprint: result.keyFingerprint } : {}) });
-    setConfirmed(false);
-  }, authType === 'password' ? '无法读取已信任的主机指纹，请重试。' : '无法更新 SSH 连接，请重试。');
+  const chooseIdentity = () => {
+    if (hasActiveSessions) return;
+    return run('pick', async isCurrent => {
+      const result = await api.call(authType === 'password' ? 'prepareTerminalSshPassword' : 'prepareTerminalSshIdentity', {
+        id: profileId, host: draft.host.trim(), port: Number(draft.port), user: draft.user.trim(),
+      });
+      if (!isCurrent() || activeSessions.current || result?.canceled) return;
+      if (typeof result?.selectionToken !== 'string' || !Array.isArray(result.hostFingerprints) || !result.hostFingerprints.length
+        || (authType === 'password' ? result.authType !== 'password' : typeof result.keyFingerprint !== 'string')) throw new Error();
+      setPrepared({ selectionToken: result.selectionToken, hostFingerprints: result.hostFingerprints,
+        ...(authType === 'publickey' ? { keyLabel: result.keyLabel, keyFingerprint: result.keyFingerprint } : {}) });
+      setConfirmed(false);
+    }, authType === 'password' ? '无法读取已信任的主机指纹，请重试。' : '无法更新 SSH 连接，请重试。');
+  };
   const save = () => {
     if (hasActiveSessions || inFlight.current || !prepared || !confirmed || !draft.name.trim()) return;
     const password = authType === 'password' ? passwordInput.current?.value : undefined;
@@ -130,7 +151,11 @@ export function TerminalSshConnections({ profileId, profileName, hasActiveSessio
       try {
         const result = checkedList(await api.call('saveTerminalSshConnection', { id: profileId, name: draft.name.trim(), selectionToken: prepared.selectionToken,
           ...(authType === 'password' ? { password } : {}) }));
-        if (isCurrent()) { setState({ ...result, status: 'ready' }); setDraft(emptyDraft()); }
+        if (isCurrent()) {
+          const created = result.connections.find(connection => !state.connections.some(previous => previous.id === connection.id));
+          acceptList(result); if (created) setSelectedId(created.id);
+          setDraft(emptyDraft()); setAdding(false);
+        }
       } finally {
         // Saving consumes the authorization even when validation fails.
         if (isCurrent()) { setPrepared(null); setConfirmed(false); }
@@ -144,7 +169,7 @@ export function TerminalSshConnections({ profileId, profileName, hasActiveSessio
     clearPasswords();
     void run('password', async isCurrent => {
       const result = checkedList(await api.call('setTerminalSshPassword', { id: profileId, connectionId: connection.id, password }));
-      if (isCurrent()) { setState({ ...result, status: 'ready' }); setUnlocking(null); }
+      if (isCurrent()) { acceptList(result); setUnlocking(null); }
     }, '无法保存密码，请重试。');
   };
   const remove = connection => {
@@ -152,61 +177,103 @@ export function TerminalSshConnections({ profileId, profileName, hasActiveSessio
     clearPasswords();
     void run('remove', async isCurrent => {
       const result = checkedList(await api.call('removeTerminalSshConnection', { id: profileId, connectionId: connection.id }));
-      if (isCurrent()) { setState({ ...result, status: 'ready' }); setRemoving(null); }
+      if (isCurrent()) { acceptList(result); setRemoving(null); }
     });
   };
-  const close = () => { clearPasswords(); onClose(); };
+  const cancel = () => { if (inFlight.current) return; resetEditor(); setAdding(false); };
+  const close = () => { if (inFlight.current) return; resetEditor(); onClose?.(); };
+  const connections = state.profileId === profileId ? state.connections : [];
+  const selected = connections.find(connection => connection.id === selectedId);
+  const ready = desktopAvailable && state.profileId === profileId && state.status === 'ready' && state.supported;
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visibleConnections = connections.filter(connection => [connection.name, connection.host, connection.user, connection.alias, connection.port].join(' ').toLocaleLowerCase().includes(normalizedQuery));
+  const editDisabled = !ready || !!pending || hasActiveSessions;
+  const currentAuthType = adding ? authType : selected?.authType;
+  const selectConnection = connection => {
+    if (inFlight.current) return;
+    resetEditor(); setAdding(false); setSelectedId(connection.id);
+  };
 
-  return <div className="terminal-new-session terminal-ssh-connections" role="dialog" aria-modal="false" aria-label={t('SSH 连接')}>
-    <div className="terminal-new-session-head"><strong>{t('SSH 连接')}</strong><button className="terminal-icon-button" disabled={!!pending} onClick={close} aria-label={t('关闭')}><X size={14} /></button></div>
-    <p className="terminal-ssh-note">{profileName}</p>
-    {state.status === 'loading' && <p role="status" className="terminal-ssh-note">{t('正在读取 SSH 连接…')}</p>}
-    {state.status === 'ready' && !state.supported && <p className="terminal-ssh-note">{t('SSH 连接目前仅支持 macOS。')}</p>}
-    {state.status === 'ready' && state.supported && <>
-      <p className="terminal-ssh-note">{t('已保存主机走本机出口（远端可见 IP）；未保存主机走境舱代理。')}</p>
-      {authType === 'password' && <p className="terminal-ssh-note">{t('密码仅本次运行有效，退出清除。')}</p>}
-      {state.connections.length === 0 && <p className="terminal-ssh-note" role="status">{t('暂无已保存主机')}</p>}
-      {state.connections.length > 0 && <div className="terminal-ssh-list">{state.connections.map(connection => {
-        const passwordAuth = connection.authType === 'password';
-        return <div className="terminal-ssh-connection" key={connection.id}>
-          <strong>{connection.name}</strong><span>{connection.user}@{connection.host}:{connection.port}</span>
-          <span>{t(passwordAuth ? connection.passwordReady ? '密码已就绪' : '需先提供密码，不会改走代理。' : '私钥登录')}</span>
-          <label><span>{t('连接命令')}</span><input readOnly value={`ssh ${connection.alias}`} aria-label={t('连接命令')} onFocus={event => event.currentTarget.select()} /></label>
-          <details className="terminal-ssh-details"><summary>{t('连接详情')}</summary><label><span>{t('常用写法')}</span><input readOnly value={`ssh -p ${connection.port} ${connection.user}@${connection.host}`} aria-label={t('常用写法')} onFocus={event => event.currentTarget.select()} /></label><dl>{!passwordAuth && <div><dt>{connection.keyLabel}</dt><dd>{connection.keyFingerprint}</dd></div>}<div><dt>{t('主机指纹（来自本机 known_hosts）')}</dt><dd>{connection.hostFingerprints.map(value => <code key={value}>{value}</code>)}</dd></div></dl></details>
-          {passwordAuth && (unlocking === connection.id ? <form className="terminal-ssh-unlock" onSubmit={event => { event.preventDefault(); unlock(connection); }}>
-            <label><span>{t('密码')}</span><input ref={unlockInput} type="password" autoComplete="off" maxLength={1024} disabled={!!pending || hasActiveSessions} onChange={event => setHasUnlockPassword(!!event.currentTarget.value)} autoFocus /></label>
-            <div className="terminal-new-session-actions"><button type="button" className="terminal-text-button" disabled={!!pending} onClick={() => { clearPasswords(); setUnlocking(null); }}>{t('取消')}</button><button type="submit" className="terminal-text-button terminal-start-button" disabled={!!pending || hasActiveSessions || !hasUnlockPassword}>{t(pending === 'password' ? '保存中…' : '保存密码')}</button></div>
-          </form> : <button className="terminal-text-button terminal-ssh-remove-button" disabled={!!pending || hasActiveSessions} onClick={() => { clearPasswords(); setUnlocking(connection.id); setRemoving(null); }}>{t(connection.passwordReady ? '更新密码' : '提供密码')}</button>)}
-          {removing === connection.id ? <div className="terminal-ssh-remove"><p>{t(passwordAuth ? '仅移除此环境的连接配置。' : '仅移除此环境的连接配置，原私钥保留。')}</p><div className="terminal-new-session-actions"><button className="terminal-text-button" disabled={!!pending} onClick={() => setRemoving(null)}>{t('取消')}</button><button className="terminal-text-button" disabled={!!pending || hasActiveSessions} onClick={() => remove(connection)}>{t('确认移除')}</button></div></div> : <button className="terminal-text-button terminal-ssh-remove-button" disabled={!!pending || hasActiveSessions} onClick={() => { clearPasswords(); setRemoving(connection.id); setUnlocking(null); }}>{t('移除连接')}</button>}
-        </div>;
-      })}</div>}
-      <div className="terminal-ssh-fields">
-        <label><span>{t('连接名称')}</span><input maxLength={80} value={draft.name} disabled={!!pending} onChange={event => setDraft(value => ({ ...value, name: event.target.value }))} /></label>
+  const help = <details className="terminal-ssh-help"><summary>{t('使用说明')}</summary><div>
+    <p className="terminal-ssh-note">{t('让 Claude 运行 envara-ssh list，查看当前会话可用的连接。')}</p>
+    <dl><dt>{t('常用写法')}</dt><dd><code>ssh user@host</code></dd></dl>
+    <p className="terminal-ssh-note">{t(currentAuthType === 'password'
+      ? '密码在本次应用运行期间有效，不会定时到期，退出即清除，也不会写入命令或提供给 Claude。结束会话、线路停止或退出应用仍会关闭连接。'
+      : 'SSH 密钥授权在本次应用运行期间有效，不会定时到期；结束会话、线路停止或退出应用仍会关闭连接。')}</p>
+    {currentAuthType === 'publickey' && <p className="terminal-ssh-note">{t('私钥不会复制到环境。')}</p>}
+    <p className="terminal-ssh-note">{t(busyMessage)}</p>
+    {connections.length === 0 && <p className="terminal-ssh-note">{t('尚未保存 SSH 主机。保存配置不会自动连接。')}</p>}
+  </div></details>;
+
+  return <section className="terminal-ssh-connections ssh-connections-workspace" aria-label={t('SSH 连接')}>
+    <div className="ssh-workspace-toolbar">
+      <label className="ssh-workspace-search"><MagnifyingGlass size={17} aria-hidden="true" /><input type="search" aria-label={t('搜索 SSH 主机')} placeholder={t('搜索 SSH 主机')} value={query} onChange={event => setQuery(event.target.value)} /></label>
+      <button className="ssh-workspace-button is-primary" disabled={editDisabled} onClick={() => { resetEditor(); setAdding(true); }}><Plus size={16} />{t('添加连接')}</button>
+      {onClose && <button className="ssh-workspace-icon-button" disabled={!!pending} onClick={close} aria-label={t('关闭')}><X size={17} /></button>}
+    </div>
+    <p className="ssh-workspace-route">{t('已保存主机走本机出口（远端可见 IP）；未保存主机走境舱代理。')}</p>
+    {!desktopAvailable && <p className="ssh-workspace-notice" role="status">{t('SSH 连接需要境舱桌面应用。')}</p>}
+    {desktopAvailable && state.status === 'ready' && !state.supported && <p className="ssh-workspace-notice" role="status">{t('SSH 连接目前仅支持 macOS。')}</p>}
+    {hasActiveSessions && <p className="ssh-workspace-notice" role="status">{t(busyMessage)}</p>}
+    {error && <div className="terminal-new-session-error ssh-workspace-error" role="status">{t(error)}{state.status === 'error' && <button className="ssh-workspace-button" disabled={!!pending} onClick={() => void load()}>{t('重试')}</button>}</div>}
+    <div className="ssh-workspace-columns">
+      <div className="ssh-workspace-hosts">
+        <div className="ssh-workspace-list-heading"><span>{t('全部')}</span><span>{connections.length}</span></div>
+        {state.status === 'loading' && <p className="ssh-workspace-list-message" role="status">{t('正在读取 SSH 连接…')}</p>}
+        <ul className="terminal-ssh-list ssh-workspace-host-list" aria-label={t('SSH 连接')}>{visibleConnections.map(connection => <li key={connection.id}><button className={`ssh-workspace-host ${!adding && selectedId === connection.id ? 'is-selected' : ''}`} aria-pressed={!adding && selectedId === connection.id} disabled={!!pending} onClick={() => selectConnection(connection)}>
+          <span className="ssh-workspace-host-icon">{connection.authType === 'password' ? <LockKey size={20} /> : <Key size={20} />}</span>
+          <span className="ssh-workspace-host-label"><strong>{connection.name}</strong><span>{connection.user}@{connection.host}:{connection.port}</span><small className={connection.authType === 'password' && !connection.passwordReady ? 'needs-password' : ''}>{t(connection.authType === 'password' ? connection.passwordReady ? '密码已就绪' : '提供密码' : '私钥登录')}</small></span>
+          <CaretRight size={15} className="ssh-workspace-host-chevron" />
+        </button></li>)}</ul>
+        {state.status === 'ready' && visibleConnections.length === 0 && <div className="ssh-workspace-list-empty"><TerminalWindow size={28} weight="duotone" /><strong>{t(connections.length ? '未找到匹配的主机' : '暂无已保存主机')}</strong></div>}
+      </div>
+      <aside className="ssh-workspace-detail" aria-label={t('连接详情')}>
+        {adding ? <form className="ssh-workspace-editor" aria-label={t('添加连接')} onSubmit={event => { event.preventDefault(); save(); }}>
+          <div className="ssh-workspace-detail-heading"><span className="ssh-workspace-detail-icon"><Plus size={22} /></span><div><h2>{t('添加连接')}</h2><p>{profileName}</p></div></div>
+          <div className="terminal-ssh-fields">
+        <label><span>{t('连接名称')}</span><input autoFocus maxLength={80} value={draft.name} disabled={!!pending} onChange={event => setDraft(value => ({ ...value, name: event.target.value }))} /></label>
         <div className="terminal-ssh-target"><label><span>{t('主机')}</span><input autoCapitalize="none" spellCheck={false} maxLength={253} value={draft.host} disabled={!!pending} onChange={event => updateTarget('host', event.target.value)} /></label><label><span>{t('端口')}</span><input type="number" min="1" max="65535" step="1" value={draft.port} disabled={!!pending} onChange={event => updateTarget('port', event.target.value)} /></label></div>
         <label><span>{t('用户名')}</span><input autoCapitalize="none" spellCheck={false} maxLength={64} value={draft.user} disabled={!!pending} onChange={event => updateTarget('user', event.target.value)} /></label>
         <label><span>{t('登录方式')}</span><select aria-label={t('登录方式')} value={authType} disabled={!!pending} onChange={event => changeAuthType(event.target.value)}><option value="password">{t('密码登录')}</option><option value="publickey">{t('私钥登录')}</option></select></label>
         {authType === 'password' ? <>
           <label><span>{t('密码')}</span><input ref={passwordInput} type="password" autoComplete="off" maxLength={1024} disabled={!!pending || hasActiveSessions} onChange={event => setHasPassword(!!event.currentTarget.value)} /></label>
-          <button className="terminal-text-button" disabled={!!pending || !validTarget} onClick={() => void chooseIdentity()}>{t(pending === 'pick' ? '正在读取指纹…' : '读取主机指纹')}</button>
+          <p className="terminal-ssh-note">{t('密码仅本次运行有效，退出清除。')}</p>
+          <button type="button" className="ssh-workspace-button" disabled={editDisabled || !validTarget} onClick={() => void chooseIdentity()}>{t(pending === 'pick' ? '正在读取指纹…' : '读取主机指纹')}</button>
         </> : <>
-          <button className="terminal-text-button" disabled={!!pending || !validTarget} onClick={() => void chooseIdentity()}><Key size={14} />{t(pending === 'pick' ? '正在检查密钥…' : prepared ? '更换私钥' : '选择私钥')}</button>
+          <button type="button" className="ssh-workspace-button" disabled={editDisabled || !validTarget} onClick={() => void chooseIdentity()}><Key size={14} />{t(pending === 'pick' ? '正在检查密钥…' : prepared ? '更换私钥' : '选择私钥')}</button>
         </>}
       </div>
       {prepared && <div className="terminal-ssh-identity"><dl>{authType === 'publickey' && <div><dt>{prepared.keyLabel}</dt><dd>{prepared.keyFingerprint}</dd></div>}<div><dt>{t('主机指纹（来自本机 known_hosts）')}</dt><dd>{prepared.hostFingerprints.map(value => <code key={value}>{value}</code>)}</dd></div></dl><label><input type="checkbox" checked={confirmed} disabled={!!pending} onChange={event => setConfirmed(event.target.checked)} /><span>{t(authType === 'password' ? '我已核对已信任的主机指纹' : '我已核对密钥和已信任的主机指纹')}</span></label></div>}
-      <details className="terminal-ssh-help"><summary>{t('使用说明')}</summary><div>
-        <p className="terminal-ssh-note">{t('让 Claude 运行 envara-ssh list，查看当前会话可用的连接。')}</p>
-        <dl><dt>{t('常用写法')}</dt><dd><code>ssh user@host</code></dd></dl>
-        <p className="terminal-ssh-note">{t(authType === 'password' || state.connections.some(connection => connection.authType === 'password')
-          ? '密码在本次应用运行期间有效，不会定时到期，退出即清除，也不会写入命令或提供给 Claude。结束会话、线路停止或退出应用仍会关闭连接。'
-          : 'SSH 密钥授权在本次应用运行期间有效，不会定时到期；结束会话、线路停止或退出应用仍会关闭连接。')}</p>
-        {authType === 'publickey' && <p className="terminal-ssh-note">{t('私钥不会复制到环境。')}</p>}
-        <p className="terminal-ssh-note">{t(busyMessage)}</p>
-        {state.connections.length === 0 && <p className="terminal-ssh-note">{t('尚未保存 SSH 主机。保存配置不会自动连接。')}</p>}
-      </div></details>
-      {hasActiveSessions && <p className="terminal-ssh-note" role="status">{t(busyMessage)}</p>}
-      <div className="terminal-new-session-actions"><button className="terminal-text-button terminal-start-button" aria-busy={pending === 'save' || undefined} disabled={!!pending || hasActiveSessions || !prepared || !confirmed || !draft.name.trim() || (authType === 'password' && !hasPassword)} onClick={save}>{t(pending === 'save' ? '保存中…' : '保存连接')}</button></div>
-    </>}
-    {error && <div className="terminal-new-session-error" role="status">{t(error)}</div>}
-    {state.status === 'error' && <button className="terminal-text-button" disabled={!!pending} onClick={() => void load()}>{t('重试')}</button>}
+          {help}
+          <div className="ssh-workspace-actions"><button type="button" className="ssh-workspace-button" disabled={!!pending} onClick={cancel}>{t('取消')}</button><button type="submit" className="ssh-workspace-button is-primary" aria-busy={pending === 'save' || undefined} disabled={editDisabled || !prepared || !confirmed || !draft.name.trim() || (authType === 'password' && !hasPassword)}>{t(pending === 'save' ? '保存中…' : '保存连接')}</button></div>
+        </form> : selected ? <div className="terminal-ssh-connection ssh-workspace-selected" key={selected.id}>
+          <div className="ssh-workspace-detail-heading"><span className="ssh-workspace-detail-icon">{selected.authType === 'password' ? <LockKey size={22} /> : <Key size={22} />}</span><div><h2>{selected.name}</h2><p>{selected.user}@{selected.host}:{selected.port}</p></div></div>
+          <span className={`ssh-workspace-auth-badge ${selected.authType === 'password' && !selected.passwordReady ? 'needs-password' : ''}`}>{t(selected.authType === 'password' ? selected.passwordReady ? '密码已就绪' : '需先提供密码，不会改走代理。' : '私钥登录')}</span>
+          <label><span>{t('连接命令')}</span><input readOnly value={`ssh ${selected.alias}`} aria-label={t('连接命令')} onFocus={event => event.currentTarget.select()} /></label>
+          {onOpenTerminal && <button className="ssh-workspace-button is-primary" disabled={!desktopAvailable} onClick={() => onOpenTerminal(profileId)}><TerminalWindow size={16} />{t('打开终端')}<ArrowRight size={15} /></button>}
+          {selected.authType === 'password' && <>
+            <p className="terminal-ssh-note">{t('密码仅本次运行有效，退出清除。')}</p>
+            {unlocking === selected.id ? <form className="terminal-ssh-unlock" onSubmit={event => { event.preventDefault(); unlock(selected); }}>
+              <label><span>{t('密码')}</span><input ref={unlockInput} type="password" autoComplete="off" maxLength={1024} disabled={editDisabled} onChange={event => setHasUnlockPassword(!!event.currentTarget.value)} autoFocus /></label>
+              <div className="ssh-workspace-actions"><button type="button" className="ssh-workspace-button" disabled={!!pending} onClick={() => { clearPasswords(); setUnlocking(null); }}>{t('取消')}</button><button type="submit" className="ssh-workspace-button" disabled={editDisabled || !hasUnlockPassword}>{t(pending === 'password' ? '保存中…' : '保存密码')}</button></div>
+            </form> : <button className="ssh-workspace-button" disabled={editDisabled} onClick={() => { clearPasswords(); setUnlocking(selected.id); setRemoving(null); }}>{t(selected.passwordReady ? '更新密码' : '提供密码')}</button>}
+          </>}
+          <details className="terminal-ssh-details"><summary>{t('连接详情')}</summary><label><span>{t('常用写法')}</span><input readOnly value={`ssh -p ${selected.port} ${selected.user}@${selected.host}`} aria-label={t('常用写法')} onFocus={event => event.currentTarget.select()} /></label><dl>{selected.authType === 'publickey' && <div><dt>{selected.keyLabel}</dt><dd>{selected.keyFingerprint}</dd></div>}<div><dt>{t('主机指纹（来自本机 known_hosts）')}</dt><dd>{selected.hostFingerprints.map(value => <code key={value}>{value}</code>)}</dd></div></dl></details>
+          {help}
+          <div className="ssh-workspace-remove">{removing === selected.id ? <><p>{t(selected.authType === 'password' ? '仅移除此环境的连接配置。' : '仅移除此环境的连接配置，原私钥保留。')}</p><div className="ssh-workspace-actions"><button className="ssh-workspace-button" disabled={!!pending} onClick={() => setRemoving(null)}>{t('取消')}</button><button className="ssh-workspace-button is-danger" disabled={editDisabled} onClick={() => remove(selected)}>{t('确认移除')}</button></div></> : <button className="ssh-workspace-button is-danger is-quiet" disabled={editDisabled} onClick={() => { clearPasswords(); setRemoving(selected.id); setUnlocking(null); }}>{t('移除连接')}</button>}</div>
+        </div> : <div className="ssh-workspace-detail-empty"><Key size={28} weight="duotone" /><p>{t('选择主机以查看连接详情。')}</p></div>}
+      </aside>
+    </div>
+  </section>;
+}
+
+export function SshWorkspace({ profiles = [], selectedId, onSelect, terminalProfiles = [], onOpenTerminal }) {
+  const { t } = useI18n();
+  const profile = profiles.find(item => item.id === selectedId) ?? profiles[0];
+  const terminalProfile = terminalProfiles.find(item => item.profileId === profile?.id);
+  const hasActiveSessions = (terminalProfile?.sessions ?? []).some(session => ['starting', 'running', 'closing'].includes(session.status));
+  return <div className="ssh-workspace">
+    <div className="ssh-workspace-environment"><label><span>{t('选择环境')}</span><select aria-label={t('选择环境')} value={profile?.id ?? ''} disabled={!profiles.length} onChange={event => onSelect?.(event.target.value)}>{!profiles.length && <option value="">{t('请选择环境')}</option>}{profiles.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label></div>
+    {profile ? <TerminalSshConnections profileId={profile.id} profileName={profile.name} hasActiveSessions={hasActiveSessions} onOpenTerminal={onOpenTerminal} /> : <div className="ssh-workspace-no-environment"><TerminalWindow size={32} weight="duotone" /><h2>{t('选择一个环境')}</h2></div>}
   </div>;
 }

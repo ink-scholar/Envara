@@ -5,7 +5,7 @@
 <p align="center"><strong>讓每一套工作，都有獨立的境艙。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原創程式碼授權：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.0-475569" alt="Envara 1.1.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 種 README 語言" /></a>
 </p>
 <p align="center">
@@ -21,12 +21,11 @@
 
 ![Envara 中文原生工作區](../media/workspace-zh-CN.png)
 
-## 1.1.0：更順手的工作台
+## 1.1.1：更順手的 SSH 與終端工作區
 
-- **精簡介面與可收合導覽**：收合左側導覽，為瀏覽器、終端與應用程式內容留出更多空間，常用操作維持集中。
-- **具名儲存終端**：普通與 Claude 終端都有持久入口；可返回執行中的工作階段，或依儲存的設定重開閒置 shell，不會重播命令。
-- **自訂 MCP 與外掛**：官方 Claude CLI 可探索境艙內的使用者、專案與本地設定，同時保留固定瀏覽器工具與工作階段網路限制。
-- **依目標選擇 SSH 路線**：macOS 已儲存主機使用本機出口，未儲存目標使用環境代理；連線失敗不會切換路線。
+- **獨立 SSH 設定頁**：搜尋主機、檢視連線詳細資訊，並在需要時新增連線。
+- **更寬敞的終端工作區**：終端填滿右側工作區，工具列集中為單行；已儲存終端機清單與工作階段設定改用浮層，關閉操作也更清楚。
+- **修正時區變更後的關閉判定**：修正主機時區變更後，終端關閉狀態被誤判的問題。
 
 <p align="center"><sub>原生 Electron 工作區，截圖使用合成範例資料。</sub></p>
 

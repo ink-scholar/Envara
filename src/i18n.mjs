@@ -10,6 +10,12 @@ import { networkFlowEnglish } from './network-flow-english.mjs';
 import { networkFlowTranslations } from './network-flow-translations.mjs';
 
 export const english = {
+  "链接浏览器": "Browser for links",
+  "添加连接": "Add connection",
+  "搜索 SSH 主机": "Search SSH hosts",
+  "未找到匹配的主机": "No matching hosts",
+  "选择主机以查看连接详情。": "Select a host to view connection details.",
+  "SSH 连接需要境舱桌面应用。": "SSH connections require the Envara desktop app.",
   "收起侧栏": "Collapse sidebar",
   "展开侧栏": "Expand sidebar",
   "桌面版内置 AnyTLS；浏览器与终端共用出口，无需另开 Clash。": "The desktop app includes AnyTLS. Browsers and terminals share its egress without a separate Clash client.",

@@ -5,7 +5,7 @@
 <p align="center"><strong>作業ごとに、独立したひとつの環境を。</strong><br />ブラウザーも、ターミナルも、アプリも。同じ作業環境で。</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="独自コードのライセンス：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.0-475569" alt="Envara 1.1.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 言語の README" /></a>
 </p>
 <p align="center">
@@ -21,12 +21,11 @@ Envara は、ネットワーク出口、ブラウザープロファイル、タ�
 
 ![Envara 中国語版のネイティブワークスペース](../media/workspace-zh-CN.png)
 
-## 1.1.0 の新機能
+## 1.1.1 の新機能
 
-- **整理された画面と折りたためるナビゲーション。** 左側のナビゲーションを閉じて、ブラウザー、ターミナル、アプリの作業領域を広げられます。
-- **名前を付けて保存するターミナル。** 通常のターミナルと Claude セッションを保存し、実行中のセッションに戻るか、保存した設定で待機中の shell を開けます。コマンドは再実行しません。
-- **カスタム MCP とプラグイン。** 公式 Claude CLI が環境内のユーザー・プロジェクト・ローカル設定を読み込めます。Envara の固定ブラウザーツールとセッションのネットワーク制限は維持されます。
-- **接続先に応じた SSH 経路。** macOS では保存済みホストに端末本来のネットワーク経路を使い、未保存の接続先には環境のプロキシを使います。失敗しても経路は切り替えません。
+- **専用の SSH 設定ページ。** ホストの検索、接続の詳細確認、必要に応じた接続の追加をひとつのページで行えます。
+- **広く使えるターミナル。** 右側のワークスペース全体に表示し、ツールバーを1行に整理しました。保存済みターミナルの一覧とセッション設定はポップアップで開け、閉じる操作も分かりやすくなりました。
+- **タイムゾーン変更後の終了判定を修正。** ホストのタイムゾーンを変更すると、ターミナルの終了状態を誤って判定する問題を修正しました。
 
 <p align="center"><sub>ネイティブ Electron ワークスペース。スクリーンショットには合成したサンプルデータを使用しています。</sub></p>
 

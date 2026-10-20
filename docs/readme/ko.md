@@ -5,7 +5,7 @@
 <p align="center"><strong>작업마다, 하나의 독립된 환경을.</strong><br />브라우저도, 터미널도, 앱도. 하나의 작업 환경에서.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="자체 코드 라이선스: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.0-475569" alt="Envara 1.1.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9개 언어의 README" /></a>
 </p>
 <p align="center">
@@ -21,12 +21,11 @@ Envara는 네트워크 경로, 브라우저 프로필, 터미널 도구와 지�
 
 ![Envara 중국어 네이티브 작업 공간](../media/workspace-zh-CN.png)
 
-## 1.1.0의 새로운 기능
+## 1.1.1의 새로운 기능
 
-- **간결해진 화면과 접을 수 있는 탐색 메뉴.** 왼쪽 메뉴를 접어 브라우저, 터미널과 앱의 작업 공간을 넓힐 수 있습니다.
-- **이름을 붙여 저장하는 터미널.** 일반 터미널과 Claude 세션의 실행 중인 창으로 돌아가거나, 저장한 설정으로 대기 중인 shell을 다시 엽니다. 명령은 재실행하지 않습니다.
-- **사용자 지정 MCP와 플러그인.** 공식 Claude CLI가 환경 안의 사용자·프로젝트·로컬 설정을 찾을 수 있습니다. Envara의 고정 브라우저 도구와 세션 네트워크 제약은 유지됩니다.
-- **목적지에 따른 SSH 경로.** macOS에서 저장한 호스트는 이 기기의 네트워크 경로를, 저장하지 않은 목적지는 환경 프록시를 사용합니다. 실패해도 경로를 바꾸지 않습니다.
+- **전용 SSH 설정 페이지.** 호스트를 검색하고 연결 세부 정보를 확인하며, 필요할 때 연결을 추가할 수 있습니다.
+- **오른쪽 작업 공간을 가득 채우는 터미널.** 도구 모음을 한 줄로 정리했습니다. 저장된 터미널 목록과 세션 설정은 팝업 패널로 열며, 닫기 조작도 알아보기 쉬워졌습니다.
+- **시간대 변경 후 종료 판정 수정.** 호스트의 시간대를 변경한 뒤 터미널의 종료 상태를 잘못 판정하던 문제를 수정했습니다.
 
 <p align="center"><sub>네이티브 Electron 작업 공간입니다. 스크린샷에는 합성 예시 데이터를 사용했습니다.</sub></p>
 

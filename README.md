@@ -5,7 +5,7 @@
 <p align="center"><strong>给每一套工作，一个独立的境舱。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原创代码许可证：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.0-475569" alt="Envara 1.1.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
 </p>
 <p align="center">
   <strong>简体中文</strong> · <a href="docs/readme/zh-TW.md">繁體中文</a> · <a href="docs/readme/en.md">English</a> · <a href="docs/readme/ja.md">日本語</a> · <a href="docs/readme/ko.md">한국어</a> · <a href="docs/readme/es.md">Español</a> · <a href="docs/readme/fr.md">Français</a> · <a href="docs/readme/de.md">Deutsch</a> · <a href="docs/readme/pt-BR.md">Português (Brasil)</a>
@@ -20,12 +20,11 @@ Envara 境舱是开源的本地桌面工作台。为不同项目、账号或地�
 
 ![Envara 工作区，使用合成示例数据](docs/media/workspace-zh-CN.png)
 
-## 1.1.0：更顺手的工作台
+## 1.1.1：更专注的 SSH 与终端
 
-- **精简界面与可折叠导航**：收起左侧导航，为浏览器、终端和应用内容留出更多空间，常用操作保持集中。
-- **保存常用终端**：普通终端和 Claude 终端都有可命名的持久入口；选择运行中的会话，或按已保存上下文重新打开空闲 shell，不重放命令。
-- **找回自定义 MCP 与插件**：官方 Claude CLI 可读取境舱内用户、项目与本地配置，同时保留 Envara 的固定浏览器工具与会话网络约束。
-- **按目标选择 SSH 路线**：macOS 已保存主机使用本机出口，未保存目标使用境舱代理；认证或连接失败不切换路线。
+- **独立 SSH 配置页**：搜索已保存主机、查看连接详情，需要时再添加连接。
+- **更宽敞的终端工作区**：终端铺满右侧区域，单行工具栏搭配已保存终端与设置浮层，关闭入口更清晰。
+- **修正时区变化后的关闭判定**：修复本机时区改变后，关闭终端被误判为失败的问题。
 
 ## Claude Code「防封」与环境隔离
 

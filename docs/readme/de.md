@@ -5,7 +5,7 @@
 <p align="center"><strong>Eine eigene Umgebung für jeden Arbeitskontext.</strong><br />Dein Browser, dein Terminal und deine Apps in einer gemeinsamen Umgebung.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Lizenz des Originalcodes: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.0-475569" alt="Envara 1.1.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README in 9 Sprachen" /></a>
 </p>
 <p align="center">
@@ -21,12 +21,11 @@ Envara ist ein lokaler Open-Source-Arbeitsplatz, der Netzwerkausgänge, Browserp
 
 ![Nativer Envara-Arbeitsbereich auf Chinesisch](../media/workspace-zh-CN.png)
 
-## Neu in 1.1.0
+## Neu in 1.1.1
 
-- **Eine aufgeräumte Oberfläche mit einklappbarer Navigation.** Klappe die Seitenleiste ein und schaffe mehr Platz für Browser, Terminals und Apps.
-- **Gespeicherte Terminals mit Namen.** Kehre zu einer laufenden normalen oder Claude-Sitzung zurück oder öffne eine untätige Shell mit dem gespeicherten Kontext. Befehle werden nicht erneut ausgeführt.
-- **Eigene MCP-Server und Plugins.** Die offizielle Claude-CLI erkennt Benutzer-, Projekt- und lokale Einstellungen innerhalb der Umgebung. Envaras festgelegte Browserwerkzeuge und Netzwerkgrenzen bleiben erhalten.
-- **SSH-Routen nach Ziel.** Unter macOS verwenden gespeicherte Hosts den Netzwerkausgang des Macs, ungespeicherte Ziele den Umgebungsproxy. Bei Fehlern wird die Route nicht gewechselt.
+- **Eine eigene Seite für SSH.** Suche gespeicherte Hosts, sieh dir die Verbindungsdetails an und füge bei Bedarf Verbindungen hinzu.
+- **Mehr Platz fürs Terminal.** Es füllt den rechten Arbeitsbereich aus, mit einer einzeiligen Werkzeugleiste, aufklappbaren Menüs für gespeicherte Terminals und Einstellungen sowie einer klaren Schaltfläche zum Schließen.
+- **Schließen nach einem Zeitzonenwechsel.** Ein Wechsel der Systemzeitzone wird beim Schließen des Terminals nicht mehr fälschlich als Fehler gemeldet.
 
 <p align="center"><sub>Nativer Electron-Arbeitsbereich mit synthetischen Beispieldaten.</sub></p>
 

@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Stack, GlobeHemisphereWest, ChartLine, Gear, Plus, MagnifyingGlass, DownloadSimple, UploadSimple, Play, Stop, PencilSimple, Trash, ArrowsClockwise, FolderOpen, ArrowSquareOut, X, CheckCircle, WarningCircle, Browsers, CaretLeft, CaretRight, Clock, Eye, EyeSlash, ShieldCheck, TerminalWindow, Desktop } from "@phosphor-icons/react";
+import { Stack, GlobeHemisphereWest, ChartLine, Gear, Plus, MagnifyingGlass, DownloadSimple, UploadSimple, Play, Stop, PencilSimple, Trash, ArrowsClockwise, FolderOpen, ArrowSquareOut, X, CheckCircle, WarningCircle, Browsers, CaretLeft, CaretRight, Clock, Eye, EyeSlash, ShieldCheck, TerminalWindow, HardDrives, Desktop } from "@phosphor-icons/react";
 import { api } from "./client.js";
 import { TerminalDock } from "./TerminalPane.jsx";
+import { SshWorkspace } from "./TerminalSshConnections.jsx";
 import { TerminalWindowApp } from "./TerminalWindowApp.jsx";
 import { initialProxyForm, proxyConfig, proxyFormError } from "./proxy-form-state.mjs";
 import { locationFormState, verifiedLocationPreview, locationConfirmation, seedManualLocation, proxyRouteFields, networkApplicationChoices, chooseApplicationProfile, isApplicationAlreadyAttached, createdProfileFromSnapshot, savedNetworkPresentation } from "./network-flow-state.mjs";
@@ -83,6 +84,10 @@ const navItems = [{
   id: "terminals",
   label: "终端",
   icon: TerminalWindow
+}, {
+  id: "ssh",
+  label: "SSH 连接",
+  icon: HardDrives
 }, {
   id: "applications",
   label: "附加软件",
@@ -434,7 +439,7 @@ function ProfileForm({
           })}
       </div>
       <details className="advanced-settings" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}>
-        <summary>{t("高级设置")}<span>{t("浏览器、指纹与隐私")}</span></summary>
+        <summary>{t("高级设置")}</summary>
         <div className="form-grid">
           <div className="browser-device-settings span-two">
             {field("deviceProfileId", t("设备模板（可选）"), <select value={form.deviceProfileId} onChange={changeDeviceProfile} disabled={!deviceProfilesSupported} {...invalid("deviceProfileId")}><option value={PROVIDER_DEFAULT_DEVICE_PROFILE_ID}>{t(profile ? "保留当前配置" : "内核自动生成")}</option>{deviceChoices.map(device => <option key={device.id} value={device.id} disabled={!deviceProfilesSupported}>{t(device.label)}</option>)}</select>, {
@@ -744,8 +749,9 @@ function ProxyForm({
     <Field label={anytls ? t("节点密码") : t("密码（选填）")} className={anytls ? "span-two" : ""}><div className="input-action"><input required={anytls} type={visible ? "text" : "password"} value={form.password} onChange={change("password")} autoComplete="new-password" /><IconButton type="button" icon={visible ? EyeSlash : Eye} label={visible ? t("隐藏密码") : t("显示密码")} onClick={() => setVisible(!visible)} /></div></Field>
     {anytls && <Field label={t("TLS 服务器名称 / SNI（选填）")} className="span-two" hint={t("留空时使用服务器地址；如果服务商提供了 SNI，请填写指定值。")}><input value={form.serverName || ""} onChange={change("serverName")} placeholder={form.host.trim() || t("默认使用服务器地址")} autoComplete="off" /></Field>}
     </div>
-    {anytls && <><div className={`anytls-core-note ${api.isDesktop && proxyCore?.supported === false ? "unavailable" : ""}`} role={api.isDesktop && proxyCore?.supported === false ? "status" : undefined}><ShieldCheck size={17} /><span>{api.isDesktop && proxyCore?.supported === false ? proxyCore.message || t("当前安装无法使用内置 AnyTLS。可先保存节点配置，检测或启动时会显示具体问题。") : t("桌面版内置 AnyTLS；浏览器与终端共用出口，无需另开 Clash。")}</span></div>
+    {anytls && <>{api.isDesktop && proxyCore?.supported === false && <div className="anytls-core-note unavailable" role="status"><ShieldCheck size={17} /><span>{proxyCore.message || t("当前安装无法使用内置 AnyTLS。可先保存节点配置，检测或启动时会显示具体问题。")}</span></div>}
       <details className="advanced-settings proxy-tls-settings"><summary>{t("高级节点设置")}<span>{form.skipCertVerify ? t("证书验证已关闭") : t("验证服务器证书")}</span></summary><div className="proxy-tls-options">
+        <p className="field-hint">{t("桌面版内置 AnyTLS；浏览器与终端共用出口，无需另开 Clash。")}</p>
         <label className="proxy-check-option"><input type="checkbox" checked={!form.skipCertVerify} onChange={event => update("skipCertVerify", !event.target.checked)} /><span>{t("验证 TLS 证书")}</span></label>
         <p className="field-hint">{t("如果服务商使用自签名证书，可按其配置关闭验证。")}</p>
         <Field label={t("ALPN（选填）")} hint={t("按服务商配置填写，用英文逗号分隔；留空使用内核默认值。")}><input value={Array.isArray(form.alpn) ? form.alpn.join(", ") : form.alpn || ""} onChange={change("alpn")} placeholder="h2, http/1.1" autoComplete="off" /></Field>
@@ -872,7 +878,7 @@ function BrowserDetail({
   editingDisabled,
   t
 }) {
-  if (!profile) return <div className="detail-empty"><Browsers size={32} /><h2>{t("浏览器详情")}</h2><p>{t("选择一个环境")}</p></div>;
+  if (!profile) return <div className="detail-empty"><Browsers size={32} /><h2>{t("选择一个环境")}</h2></div>;
   const networkPresentation = savedNetworkPresentation(profile, proxy);
   const controls = browserSessionControls(profile, runtime, { pending, busy });
   const { running, starting } = controls;
@@ -1440,7 +1446,6 @@ function WorkspaceApp() {
     api.call("linkRouterStatus").then(value => setLinkRouter(value)).catch(() => setLinkRouter(null));
   }, [page, snapshot.settings]);
   const linkBrowsersFor = profile => linkBrowsersOf(profiles, profile);
-  const linkBrowserName = (candidates, chosenId) => { const value = linkBrowserChoice(candidates, chosenId); return value === SYSTEM_BROWSER ? t("系统默认浏览器") : candidates.find(item => item.id === value)?.name || t("系统默认浏览器"); };
   const terminalLinkBrowsers = linkBrowsersFor(selected);
   /* Save where an environment's terminal links open, then have the dock read
    * the stored value back so every view names the same browser. */
@@ -1460,15 +1465,21 @@ function WorkspaceApp() {
     return proxy?.location?.confirmed && proxy.location.timezone ? { ...profile, ...network, savedNetworkTimezone: proxy.location.timezone, savedNetworkLocation: proxy.location } : { ...profile, ...network };
   });
   const withDetail = ["profiles", "browsers", "applications"].includes(page);
+  const terminalWorkspace = page === "terminals";
+  const effectiveTerminalExpanded = terminalWorkspace || terminalExpanded;
+  const openTerminalWorkspace = (profileId = selectedId) => {
+    if (profileId && !profiles.some(profile => profile.id === profileId)) return;
+    if (profileId) setSelectedId(profileId);
+    setPage("terminals");
+    setTerminalVisible(true);
+    setTerminalExpanded(false);
+    if (profileId) setTerminalRequest({ profileId, nonce: Date.now() });
+  };
   const navigate = target => {
+    if (target === "terminals") { openTerminalWorkspace(); return; }
     setPage(target);
     setTerminalExpanded(false);
-    setTerminalVisible(target === "terminals");
-    if (target === "terminals") setTerminalHeight(Math.max(320, window.innerHeight - 180));
-    if (target === "terminals" && selectedId) setTerminalRequest({
-      profileId: selectedId,
-      nonce: Date.now()
-    });
+    setTerminalVisible(false);
   };
   const activeInEnvironment = profile => ["running", "starting"].includes(profile?.status) || terminalActive(profile?.id) || applications.some(item => item.profileId === profile?.id && (["running", "starting", "stopping"].includes(item.status) || notionTrialLocksConfiguration(item, pending)));
   const editSelected = profile => {
@@ -1538,20 +1549,20 @@ function WorkspaceApp() {
     } catch (error) { return { ok: false, message: error.message || t("操作未完成，请重试。") }; }
     finally { pendingRef.current.delete(key); setPending(value => { const next = { ...value }; delete next[key]; return next; }); }
   };
-  return <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${api.isDesktop ? "is-desktop" : ""} ${withDetail ? "with-detail" : ""} ${terminalVisible ? "terminal-visible" : ""} ${terminalVisible && terminalExpanded ? "terminal-expanded" : ""} ${page === "terminals" ? "terminal-workspace" : ""}`} style={{
+  return <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${api.isDesktop ? "is-desktop" : ""} ${withDetail ? "with-detail" : ""} ${terminalVisible ? "terminal-visible" : ""} ${terminalVisible && effectiveTerminalExpanded ? "terminal-expanded" : ""} ${terminalWorkspace ? "terminal-workspace" : ""}`} style={{
     "--terminal-height": `${Math.min(terminalHeight, terminalMaxHeight)}px`
   }}>
     {api.isDesktop && <div className="desktop-titlebar" aria-hidden="true" />}
     <WorkspaceSidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(value => !value)} page={page} onNavigate={navigate} count={profiles.length} totalBytes={totalBytes} language={language} t={t} />
-    <main className="main-panel">
-      <header className="page-header"><div className="page-heading"><div className="heading-line"><h1 tabIndex={-1}>{t(page === "settings" ? "设置" : navItems.find(item => item.id === page)?.label)}</h1>{!api.isDesktop && <span className="preview-badge">{t("界面预览")}</span>}</div></div>
+    <main className={`main-panel${page === "ssh" ? " ssh-main-panel" : ""}`}>
+      {!terminalWorkspace && <header className="page-header"><div className="page-heading"><div className="heading-line"><h1 tabIndex={-1}>{t(page === "settings" ? "设置" : navItems.find(item => item.id === page)?.label)}</h1>{!api.isDesktop && <span className="preview-badge">{t("界面预览")}</span>}</div></div>
         {page === "profiles" && <div className="header-actions"><Button icon={UploadSimple} onClick={() => importProfiles()} disabled={pending["importProfiles:"]}>{t("导入")}</Button><Button icon={Plus} className="primary" onClick={() => setModal({
             type: "createProfile"
           })}>{t("新建环境")}</Button></div>}
         {page === "proxies" && <Button icon={Plus} className="primary" onClick={() => setModal({
           type: "createProxy"
         })}>{t("添加网络出口")}</Button>}
-      </header>
+      </header>}
       {page === "profiles" && <>
         {api.isDesktop && snapshot.legacyMigration?.available && <div className="section-note migration-discovery"><FolderOpen size={18} /><span>{t("发现 {count} 个旧环境", {
               count: snapshot.legacyMigration.count || 0
@@ -1578,10 +1589,7 @@ function WorkspaceApp() {
       })} onEdit={editSelected} onCreate={() => setModal({
         type: "createProfile"
       })} onInstall={installRuntime} busyProfile={busyProfile} editingDisabled={id => activeInEnvironment(profiles.find(profile => profile.id === id))} pending={pending} t={t} />}
-      {page === "terminals" && <div className="terminal-page-context"><GlobeHemisphereWest size={18} /><span>{selectedProxy?.location?.confirmed ? `${selectedProxy.name} · ${selectedProxy.location.label || ""} · ${selectedProxy.location.timezone}` : selectedProxy?.name || t(!selected ? "选择一个环境" : selected.proxyId ? "出口不可用" : "本机网络")}</span>
-        {selected && <button type="button" className="link-browser-chip" onClick={() => setModal({ type: "terminalLinkBrowser" })} title={t("链接使用的浏览器")}><Browsers size={13} />{t("链接使用的浏览器")}<strong>{linkBrowserName(terminalLinkBrowsers, selectedWorkspace?.browserProfileId)}</strong><CaretRight size={11} /></button>}
-        {selected && <Button icon={DownloadSimple} disabled={!api.isDesktop || terminalActive(selected.id)} onClick={() => setModal({ type: "exportData", scope: "terminal", profile: selected })}>{t("导出终端")}</Button>}
-      </div>}
+      {page === "ssh" && <SshWorkspace profiles={profiles} selectedId={selectedId} onSelect={setSelectedId} terminalProfiles={terminalProfiles} onOpenTerminal={openTerminalWorkspace} />}
       {page === "applications" && <ApplicationsWorkspace profiles={profiles} proxies={proxies} applications={applications} routing={snapshot.applicationRouting} systemPlatform={system.platform} selectedId={selectedId} onSelect={setSelectedId} onPick={pickApplication} onStart={application => perform("startApplication", {
         id: application.id
       })} onStop={application => perform("stopApplication", {
@@ -1657,11 +1665,16 @@ function WorkspaceApp() {
       })} onStop={() => perform("stopProfile", {
         id: selected.id
       }, t("会话已停止"))} onEdit={() => editSelected(selected)} onClear={() => confirmClear(selected)} onExport={() => setModal({ type: "exportData", scope: "browser", profile: selected })} editingDisabled={activeInEnvironment(selected)} t={t} /> : <ContextDetail profile={selected} proxy={selectedProxy} workspace={selectedWorkspace} onEdit={() => editSelected(selected)} onDirectory={chooseDirectory} directoryDisabled={!api.isDesktop || !selected || activeInEnvironment(selected) || !!pending[`chooseWorkspaceDirectory:${selected?.id}`]} onNavigate={navigate} onClone={() => cloneProfile(selected)} onDelete={() => confirmDelete(selected)} editingDisabled={activeInEnvironment(selected)} t={t} />}</aside>}
-    <TerminalDock profiles={terminalContextProfiles} screenReaderMode={snapshot.system?.accessibilitySupportEnabled === true} selectedProfileId={selectedId} onSelectProfile={setSelectedId} visible={terminalVisible} onHide={() => {
+    <TerminalDock profiles={terminalContextProfiles} screenReaderMode={snapshot.system?.accessibilitySupportEnabled === true} selectedProfileId={selectedId} onSelectProfile={setSelectedId} visible={terminalVisible} workspace={terminalWorkspace} onExport={profileId => {
+      const profile = profiles.find(item => item.id === profileId);
+      if (api.isDesktop && profile && !terminalActive(profile.id)) { setSelectedId(profile.id); setModal({ type: "exportData", scope: "terminal", profile }); }
+    }} onConfigureLinkBrowser={profileId => {
+      if (profiles.some(profile => profile.id === profileId)) { setSelectedId(profileId); setModal({ type: "terminalLinkBrowser" }); }
+    }} exportDisabled={!api.isDesktop || !selected || terminalActive(selected.id)} onHide={() => {
       setTerminalVisible(false);
       setTerminalExpanded(false);
       if (page === "terminals") setPage("profiles");
-    }} expanded={terminalExpanded} onToggleExpanded={() => setTerminalExpanded(value => !value)} onHeightChange={resizeTerminalDock} minHeight={320} maxHeight={terminalMaxHeight} openRequest={terminalRequest} refreshKey={terminalRefresh} onError={terminalError} onProfilesChange={setTerminalProfiles} />
+    }} expanded={effectiveTerminalExpanded} onToggleExpanded={() => setTerminalExpanded(value => !value)} onHeightChange={resizeTerminalDock} minHeight={320} maxHeight={terminalMaxHeight} openRequest={terminalRequest} refreshKey={terminalRefresh} onError={terminalError} onProfilesChange={setTerminalProfiles} />
     {modal?.type === "attachApplication" && <AttachApplicationForm profiles={profiles} proxies={proxies} groups={snapshot.groups} applications={applications} selectedId={selectedId} systemPlatform={system.platform} isActive={activeInEnvironment} onSave={saveAttachedApplication} onClose={closeModal} onAddNetwork={() => { setPage("proxies"); setModal({ type: "createProxy" }); }} saving={pending["attachApplication:"]} />}
     {(modal?.type === "createProfile" || modal?.type === "editProfile") && <ProfileForm profile={modal.profile} proxies={proxies} systemPlatform={system.platform} engines={engines} defaultEngine={snapshot.settings?.defaultEngine} groups={groups} groupDescriptors={snapshot.groups} onSave={saveProfile} onClose={closeModal} saving={pending[`updateProfile:${modal.profile?.id}`] || pending["createProfile:"]} />}{(modal?.type === "createProxy" || modal?.type === "editProxy") && <ProxyForm proxy={modal.proxy} proxyCore={system.proxyCore} onSave={saveProxy} onClose={closeModal} saving={pending["saveProxy:"]} />}{modal?.type === "importMapping" && <ImportMappingForm session={modal.session} proxies={proxies} onImport={proxyMap => importProfiles({
       importId: modal.session.importId,

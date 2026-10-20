@@ -1,4 +1,10 @@
 {
+  "链接浏览器": "Navegador para links",
+  "添加连接": "Adicionar conexão",
+  "搜索 SSH 主机": "Buscar hosts SSH",
+  "未找到匹配的主机": "Nenhum host correspondente",
+  "选择主机以查看连接详情。": "Selecione um host para ver os detalhes da conexão.",
+  "SSH 连接需要境舱桌面应用。": "As conexões SSH exigem o aplicativo Envara para desktop.",
   "收起侧栏": "Recolher barra lateral",
   "展开侧栏": "Expandir barra lateral",
   "桌面版内置 AnyTLS；浏览器与终端共用出口，无需另开 Clash。": "A versão para desktop inclui AnyTLS. O navegador e o terminal compartilham a saída de rede, sem precisar abrir o Clash.",

@@ -153,6 +153,7 @@ test('device form wires explicit changes, readonly fixed summaries and persisted
   assert.match(pane, /BROWSER_DEVICE_PROFILES\.filter\(device => device\.id === defaultBrowserDeviceProfileId\(systemPlatform\) \|\| device\.id === profile\?\.deviceProfileId\)/);
   const profileForm = pane.slice(pane.indexOf('function ProfileForm('), pane.indexOf('function GroupForm('));
   const advanced = profileForm.indexOf('<details className="advanced-settings"');
+  assert.match(profileForm.slice(advanced), /<summary>\{t\("高级设置"\)\}<\/summary>/);
   assert.ok(profileForm.indexOf('field("engine"') < advanced, 'engine is available before Advanced');
   assert.equal(profileForm.match(/field\("engine"/g)?.length, 1);
   assert.match(profileForm, /width: "",\s+height: ""/);
@@ -179,7 +180,8 @@ test('device form wires explicit changes, readonly fixed summaries and persisted
   assert.doesNotMatch(profileForm, /不影响登录和网站功能/);
   const terminal = await readFile(new URL('../src/TerminalPane.jsx', import.meta.url), 'utf8');
   assert.match(terminal, /selectedSession\?\.language \?\? selectedMetadata\?\.language/);
-  assert.match(terminal, /title=\{languageLabel\}/);
+  const terminalContext = terminal.slice(terminal.indexOf('<details className="terminal-context-menu"'), terminal.indexOf('<TerminalDeviceIdentifierDetails'));
+  assert.match(terminalContext, /languageLabel && <div><dt>\{t\('有效语言'\)\}<\/dt><dd className=\{sessionLanguage\.fallback \? 'is-fallback' : ''\}>\{languageLabel\}<\/dd>/);
 });
 
 test('device and effective-language copy is available in all nine languages', () => {

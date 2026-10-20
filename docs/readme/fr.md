@@ -5,7 +5,7 @@
 <p align="center"><strong>Un environnement dédié à chaque contexte de travail.</strong><br />Votre navigateur, votre terminal et vos applications, dans un même environnement.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licence du code original : MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.0-475569" alt="Envara 1.1.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README en 9 langues" /></a>
 </p>
 <p align="center">
@@ -21,12 +21,11 @@ Envara est un espace de travail local et open source qui réunit sortie réseau,
 
 ![Espace de travail natif Envara en chinois](../media/workspace-zh-CN.png)
 
-## Nouveautés de la version 1.1.0
+## Nouveautés de la version 1.1.1
 
-- **Une interface allégée et une navigation repliable.** Repliez le menu latéral pour laisser plus de place au navigateur, aux terminaux et aux applications.
-- **Des terminaux enregistrés et nommés.** Retrouvez une session ordinaire ou Claude en cours, ou ouvrez un shell au repos avec son contexte enregistré. Aucune commande n’est rejouée.
-- **MCP et plugins personnalisés.** La CLI officielle de Claude peut découvrir les configurations utilisateur, projet et locale de l’environnement, tout en conservant les outils du navigateur fixé et les contraintes réseau d’Envara.
-- **Un trajet SSH selon la destination.** Sur macOS, les hôtes enregistrés utilisent la sortie réseau du Mac ; les autres passent par le proxy de l’environnement. Un échec ne change jamais ce trajet.
+- **Une page dédiée à SSH.** Recherchez les hôtes enregistrés, consultez les détails et ajoutez des connexions au besoin.
+- **Plus de place pour le terminal.** Il occupe tout l’espace de travail à droite, avec une barre d’outils sur une ligne, des panneaux flottants pour les terminaux enregistrés et les paramètres, et un bouton de fermeture explicite.
+- **Fermeture corrigée après un changement de fuseau horaire.** Un changement du fuseau horaire de l’ordinateur ne provoque plus de faux échec lors de la fermeture du terminal.
 
 <p align="center"><sub>Espace de travail Electron natif avec des données d’exemple synthétiques.</sub></p>
 

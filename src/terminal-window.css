@@ -1,0 +1,24 @@
+.terminal-window-shell.terminal-window-workspace { min-width: 0; }
+.terminal-window-workspace .terminal-window-workspace-heading {
+  height: 48px;
+  min-height: 48px;
+  gap: 16px;
+  padding: 0 16px;
+}
+.terminal-window-shell.terminal-window-workspace.is-desktop .terminal-window-workspace-heading { height: 80px; min-height: 80px; padding-top: 32px; }
+.terminal-window-workspace .terminal-window-workspace-heading > h1 { flex: 1; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-size-sm, 13px); }
+.terminal-window-view-tabs { display: flex; align-items: center; gap: 3px; flex: none; padding: 3px; border: 1px solid var(--border); border-radius: var(--radius-control, 8px); background: var(--bg-inset); }
+.terminal-window-view-tabs > button { display: inline-flex; align-items: center; justify-content: center; min-height: 30px; padding: 4px 11px; border: 0; border-radius: 5px; background: transparent; color: var(--text-muted); font: inherit; font-size: var(--font-size-xs, 12px); white-space: nowrap; }
+.terminal-window-view-tabs > button[aria-selected="true"] { background: var(--bg-raised); color: var(--text); box-shadow: var(--shadow-control, none); }
+.terminal-window-view-tabs > button:hover:not(:disabled) { color: var(--text); }
+.terminal-window-view-tabs > button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.terminal-window-workspace > .terminal-window-terminal-panel { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.terminal-window-workspace > .terminal-window-terminal-panel[hidden] { display: none; }
+.terminal-window-terminal-panel > .terminal-dock.is-standalone { flex: 1; width: 100%; height: auto; min-height: 0; border-top: 0; }
+.terminal-window-workspace > .terminal-window-ssh-panel { display: flex; flex: 1; min-width: 0; min-height: 0; padding: 20px; overflow-y: auto; }
+.terminal-window-ssh-panel > .ssh-workspace { min-width: 0; }
+.terminal-window-ssh-panel .ssh-workspace-environment { display: none; }
+@media (max-width: 760px) {
+  .terminal-window-workspace .terminal-window-workspace-heading { gap: 10px; padding-right: 12px; padding-left: 12px; }
+  .terminal-window-workspace > .terminal-window-ssh-panel { padding: 14px; }
+}

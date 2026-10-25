@@ -22,6 +22,7 @@ Envara's original application code is licensed under the MIT License. Third-part
 | electron-builder | MIT | 2015 Loopline Systems · [source](https://github.com/electron-userland/electron-builder) |
 | node-pty 1.1.0 | MIT | 2012–2015 Christopher Jeffrey · [source](https://github.com/microsoft/node-pty/tree/v1.1.0) |
 | @xterm/xterm 6.0.0 | MIT | xterm.js authors; SourceLair; Christopher Jeffrey · [source](https://github.com/xtermjs/xterm.js) |
+| @xterm/headless 6.0.0 | MIT | xterm.js authors; SourceLair; Christopher Jeffrey · [source](https://github.com/xtermjs/xterm.js/tree/6.0.0) |
 | @xterm/addon-fit 0.11.0 | MIT | 2019 xterm.js authors · [source](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-fit) |
 | socks 2.8.10 | MIT | 2013 Josh Glazebrook · [source](https://github.com/JoshGlazebrook/socks) |
 | https-proxy-agent 9.1.0 / socks-proxy-agent 10.1.0 | MIT | 2013 Nathan Rajlich · [source](https://github.com/TooTallNate/proxy-agents) |

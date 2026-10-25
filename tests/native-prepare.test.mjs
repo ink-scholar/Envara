@@ -15,6 +15,7 @@ test('license preparation includes runtime dependency graph and safely replaces 
   assert(first.some(item => item.name === 'proxy-agent-negotiate' && item.notices.some(name => name.includes('supplementary'))));
   assert(first.some(item => item.name === 'node-pty' && item.notices.some(name => name.includes('Microsoft-Terminal'))));
   assert(first.some(item => item.name === '@xterm/xterm' && item.renderer));
+  assert(first.some(item => item.name === '@xterm/headless' && !item.renderer && item.notices.length));
   assert(!first.some(item => item.name === '@electron/rebuild' || item.name === 'kerberos'));
   for (const item of first) {
     for (const notice of item.notices) assert((await fs.readFile(path.join(directory, notice), 'utf8')).length > 100);

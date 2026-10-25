@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const requireApp = createRequire(path.join(root, 'package.json'));
 const execute = promisify(execFile);
-const nativePackages = ['node-pty', 'socks', 'https-proxy-agent', 'socks-proxy-agent', 'ipaddr.js'];
+const nativePackages = ['node-pty', '@xterm/headless', 'socks', 'https-proxy-agent', 'socks-proxy-agent', 'ipaddr.js'];
 const rendererPackages = ['@xterm/xterm', '@xterm/addon-fit'];
 
 /** Compiler flags belong only to the rebuild child, never the user's process. */
@@ -96,6 +96,13 @@ export async function copyDependencyLicenses(destination = path.join(root, 'buil
     if (metadata.name === 'proxy-agent-negotiate' && metadata.version === '1.1.0' && metadata.license === 'MIT' && !notices.length) {
       const outputName = `${prefix}-supplementary-NOTICE.txt`;
       await atomicWrite(path.join(destination, outputName), await fs.readFile(path.join(root, 'third_party/npm-licenses/proxy-agent-negotiate-NOTICE.txt')));
+      notices.push(outputName);
+    }
+    // The headless 6.0.0 npm archive omits LICENSE. Preserve the unmodified
+    // notice from the matching official xterm.js source tag instead.
+    if (metadata.name === '@xterm/headless' && metadata.version === '6.0.0' && metadata.license === 'MIT' && !notices.length) {
+      const outputName = `${prefix}-LICENSE`;
+      await atomicWrite(path.join(destination, outputName), await fs.readFile(path.join(root, 'third_party/npm-licenses/Xterm-6.0.0-LICENSE')));
       notices.push(outputName);
     }
     if (!notices.length) throw new Error(`No distributed license notice was found for ${metadata.name}.`);

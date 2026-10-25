@@ -279,17 +279,18 @@ export class BrowseForgeService {
   }
   async snapshot() {
     await this.ready;
-    const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
+    const trace = (stage, operation) => this.options.diagnostics ? this.options.diagnostics.step(stage, operation) : operation();
+    const [workspace, remote] = await Promise.all([trace('snapshot.store', () => this.store.read()), trace('snapshot.remote', () => this.remote())]);
     const proxies = this.proxies(workspace, remote);
-    const engines = await this.engines(remote.descriptors);
+    const engines = await trace('snapshot.engines', () => this.engines(remote.descriptors));
     const knownIds = new Set(remote.profiles.map((profile) => profile.id));
     for (const profileId of new Set([...this.previews.keys(), ...this.previewInFlight.keys(), ...this.previewAttempts.keys(), ...this.previewCapturedAt.keys()])) if (!knownIds.has(profileId)) this.resetPreview(profileId);
     let measurements = {};
-    try { measurements = await this.options.getMetrics?.(remote.profiles) ?? {}; } catch { /* Unavailable OS measurements remain unknown. */ }
-    const profiles = await Promise.all(remote.profiles.map(async (profile) => {
+    try { measurements = await trace('snapshot.metrics', () => this.options.getMetrics?.(remote.profiles)) ?? {}; } catch { /* Unavailable OS measurements remain unknown. */ }
+    const profiles = await trace('snapshot.profiles', () => Promise.all(remote.profiles.map(async (profile) => {
       const metadata = workspace.profiles.find((item) => item.id === profile.id) ?? {};
       const session = remote.sessions.find((item) => item.profile_id === profile.id);
-      const health = session ? await this.health(session) : null;
+      const health = session ? await trace('snapshot.health', () => this.health(session)) : null;
       const effective = this.effectiveProxy(profile, remote.groups, workspace);
       const ownProxy = this.profileProxy(profile, workspace);
       const proxyId = effective.proxy ? proxies.find((proxy) => proxy.id === effective.proxy.id)?.id ?? proxies.find((proxy) => sameProxy(proxy, effective.proxy))?.id ?? null : null;
@@ -305,16 +306,19 @@ export class BrowseForgeService {
       const currentContext = context?.signature === this.contextSignature(profile, effective) ? context : null;
       const status = this.starting.has(profile.id) ? 'starting' : session && health?.alive === true ? 'running' : session && health?.alive === null ? 'error' : this.lastErrors.has(profile.id) ? 'error' : 'stopped';
       const measurement = status === 'running' ? measurements[profile.id] ?? {} : {};
-      if (status === 'running') await this.capture(profile.id, session.session_id, { force: false });
+      if (status === 'running') await trace('snapshot.capture', () => this.capture(profile.id, session.session_id, { force: false }));
       else this.resetPreview(profile.id);
       let bytes = null;
-      try { bytes = await dataSize(path.join(await this.checkedDirectory(profile), 'browser-data')); } catch {}
+      try {
+        const directory = await trace('snapshot.directory', () => this.checkedDirectory(profile));
+        bytes = await trace('snapshot.data-size', () => dataSize(path.join(directory, 'browser-data')));
+      } catch {}
       return { id: profile.id, name: profile.name, group: profile.group ?? '', tags: profile.tags ?? [], notes: metadata.notes ?? '', engine: profile.runtime_id, deviceProfileId: metadata.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID, platform: launchOverrides.target_os || profile.identity?.target_os || null, seed: profile.fingerprint_seed || null, fingerprintGeneration: profile.fingerprint_generation ?? null, locale, timezone, localeMode: configured(locale) ? 'fixed' : 'auto', timezoneMode: configured(timezone) ? 'fixed' : 'auto', launchOverrides, resolvedTimezone: currentContext ? currentContext.timezone ?? null : networkTimezone ?? fixedTimezone, timezoneSource: currentContext ? currentContext.timezoneSource ?? null : networkTimezone ? 'proxy-egress' : configured(timezone) ? 'manual' : null, timezoneOrigin: currentContext?.timezoneOrigin ?? (networkTimezone ? 'network-environment' : null), network: currentContext?.network ?? null, networkLastError: currentContext?.networkLastError ?? null, width: fingerprint['screen.width'] ?? null, height: fingerprint['screen.height'] ?? null, fingerprint, privacy: normalizePrivacy(metadata.privacy), privacyProtection: session?.privacy ?? null, geolocation: currentContext?.geolocation ?? null, selectedLocation: currentContext?.selectedLocation ?? selectedNetworkLocation, locationSource: currentContext?.locationSource ?? effective.proxy?.location?.source ?? null, resolvedLocale: currentContext?.locale ?? null, startUrl: metadata.startUrl ?? 'about:blank', proxyId, profileProxyId: ownProxy ? proxies.find((proxy) => proxy.id === ownProxy.id)?.id ?? proxies.find((proxy) => sameProxy(proxy, ownProxy))?.id ?? null : null, proxySource: effective.source, proxyMode: effective.mode, createdAt: metadata.createdAt ?? profile.created_at, updatedAt: metadata.updatedAt ?? profile.created_at, lastLaunchedAt: metadata.lastLaunchedAt ?? null, status, lastError: health?.alive === null ? health.error : this.lastErrors.get(profile.id) ?? null, dataBytes: bytes, cpuPercent: metric(measurement.cpuPercent), memoryBytes: metric(measurement.memoryBytes), observed: health?.observed ?? null, ...(this.previews.has(profile.id) && status === 'running' ? { screenshot: this.previews.get(profile.id), screenshotCapturedAt: this.previewCapturedAt.get(profile.id) } : {}) };
-    }));
+    })));
     let legacyMigration;
-    try { const migration = await this.previewLegacyMigration(); legacyMigration = { available: migration.detected && migration.profiles.some((profile) => !profile.migrated), count: migration.profiles.filter((profile) => !profile.migrated).length, migrated: migration.profiles.filter((profile) => profile.migrated).length, ...migration }; }
+    try { const migration = await trace('snapshot.migration', () => this.previewLegacyMigration()); legacyMigration = { available: migration.detected && migration.profiles.some((profile) => !profile.migrated), count: migration.profiles.filter((profile) => !profile.migrated).length, migrated: migration.profiles.filter((profile) => profile.migrated).length, ...migration }; }
     catch (value) { legacyMigration = { available: false, count: 0, migrated: 0, error: value.message }; }
-    const connection = await this.options.getConnectionInfo?.() ?? {};
+    const connection = await trace('snapshot.connection', () => this.options.getConnectionInfo?.()) ?? {};
     const publicConnection = Object.fromEntries(['apiUrl', 'mcpUrl', 'status', 'version', 'sourceCommit'].filter((key) => Object.hasOwn(connection, key)).map((key) => [key, connection[key]]));
     return { profiles: profiles.sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '')), proxies, groups: this.groups(workspace, remote.groups).map((group) => ({ ...group, proxyId: group.proxy ? proxies.find((proxy) => proxy.id === group.proxy.id)?.id ?? proxies.find((proxy) => sameProxy(proxy, group.proxy))?.id ?? null : null, proxy: undefined })), engines, engine: engines.find((item) => item.id === remote.defaultEngine) ?? engines[0] ?? {}, settings: { ...workspace.settings, defaultEngine: remote.defaultEngine }, events: workspace.events, legacyMigration, system: this.system, integration: { backup: { configExport: true, browserDataExport: false, credentialExport: false }, mcp: { supported: true, authentication: 'bearer', ...publicConnection } } };
   }

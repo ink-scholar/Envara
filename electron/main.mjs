@@ -43,12 +43,14 @@ import { ProxyNetworkProbe } from './proxy-network.mjs';
 import { parseGoogleMapsLocation } from '../shared/network-location.mjs';
 import { createWorkspaceWindowController, createOwnedQuitController } from './desktop-lifecycle.mjs';
 import { createStartupDiagnostics } from './startup-diagnostics.mjs';
+import { createRuntimeDiagnostics } from './runtime-diagnostics.mjs';
 import { createDesktopStartup } from './desktop-startup.mjs';
 import { registerDesktopIPC } from './desktop-ipc.mjs';
 import { shutdownDesktopServices } from './desktop-services.mjs';
 import { finishEnvironmentDeletion } from './environment-deletion-cleanup.mjs';
 import { createAppearanceManager, readInitialAppearance } from './appearance.mjs';
 import { appearanceBackground } from '../shared/appearance.mjs';
+import { getTerminalTheme } from '../shared/terminal-theme.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const isSmoke = process.env.ENVARA_SMOKE === '1' && !app.isPackaged;
@@ -67,6 +69,9 @@ app.setName('Envara');
 const ownsLock = app.requestSingleInstanceLock();
 if (!ownsLock) app.quit();
 const startupDiagnostics = ownsLock ? createStartupDiagnostics({ directory: app.getPath('userData'), version: app.getVersion() }) : null;
+const runtimeDiagnostics = ownsLock ? createRuntimeDiagnostics({ directory: app.getPath('userData') }) : null;
+const runtimeStep = (stage, operation) => runtimeDiagnostics ? runtimeDiagnostics.step(stage, operation) : operation();
+app.once('will-quit', () => runtimeDiagnostics?.close());
 startupDiagnostics?.mark('main-entry');
 const startupStep = (name, operation) => startupDiagnostics ? startupDiagnostics.step(name, operation) : operation();
 let firstWorkspaceSnapshot = false;
@@ -128,10 +133,10 @@ async function fullWorkspaceSnapshot(value) {
   if (!value || !Array.isArray(value.profiles) || !Array.isArray(value.proxies) || !value.system) return value;
   // The expensive profile snapshot may predate a settings save. Read only the
   // local store so a delayed network response cannot revert the chosen theme.
-  if (service?.store) appearance.setPreference((await service.store.read()).settings.appearance);
-  const applicationState = applications ? await applications.snapshot() : { applications: [], applicationRouting: { ready: false, installed: false, authorized: false, status: 'unavailable', message: '应用网络组件尚未安装。' } };
+  if (service?.store) appearance.setPreference((await runtimeStep('snapshot.appearance', () => service.store.read())).settings.appearance);
+  const applicationState = applications ? await runtimeStep('snapshot.applications', () => applications.snapshot()) : { applications: [], applicationRouting: { ready: false, installed: false, authorized: false, status: 'unavailable', message: '应用网络组件尚未安装。' } };
   if (typeof applications?.routing?.controlledNotionTrialAvailability === 'function') {
-    const availability = await getNotionTrialAvailability();
+    const availability = await runtimeStep('snapshot.availability', () => getNotionTrialAvailability());
     applicationState.applicationRouting = { ...applicationState.applicationRouting,
       controlledNotionTrialAvailable: availability.controlledNotionTrialAvailable === true,
       controlledNotionTrialErrorCode: availability.errorCode ?? null,
@@ -189,7 +194,7 @@ async function openOutsideEnvironment(url) {
   return shellOpen(url);
 }
 const shutdownOwnedServices = () => shutdownDesktopServices({ applications, diagnostics: notionDiagnostics,
-  terminal, terminalBrowserBroker, linkChannel, routerChannel, service, sidecar, proxyCore });
+  terminal, terminalBrowserBroker, linkChannel, routerChannel, service, sidecar, proxyCore, runtimeDiagnostics });
 
 async function publish() {
   if (desktopStartup.phase !== 'ready' || quitting || !service || !views.size) return;
@@ -644,7 +649,7 @@ function viewOptions() {
 
 async function openTerminalWindow(args) {
   if (!terminal) throw new Error('当前运行路径尚未启用终端。');
-  const target = resolveTerminalView(args, await service.snapshot(), await terminal.snapshot());
+  const target = resolveTerminalView(args, await runtimeStep('terminal.window', () => service.snapshot()), await runtimeStep('terminal.snapshot', () => terminal.snapshot()));
   const key = JSON.stringify([target.profileId, target.sessionId ?? '']);
   const previous = terminalWindows.get(key);
   if (previous && !previous.isDestroyed()) {
@@ -706,7 +711,7 @@ app.on('activate', showWorkspaceWindow);
 app.on('accessibility-support-changed', () => { void publish(); });
 const desktopStartup = createDesktopStartup({ initialize: initializeDesktopServices });
 const ownedQuit = createOwnedQuitController({
-  hasResources: () => desktopStartup.phase === 'starting' || !!(service || sidecar || terminal || proxyCore), startup: () => desktopStartup.settled,
+  hasResources: () => desktopStartup.phase === 'starting' || !!(service || sidecar || terminal || proxyCore), startup: () => runtimeStep('shutdown.startup', () => desktopStartup.settled),
   shutdown: shutdownOwnedServices, quit: () => app.quit(), onStateChange: value => {
     quitting = value;
     if (value) requestEpoch++;
@@ -746,7 +751,7 @@ async function initializeDesktopServices({ checkOpen }) {
     sidecar = new SidecarManager({ dataDir, resourcesDir: app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.join(root, 'build/backend'), onChange: publish, startupStep: initializeStep });
     await initializeStep('sidecar-initialize', () => sidecar.initialize());
     service = new BrowseForgeService(dataDir, sidecar.client, { platform: process.platform, appVersion: app.getVersion(), backend: 'BrowseForge (Envara desktop)', upstreamVersion: '2.1.15', localApi: sidecar.baseUrl }, publish, {
-      profilesDir: path.join(sidecar.baseDir, 'profiles'), getEngineStates: () => sidecar.getEngineStates(), proxyCore,
+      profilesDir: path.join(sidecar.baseDir, 'profiles'), getEngineStates: () => sidecar.getEngineStates(), proxyCore, diagnostics: runtimeDiagnostics,
       ...(isWorkspaceSmoke ? {
         networkProbe: new ProxyNetworkProbe({ transport: async () => ({ success: true, ip: '8.8.8.8', country: 'Philippines', country_code: 'PH', city: 'Manila', latitude: 14.6, longitude: 121, timezone: { id: 'Asia/Manila' } }) }),
         addressGeocoder: { search: async () => ({ source: 'Photon', attribution: '© OpenStreetMap contributors', candidates: [{ id: 'owned-place-fixture', label: 'Synthetic public landmark, Manila', latitude: 14.58, longitude: 120.98 }] }) },
@@ -771,6 +776,7 @@ async function initializeDesktopServices({ checkOpen }) {
       onError: event => { for (const { window: view, kind } of views.values()) if (!view.isDestroyed() && kind === 'workspace') view.webContents.send('envara:link-event', { ...event, type: 'error' }); } });
     terminal = new TerminalService({
       dataDir,
+      diagnostics: runtimeDiagnostics, getTheme: () => getTerminalTheme(appearance.snapshot().effective),
       linkChannel,
       sshManager: new TerminalSshManager({ dataDir, hostHome: app.getPath('home'),
         resolveRoute: settings => terminal.resolveSshRoute(settings),
@@ -870,7 +876,7 @@ if (ownsLock) void startupStep('electron-ready', () => app.whenReady()).then(() 
   if (quitting) return;
   registerDesktopIPC({ ipcMain, views, startup: desktopStartup,
     lifecycle: () => ({ quitting, requestEpoch }), services: () => ({ applications, terminal }),
-    transferLock: environmentTransferLock, handleCall, fullWorkspaceSnapshot,
+    transferLock: environmentTransferLock, handleCall, fullWorkspaceSnapshot, diagnostics: runtimeDiagnostics,
     onReady: () => startupDiagnostics?.mark('ipc-ready') });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: 'Envara', submenu: [{ label: '关于境舱', role: 'about' }, { type: 'separator' }, { label: '退出境舱', role: 'quit' }] },

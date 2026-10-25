@@ -189,32 +189,60 @@ function fixtureCertificate() {
   return certificatePromise;
 }
 
-async function listen(t, server) {
+async function listen(server, own) {
   const sockets = new Set();
-  server.on('connection', socket => { sockets.add(socket); socket.on('error', () => {}); socket.once('close', () => sockets.delete(socket)); });
+  server.on('connection', socket => { own(socket); sockets.add(socket); socket.once('close', () => sockets.delete(socket)); });
+  // HTTPS has a separate TLS wrapper; CONNECT releases its HTTP error owner.
+  server.on('secureConnection', own);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); });
   return { port: server.address().port, sockets };
 }
 
 async function fixture(t, { protocol = 'http', proxyHost = '127.0.0.1', response = (query, reply) => { reply.writeHead(200, { 'Content-Type': 'application/dns-message' }); reply.end(answer(query)); }, handshake } = {}) {
   const { key, cert } = await fixtureCertificate();
-  let targetHits = 0; const observations = [];
+  let targetHits = 0; const observations = [], servers = [], resolvers = [], connections = new Map(), errors = [];
+  const own = socket => {
+    if (connections.has(socket)) return socket;
+    connections.set(socket, new Promise(resolve => socket.once('close', () => { connections.delete(socket); resolve(); })));
+    socket.on('error', error => {
+      // A winning answer cancels the other peer. Other errors remain failures.
+      if (!['ECONNRESET', 'EPIPE'].includes(error.code)) errors.push(error);
+      socket.destroy();
+    });
+    return socket;
+  };
+  t.after(async () => {
+    for (const resolver of resolvers) resolver.close();
+    const listenersClosed = servers.map(server => new Promise(resolve => server.close(resolve)));
+    const pending = [...connections];
+    for (const [socket] of pending) socket.unpipe();
+    // Close TLS before its raw socket so no wrapper writes to a released fd.
+    for (const [socket] of pending.filter(([socket]) => socket.encrypted)) socket.destroy();
+    for (const [socket] of pending) socket.destroy();
+    await Promise.all([...listenersClosed, ...pending.map(([, closed]) => closed)]);
+    assert.deepEqual(errors, [], 'fixture connection errors');
+  });
   const target = https.createServer({ key, cert }, (request, reply) => {
     targetHits++; const chunks = [];
     assert.equal(request.method, 'POST'); assert.equal(request.url, '/dns-query'); assert.equal(request.headers['content-type'], 'application/dns-message');
     request.on('data', chunk => chunks.push(chunk)); request.on('end', () => response(Buffer.concat(chunks), reply));
   });
-  const destination = await listen(t, target), server = protocol === 'https' ? https.createServer({ key, cert }) : http.createServer();
+  servers.push(target);
+  const destination = await listen(target, own), server = protocol === 'https' ? https.createServer({ key, cert }) : http.createServer();
+  servers.push(server);
   server.on('connect', (request, socket, head) => {
     observations.push({ host: request.url, auth: request.headers['proxy-authorization'], servername: socket.servername });
     if (handshake) { socket.resume(); socket.once('end', () => socket.end()); return handshake(socket); }
     assert.equal(head.length, 0);
-    const remote = net.connect(destination.port, '127.0.0.1', () => { socket.write('HTTP/1.1 200 Connection Established\r\n\r\n'); socket.pipe(remote); remote.pipe(socket); });
-    remote.on('error', () => socket.destroy()); socket.once('close', () => remote.destroy());
+    const remote = own(net.connect(destination.port, '127.0.0.1', () => { socket.write('HTTP/1.1 200 Connection Established\r\n\r\n'); socket.pipe(remote); remote.pipe(socket); }));
+    remote.on('error', () => socket.destroy());
+    socket.once('close', () => { socket.unpipe(remote); remote.unpipe(socket); remote.destroy(); });
   });
-  const upstream = await listen(t, server);
-  return { resolver: options => createProxyDestinationResolver({ protocol, host: proxyHost, port: upstream.port, username: 'fixture-user', password: 'fixture-secret' }, { ca: cert, timeoutMs: 500, ...options }),
+  const upstream = await listen(server, own);
+  return { resolver: options => {
+    const resolver = createProxyDestinationResolver({ protocol, host: proxyHost, port: upstream.port, username: 'fixture-user', password: 'fixture-secret' }, { ca: cert, timeoutMs: 500, ...options });
+    resolvers.push(resolver); return resolver;
+  },
     observations, hits: () => targetHits, sockets: upstream.sockets };
 }
 

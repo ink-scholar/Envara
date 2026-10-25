@@ -13,6 +13,8 @@ import { ClaudeAccountStore, DEFAULT_CLAUDE_ACCOUNT, claudeAccountId as validate
 import { TerminalEntryStore } from './terminal-entry-store.mjs';
 import { installedProcessLocales, resolveProcessLanguage } from './workspace-context.mjs';
 import { normalizeSshRoute } from './terminal-ssh-route.mjs';
+import { TerminalProtocol } from './terminal-protocol.mjs';
+import { getTerminalTheme } from '../shared/terminal-theme.mjs';
 
 const require = createRequire(import.meta.url);
 const MAX_SESSIONS = 8;
@@ -149,10 +151,14 @@ export class TerminalService {
     networkFence = process.platform === 'darwin' ? new TerminalNetworkFence() : null,
     /* Links a fenced terminal asks to open come back through this channel and
      * are opened by the app, never by the host's default browser. */
-    linkChannel = null, browserBroker = null, sshManager = null, resolveSshContext = resolveContext, claudeExecutableResolver = findClaudeExecutable, claudeInstaller = ensureClaudeInstallation, availableLocales = null }) {
+    linkChannel = null, browserBroker = null, sshManager = null, resolveSshContext = resolveContext, claudeExecutableResolver = findClaudeExecutable, claudeInstaller = ensureClaudeInstallation, availableLocales = null,
+    getTheme = () => getTerminalTheme('dark'), diagnostics = null }) {
     if (!path.isAbsolute(dataDir ?? '') || typeof resolveContext !== 'function') throw codeError('终端数据目录或环境解析器无效。');
     this.dataDir = path.resolve(dataDir);
     this.onEvent = onEvent;
+    if (typeof getTheme !== 'function') throw codeError('终端外观配置无效。');
+    this.getTheme = getTheme;
+    this.diagnostics = diagnostics;
     this.resolveContext = resolveContext;
     if (typeof resolveSshContext !== 'function') throw codeError('SSH 网络解析器无效。', 'SSH_ROUTE_INVALID');
     this.resolveSshContext = resolveSshContext;
@@ -963,9 +969,22 @@ export class TerminalService {
       }
       session.pty = pty;
       if (!session.pty || typeof session.pty.onData !== 'function' || typeof session.pty.onExit !== 'function') throw codeError('原生终端接口无效。', 'TERMINAL_PTY_UNAVAILABLE');
+      session.protocol = new TerminalProtocol({ columns: session.columns, rows: session.rows, getTheme: this.getTheme,
+        write: data => {
+          if (!session.finished && !session.finishing && ['starting', 'running'].includes(session.status) && session.pty === pty) pty.write(data);
+        },
+        onPressure: paused => { session.protocolPaused = paused; this.updatePtyPressure(session); } });
+      if (typeof pty.on === 'function') {
+        const closed = () => this.markPtyDiagnostic('terminal.pty-close');
+        pty.on('close', closed);
+        session.disposables.push({ dispose: () => {
+          if (typeof pty.off === 'function') pty.off('close', closed);
+          else pty.removeListener?.('close', closed);
+        } });
+      }
       session.capturePromise = Promise.resolve().then(() => this.processControl.capture(session.pty.pid)).then(identity => { session.identity = identity; return identity; });
       if (!cancelled) session.disposables.push(session.pty.onData(data => this.receive(session, data)));
-      session.disposables.push(session.pty.onExit(event => { session.nativeExited = true; void this.finish(session, event).catch(() => {}); }));
+      session.disposables.push(session.pty.onExit(event => { this.markPtyDiagnostic('terminal.pty-exit'); session.nativeExited = true; void this.finish(session, event).catch(() => {}); }));
       if (cancelled) this.assertStarting(session);
       await session.capturePromise;
       if (session.networkFailure) this.assertStarting(session);
@@ -999,6 +1018,7 @@ export class TerminalService {
     }
   }
   releaseLaunchContext(session) {
+    session.protocol?.dispose(); session.protocol = null;
     session.launchContext = null;
     session.secrets = [];
     session.secretTail = '';
@@ -1041,6 +1061,13 @@ export class TerminalService {
   }
   deliver(session, value) {
     if (!value) return;
+    // The one PTY parser sees the same live, redacted bytes as its views, before
+    // replay limits or slow-view truncation. Snapshots never feed it again.
+    if (session.protocol) {
+      const parse = () => session.protocol.write(value);
+      const pending = this.diagnostics?.step ? this.diagnostics.step('terminal.output', parse, { bytes: Buffer.byteLength(value) }) : parse();
+      void pending.catch(() => {});
+    }
     session.replay = tail(session.replay + value, MAX_REPLAY_BYTES);
     const buffer = Buffer.from(tail(value, MAX_QUEUE_BYTES));
     for (let start = 0; start < buffer.length;) {
@@ -1060,7 +1087,7 @@ export class TerminalService {
           session.queuedBytes -= item.bytes;
           try { await this.onEvent(item.event); } catch {}
           item.resolve();
-          if (session.paused && session.queuedBytes < MAX_QUEUE_BYTES / 4 && !session.finished) { try { session.pty?.resume?.(); session.paused = false; } catch {} }
+          if (session.paused && session.queuedBytes < MAX_QUEUE_BYTES / 4 && !session.finished) { session.paused = false; this.updatePtyPressure(session); }
         }
       } finally { session.pumping = false; }
     })().catch(() => { session.pumping = false; }); });
@@ -1077,7 +1104,7 @@ export class TerminalService {
       session.queuedBytes -= removed.bytes; removed.resolve();
       if (!session.outputLimited) { session.outputLimited = true; this.emit(session, 'status', { status: session.status, message: '输出过快，已保留最近的终端输出。' }); }
     }
-    if (session.queuedBytes > MAX_QUEUE_BYTES / 2 && !session.finished) { try { session.pty?.pause?.(); session.paused = true; } catch {} }
+    if (session.queuedBytes > MAX_QUEUE_BYTES / 2 && !session.finished) { session.paused = true; this.updatePtyPressure(session); }
     this.pump(session);
     return delivery;
   }
@@ -1087,19 +1114,41 @@ export class TerminalService {
     if (!session) throw codeError('终端会话不存在。', 'TERMINAL_SESSION_NOT_FOUND');
     return session;
   }
+  markPtyDiagnostic(stage) {
+    try {
+      this.diagnostics?.mark?.(stage);
+      void this.diagnostics?.flush?.()?.catch?.(() => {});
+    } catch { /* Timing evidence cannot change native stream behavior. */ }
+  }
+  updatePtyPressure(session) {
+    const paused = !!(session.paused || session.protocolPaused);
+    try {
+      if (paused && !session.ptyPaused) { session.pty?.pause?.(); session.ptyPaused = true; }
+      else if (!paused && session.ptyPaused && !session.finished) { session.pty?.resume?.(); session.ptyPaused = false; }
+    } catch { /* A concurrent native close is handled by its normal lifecycle. */ }
+  }
   async write({ sessionId, data }) {
     const session = this.session(sessionId);
     if (session.status !== 'running' || session.finished) throw codeError('终端已停止。', 'TERMINAL_NOT_RUNNING');
     if (typeof data !== 'string' || Buffer.byteLength(data) > MAX_WRITE_BYTES) throw codeError('终端输入过大，请分段发送。', 'TERMINAL_INPUT_LIMIT');
-    session.pty.write(data);
-    return { accepted: true };
+    const operation = () => { session.pty.write(data); return { accepted: true }; };
+    return this.diagnostics?.step ? this.diagnostics.step('terminal.write', operation, { bytes: Buffer.byteLength(data) }) : operation();
   }
   async resize({ sessionId, columns, rows }) {
     const session = this.session(sessionId);
     if (session.status !== 'running' || session.finished) throw codeError('终端已停止。', 'TERMINAL_NOT_RUNNING');
     const cols = integer(columns, session.columns, 20, 400); const height = integer(rows, session.rows, 5, 150);
-    session.pty.resize(cols, height); session.columns = cols; session.rows = height;
-    return this.metadata(session);
+    const operation = async () => {
+      const apply = () => {
+        if (session.status !== 'running' || session.finished) throw codeError('终端已停止。', 'TERMINAL_NOT_RUNNING');
+        session.pty.resize(cols, height); session.columns = cols; session.rows = height;
+      };
+      if (session.protocol) {
+        if (!await session.protocol.resize(cols, height, apply)) throw codeError('终端已停止。', 'TERMINAL_NOT_RUNNING');
+      } else apply();
+      return this.metadata(session);
+    };
+    return this.diagnostics?.step ? this.diagnostics.step('terminal.resize', operation) : operation();
   }
   async stopUnidentifiedPty(session) {
     let listener, timer;
@@ -1115,6 +1164,7 @@ export class TerminalService {
     finally { clearTimeout(timer); try { listener?.dispose?.(); } catch {} }
   }
   async cleanup(session) {
+    session.protocol?.dispose();
     if (session.cleanupPromise) return session.cleanupPromise;
     session.cleanupPromise = Promise.resolve().then(async () => {
       let failure;

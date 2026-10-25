@@ -8,6 +8,7 @@ import { createInterfaceLanguageController } from '../src/interface-language-sta
 import { terminalViewSnapshot } from '../electron/terminal-view.mjs';
 import { registerDesktopIPC } from '../electron/desktop-ipc.mjs';
 import { shutdownDesktopServices } from '../electron/desktop-services.mjs';
+import { createRuntimeDiagnostics } from '../electron/runtime-diagnostics.mjs';
 
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const turn = () => new Promise(resolve => setImmediate(resolve));
@@ -22,7 +23,7 @@ function shutdownFixture(overrides) {
 }
 
 // Exercise the shipped handler and preload without loading Electron's main entry.
-function fixture({ initialize = async () => {} } = {}) {
+function fixture({ initialize = async () => {}, diagnostics = null } = {}) {
   const events = [], calls = [], handlers = new Map(), listeners = new Map();
   const startup = createDesktopStartup({ initialize });
   const view = { destroyed: false, isDestroyed() { return this.destroyed; }, isMinimized: () => false, show() { events.push('window-show'); }, focus() {} };
@@ -39,6 +40,7 @@ function fixture({ initialize = async () => {} } = {}) {
     handleCall: async (method, args) => { calls.push({ method, args }); return method === 'snapshot' ? snapshot() : { method }; },
   };
   registerDesktopIPC({ ipcMain: context.ipcMain, views, startup,
+    diagnostics,
     lifecycle: () => context, services: () => context,
     transferLock: { mutate: (...args) => context.environmentTransferLock.mutate(...args) },
     handleCall: (...args) => context.handleCall(...args),
@@ -81,6 +83,36 @@ test('the real IPC/preload keep both initial settings reads pending behind a vis
   language.stop();
 });
 
+test('runtime evidence distinguishes a held terminal dispatch from snapshot enrichment without retaining input', async () => {
+  const diagnostics = createRuntimeDiagnostics(), holdWrite = deferred(), holdSnapshot = deferred();
+  const f = fixture({ diagnostics });
+  await f.startup.start();
+  f.context.handleCall = async method => method === 'writeTerminal'
+    ? diagnostics.step('terminal.write', () => holdWrite.promise, { bytes: 8 }) : snapshot();
+  f.context.fullWorkspaceSnapshot = async value => value?.system ? holdSnapshot.promise : value;
+  const writing = f.api.call('writeTerminal', { sessionId: 'private-session-fixture', data: 'private-input-fixture' });
+  const reading = f.api.call('snapshot');
+  try {
+    await turn();
+    const evidence = diagnostics.snapshot();
+    const terminalWrite = evidence.pending.find(item => item.stage === 'terminal.write');
+    const snapshotEnrich = evidence.pending.find(item => item.stage === 'ipc.enrich');
+    assert.ok(terminalWrite && snapshotEnrich);
+    assert.equal(terminalWrite.bytes, 8);
+    const parent = evidence.pending.find(item => item.ordinal === terminalWrite.parentOrdinal);
+    assert.equal(parent.stage, 'ipc.dispatch');
+    assert.doesNotMatch(JSON.stringify(evidence), /private-session-fixture|private-input-fixture/);
+    holdWrite.resolve({ accepted: true });
+    assert.equal((await writing).accepted, true);
+    assert.ok(diagnostics.snapshot().pending.some(item => item.stage === 'ipc.enrich'), 'a slow snapshot remains independently identifiable');
+  } finally {
+    holdWrite.resolve({ accepted: true }); holdSnapshot.resolve(snapshot());
+    await Promise.allSettled([writing, reading]);
+    diagnostics.close();
+  }
+  assert.equal(diagnostics.snapshot().pending.length, 0);
+});
+
 test('the actual Electron-ready entry opens its window and installs IPC without awaiting held backend stages', async () => {
   const electronReady = deferred(), backend = deferred();
   const f = fixture({ initialize: async () => { f.events.push('backend-start'); await backend.promise; } });
@@ -94,7 +126,7 @@ test('the actual Electron-ready entry opens its window and installs IPC without 
     app: { whenReady: () => electronReady.promise },
     registerDesktopIPC: () => f.events.push('ipc-ready'),
     Menu: { buildFromTemplate: value => value, setApplicationMenu() {} },
-    process: { platform: 'linux' }, startupDiagnostics: null,
+    process: { platform: 'linux' }, startupDiagnostics: null, runtimeDiagnostics: null,
     reportStartupFailure: error => assert.fail(error.message),
     publish: async () => f.events.push('published'),
     isSmoke: true, isWorkspaceSmoke: false,
@@ -333,6 +365,21 @@ test('a genuine attached-application cleanup failure still retains its network a
     proxyCore: { close: async () => events.push('proxy-core') } });
   await assert.rejects(shutdown(), actual => actual === error);
   assert.deepEqual(events, []);
+});
+
+test('runtime diagnostics retain a swallowed cleanup failure while later owned cleanup still runs', async () => {
+  const diagnostics = createRuntimeDiagnostics(), events = [];
+  try {
+    await shutdownFixture({ runtimeDiagnostics: diagnostics,
+      terminal: { shutdown: async () => { throw new Error('private fixture detail'); } },
+      terminalBrowserBroker: { shutdown: async () => events.push('broker') },
+      proxyCore: { close: async () => events.push('proxy') },
+    })();
+    assert.deepEqual(events, ['broker', 'proxy']);
+    const evidence = diagnostics.snapshot();
+    assert.equal(evidence.recent.find(item => item.stage === 'shutdown.terminal').status, 'failed');
+    assert.doesNotMatch(JSON.stringify(evidence), /private fixture detail/);
+  } finally { diagnostics.close(); }
 });
 
 test('the existing loading shell remains noninteractive until real settings arrive', async () => {

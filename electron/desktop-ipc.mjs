@@ -22,8 +22,10 @@ async function assertTerminalScope(source, request, terminal) {
  * queue behind initialization. Recheck authority after every asynchronous gate.
  */
 export function registerDesktopIPC({ ipcMain, views, startup, lifecycle, services, transferLock,
-  handleCall, fullWorkspaceSnapshot, onReady = () => {} }) {
-  ipcMain.handle('envara:call', async (event, request) => {
+  handleCall, fullWorkspaceSnapshot, diagnostics = null, onReady = () => {} }) {
+  const trace = (stage, operation) => diagnostics ? diagnostics.step(stage, operation) : operation();
+  const tracedMethods = new Set(['snapshot', 'terminalSnapshot', 'writeTerminal', 'resizeTerminal', 'openTerminalWindow']);
+  ipcMain.handle('envara:call', (event, request) => trace(`ipc.${tracedMethods.has(request?.method) ? request.method : 'other'}`, async () => {
     try {
       const source = views.get(event.sender);
       const sourceEpoch = lifecycle().requestEpoch;
@@ -40,12 +42,13 @@ export function registerDesktopIPC({ ipcMain, views, startup, lifecycle, service
 
       const dispatch = async () => {
         assertSource();
-        if (source.kind === 'terminal') await assertTerminalScope(source, request, services().terminal);
+        if (source.kind === 'terminal') await trace('ipc.scope', () => assertTerminalScope(source, request, services().terminal));
         assertSource();
         startup.assertReady();
-        const value = await fullWorkspaceSnapshot(await transferLock.mutate(request.method, request.args,
-          () => { assertSource(); startup.assertReady(); return handleCall(request.method, request.args, source.window); },
+        const raw = await trace('ipc.transfer', () => transferLock.mutate(request.method, request.args,
+          () => trace('ipc.dispatch', () => { assertSource(); startup.assertReady(); return handleCall(request.method, request.args, source.window); }),
           environmentMutationProfile(request.method, request.args, services())));
+        const value = await trace('ipc.enrich', () => fullWorkspaceSnapshot(raw));
         assertSource();
         return { ok: true, value: source.kind === 'terminal' ? terminalViewSnapshot(value) : value };
       };
@@ -53,6 +56,6 @@ export function registerDesktopIPC({ ipcMain, views, startup, lifecycle, service
       startup.assertReady();
       return await dispatch();
     } catch (error) { return { ok: false, error: { message: error.message, code: error.code || 'ACTION_FAILED' } }; }
-  });
+  }));
   onReady();
 }

@@ -35,14 +35,14 @@ function forbiddenFile(filename, mode) {
   const name = path.posix.basename(filename).toLowerCase();
   if (/^(?:\.env(?:\..*)?|id_(?:rsa|dsa|ecdsa|ed25519))$/.test(name) && !/^\.env\.(?:example|sample|template)$/.test(name)
       || /\.(?:p12|pfx|keychain(?:-db)?)$/.test(name)) return 'PRIVATE_CREDENTIAL_FILE';
-  if (/(?:^|\/)(?:local-verification|local-carrier-verification|test-artifacts|playwright-report|local-authorization-archive|release-verified-[^/]+|notion-trial-diagnostics|startup-diagnostics)(?:\/|$)/i.test(filename)
+  if (/(?:^|\/)(?:local-verification|local-carrier-verification|test-artifacts|playwright-report|local-authorization-archive|release-verified-[^/]+|notion-trial-diagnostics|startup-diagnostics|runtime-diagnostics)(?:\/|$)/i.test(filename)
       || name === '.ds_store' || /\.(?:dmp|log)$/.test(name)) return 'LOCAL_EVIDENCE_FILE';
   if (mode === 'app' && /^(?:tests|scripts)\//.test(filename)) return 'LOCAL_EVIDENCE_FILE';
   const fixture = /(?:^|\/)(?:fixtures?|testdata)(?:\/|$)/i.test(filename);
   const vendor = /(?:^|\/)(?:node_modules|third_party)(?:\/|$)/.test(filename);
   if (!vendor && !(mode === 'source' && fixture) && new Set(['workspace.json', 'profiles.json', 'proxies.json',
     'claude-accounts.json', '.claude.json', '.credentials.json', '.envara-token', 'link-preferences.json',
-    'last-startup.json', 'previous-startup.json', 'cookies', 'login data', 'local state']).has(name)) return 'LOCAL_RUNTIME_FILE';
+    'last-startup.json', 'previous-startup.json', 'last-runtime.json', 'previous-runtime.json', 'cookies', 'login data', 'local state']).has(name)) return 'LOCAL_RUNTIME_FILE';
   return null;
 }
 

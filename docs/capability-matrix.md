@@ -1,8 +1,8 @@
-# Envara 1.1.2 能力矩阵
+# Envara 1.1.3 能力矩阵
 
 当前发布目标为 **macOS Apple Silicon（arm64）**。下表区分源码能力、桌面入口和验收边界，不表示所有 provider、网站或原生软件都已逐项通过。
 
-本文描述 Envara 1.1.2，包括可折叠导航、完整终端工作区、独立 SSH 配置页、持久终端入口、Claude MCP 配置发现，以及按连接保存 SSH 路线与首次指纹确认。各版本实测范围记录在[验证说明](verification.md)中，下表不替代对应的验收记录。
+本文描述 Envara 1.1.3，包括完整终端工作区、独立 SSH 配置页、持久终端入口、Claude MCP 配置发现，以及按连接保存 SSH 路线与首次指纹确认。1.1.3 将终端查询应答保留在会话中，页面隐藏或关闭后仍可处理，多窗口与画面恢复不会重复应答。各版本实测范围记录在[验证说明](verification.md)中，下表不替代对应的验收记录。
 
 ## 与固定 BrowseForge 基线的关系
 
@@ -21,7 +21,7 @@ Envara 纳入 BrowseForge **v2.1.15 / `fa9e0bb670e749706a9c8f2d4095333347d6c521`
 | REST / MCP / Playwright | 浏览器、页面、标签、表单、Cookie、截图等自动化接口 | 保留本机后台接口；专用终端另用会话级 broker，全部工具未宣称逐项验收 |
 | YAML 工作流 | CLI/REST/MCP 的工作流执行 | 固定后端保留；没有等价的桌面可视化工作流编辑器 |
 | 备份与数据交换 | 配置 ZIP、Cookie 备份与 CLI 文件系统备份 | 增加密码加密的浏览器/终端/单软件导出；导入新环境，不覆盖已有资料，旧整环境文件兼容 |
-| 原生终端 | 无应用内 PTY 产品流程 | 目录选择、独立配置/历史、拖高/放大/独立窗、独立进程复制；普通与 Claude 终端自动保存具名入口，运行中切回原会话，结束后按原上下文打开空闲 shell，不重放命令；移除入口不结束进程或删除账号资料 |
+| 原生终端 | 无应用内 PTY 产品流程 | 目录选择、独立配置/历史、拖高/放大/独立窗、独立进程复制；终端查询由每个会话统一应答，不依赖视图可见性，键盘输入仍只发往当前活动终端。普通与 Claude 终端自动保存具名入口，运行中切回原会话，结束后按原上下文打开空闲 shell，不重放命令；移除入口不结束进程或删除账号资料 |
 | SSH 连接 | 无桌面受控密钥授权流程 | 为每条保存连接显式选择本机或已配置环境路线；经该路线读取首次主机指纹，用户核对确认后将信任保存在应用内，不写宿主 known_hosts。普通终端、Claude 和复制会话沿用保存路线；缺少路线的旧记录继续走本机，服从已有 VPN/TUN。所选环境缺失、路线改变、授权不可用或连接失败时拒绝，不切换路线。未保存目标仍走终端所属环境代理，不借用保存连接的授权或其他环境路线。密码仅在主进程内存保留至退出，私钥通过独立受限 agent 使用；均无定时授权到期。保留别名、会话发现及端口/用户/TTY/日志参数白名单，未集成 scp/sftp、-i、跳板或端口转发。私钥要求 OpenSSH ≥ 8.9、0600 未加密文件及对应公钥；修改连接后需新建会话。详见[连接要求](claude-code-sessions.md#ssh-through-the-environment-route) |
 | Claude Code | 通用浏览器 MCP，无专用安装与登录档案流程 | 官方原样 native CLI、环境内安装、命名档案、手动启动/更新及固定浏览器 broker；支持环境内 user/project/local MCP 配置与插件发现，保留官方项目信任流程，冲突的账号或网络覆盖会被拒绝；可独立创建、改名和确认删除所选档案，运行中拒绝改名/删除，默认档案不可单独删除 |
 | 附加软件 | 无桌面应用强制路由生命周期 | 身份绑定、引擎识别、独立资料、启动/停止与原生适配器；普通 HTTP/HTTPS/SOCKS5 上游接入自有认证 Mihomo 路线，HTTPS 仅支持单节点。上游仍须通过认证与实测；识别引擎或支持代理协议不代表任意应用保护验收 |
@@ -36,6 +36,8 @@ Envara 纳入 BrowseForge **v2.1.15 / `fa9e0bb670e749706a9c8f2d4095333347d6c521`
 - API 与工作流：[REST 路由](../third_party/browseforge/internal/api/router.go)、[MCP schema](../third_party/browseforge/internal/mcp/tool_schema.go)、[workflow engine](../third_party/browseforge/internal/workflow/engine.go)、[backup](../third_party/browseforge/internal/api/backup.go)。
 - Envara 扩展：[代理核心](../electron/proxy-core-manager.mjs)、[终端](../electron/terminal-service.mjs)、[浏览器 broker](../electron/terminal-browser-broker.mjs)、[附加软件](../electron/application-service.mjs)、[加密导出](../electron/environment-export.mjs)、[数据恢复](../electron/environment-transfer.mjs)。
 - 隐私与语言：[浏览器规则](../third_party/browseforge/internal/browser/trackerlist.go)、[隐私接入](../third_party/browseforge/internal/browser/privacy.go)、[界面语言目录](../shared/interface-languages.mjs)。
+
+终端协议状态由[会话协议处理器](../electron/terminal-protocol.mjs)维护，与页面显示和历史画面恢复分开。[本地阶段诊断](../electron/runtime-diagnostics.mjs)采用有界记录，只包含固定阶段、耗时、字节数与本次运行内的序号，不保存命令、终端输出、聊天内容、凭据或私人路径。正常快速操作不单独触发写盘；慢操作、失败或会话结束时会一并保存最近的阶段记录。
 
 ## 平台与验收边界
 

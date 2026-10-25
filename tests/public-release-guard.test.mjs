@@ -114,13 +114,16 @@ test('the audited localhost TLS fixture exception is bound to its exact key and 
 
 test('runtime, signing and evidence files are refused while an empty environment example remains public', async t => {
   const f = await fixture(t);
-  for (const relative of ['.env.local', 'credentials/release.p12', 'runtime/workspace.json', 'build/local-verification/report.json']) await f.put(relative, '{}');
+  for (const relative of ['.env.local', 'credentials/release.p12', 'runtime/workspace.json', 'build/local-verification/report.json',
+    'runtime-diagnostics/last-runtime.json', 'saved/previous-runtime.json']) await f.put(relative, '{}');
   await f.put('.env.example', 'API_KEY=replace-me\n');
   const report = await f.source();
-  assert.equal(report.findings.length, 4);
+  assert.equal(report.findings.length, 6);
   assert.equal(count(report, '.env.local', 'PRIVATE_CREDENTIAL_FILE'), 1);
   assert.equal(count(report, 'runtime/workspace.json', 'LOCAL_RUNTIME_FILE'), 1);
   assert.equal(count(report, 'build/local-verification/report.json', 'LOCAL_EVIDENCE_FILE'), 1);
+  assert.equal(count(report, 'runtime-diagnostics/last-runtime.json', 'LOCAL_EVIDENCE_FILE'), 1);
+  assert.equal(count(report, 'saved/previous-runtime.json', 'LOCAL_RUNTIME_FILE'), 1);
 });
 
 test('app scanning reads nested asar entries and external binary resources without modifying upstream content', async t => {

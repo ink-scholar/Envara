@@ -5,7 +5,7 @@
 <p align="center"><strong>Give each workflow a place of its own.</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="MIT license for original code" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.2-475569" alt="Envara 1.1.2" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.3-475569" alt="Envara 1.1.3" /></a>
 </p>
 <p align="center">
   <a href="../../README.md">简体中文</a> · <a href="zh-TW.md">繁體中文</a> · <strong>English</strong> · <a href="ja.md">日本語</a> · <a href="ko.md">한국어</a> · <a href="es.md">Español</a> · <a href="fr.md">Français</a> · <a href="de.md">Deutsch</a> · <a href="pt-BR.md">Português (Brasil)</a>
@@ -14,17 +14,17 @@
   <a href="https://github.com/ink-scholar/Envara/releases/latest">Download for macOS</a> · <a href="../user-guide.md">User guide</a> · <a href="../capability-matrix.md">All features</a> · <a href="../SUPPORT.md">Support</a>
 </p>
 
-**More than a privacy workspace for Claude Code: one independent environment for your browser, terminal and desktop apps.**
+**Bring your browser, terminal and desktop apps into separate working environments.**
 
 Envara is an open-source local desktop workspace. Keep separate networks, browser data and tool settings for different projects, accounts or regions. Choose an environment, research in the browser, write code or open an app, and pick up where you left off.
 
 ![Envara workspace with synthetic example data](../media/workspace-zh-CN.png)
 
-## New in 1.1.2
+## New in 1.1.3
 
-- **Choose a route for each SSH connection.** Select the host network or a configured environment; ordinary, Claude and duplicated sessions keep that choice.
-- **Add a new host directly.** Fetch its fingerprint through the selected route, verify it, then confirm. A pre-existing host `known_hosts` entry is no longer required.
-- **See the actual failure reason.** Desktop calls preserve error codes. Unavailable routes fail closed, while existing private-key, credential and device-read protections remain in place.
+- **Keep terminal queries working when a view is hidden.** Fixes a missing-response bug that could leave command-line programs waiting and typed input without an echo after switching pages or closing a terminal view.
+- **Use several views of the same session.** Each session handles terminal queries once, so opening another window or restoring output does not send duplicate replies.
+- **Diagnose slow operations.** Local stage records help investigate delays and failures without recording commands, conversations or credentials. Existing environment settings and sign-in data are retained.
 
 ## Concerned about account and environment linking in Claude Code?
 

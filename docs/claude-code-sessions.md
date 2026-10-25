@@ -1,6 +1,6 @@
 # Claude Code sessions
 
-This document describes Envara 1.1.2 for macOS arm64, including per-connection SSH route selection and first-contact fingerprint confirmation. Release-specific checks remain in [release verification](verification.md); terminal input checks retain their [1.0.2 scope](verification.md#102-发布验证). Historical measurements do not establish real Claude account login or model-directed tool use. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
+This document describes Envara 1.1.3 for macOS arm64, including terminal query handling that continues when its views are hidden, per-connection SSH route selection and first-contact fingerprint confirmation. Release-specific checks remain in [release verification](verification.md); earlier terminal input measurements retain their [1.0.2 scope](verification.md#102-发布验证). Historical measurements do not establish real Claude account login or model-directed tool use. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
 
 ## Start and installation
 
@@ -25,11 +25,15 @@ Ending a session retains its entry. Renaming or removing an entry changes only t
 
 ## Terminal input
 
+In 1.1.3, each terminal session handles queries from its command-line program even when the panel is hidden or its windows are closed. This fixes missing query responses that could leave a program waiting and consume subsequent keystrokes without displaying them. Multiple views and restored output do not generate duplicate responses; user input still goes only to the active, visible terminal. Closing a view retains the process, while **End session** ends it.
+
 From 1.0.2, **Shift+Enter** sends the same multiline sequence as Option+Enter; plain Enter keeps its normal submit behavior. Confirming an input-method candidate with Enter does not also submit the terminal line. These rules apply to both the workspace panel and independent terminal window.
 
 On macOS, the terminal waits for the input method's confirmed character on the backslash key, so Chinese `、` and English `\` or `|` retain their intended text. Screen-reader support follows the system accessibility state without restarting the session. These input changes preserve the official CLI, network fence, device restrictions and account directories.
 
 The refreshed 1.0.2 package also keeps IME preedit after a complete wide character and moves it to the next visible row at a pending line wrap. At the bottom edge or when the text is too long, a bounded preedit popup uses an adjacent row; it can temporarily cover nearby output but keeps the current input line readable. The native candidate anchor follows the preedit, and returns to the terminal cursor when composition ends. This changes display positioning only, without rewriting terminal output or the committed input sequence.
+
+Bounded local diagnostic records contain fixed stage names, durations, byte counts and sequence numbers within that application run. They do not record commands, terminal output, conversations, credentials or private paths. Fast operations do not trigger a disk write on their own; their recent stage records can be saved along with slow operations, failures or session shutdown. These records help distinguish input delivery from slow workspace requests. Query handling does not resolve provider authentication errors, and its verification does not establish every long-running or sleep/resume scenario.
 
 ## Login profiles and data
 

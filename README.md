@@ -5,7 +5,7 @@
 <p align="center"><strong>给每一套工作，一个独立的境舱。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原创代码许可证：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.2-475569" alt="Envara 1.1.2" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.3-475569" alt="Envara 1.1.3" /></a>
 </p>
 <p align="center">
   <strong>简体中文</strong> · <a href="docs/readme/zh-TW.md">繁體中文</a> · <a href="docs/readme/en.md">English</a> · <a href="docs/readme/ja.md">日本語</a> · <a href="docs/readme/ko.md">한국어</a> · <a href="docs/readme/es.md">Español</a> · <a href="docs/readme/fr.md">Français</a> · <a href="docs/readme/de.md">Deutsch</a> · <a href="docs/readme/pt-BR.md">Português (Brasil)</a>
@@ -14,17 +14,17 @@
   <a href="https://github.com/ink-scholar/Envara/releases/latest">下载 macOS 版</a> · <a href="docs/user-guide.md">使用指南</a> · <a href="docs/capability-matrix.md">全部功能</a> · <a href="docs/SUPPORT.md">支持项目</a>
 </p>
 
-**不止是 Claude Code 的隐私隔离工具，更是浏览器、终端和桌面应用的一站式独立工作区。**
+**浏览器、终端和桌面应用，放进各自独立的工作环境。**
 
 Envara 境舱是开源的本地桌面工作台。为不同项目、账号或地区保存各自的网络、浏览资料和工具配置；选好环境，从查资料、写代码到打开应用，接着上次的工作继续。
 
 ![Envara 工作区，使用合成示例数据](docs/media/workspace-zh-CN.png)
 
-## 1.1.2：选择 SSH 路线，确认首次连接
+## 1.1.3：切换页面，终端继续工作
 
-- **每条连接独立选路**：明确选择本机网络或已配置环境，普通终端、Claude 和复制会话沿用保存的选择。
-- **直接添加新主机**：通过所选路线读取服务器指纹，核对后确认；不再要求预先向宿主 `known_hosts` 添加记录。
-- **清楚呈现失败原因**：保留桌面调用的真实错误码；路线不可用时拒绝连接，既有私钥、凭据与设备读取保护继续保留。
+- **隐藏后继续应答**：修复切走页面或关闭终端视图后，命令行程序因收不到终端查询回应而一直等待、输入没有回显的问题。
+- **同一会话支持多个视图**：终端查询由会话统一处理，打开独立窗口或恢复历史画面不会重复回应。
+- **卡顿有迹可查**：慢操作与失败会生成仅保存在本机的阶段诊断，不记录命令、聊天内容或凭据。已有环境配置和登录资料继续保留。
 
 ## Claude Code「防封」与环境隔离
 

@@ -14,6 +14,7 @@ installed packages' complete notices and their dependency notices to
 | socks-proxy-agent | 10.1.0 | SOCKS HTTP/HTTPS agent | MIT | [proxy-agents](https://github.com/TooTallNate/proxy-agents/tree/main/packages/socks-proxy-agent) |
 | ipaddr.js | 2.5.0 | IP address classification | MIT | [ipaddr.js](https://github.com/whitequark/ipaddr.js) |
 | @xterm/xterm | 6.0.0 | Renderer terminal | MIT | [xterm.js](https://github.com/xtermjs/xterm.js) |
+| @xterm/headless | 6.0.0 | Session-owned terminal protocol state | MIT | [xterm.js](https://github.com/xtermjs/xterm.js/tree/6.0.0) |
 | @xterm/addon-fit | 0.11.0 | Renderer terminal size | MIT | [fit addon](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-fit) |
 | @electron/rebuild | 4.2.1 | Development build tool | MIT | [Electron rebuild](https://github.com/electron/rebuild/tree/v4.2.1) |
 
@@ -24,6 +25,11 @@ the pinned Electron runtime and compiles only node-pty from source if that check
 fails. `npm run native:rebuild` explicitly requests a source rebuild. Windows and
 Linux must be built and verified on their native CI runner; a macOS check does
 not establish their acceptance.
+
+The `@xterm/headless` 6.0.0 npm archive omits its standalone license file.
+`Xterm-6.0.0-LICENSE` retains the unmodified MIT notice from the matching
+[official source tag](https://github.com/xtermjs/xterm.js/blob/6.0.0/LICENSE).
+The native preparation step includes this notice in the package license manifest.
 
 The complete node-pty package is unpacked so its native modules, spawn helper,
 Windows worker, winpty fallback, and Microsoft Terminal ConPTY files retain

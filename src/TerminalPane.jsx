@@ -8,6 +8,7 @@ import { useAppearance } from './appearance.jsx';
 import { getTerminalTheme, terminalFontFamily } from './terminal-theme.mjs';
 import { attachTerminalKeyboard } from './terminal-keyboard.mjs';
 import { attachTerminalComposition } from './terminal-composition.mjs';
+import { attachTerminalProtocol } from './terminal-protocol.mjs';
 import { SYSTEM_BROWSER, terminalNetworks } from './link-browser.mjs';
 import { CLAUDE_SESSION, sessionNetworks, sessionChoiceHost, changeSessionKind, terminalSessionOptions } from './terminal-session-choice.mjs';
 import { TerminalErrorNotices } from './terminal-error-notices.mjs';
@@ -73,6 +74,7 @@ function TerminalSession({ session, active, visible, autoFocus, focusRequest, pr
     terminal.open(containerRef.current);
     const detachKeyboard = attachTerminalKeyboard(terminal);
     const detachComposition = attachTerminalComposition(terminal);
+    const protocol = attachTerminalProtocol(terminal);
     terminal.textarea?.setAttribute('aria-label', translationRef.current('环境终端输入'));
 
     // Serialize xterm writes so a replay repair cannot reset queued live output.
@@ -105,7 +107,7 @@ function TerminalSession({ session, active, visible, autoFocus, focusRequest, pr
       finally { sending = false; }
     };
     const inputSubscription = terminal.onData(data => {
-      if (disposed || !visibleRef.current || sessionRef.current.status !== 'running') return;
+      if (disposed || protocol.isResponse(data) || !visibleRef.current || sessionRef.current.status !== 'running') return;
       input += data;
       if (!inputTimer && !sending) inputTimer = setTimeout(() => { void flushInput(); }, 12);
     });
@@ -135,7 +137,7 @@ function TerminalSession({ session, active, visible, autoFocus, focusRequest, pr
       clearTimeout(inputTimer); clearTimeout(fitTimer);
       input = ''; output.length = 0;
       window.removeEventListener('focus', focusWindow);
-      observer.disconnect(); inputSubscription.dispose(); unregister(); detachKeyboard(); detachComposition();
+      observer.disconnect(); inputSubscription.dispose(); unregister(); detachKeyboard(); detachComposition(); protocol.dispose();
       controlRef.current = null; terminal.dispose();
     };
   }, [session.sessionId, register, onError]);

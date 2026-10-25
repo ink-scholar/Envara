@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { _electron } from 'playwright-core';
+import { TerminalProtocol } from '../electron/terminal-protocol.mjs';
 
 // Real Electron, React, TerminalDock and xterm, but no Envara main process,
 // PTY, saved workspace, network, clipboard or system input-method changes.
@@ -27,6 +28,7 @@ const openTerminal = Terminal.prototype.open;
 Terminal.prototype.open = function (...args) {
   const result = openTerminal.apply(this, args);
   window.fixture.terminal = this;
+  window.fixture.terminals.push(this);
   this.onData(data => window.fixture.rawData.push(data));
   return result;
 };
@@ -41,7 +43,8 @@ function render() {
   const dockProps = { profiles: [profile], selectedProfileId: profile.id,
     visible: options.visible, ...(options.screenReaderMode === undefined ? {} : { screenReaderMode: options.screenReaderMode }) };
   root.render(<I18nProvider api={api}><AppearanceProvider api={api}>
-    {options.standalone ? <TerminalWindowApp profileId={profile.id} sessionId={session.sessionId} /> : <TerminalDock {...dockProps} />}
+    {options.standalone ? <TerminalWindowApp profileId={profile.id} sessionId={session.sessionId} />
+      : Array.from({ length: options.views || 1 }, (_, index) => <TerminalDock key={index} {...dockProps} />)}
   </AppearanceProvider></I18nProvider>);
 }
 window.fixture.mount = (next = {}) => {
@@ -50,11 +53,12 @@ window.fixture.mount = (next = {}) => {
   window.fixture.writes = [];
   window.fixture.rawData = [];
   window.fixture.terminal = null;
+  window.fixture.terminals = [];
   window.fixture.unexpected = [];
   window.fixture.snapshot = { profiles: [profile], proxies: [], settings: { language: 'zh-CN', appearance: 'dark' },
     system: { platform: 'darwin', appVersion: 'fixture', accessibilitySupportEnabled: options.screenReaderMode === true } };
   window.fixture.terminalSnapshot = { profiles: [{ profileId: profile.id, name: profile.name,
-    sessions: [{ ...session, status: options.status || 'running' }] }] };
+    sessions: [{ ...session, status: options.status || 'running', replay: options.replay || '' }] }] };
   root = createRoot(document.querySelector('#root'));
   render();
 };
@@ -92,6 +96,7 @@ app.whenReady().then(() => {
     const snapshots = new Set(), terminalEvents = new Set();
     window.fixture = { writes: [], unexpected: [],
       publishSnapshot() { for (const listener of snapshots) listener(structuredClone(this.snapshot)); },
+      publishTerminalEvent(event) { for (const listener of terminalEvents) listener(structuredClone(event)); },
       listenerCount: () => snapshots.size + terminalEvents.size,
     };
     window.envara = { isDesktop: true,
@@ -129,7 +134,7 @@ after(async () => {
 
 async function mount(options = {}) {
   await page.evaluate(value => window.fixture.mount(value), options);
-  await page.locator('.xterm-helper-textarea').waitFor({ state: 'attached' });
+  await page.locator('.xterm-helper-textarea').first().waitFor({ state: 'attached' });
   // Let effects set disableStdin and settle xterm's asynchronous replay/focus.
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
@@ -403,6 +408,105 @@ test('hidden and non-running terminals do not forward punctuation or Shift+Enter
     assert.equal(sent(await events([{ append: '、' }, input('、'), key('keydown', { shiftKey: true }), key('keyup', { shiftKey: true }),
       backslash('keydown'), { append: '、' }, input('、'), backslash('keyup')])), '');
   }
+});
+
+test('renderer query replies never reach the PTY while subsequent keyboard input does', { skip: noDisplay }, async () => {
+  await mount();
+  const raw = await page.evaluate(async () => {
+    const terminal = window.fixture.terminal;
+    terminal.options.windowOptions = { getWinSizePixels: true, getCellSizePixels: true, getWinSizeChars: true };
+    await new Promise(resolve => terminal.write(
+      '\x1b[5n\x1b[6n\x1b[?6n\x1b[c\x1b[>c\x1b[4$p\x1b[?25$p' +
+      '\x1bP$qm\x1b\\\x1b[14t\x1b[16t\x1b[18t' +
+      '\x1b]4;1;?\x07\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x07', resolve));
+    return window.fixture.rawData.slice();
+  });
+  // Observe the actual native xterm replies before TerminalDock's filter. This
+  // prevents a passing test caused by queries that did not run at all.
+  assert.equal(raw.length, 15);
+  assert.ok(raw.includes('\x1b[0n'));
+  assert.ok(raw.some(data => /^\x1b\]\d+;.*rgb:/.test(data)));
+  assert.equal(sent(await events([])), '', 'only the main-process terminal may answer these queries');
+  assert.equal(sent(await events([
+    key('keydown', { key: 'a', code: 'KeyA', keyCode: 65, which: 65 }),
+    key('keyup', { key: 'a', code: 'KeyA', keyCode: 65, which: 65 }),
+    { append: '、' }, input('、'),
+  ])), 'a、', 'the next task is ordinary input, not a terminal reply');
+});
+
+test('query filtering preserves mixed OSC colour changes and their native query results', { skip: noDisplay }, async () => {
+  await mount();
+  const raw = await page.evaluate(async () => {
+    await new Promise(resolve => window.fixture.terminal.write(
+      '\x1b]4;1;#123456;2;?\x1b\\\x1b]10;#112233;?;#445566\x1b\\' +
+      '\x1b]4;1;?\x1b\\\x1b]10;?\x1b\\\x1b]12;?\x1b\\', resolve));
+    return window.fixture.rawData.slice();
+  });
+  assert.ok(raw.includes('\x1b]4;1;rgb:1212/3434/5656\x1b\\'), 'indexed colour settings are applied');
+  assert.ok(raw.includes('\x1b]10;rgb:1111/2222/3333\x1b\\'), 'foreground settings are applied');
+  assert.ok(raw.includes('\x1b]12;rgb:4444/5555/6666\x1b\\'), 'cursor settings after a query are applied');
+  assert.equal(sent(await events([])), '', 'native colour replies remain local to the view');
+});
+
+test('multiple views and replayed or fragmented queries cannot duplicate protocol input', { skip: noDisplay }, async () => {
+  await mount({ views: 2, replay: '\x1b[6n' });
+  await page.waitForFunction(() => window.fixture.terminals.length === 2 && window.fixture.rawData.length === 2);
+  await page.evaluate(() => {
+    window.fixture.publishTerminalEvent({ type: 'data', sessionId: 'input-session', profileId: 'input-fixture', sequence: 1, data: '\x1b[' });
+    window.fixture.publishTerminalEvent({ type: 'data', sessionId: 'input-session', profileId: 'input-fixture', sequence: 2, data: '6n' });
+  });
+  await page.waitForFunction(() => window.fixture.rawData.length === 4);
+  assert.equal(await page.evaluate(() => window.fixture.rawData.filter(data => /^\x1b\[\d+;\d+R$/.test(data)).length), 4);
+  assert.equal(sent(await events([])), '', 'two live renderers and their replay never reply to the PTY');
+});
+
+test('focus reports in the same query batch still come from the real view', { skip: noDisplay }, async () => {
+  await mount();
+  await page.evaluate(async () => {
+    const terminal = window.fixture.terminal;
+    terminal.blur();
+    await new Promise(resolve => terminal.write('\x1b[6n\x1b[?1004h', resolve));
+  });
+  assert.equal(sent(await events([])), '\x1b[O', 'the query is filtered but the actual unfocused state is reported');
+  await page.evaluate(() => window.fixture.terminal.focus());
+  assert.equal(sent(await events([])), '\x1b[O\x1b[I', 'later focus changes retain their normal bytes');
+});
+
+test('IME composition and paste after query parsing remain user input', { skip: noDisplay }, async () => {
+  await mount();
+  await page.evaluate(() => new Promise(resolve => window.fixture.terminal.write('\x1b[6n', resolve)));
+  assert.equal(sent(await events([
+    imeKey('keydown'), { type: 'compositionstart', data: '' },
+    { type: 'compositionupdate', data: '中文' }, { value: '中文' },
+    { type: 'input', inputType: 'insertCompositionText', data: '中文', isComposing: true }, { wait: 4 },
+    { type: 'compositionend', data: '中文' }, input('中文'), imeKey('keyup'), { wait: 4 },
+  ])), '中文');
+  await page.evaluate(() => window.fixture.terminal.paste('粘贴'));
+  assert.equal(sent(await events([])), '中文粘贴');
+});
+
+test('canonical and renderer cursor replies agree after long output and resizing', { skip: noDisplay }, async () => {
+  const output = Array.from({ length: 60 }, (_, index) => `${index}: 中文abcdef `.repeat(4)).join('\r\n');
+  await geometryTerminal(output, { columns: 20, rows: 5 });
+  const replies = [];
+  const protocol = new TerminalProtocol({ columns: 20, rows: 5, write: data => replies.push(data) });
+  try {
+    await protocol.write(output);
+    for (const [columns, rows] of [[20, 5], [40, 12], [18, 6], [60, 24]]) {
+      await protocol.resize(columns, rows);
+      const rendererReply = await page.evaluate(async ({ columns, rows }) => {
+        const terminal = window.fixture.terminal;
+        terminal.resize(columns, rows);
+        window.fixture.rawData = [];
+        await new Promise(resolve => terminal.write('\x1b[6n', resolve));
+        return window.fixture.rawData.at(-1);
+      }, { columns, rows });
+      await protocol.write('\x1b[6n');
+      assert.match(rendererReply, /^\x1b\[\d+;\d+R$/);
+      assert.equal(replies.at(-1), rendererReply, `cursor position agrees at ${columns}x${rows}`);
+    }
+    assert.equal(sent(await events([])), '', 'the renderer remains a display even after reflow');
+  } finally { protocol.dispose(); }
 });
 
 test('language and appearance updates keep the same input element and preserve queued input', { skip: noDisplay }, async () => {

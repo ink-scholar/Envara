@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
-import { candidateBootstrapExpression, candidateEnvironment, clearCandidateRuntime, observeCandidateProcesses,
+import { candidateBootstrapExpression, candidateEnvironment, candidateFailure, clearCandidateRuntime, observeCandidateProcesses,
   parseCandidateArguments, parseCandidateProcesses, prepareCandidateRuntime, requiredChecks,
-  validateCandidateInputs, verifyMacosReleaseCandidate, writeCandidateReceipt } from '../scripts/verify-macos-release-candidate.mjs';
+  readCandidateProcessSnapshot, validateCandidateInputs, verifyMacosReleaseCandidate, waitForCandidateBrowserEndpoint,
+  writeCandidateReceipt } from '../scripts/verify-macos-release-candidate.mjs';
 
 function input(root = '/fixture/release') {
   const nonce = randomUUID(), evidence = path.join(root, 'evidence', nonce);
@@ -112,6 +114,22 @@ test('read-only process parser rejects incomplete identities and never needs arg
     assert.throws(() => parseCandidateProcesses(text), { code: 'CANDIDATE_PROCESS_SNAPSHOT_FAILED' });
 });
 
+test('process snapshots retry only incomplete reads, and repeated failure remains closed with categorical evidence', async () => {
+  let reads = 0;
+  const valid = '123 1 123 Ss Wed Oct 28 10:00:00 2026 Envara\n';
+  const result = await readCandidateProcessSnapshot({ read: async () => ++reads === 1 ? 'incomplete private row' : valid, delay: async () => {} });
+  assert.equal(reads, 2); assert.equal(result[0].pid, 123);
+  reads = 0;
+  await assert.rejects(readCandidateProcessSnapshot({ read: async () => { reads += 1; return 'incomplete private row'; }, delay: async () => {} }),
+    error => { assert.deepEqual(candidateFailure(error, 'process-cleanup'), {
+      code: 'CANDIDATE_PROCESS_SNAPSHOT_FAILED', phase: 'process-cleanup', reason: 'SNAPSHOT_ROW_SHAPE', attempts: 3 }); return true; });
+  assert.equal(reads, 3);
+  reads = 0;
+  await assert.rejects(readCandidateProcessSnapshot({ read: async () => { reads += 1; throw Object.assign(new Error('cannot inspect'), { code: 'EACCES' }); },
+    delay: async () => { throw new Error('must not retry command failures'); } }), { code: 'EACCES' });
+  assert.equal(reads, 1);
+});
+
 test('only descendants of the captured process identity are owned, and PID reuse is refused', () => {
   const root = { pid: 10, ppid: 1, pgid: 10, birth: 'fixture birth', command: '/fixture/Envara' };
   const child = { pid: 11, ppid: 10, pgid: 10, birth: 'child birth', command: '/bin/zsh' };
@@ -135,6 +153,47 @@ test('Darwin exiting and zombie command changes complete observation without tru
     assert.throws(() => observeCandidateProcesses([{ ...dead, birth: 'another birth' }], root), { code: 'CANDIDATE_PROCESS_IDENTITY_CHANGED' });
     assert.throws(() => observeCandidateProcesses([{ ...dead, state: 'S' }], root), { code: 'CANDIDATE_PROCESS_IDENTITY_CHANGED' });
   }
+});
+
+test('browser endpoint waits through startup responses before returning a same-port loopback websocket', async t => {
+  let requests = 0;
+  const server = http.createServer((request, response) => {
+    assert.equal(request.url, '/json/version/'); requests += 1;
+    if (requests < 3) { response.writeHead(503); response.end(); return; }
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify({ webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/fixture` }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  assert.equal(await waitForCandidateBrowserEndpoint(server.address().port, { timeout: 1000 }),
+    `ws://127.0.0.1:${server.address().port}/devtools/browser/fixture`);
+  assert.equal(requests, 3);
+});
+
+test('browser endpoint rejects foreign addresses and reports bounded startup failure categorically', async () => {
+  for (const address of ['ws://example.invalid:1234/devtools/browser/fixture', 'ws://127.0.0.1:5678/devtools/browser/fixture',
+    'ws://name:secret@127.0.0.1:1234/devtools/browser/fixture', 'ws://127.0.0.1:1234/other', 'not-a-url']) {
+    await assert.rejects(waitForCandidateBrowserEndpoint(1234, { read: async () => ({ webSocketDebuggerUrl: address }) }),
+      { code: 'CANDIDATE_BOOTSTRAP_FAILED' });
+  }
+  await assert.rejects(waitForCandidateBrowserEndpoint(1234, { timeout: 20,
+    read: async () => { throw Object.assign(new Error('private endpoint details'), { code: 'ECONNREFUSED' }); } }),
+  error => {
+    assert.deepEqual(candidateFailure(error, 'browser-endpoint'),
+      { code: 'CANDIDATE_CHECK_TIMEOUT', phase: 'browser-endpoint', reason: 'ECONNREFUSED' });
+    return true;
+  });
+});
+
+test('failure evidence preserves fixed inspector detail and excludes raw diagnostic contents', () => {
+  const error = Object.assign(new Error('sensitive endpoint, path and expression'), {
+    code: 'CANDIDATE_BOOTSTRAP_FAILED', operation: 'Runtime.evaluate', reason: 'INSPECTOR_EXCEPTION' });
+  assert.deepEqual(candidateFailure(error, 'pre-main-isolation'), {
+    code: 'CANDIDATE_BOOTSTRAP_FAILED', phase: 'pre-main-isolation', operation: 'Runtime.evaluate', reason: 'INSPECTOR_EXCEPTION' });
+  assert.deepEqual(candidateFailure(new Error('CANDIDATE_BOOTSTRAP_FAILED'), 'main-inspector'),
+    { code: 'CANDIDATE_BOOTSTRAP_FAILED', phase: 'main-inspector' });
+  assert.deepEqual(candidateFailure({ message: 'private', code: 'private', reason: 'private', operation: 'private' }, '/private/path'),
+    { code: 'CANDIDATE_CHECK_FAILED', phase: 'unknown' });
 });
 
 function orchestration(overrides = {}) {
@@ -161,8 +220,19 @@ test('failed GUI cannot be upgraded to a pass by successful cleanup and does not
     code: 'CANDIDATE_GUI_FAILED', observation: { appLaunched: true, checks: [], remainingOwnedProcesses: 0, cleanupComplete: true } }); } });
   await assert.rejects(verifyMacosReleaseCandidate(input(), f.methods), error => error.receipt.passed === false);
   assert(!f.events.includes('keychain')); assert(f.events.includes('cleanup'));
-  assert.deepEqual(f.stored[0].value.error, { code: 'CANDIDATE_GUI_FAILED' });
+  assert.deepEqual(f.stored[0].value.error, { code: 'CANDIDATE_GUI_FAILED', phase: 'launch' });
   assert(!JSON.stringify(f.stored).includes('sensitive path'));
+});
+
+test('a cleanup failure does not overwrite the phase and reason of the first desktop failure', async () => {
+  const f = orchestration({ desktop: async () => { throw Object.assign(new Error('private'), {
+    observation: { appLaunched: false, checks: [], remainingOwnedProcesses: 0, cleanupComplete: true,
+      failure: { code: 'CANDIDATE_CHECK_FAILED', phase: 'first-launch-ui', reason: 'TimeoutError' } } }); },
+  cleanup: async () => { throw new Error('cleanup path'); } });
+  await assert.rejects(verifyMacosReleaseCandidate(input(), f.methods));
+  assert.deepEqual(f.stored[0].value.error, { code: 'CANDIDATE_CHECK_FAILED', phase: 'first-launch-ui', reason: 'TimeoutError' });
+  assert.deepEqual(f.stored[0].value.cleanup.error, { code: 'CANDIDATE_CLEANUP_FAILED', phase: 'runtime-cleanup' });
+  assert(!JSON.stringify(f.stored).includes('cleanup path'));
 });
 
 test('uncertain native cleanup preserves temporary data and refuses publication', async () => {

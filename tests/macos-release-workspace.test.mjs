@@ -7,6 +7,7 @@ import {
   LSREGISTER, RELEASE_SLOT_KINDS, openReleaseWorkspace, parseLaunchServicesDump,
   planReleaseCleanup, releaseWorkspacePaths,
 } from '../scripts/macos-release-workspace.mjs';
+import { inventory } from '../scripts/build-macos-release.mjs';
 
 // Every command is handled below. These tests never invoke a native executable.
 const otherApp = '/Applications/Other.app';
@@ -46,6 +47,28 @@ async function sealed(workspace, kind = 'candidate') {
   const filename = await workspace.claim(kind);
   await fakeApp(filename); await workspace.seal(kind);
   return filename;
+}
+
+async function rebuiltCandidate(t) {
+  const f = await fixture(t), workspace = await f.open(), app = await workspace.claim('candidate');
+  const parent = path.dirname(app), original = await fs.lstat(parent);
+  // Retain the empty old directory outside the workspace so inode reuse cannot
+  // turn this replacement test into an unchanged-parent test.
+  await fs.rename(parent, path.join(f.temporary, 'original-candidate-parent'));
+  await fs.mkdir(parent, { mode: 0o755 }); await fs.chmod(parent, 0o755);
+  assert.notEqual((await fs.lstat(parent)).ino, original.ino);
+  await fakeApp(app);
+  return { ...f, workspace, app, parent, signedManifest: await inventory(app) };
+}
+
+const completedBuilder = { code: 0, closeConfirmed: true, cleanupUncertain: false };
+
+async function assertUnsealedRetained(workspace, app) {
+  const fake = fakeCommands(), report = await workspace.cleanup({ run: fake.run });
+  assert.equal(report.complete, false);
+  assert.equal(report.cleanupErrors[0].code, 'UNSEALED_APP_RETAINED');
+  assert.equal(fake.calls.length, 0);
+  assert(await exists(app)); assert(await exists(path.join(workspace.root, 'lock.json')));
 }
 
 function fakeCommands({ registrations = [], failure = null, mount = null } = {}) {
@@ -210,6 +233,93 @@ test('seal refuses a foreign sibling while retaining the claimed App and notes',
   const fake = fakeCommands({ registrations: [app] }), report = await workspace.cleanup({ run: fake.run });
   assert.equal(report.complete, false); assert.equal(report.cleanupErrors[0].code, 'UNSEALED_APP_RETAINED');
   assert.equal(fake.calls.length, 0); assert(await exists(app)); assert.deepEqual(await fs.readFile(notes), contents);
+});
+
+test('completed builder output adopts only the replaced candidate parent before sealing and cleanup', async t => {
+  const f = await rebuiltCandidate(t), replacement = await fs.lstat(f.parent);
+  const options = { builderResult: completedBuilder, signedManifest: f.signedManifest };
+  assert.equal(await f.workspace.adoptCandidateOutput(options), f.app);
+  const after = await fs.lstat(f.parent);
+  assert.equal(after.ino, replacement.ino); assert.equal(after.dev, replacement.dev);
+  assert.equal(after.mode & 0o7777, 0o700);
+  assert.deepEqual(await inventory(f.app), f.signedManifest);
+  const events = (await fs.readFile(f.workspace.journalPath, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(events.filter(event => event.event === 'builder-output-adopted').length, 1);
+  await assert.rejects(f.workspace.adoptCandidateOutput(options), { code: 'BUILDER_ADOPTION_INVALID' });
+  await f.workspace.seal('candidate');
+  const fake = fakeCommands({ registrations: [f.app] });
+  assert.equal((await f.workspace.cleanup({ run: fake.run })).complete, true);
+  assert.equal(fake.unregisters().length, 1);
+  assert.equal(await exists(f.app), false);
+  assert.equal(await exists(path.join(f.workspace.root, 'lock.json')), false);
+});
+
+test('failed or uncertain builder completion cannot adopt or chmod the candidate parent', async t => {
+  for (const builderResult of [
+    { ...completedBuilder, code: 1 }, { ...completedBuilder, closeConfirmed: false },
+    { ...completedBuilder, cleanupUncertain: true }, { code: 0 },
+  ]) await t.test(JSON.stringify(builderResult), async t => {
+    const f = await rebuiltCandidate(t), journal = await fs.readFile(f.workspace.journalPath);
+    await assert.rejects(f.workspace.adoptCandidateOutput({ builderResult, signedManifest: f.signedManifest }),
+      { code: 'BUILDER_COMPLETION_UNCONFIRMED' });
+    assert.equal((await fs.lstat(f.parent)).mode & 0o7777, 0o755);
+    assert.deepEqual(await fs.readFile(f.workspace.journalPath), journal);
+    assert.deepEqual(await inventory(f.app), f.signedManifest);
+    await assertUnsealedRetained(f.workspace, f.app);
+  });
+});
+
+test('candidate adoption refuses replacement of the controlled output ancestor', async t => {
+  const f = await rebuiltCandidate(t), journal = await fs.readFile(f.workspace.journalPath);
+  await fs.rename(f.workspace.candidateOutput, path.join(f.temporary, 'original-candidate-output'));
+  await fs.mkdir(f.workspace.candidateOutput, { mode: 0o700 });
+  await fs.mkdir(f.parent, { mode: 0o755 }); await fs.chmod(f.parent, 0o755); await fakeApp(f.app);
+  assert.deepEqual(await inventory(f.app), f.signedManifest);
+  await assert.rejects(f.workspace.adoptCandidateOutput({ builderResult: completedBuilder, signedManifest: f.signedManifest }),
+    { code: 'BUILDER_OUTPUT_PARENT_CHANGED' });
+  assert.equal((await fs.lstat(f.parent)).mode & 0o7777, 0o755);
+  assert.deepEqual(await fs.readFile(f.workspace.journalPath), journal);
+  await assertUnsealedRetained(f.workspace, f.app);
+});
+
+test('candidate adoption refuses bytes that differ from the signed manifest', async t => {
+  const f = await rebuiltCandidate(t), journal = await fs.readFile(f.workspace.journalPath);
+  const asar = path.join(f.app, 'Contents/Resources/app.asar');
+  await fs.writeFile(asar, 'modified after synthetic signing\n');
+  await assert.rejects(f.workspace.adoptCandidateOutput({ builderResult: completedBuilder, signedManifest: f.signedManifest }),
+    { code: 'BUILDER_SIGNED_MANIFEST_CHANGED' });
+  assert.equal((await fs.lstat(f.parent)).mode & 0o7777, 0o755);
+  assert.deepEqual(await fs.readFile(f.workspace.journalPath), journal);
+  assert.equal(await fs.readFile(asar, 'utf8'), 'modified after synthetic signing\n');
+  await assertUnsealedRetained(f.workspace, f.app);
+});
+
+test('candidate adoption rejects extra siblings and a symlinked output directory', async t => {
+  for (const kind of ['file', 'sibling-symlink', 'parent-symlink']) await t.test(kind, async t => {
+    const f = await rebuiltCandidate(t), journal = await fs.readFile(f.workspace.journalPath);
+    if (kind === 'file') await fs.writeFile(path.join(f.parent, 'foreign.txt'), 'retain foreign file\n', { mode: 0o600 });
+    else if (kind === 'sibling-symlink') await fs.symlink('Envara.app', path.join(f.parent, 'foreign-link'));
+    else {
+      const retained = path.join(f.temporary, 'retained-candidate-parent');
+      await fs.rename(f.parent, retained); await fs.symlink(retained, f.parent);
+    }
+    await assert.rejects(f.workspace.adoptCandidateOutput({ builderResult: completedBuilder, signedManifest: f.signedManifest }),
+      { code: kind === 'parent-symlink' ? 'BUILDER_OUTPUT_PARENT_UNSAFE' : 'BUILDER_OUTPUT_NOT_EXCLUSIVE' });
+    assert.deepEqual(await fs.readFile(f.workspace.journalPath), journal);
+    if (kind === 'file') assert.equal(await fs.readFile(path.join(f.parent, 'foreign.txt'), 'utf8'), 'retain foreign file\n');
+    else assert.equal((await fs.lstat(kind === 'parent-symlink' ? f.parent : path.join(f.parent, 'foreign-link'))).isSymbolicLink(), true);
+    await assertUnsealedRetained(f.workspace, f.app);
+  });
+});
+
+test('ordinary payload sealing still refuses a replaced parent directory', async t => {
+  const f = await fixture(t), workspace = await f.open(), app = await workspace.claim('payload');
+  const parent = path.dirname(app), journal = await fs.readFile(workspace.journalPath);
+  await fs.rename(parent, path.join(f.temporary, 'original-payload-parent'));
+  await fs.mkdir(parent, { mode: 0o700 }); await fakeApp(app);
+  await assert.rejects(workspace.seal('payload'), { code: 'SEAL_PARENT_CHANGED' });
+  assert.deepEqual(await fs.readFile(workspace.journalPath), journal);
+  await assertUnsealedRetained(workspace, app);
 });
 
 test('unknown root or candidate entries block workspace reuse without deleting evidence', async t => {

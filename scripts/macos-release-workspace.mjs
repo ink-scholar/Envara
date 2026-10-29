@@ -120,6 +120,15 @@ async function bundleTree(app, uid) {
   return rows;
 }
 
+function contentInventory(tree) {
+  return Object.fromEntries(tree.map(item => {
+    const value = { mode: item.mode, kind: item.kind };
+    if (item.kind === 'file') Object.assign(value, { bytes: Number(item.size), sha256: item.sha256 });
+    if (item.kind === 'symlink') value.target = item.target;
+    return [item.relative, value];
+  }).sort(([a], [b]) => a.localeCompare(b)));
+}
+
 async function privateDirectory(filename, uid, create = false) {
   if (create) try { await fs.mkdir(filename, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
   const info = await describe(filename);
@@ -226,10 +235,56 @@ export async function openReleaseWorkspace({ home = os.homedir(), repository, ui
     await guard(); requireThat(!cleanupStarted && RELEASE_SLOT_KINDS.includes(kind) && !claims.has(kind), 'CLAIM_INVALID');
     await fixedStructure(paths, uid);
     const app = slots[kind]; requireThat(!await exists(app), 'CLAIM_PATH_OCCUPIED');
-    const entry = { kind, path: app, parent: await privateDirectory(path.dirname(app), uid), sealed: false };
+    const entry = { kind, path: app, parent: await privateDirectory(path.dirname(app), uid), sealed: false,
+      ...(kind === 'candidate' ? { outputParent: await privateDirectory(paths.candidateOutput, uid) } : {}) };
     await directoryEntries(path.dirname(app), [], uid, 'CLAIM_PARENT_NOT_EMPTY');
-    await record('claim-intent', { kind, path: app, parent: entry.parent }); claims.set(kind, entry);
+    await record('claim-intent', { kind, path: app, parent: entry.parent, ...(entry.outputParent ? { outputParent: entry.outputParent } : {}) }); claims.set(kind, entry);
     return app;
+  }
+  async function adoptCandidateOutput({ builderResult, signedManifest } = {}) {
+    await guard(); const entry = claims.get('candidate');
+    requireThat(entry && !entry.sealed && !entry.builderOutputAdopted && !cleanupStarted, 'BUILDER_ADOPTION_INVALID');
+    requireThat(builderResult?.code === 0 && builderResult.closeConfirmed === true
+      && builderResult.cleanupUncertain !== true, 'BUILDER_COMPLETION_UNCONFIRMED');
+    requireThat(signedManifest && typeof signedManifest === 'object' && !Array.isArray(signedManifest), 'BUILDER_SIGNED_MANIFEST_INVALID');
+    const parent = path.dirname(entry.path), before = await describe(parent);
+    const guardOutput = async () => {
+      await guard();
+      requireThat(same(await privateDirectory(paths.candidateOutput, uid), entry.outputParent), 'BUILDER_OUTPUT_PARENT_CHANGED');
+      await fixedStructure(paths, uid);
+      const current = await describe(parent);
+      requireThat(current.kind === 'directory' && current.uid === uid && current.dev === entry.parent.dev
+        && [0o700, 0o755].includes(current.mode) && await fs.realpath(parent) === parent, 'BUILDER_OUTPUT_PARENT_UNSAFE');
+      requireThat(same((await fs.readdir(parent)).sort(), ['Envara.app']), 'BUILDER_OUTPUT_NOT_EXCLUSIVE');
+    };
+    await guardOutput();
+    // electron-builder replaces only appOutDir while extracting Electron. The
+    // controlled candidate output directory above it must retain its identity.
+    requireThat(before.kind === 'directory' && before.uid === uid && before.dev === entry.parent.dev
+      && [0o700, 0o755].includes(before.mode) && await fs.realpath(parent) === parent, 'BUILDER_OUTPUT_PARENT_UNSAFE');
+    const tree = await bundleTree(entry.path, uid);
+    requireThat(same(contentInventory(tree), signedManifest), 'BUILDER_SIGNED_MANIFEST_CHANGED');
+    await guardOutput();
+    requireThat(same(await describe(parent), before), 'BUILDER_OUTPUT_PARENT_CHANGED');
+    const handle = await fs.open(parent, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
+    try {
+      requireThat(same(identity(await handle.stat({ bigint: true })), before), 'BUILDER_OUTPUT_PARENT_CHANGED');
+      const manifestSHA256 = digest(JSON.stringify(signedManifest));
+      await record('builder-output-adoption-intent', { kind: 'candidate', path: entry.path,
+        previousParent: entry.parent, replacementParent: before, outputParent: entry.outputParent, signedManifestSHA256: manifestSHA256 });
+      // Change the verified directory descriptor, never a recursively selected
+      // path. Unrelated archive parents continue to use the original seal rule.
+      await handle.chmod(0o700);
+      const adopted = { ...before, mode: 0o700 };
+      requireThat(same(identity(await handle.stat({ bigint: true })), adopted)
+        && same(await privateDirectory(parent, uid), adopted), 'BUILDER_OUTPUT_PARENT_CHANGED');
+      await guardOutput();
+      requireThat(same(await bundleTree(entry.path, uid), tree), 'BUILDER_SIGNED_MANIFEST_CHANGED');
+      await record('builder-output-adopted', { kind: 'candidate', path: entry.path, parent: adopted,
+        outputParent: entry.outputParent, signedManifestSHA256: manifestSHA256 });
+      entry.parent = adopted; entry.builderOutputAdopted = true;
+    } finally { await handle.close(); }
+    return entry.path;
   }
   async function seal(kind, options = {}) {
     await guard(); const entry = claims.get(kind); requireThat(entry && !entry.sealed && !cleanupStarted, 'SEAL_INVALID');
@@ -347,5 +402,5 @@ export async function openReleaseWorkspace({ home = os.homedir(), repository, ui
     }
     return report;
   }
-  return { ...paths, evidenceDir, journalPath, claim, seal, cleanup };
+  return { ...paths, evidenceDir, journalPath, claim, adoptCandidateOutput, seal, cleanup };
 }

@@ -433,7 +433,8 @@ export async function verifySignedBundle(bundle, identifier, identity, run, evid
   return { ...verified, requirement };
 }
 
-async function signCandidate(app, identity, run, evidence) {
+async function signCandidate(app, identity, run, evidence, binding) {
+  requireValue(binding && /^[a-f0-9]{40}$/.test(binding.sourceCommit) && /^[a-f0-9-]{36}$/.test(binding.nonce), 'Invalid candidate signing binding.');
   const before = await inventory(app), metadata = [];
   for (const relative of signingTargets) metadata.push(await signatureMetadata(app, relative, run));
   for (const item of metadata) requireValue(item.adhoc && item.team === 'not set', 'Refusing to replace an existing vendor or unknown signature.');
@@ -459,7 +460,8 @@ async function signCandidate(app, identity, run, evidence) {
   await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', app]);
   const after = await inventory(app);
   const changed = validateSigningChanges(before, after, metadata);
-  await fs.writeFile(path.join(evidence, 'signing.json'), JSON.stringify({ verified, changed, resourcesUnchanged: true, before, after }, null, 2), { flag: 'wx', mode: 0o600 });
+  await fs.writeFile(path.join(evidence, 'signing.json'), JSON.stringify({ schema: 'envara.macos-candidate-signing/v1',
+    app, sourceCommit: binding.sourceCommit, nonce: binding.nonce, verified, changed, resourcesUnchanged: true, before, after }, null, 2), { flag: 'wx', mode: 0o600 });
   return after;
 }
 
@@ -478,7 +480,8 @@ export async function buildMacRelease({ env = process.env, platform = process.pl
     const result = await run(cmd, args, { cwd: root, env: buildEnv, ...options });
     uncertainCommand ||= result.cleanupUncertain === true || result.closeConfirmed === false;
     if (evidenceDirectory) await fs.appendFile(path.join(evidenceDirectory, 'commands.jsonl'),
-      `${JSON.stringify({ command: cmd, args, code: result.code, stdout: result.stdout, stderr: result.stderr })}\n`, { mode: 0o600 });
+      `${JSON.stringify({ command: cmd, args, code: result.code, closeConfirmed: result.closeConfirmed ?? null,
+        cleanupUncertain: result.cleanupUncertain === true, stdout: result.stdout, stderr: result.stderr })}\n`, { mode: 0o600 });
     return result;
   };
   const checked = async (...args) => {
@@ -507,12 +510,14 @@ export async function buildMacRelease({ env = process.env, platform = process.pl
     const builderConfig = path.join(workspace.evidenceDir, 'builder.json');
     await fs.writeFile(builderConfig, JSON.stringify({ ...pkg.build, directories: { ...pkg.build.directories, output: workspace.candidateOutput },
       mac: { ...pkg.build.mac, identity: null, notarize: false } }), { flag: 'wx', mode: 0o600 });
-    await checked(path.join(root, 'node_modules/.bin/electron-builder'), ['--mac', '--arm64', '--dir',
+    const builderResult = await checked(path.join(root, 'node_modules/.bin/electron-builder'), ['--mac', '--arm64', '--dir',
       '--config', builderConfig]);
     await retainBuilderMetadata(workspace);
     const plist = JSON.parse((await checked('/usr/bin/plutil', ['-convert', 'json', '-o', '-', path.join(workspace.candidateApp, 'Contents/Info.plist')])).stdout);
     requireValue(plist.CFBundleIdentifier === 'io.envara.desktop' && plist.CFBundleShortVersionString === pkg.version, 'Packaged bundle identity/version differs.');
-    const manifest = await signCandidate(workspace.candidateApp, identity, checked, workspace.evidenceDir);
+    const manifest = await signCandidate(workspace.candidateApp, identity, checked, workspace.evidenceDir,
+      { sourceCommit: commit, nonce: authorization.nonce });
+    await workspace.adoptCandidateOutput({ builderResult, signedManifest: manifest });
     await workspace.seal('candidate');
     for (const script of ['verify-package-resources.mjs', 'verify-public-release.mjs']) {
       await checked(process.execPath, [`scripts/${script}`, ...(script === 'verify-public-release.mjs' ? ['--app'] : []), workspace.candidateApp]);

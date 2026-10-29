@@ -469,6 +469,12 @@ const preparation = ['native:prepare', 'claude:keychain:prepare', 'backend:prepa
   'routing:build:mac:local', 'routing:build:mac:acceptance', 'routing:build:mac:pf',
   'routing:prepare:mac:package', 'routing:build:mac:link-router', 'build'];
 
+export function zipArchiveArguments(app, archive) {
+  // Sequestering resource metadata creates __MACOSX siblings even when the
+  // archive must contain only the verified candidate directory.
+  return ['-c', '-k', '--keepParent', '--noqtn', '--norsrc', '--noextattr', app, archive];
+}
+
 export async function buildMacRelease({ env = process.env, platform = process.platform, arch = process.arch,
   home = os.homedir(), root = repository, run = command, openWorkspace = openReleaseWorkspace, checkOnly = false } = {}) {
   // Keep this ahead of all mutable operations, including opening the workspace.
@@ -538,7 +544,7 @@ export async function buildMacRelease({ env = process.env, platform = process.pl
     await workspace.claim('payload');
     await checked('/usr/bin/ditto', ['--noqtn', '--norsrc', '--noextattr', workspace.candidateApp, workspace.payloadApp]);
     await workspace.seal('payload');
-    await checked('/usr/bin/ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', '--noqtn', '--norsrc', '--noextattr', workspace.candidateApp, archiveFile('zip')]);
+    await checked('/usr/bin/ditto', zipArchiveArguments(workspace.candidateApp, archiveFile('zip')));
     await workspace.claim('zip');
     await checked('/usr/bin/ditto', ['-x', '-k', '--noqtn', '--norsrc', '--noextattr', archiveFile('zip'), workspace.zipDir]);
     await workspace.seal('zip');

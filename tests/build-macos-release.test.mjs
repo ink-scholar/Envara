@@ -9,7 +9,7 @@ import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { buildMacRelease, signingGate, signingRequest, selectSigningIdentity, beforePack, command,
   signingTargets, validateDesignatedRequirement, validateSigningChanges, inventory, inspectCandidateAcceptanceScript,
-  candidateSigningOptions, validateSignedIdentity, validateAdhocRequirement, verifySignedBundle,
+  candidateSigningOptions, validateSignedIdentity, validateAdhocRequirement, verifySignedBundle, zipArchiveArguments,
   CANDIDATE_ACCEPTANCE_SCRIPT, CANDIDATE_ACCEPTANCE_SCHEMA, CANDIDATE_ACCEPTANCE_CHECKS,
   validateCandidateAcceptance, readCandidateAcceptanceReceipt, runCandidateAcceptance } from '../scripts/build-macos-release.mjs';
 
@@ -160,6 +160,42 @@ test('native codesign verifies the explicit ad-hoc mode on a disposable executab
   assert.equal(verified.certificateSHA1, null);
   const after = await checked('/usr/bin/codesign', ['--display', '--verbose=4', executable]);
   assert.equal(Number(/CodeDirectory.*flags=(0x[A-Fa-f0-9]+)/.exec(after.stderr + after.stdout)[1]), options.expectedFlags);
+});
+
+test('native zip archive excludes resource metadata while preserving the exact fixture tree', { skip: process.platform !== 'darwin' }, async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'envara-release-zip-test-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const fixture = path.join(root, 'archive-fixture'), extracted = path.join(root, 'extracted'), archive = path.join(root, 'fixture.zip');
+  await fs.mkdir(path.join(fixture, 'bin'), { recursive: true, mode: 0o700 });
+  await fs.chmod(fixture, 0o750); await fs.chmod(path.join(fixture, 'bin'), 0o755);
+  const program = path.join(fixture, 'bin', 'program');
+  await fs.writeFile(program, 'synthetic executable bytes; never launched\n', { mode: 0o751 });
+  await fs.chmod(program, 0o751);
+  await fs.symlink('bin/program', path.join(fixture, 'program-link'));
+  await fs.mkdir(extracted, { mode: 0o700 });
+  const checked = async (cmd, args) => {
+    const result = await command(cmd, args, { cwd: root, timeout: 45000,
+      env: { ...process.env, COPYFILE_DISABLE: '1', DITTONORSRC: '1' } });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.closeConfirmed, true); assert.equal(result.cleanupUncertain, false);
+    return result;
+  };
+  for (const target of [fixture, program]) {
+    await checked('/usr/bin/xattr', ['-w', 'com.envara.release-test', 'synthetic metadata', target]);
+    assert.equal((await checked('/usr/bin/xattr', ['-p', 'com.envara.release-test', target])).stdout.trim(), 'synthetic metadata');
+  }
+  const before = await inventory(fixture);
+  await checked('/usr/bin/ditto', zipArchiveArguments(fixture, archive));
+  const members = (await checked('/usr/bin/unzip', ['-Z', '-1', archive])).stdout.trim().split('\n');
+  assert.deepEqual(members.sort(), ['archive-fixture/', 'archive-fixture/bin/', 'archive-fixture/bin/program', 'archive-fixture/program-link'].sort());
+  assert.equal(members.some(name => name.split('/').some(part => part === '__MACOSX' || part.startsWith('._'))), false);
+  await checked('/usr/bin/ditto', ['-x', '-k', '--noqtn', '--norsrc', '--noextattr', archive, extracted]);
+  assert.deepEqual(await fs.readdir(extracted), ['archive-fixture']);
+  const restored = path.join(extracted, 'archive-fixture');
+  assert.deepEqual(await inventory(restored), before);
+  assert.equal((await fs.stat(path.join(restored, 'bin/program'))).mode & 0o7777, 0o751);
+  assert.equal(await fs.readlink(path.join(restored, 'program-link')), 'bin/program');
+  assert.equal((await checked('/usr/bin/xattr', [path.join(restored, 'bin/program')])).stdout.includes('com.envara.release-test'), false);
 });
 
 test('platform and identity discovery failures occur before workspace creation', async () => {

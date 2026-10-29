@@ -5,13 +5,13 @@
 <p align="center"><strong>Give each workflow a place of its own.</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="MIT license for original code" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.2.0-475569" alt="Envara 1.2.0" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/github/v/release/ink-scholar/Envara?color=475569" alt="Latest release" /></a>
 </p>
 <p align="center">
   <a href="../../README.md">简体中文</a> · <a href="zh-TW.md">繁體中文</a> · <strong>English</strong> · <a href="ja.md">日本語</a> · <a href="ko.md">한국어</a> · <a href="es.md">Español</a> · <a href="fr.md">Français</a> · <a href="de.md">Deutsch</a> · <a href="pt-BR.md">Português (Brasil)</a>
 </p>
 <p align="center">
-  <a href="https://github.com/ink-scholar/Envara/releases/latest">Download macOS 1.2.0</a> · <a href="../user-guide.md">User guide</a> · <a href="../capability-matrix.md">All features</a> · <a href="../SUPPORT.md">Support</a>
+  <a href="https://github.com/ink-scholar/Envara/releases/latest">Download for macOS</a> · <a href="../user-guide.md">User guide</a> · <a href="../capability-matrix.md">All features</a> · <a href="../SUPPORT.md">Support</a>
 </p>
 
 **Bring your browser, terminal and desktop apps into separate working environments.**
@@ -20,48 +20,38 @@ Envara is an open-source local desktop workspace. Keep separate networks, browse
 
 ![Envara workspace with synthetic example data](../media/workspace-zh-CN.png)
 
-## New in 1.2.0: macOS Keychain compatibility
-
-- **Prepare the environment’s Keychain selection.** Fixes credential-storage compatibility when a private HOME has no default Keychain selection. Envara prepares local selection metadata only when you start a Claude terminal.
-- **Keep the chosen login profile.** Reopening saved terminals and duplicating sessions retain the selected profile. If the Keychain is unavailable, Envara explains the problem and preserves existing data.
-- **Keep your workspace settings.** Existing environment, network, browser and terminal settings and sign-in data are retained. Keychain preparation does not read or migrate host credentials, or change the host’s default Keychain or search list.
-
-Synthetic credential scenarios have been verified; real Claude OAuth login and account state after reopening remain unverified. See the [verification scope](../verification.md#120-验证范围).
-
-## Concerned about account and environment linking in Claude Code?
-
-Keep a **chosen network route, separate account directories, persistent browser identities and supported device-read restrictions** in the same session workflow to reduce configuration mix-ups. Each environment installs the **unchanged official CLI** and keeps named login profiles separate. You choose the model, session-resume and permission options.
-
-Isolation helps reduce configuration mix-ups; it does not guarantee freedom from account restrictions or complete anonymity. See the [Claude Code guide](../claude-code-sessions.md) for methods and scope.
-
 ## One workspace for the whole workflow
 
 | Feature | What you can do |
 | --- | --- |
-| 🌐 Network environments | Use HTTP / HTTPS / SOCKS5 / AnyTLS, verify authenticated egress, and confirm region and timezone; AnyTLS needs no separate Clash installation |
+| 🌐 Network environments | Use HTTP / HTTPS / SOCKS5 / AnyTLS, check authenticated egress, and confirm region and timezone; AnyTLS needs no separate Clash installation |
 | 🧭 Separate browsers | Choose CloakBrowser, Camoufox or experimental BrowseForge Chromium; keep data separate and reuse saved identities when reopening |
-| 🤖 Claude Code | Install and update within an environment, manage named login profiles, and bind the selected environment browser |
-| ⌨️ Native terminals | Choose a project folder, open multiple sessions, resize the panel or use a separate window; retain environment configuration and history. Each saved macOS [SSH connection](../claude-code-sessions.md#ssh-through-the-environment-route) can use the host network or a configured environment’s route |
+| ⌨️ Native terminals | Choose a project folder, open multiple sessions, resize the panel or use a separate window; retain environment configuration and history. Each saved macOS SSH connection can use the host network or a configured environment’s route |
 | 🧩 Attached apps | Bind supported Chromium / Electron applications to an environment, with separate data and managed start/stop controls |
+| 🤖 Claude Code | Install and update within an environment, manage named login profiles, and bind the selected environment browser |
 | 🔗 Links and automation | Open links in the chosen browser and use REST / MCP / Playwright browser interfaces |
 | 📦 Encrypted migration | Export a browser, selected terminal profile or individual app with password encryption; import into a new environment |
-| 🗂️ Workspace management | Group, search and duplicate environments; inspect runtime status in a three-column layout with nine languages and light, dark or system appearance |
+| 🗂️ Workspace management | Group, search and duplicate environments; inspect runtime status in a three-column layout with collapsible navigation, nine languages and light, dark or system appearance |
 
-**In 1.1.2, each SSH connection keeps its chosen route.** When adding a connection, select the host network or a configured environment, fetch the server fingerprint through that route, then verify and confirm it. New trust pins stay in Envara; it does not write them to the host’s `known_hosts`. Ordinary, Claude and duplicated terminal sessions use the saved route. Older records without a route retain the host network, including any active system VPN/TUN; the server sees the actual exit IP.
+## Keep working with familiar tools
 
-Missing authorization, an unavailable or changed selected environment route, and connection failures are refused without switching routes. Unsaved `user@host` destinations use the terminal’s own environment proxy, without borrowing a saved connection’s authorization or another environment’s route. Use `envara-ssh list` to inspect loaded authorizations. Passwords stay in application memory until exit; private keys remain on your Mac.
+Research in the browser, write code in a terminal and open the desktop apps you need. Your environment keeps the network settings and data for that work together. Connect to remote servers from the terminal, with a chosen route for each saved SSH connection. See the [SSH guide](../claude-code-sessions.md#ssh-through-the-environment-route) for setup.
 
-Existing sessions retain their original context; connection changes require a new session. See the [SSH guide](../claude-code-sessions.md#ssh-through-the-environment-route) for trust, authentication and supported command options.
+Claude Code is one integration within the terminal workflow. Each environment installs the **unchanged official CLI**, keeps named login profiles separate and binds the chosen environment browser. Start at a shell prompt and type `claude` when you want to use it. You choose the model, session-resume and permission options. See the [Claude Code guide](../claude-code-sessions.md).
 
-See [capabilities and limits](../capability-matrix.md) for attached-app system authorization, sandbox trade-offs and support. Stopping or unbinding preserves sign-in data.
+Environment isolation helps reduce network and account configuration mix-ups; it does not guarantee freedom from account restrictions or complete anonymity. See [capabilities and limits](../capability-matrix.md) for attached-app support, system authorization and sandbox trade-offs. Stopping or unbinding preserves sign-in data.
 
 ## Get started
 
-Download the **1.2.0 macOS Apple Silicon (arm64)** DMG or ZIP from [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest), with SHA-256 checksums. This release uses ad-hoc signing, without an Apple Developer ID signature or notarization; see the guide for installation steps. Verified builds for other platforms remain unavailable.
+Download the **macOS Apple Silicon (arm64)** DMG or ZIP and SHA-256 checksums from [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). See the [user guide](../user-guide.md) for installation steps and signing information.
 
-**For your first session, start with one project.** Add and check a network route, then create an environment and choose a browser. Select a working directory when opening a terminal, or attach a supported desktop app as needed. Return to the same environment to reuse your saved browser data, terminal settings and app data, with less setup when switching between tools.
+1. **Choose a network.** Add a network configuration, check its actual egress, then confirm the region and timezone.
+2. **Create an environment.** Choose a browser and give your project or account its own workspace.
+3. **Start working.** Open the browser, choose a terminal working directory or attach a supported desktop app.
 
-[User guide](../user-guide.md) · [All features](../capability-matrix.md) · [Verification scope](../verification.md) · [Develop and contribute](../../CONTRIBUTING.md) · [Report an issue](https://github.com/ink-scholar/Envara/issues)
+Return to the same environment to reuse your saved browser data, terminal settings and app data, with less setup each time.
+
+[User guide](../user-guide.md) · [All features](../capability-matrix.md) · [Release notes](https://github.com/ink-scholar/Envara/releases) · [Develop and contribute](../../CONTRIBUTING.md) · [Report an issue](https://github.com/ink-scholar/Envara/issues)
 
 ## Support Envara
 

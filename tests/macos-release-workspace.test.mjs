@@ -71,8 +71,8 @@ async function assertUnsealedRetained(workspace, app) {
   assert(await exists(app)); assert(await exists(path.join(workspace.root, 'lock.json')));
 }
 
-function fakeCommands({ registrations = [], failure = null, mount = null } = {}) {
-  const registered = new Set(registrations), allowedApps = new Set(registrations), calls = [];
+function fakeCommands({ registrations = [], ownedApps = [], failure = null, mount = null } = {}) {
+  const registered = new Set(registrations), allowedApps = new Set([...registrations, ...ownedApps]), calls = [];
   let mounted = mount !== null, unregisterAttempted = false;
   const result = (code = 0, stdout = '', stderr = '') => ({ code, stdout, stderr });
   const run = async (command, args, options) => {
@@ -87,6 +87,7 @@ function fakeCommands({ registrations = [], failure = null, mount = null } = {})
       assert.notEqual(args[1], otherApp);
       unregisterAttempted = true;
       if (failure === 'unregister') return result(1, '', 'synthetic unregister refusal');
+      if (failure === 'unregister-stderr') return result(0, '', 'synthetic unregister diagnostic');
       if (!['registration-remains', 'path-only-remains'].includes(failure)) registered.delete(args[1]);
       return result();
     }
@@ -370,7 +371,7 @@ test('inspection and unregister failures stop removal and retain independent fai
   const cases = [
     ['lsof', 'APP_IN_USE_OR_INSPECTION_FAILED', 0], ['live-process', 'APP_STILL_RUNNING', 0],
     ['signature', 'INSPECTION_COMMAND_FAILED', 0], ['dump', 'LS_DUMP_EMPTY_OR_UNRECOGNIZED', 0],
-    ['unregister', 'UNREGISTER_FAILED', 1], ['registration-remains', 'REGISTRATION_REMAINS', 1],
+    ['unregister', 'UNREGISTER_FAILED', 1], ['unregister-stderr', 'UNREGISTER_FAILED', 1], ['registration-remains', 'REGISTRATION_REMAINS', 1],
     ['path-only-remains', 'REGISTRATION_REMAINS', 1],
   ];
   for (const [failure, code, unregisters] of cases) await t.test(failure, async t => {
@@ -382,6 +383,72 @@ test('inspection and unregister failures stop removal and retain independent fai
     assert(await exists(app)); assert(await exists(path.join(workspace.root, 'lock.json')));
     const events = (await fs.readFile(workspace.journalPath, 'utf8')).trim().split('\n').map(JSON.parse);
     assert.equal(events.at(-1).event, 'cleanup-failed'); assert(!events.some(event => event.event === 'removed'));
+  });
+});
+
+test('unregistered zip and payload copies clean up without an unregister command', async t => {
+  for (const kind of ['zip', 'payload']) await t.test(kind, async t => {
+    const f = await fixture(t), workspace = await f.open(), app = await sealed(workspace, kind);
+    const fake = fakeCommands({ ownedApps: [app] });
+    const report = await workspace.cleanup({ run: fake.run });
+    assert.equal(report.complete, true); assert.deepEqual(report.cleanupErrors, []);
+    assert.equal(report.results[0].alreadyAbsent, true);
+    assert.equal(report.results[0].unregistered, false);
+    assert.equal(report.results[0].removed, true);
+    assert.equal(fake.unregisters().length, 0);
+    assert.equal(await exists(app), false);
+    assert.equal(await exists(path.join(workspace.root, 'lock.json')), false);
+    const events = (await fs.readFile(workspace.journalPath, 'utf8')).trim().split('\n').map(JSON.parse);
+    assert.equal(events.filter(event => event.event === 'unregister-already-absent' && event.path === app).length, 1);
+    assert(!events.some(event => ['unregister-intent', 'unregister-result'].includes(event.event)));
+    assert(fake.calls.filter(call => call.command === LSREGISTER && call.args[0] === '-dump').length >= 3);
+    assert(fake.calls.some(call => call.command === '/usr/bin/codesign'));
+    assert(fake.calls.some(call => call.command === '/usr/sbin/lsof'));
+  });
+});
+
+test('the already-absent branch retains the candidate when protected registrations change', async t => {
+  for (const changed of ['installed-app', 'link-router']) await t.test(changed, async t => {
+    const f = await fixture(t), workspace = await f.open(), app = await sealed(workspace, 'zip');
+    const fake = fakeCommands({ ownedApps: [app] }); let dumps = 0;
+    const installed = lsRecord('/Applications/Envara.app');
+    const router = lsRecord('/private/synthetic-router/EnvaraLinkRouter.app', 'io.envara.link-router');
+    const run = async (cmd, args, options) => {
+      const result = await fake.run(cmd, args, options);
+      if (cmd === LSREGISTER && args[0] === '-dump') {
+        dumps++;
+        result.stdout += dumps > 1 && changed === 'installed-app'
+          ? installed.replace('codeInfoID: 123', 'codeInfoID: 456') : installed;
+        if (!(dumps > 1 && changed === 'link-router')) result.stdout += router;
+      }
+      return result;
+    };
+    const report = await workspace.cleanup({ run });
+    assert.equal(report.complete, false);
+    assert.equal(report.cleanupErrors[0].code, 'PROTECTED_REGISTRATION_CHANGED');
+    assert.equal(report.results[0].alreadyAbsent, true);
+    assert.equal(report.results[0].removed, false);
+    assert.equal(fake.unregisters().length, 0);
+    assert(await exists(app)); assert(await exists(path.join(workspace.root, 'lock.json')));
+  });
+});
+
+test('late registration after an absent snapshot is refused before removing the owned copy', async t => {
+  for (const appearance of [2, 3]) await t.test(`registration appears on dump ${appearance}`, async t => {
+    const f = await fixture(t), workspace = await f.open(), app = await sealed(workspace, 'payload');
+    const fake = fakeCommands({ ownedApps: [app] }); let dumps = 0;
+    const run = async (cmd, args, options) => {
+      const result = await fake.run(cmd, args, options);
+      if (cmd === LSREGISTER && args[0] === '-dump' && ++dumps >= appearance) result.stdout += lsRecord(app);
+      return result;
+    };
+    const report = await workspace.cleanup({ run });
+    assert.equal(report.complete, false); assert.equal(report.cleanupErrors[0].code, 'REGISTRATION_REMAINS');
+    assert.equal(report.results[0].alreadyAbsent, true); assert.equal(report.results[0].removed, false);
+    assert.equal(fake.unregisters().length, 0);
+    assert(await exists(app)); assert(await exists(path.join(workspace.root, 'lock.json')));
+    const events = (await fs.readFile(workspace.journalPath, 'utf8')).trim().split('\n').map(JSON.parse);
+    assert(!events.some(event => ['removed', 'complete'].includes(event.event)));
   });
 });
 

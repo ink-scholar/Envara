@@ -358,21 +358,26 @@ export async function openReleaseWorkspace({ home = os.homedir(), repository, ui
         await verifyEntry(entry); await noProcesses(entry.path);
         await checked('/usr/bin/codesign', ['--verify', '--deep', '--strict', entry.path]);
         if (entry.mount) await ownedMount(entry);
-        await stableRegistrations(); await verifyEntry(entry); await noProcesses(entry.path);
-        await record('unregister-intent', item);
-        const unregister = await execute(LSREGISTER, ['-u', entry.path]);
-        await record('unregister-result', { ...item, code: unregister.code });
-        requireThat(unregister.code === 0 && !unregister.stderr.trim(), 'UNREGISTER_FAILED');
-        await absent(entry.path); result.unregistered = true;
+        const registered = (await stableRegistrations()).some(record => record.path === entry.path);
+        await verifyEntry(entry); await noProcesses(entry.path);
+        if (registered) {
+          await record('unregister-intent', item);
+          const unregister = await execute(LSREGISTER, ['-u', entry.path]);
+          await record('unregister-result', { ...item, code: unregister.code });
+          requireThat(unregister.code === 0 && !unregister.stderr.trim(), 'UNREGISTER_FAILED');
+        } else {
+          await record('unregister-already-absent', item); result.alreadyAbsent = true;
+        }
+        await absent(entry.path); if (registered) result.unregistered = true;
         await verifyEntry(entry); await noProcesses(entry.path);
         if (entry.mount) {
-          await ownedMount(entry); await record('detach-intent', { ...item, device: entry.mount.device });
+          await ownedMount(entry); await absent(entry.path); await record('detach-intent', { ...item, device: entry.mount.device });
           await checked('/usr/bin/hdiutil', ['detach', entry.mount.device]);
           requireThat(!(await mounts()).some(image => image['image-path'] === entry.mount.imagePath), 'MOUNT_REMAINS');
           requireThat(!await exists(entry.path), 'MOUNT_PATH_REMAINS'); result.detached = true;
           await record('detached', item);
         } else {
-          await record('remove-intent', item); await verifyEntry(entry);
+          await record('remove-intent', item); await verifyEntry(entry); await absent(entry.path);
           // Only the private, sealed slot can reach this removal. No glob, lookup
           // by identifier, unrelated app, or recursive workspace deletion exists.
           await fs.rm(entry.path, { recursive: true, force: false });

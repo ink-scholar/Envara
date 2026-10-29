@@ -5,14 +5,14 @@
 <p align="center"><strong>작업마다, 하나의 독립된 환경을.</strong><br />브라우저도, 터미널도, 앱도. 하나의 작업 환경에서.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="자체 코드 라이선스: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.2.0-475569" alt="Envara 1.2.0" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9개 언어의 README" /></a>
 </p>
 <p align="center">
   <a href="../../README.md">简体中文</a> · <a href="zh-TW.md">繁體中文</a> · <a href="en.md">English</a> · <a href="ja.md">日本語</a> · <strong>한국어</strong> · <a href="es.md">Español</a> · <a href="fr.md">Français</a> · <a href="de.md">Deutsch</a> · <a href="pt-BR.md">Português (Brasil)</a>
 </p>
 <p align="center">
-  <a href="https://github.com/ink-scholar/Envara/releases/latest">macOS 버전 다운로드</a> · <a href="../capability-matrix.md">기능과 한계</a> · <a href="../../CONTRIBUTING.md">기여하기</a> · <a href="../SUPPORT.md">프로젝트 지원</a>
+  <a href="https://github.com/ink-scholar/Envara/releases/latest">macOS 1.2.0 다운로드</a> · <a href="../capability-matrix.md">기능과 한계</a> · <a href="../../CONTRIBUTING.md">기여하기</a> · <a href="../SUPPORT.md">프로젝트 지원</a>
 </p>
 
 **브라우저를 열고, 명령을 실행하고, 데스크톱 앱으로 이어지는 작업. 하나의 환경에서 흐름을 이어 가세요.**
@@ -21,11 +21,13 @@ Envara는 네트워크 경로, 브라우저 프로필, 터미널 도구와 지�
 
 ![Envara 중국어 네이티브 작업 공간](../media/workspace-zh-CN.png)
 
-## 1.1.1의 새로운 기능
+## 1.2.0: macOS Keychain 호환성 수정
 
-- **전용 SSH 설정 페이지.** 호스트를 검색하고 연결 세부 정보를 확인하며, 필요할 때 연결을 추가할 수 있습니다.
-- **오른쪽 작업 공간을 가득 채우는 터미널.** 도구 모음을 한 줄로 정리했습니다. 저장된 터미널 목록과 세션 설정은 팝업 패널로 열며, 닫기 조작도 알아보기 쉬워졌습니다.
-- **시간대 변경 후 종료 판정 수정.** 호스트의 시간대를 변경한 뒤 터미널의 종료 상태를 잘못 판정하던 문제를 수정했습니다.
+- **환경 내 키체인 선택 정보 보완.** 전용 HOME에 기본 키체인 선택이 없을 때 발생하는 자격 증명 저장 문제를 수정합니다. Claude 터미널을 만들 때만 환경 내 선택 메타데이터를 준비합니다.
+- **선택한 로그인 프로필 유지.** 저장된 터미널을 다시 열거나 세션을 복제할 때 같은 프로필을 사용합니다. 키체인을 사용할 수 없으면 이유를 안내하고 기존 데이터를 보존합니다.
+- **기존 작업 공간 보존.** 환경, 네트워크, 브라우저, 터미널 설정과 로그인 데이터를 유지합니다. 키체인 준비 과정에서 호스트의 자격 증명을 읽거나 옮기지 않으며, 호스트의 기본 키체인과 검색 목록도 바꾸지 않습니다.
+
+합성 자격 증명 시나리오는 검증했지만, 실제 Claude OAuth 로그인과 다시 열었을 때의 계정 상태는 아직 검증하지 않았습니다. [검증 범위](../verification.md#120-验证范围)를 참고하세요.
 
 <p align="center"><sub>네이티브 Electron 작업 공간입니다. 스크린샷에는 합성 예시 데이터를 사용했습니다.</sub></p>
 
@@ -97,11 +99,11 @@ Claude Code는 여러 통합 기능 중 하나입니다. 환경마다 **수정�
 
 ## 다운로드 및 설치
 
-[GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest)에서 **macOS Apple Silicon(arm64)**용 DMG 또는 ZIP 설치 패키지를 다운로드하세요. DMG를 열고 Envara를 ‘응용 프로그램’ 폴더로 드래그하면 됩니다. 체크섬 파일과 버전 설명은 Release에 함께 제공됩니다.
+[GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest)에서 **1.2.0 macOS Apple Silicon(arm64)**용 DMG, ZIP과 SHA-256 체크섬을 다운로드할 수 있습니다. DMG를 열고 Envara를 ‘응용 프로그램’ 폴더로 드래그하면 됩니다.
 
-**현재 macOS 배포 파일은 Apple Developer ID 서명과 공증을 받지 않았습니다.** 처음 열 때 macOS 보안 검사로 실행이 차단될 수 있으므로 이 저장소에서 다운로드했는지 확인하고 체크섬을 대조하세요. Envara는 시스템 보안 검사를 자동으로 끄지 않습니다. 연결된 앱의 시스템 라우팅 구성 요소에는 별도의 관리자 승인이 필요하며, 브라우저나 일반 작업 공간을 시작할 때 자동으로 설치되지 않습니다.
+**이번 버전은 ad-hoc 서명을 사용하며 Apple Developer ID 서명과 공증을 받지 않았습니다.** 처음 열 때 macOS 보안 검사로 실행이 차단될 수 있으므로 이 저장소에서 다운로드했는지 확인하고 체크섬을 대조하세요. Envara는 시스템 보안 검사를 자동으로 끄지 않습니다. 연결된 앱의 시스템 라우팅 구성 요소에는 별도의 관리자 승인이 필요하며, 브라우저나 일반 작업 공간을 시작할 때 자동으로 설치되지 않습니다.
 
-| 플랫폼 | 이번 배포 범위 |
+| 플랫폼 | 1.2.0 배포 범위 |
 | --- | --- |
 | macOS Apple Silicon | DMG, ZIP 및 SHA-256 체크섬 파일 제공 |
 | macOS Intel | 소스 코드는 유지하지만 검증된 배포 파일은 제공하지 않음 |

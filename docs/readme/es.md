@@ -5,14 +5,14 @@
 <p align="center"><strong>Un entorno propio para cada flujo de trabajo.</strong><br />Un entorno. Tu navegador, terminal y aplicaciones.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licencia del código original: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.2.0-475569" alt="Envara 1.2.0" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README en 9 idiomas" /></a>
 </p>
 <p align="center">
   <a href="../../README.md">简体中文</a> · <a href="zh-TW.md">繁體中文</a> · <a href="en.md">English</a> · <a href="ja.md">日本語</a> · <a href="ko.md">한국어</a> · <strong>Español</strong> · <a href="fr.md">Français</a> · <a href="de.md">Deutsch</a> · <a href="pt-BR.md">Português (Brasil)</a>
 </p>
 <p align="center">
-  <a href="https://github.com/ink-scholar/Envara/releases/latest">Descargar para macOS</a> · <a href="../capability-matrix.md">Funciones y límites</a> · <a href="../../CONTRIBUTING.md">Contribuir</a> · <a href="../SUPPORT.md">Apoyar el proyecto</a>
+  <a href="https://github.com/ink-scholar/Envara/releases/latest">Descargar macOS 1.2.0</a> · <a href="../capability-matrix.md">Funciones y límites</a> · <a href="../../CONTRIBUTING.md">Contribuir</a> · <a href="../SUPPORT.md">Apoyar el proyecto</a>
 </p>
 
 **Navega, ejecuta comandos y conecta aplicaciones de escritorio: un mismo entorno para todo tu flujo de trabajo.**
@@ -21,7 +21,15 @@ Envara es un espacio de trabajo local y de código abierto que reúne la salida 
 
 ![Espacio de trabajo nativo de Envara en chino](../media/workspace-zh-CN.png)
 
-## Novedades de 1.1.1
+## Novedades de 1.2.0: compatibilidad con el Llavero de macOS
+
+- **Compatibilidad con el llavero de macOS.** La corrección resuelve un problema de persistencia de las credenciales de Claude cuando falta la selección del llavero predeterminado en el HOME privado del entorno. Al iniciar explícitamente la sesión, solo añade esos metadatos de selección y reutiliza un llavero de inicio de sesión disponible del sistema. La corrección no lee, escribe ni transfiere credenciales, ni cambia el llavero predeterminado o la lista de búsqueda del sistema anfitrión.
+- **Se conserva la elección del perfil.** Al volver a abrir o duplicar una entrada de terminal guardada, se mantiene el perfil de inicio de sesión de Claude con nombre que habías seleccionado.
+- **Se conservan los ajustes y los datos existentes.** Se mantienen los entornos, las configuraciones de red y navegador, los terminales y los datos de inicio de sesión.
+
+Se han validado escenarios con credenciales sintéticas; el inicio de sesión OAuth real de Claude y el estado de la cuenta al volver a abrir siguen pendientes de validación. Consulta el [alcance de las pruebas](../verification.md#120-验证范围).
+
+### Novedades anteriores de 1.1.1
 
 - **Una página propia para SSH.** Busca hosts guardados, consulta los detalles y añade conexiones cuando las necesites.
 - **Más espacio para el terminal.** Ocupa toda el área de trabajo derecha, con una barra de herramientas de una sola fila, paneles emergentes para terminales guardados y ajustes, y un control de cierre claro.
@@ -97,15 +105,15 @@ La interfaz de tres columnas ofrece los modos claro, oscuro y según el sistema,
 
 ## Descarga e instalación
 
-Descarga el paquete DMG o ZIP para **macOS Apple Silicon (arm64)** desde [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). Abre el DMG y arrastra Envara a Aplicaciones. Los archivos de sumas de verificación y las notas de la versión se incluyen en la publicación.
+Descarga los **paquetes DMG o ZIP de 1.2.0 para macOS Apple Silicon (arm64)** y sus sumas de verificación SHA-256 desde [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). Abre el DMG y arrastra Envara a Aplicaciones.
 
-**Los paquetes actuales para macOS no están firmados con Apple Developer ID ni notarizados.** macOS puede aplicar sus comprobaciones de seguridad al abrir la aplicación por primera vez; confirma que la descarga procede de este repositorio y verifica la suma de comprobación. Envara no desactiva automáticamente las comprobaciones de seguridad del sistema. El componente de enrutamiento del sistema para las aplicaciones vinculadas requiere autorización independiente del administrador; iniciar el navegador o el espacio de trabajo habitual no lo instala automáticamente.
+**Esta versión utiliza firma ad-hoc, sin firma Apple Developer ID ni notarización.** macOS puede aplicar sus comprobaciones de seguridad al abrir la aplicación por primera vez; confirma que la descarga procede de este repositorio y verifica la suma de comprobación. Envara no desactiva automáticamente las comprobaciones de seguridad del sistema. El componente de enrutamiento del sistema para las aplicaciones vinculadas requiere autorización independiente del administrador; iniciar el navegador o el espacio de trabajo habitual no lo instala automáticamente.
 
 | Plataforma | Alcance de la publicación |
 | --- | --- |
-| macOS Apple Silicon | Esta publicación incluye DMG, ZIP y archivos de sumas de verificación SHA-256 |
+| macOS Apple Silicon | DMG, ZIP y archivo de sumas de verificación SHA-256 |
 | macOS Intel | Se conserva el código fuente para esta plataforma; no se ofrecen paquetes verificados |
-| Windows / Linux | Se conserva el código fuente correspondiente; esta publicación no incluye paquetes. Consulta la matriz de funciones para conocer el alcance de las pruebas en equipos reales |
+| Windows / Linux | Se conserva el código fuente correspondiente; 1.2.0 no incluye paquetes para estas plataformas. Consulta la matriz de funciones para conocer el alcance de las pruebas en equipos reales |
 
 Los motores de navegador se instalan desde la aplicación por decisión del usuario y están sujetos a sus respectivas licencias. La aplicación incluye las dependencias de ejecución del escritorio; no es necesario instalar Node.js ni Go por separado.
 

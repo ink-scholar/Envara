@@ -5,14 +5,14 @@
 <p align="center"><strong>Eine eigene Umgebung für jeden Arbeitskontext.</strong><br />Dein Browser, dein Terminal und deine Apps in einer gemeinsamen Umgebung.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Lizenz des Originalcodes: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.2.0-475569" alt="Envara 1.2.0" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README in 9 Sprachen" /></a>
 </p>
 <p align="center">
   <a href="../../README.md">简体中文</a> · <a href="zh-TW.md">繁體中文</a> · <a href="en.md">English</a> · <a href="ja.md">日本語</a> · <a href="ko.md">한국어</a> · <a href="es.md">Español</a> · <a href="fr.md">Français</a> · <strong>Deutsch</strong> · <a href="pt-BR.md">Português (Brasil)</a>
 </p>
 <p align="center">
-  <a href="https://github.com/ink-scholar/Envara/releases/latest">macOS-Version herunterladen</a> · <a href="../capability-matrix.md">Funktionen und Grenzen</a> · <a href="../../CONTRIBUTING.md">Mitwirken</a> · <a href="../SUPPORT.md">Projekt unterstützen</a>
+  <a href="https://github.com/ink-scholar/Envara/releases/latest">macOS 1.2.0 herunterladen</a> · <a href="../capability-matrix.md">Funktionen und Grenzen</a> · <a href="../../CONTRIBUTING.md">Mitwirken</a> · <a href="../SUPPORT.md">Projekt unterstützen</a>
 </p>
 
 **Im Browser recherchieren, Befehle ausführen und Desktop-Apps nutzen: Eine gemeinsame Arbeitsumgebung begleitet den gesamten Ablauf.**
@@ -21,7 +21,15 @@ Envara ist ein lokaler Open-Source-Arbeitsplatz, der Netzwerkausgänge, Browserp
 
 ![Nativer Envara-Arbeitsbereich auf Chinesisch](../media/workspace-zh-CN.png)
 
-## Neu in 1.1.1
+## Neu in 1.2.0: Kompatibilität mit dem macOS-Schlüsselbund
+
+- **Kompatibilität mit dem macOS-Schlüsselbund.** Die Korrektur behebt ein Problem beim dauerhaften Speichern von Claude-Zugangsdaten, wenn im privaten HOME der Umgebung die Auswahl des Standardschlüsselbunds fehlt. Beim ausdrücklichen Start ergänzt sie nur diese Auswahlmetadaten und verwendet einen verfügbaren Anmeldeschlüsselbund des Systems. Die Korrektur liest, schreibt oder überträgt keine Zugangsdaten und ändert weder den Standardschlüsselbund noch die Suchliste des Hosts.
+- **Die Profilauswahl bleibt erhalten.** Beim erneuten Öffnen oder Duplizieren eines gespeicherten Terminaleintrags bleibt das gewählte benannte Claude-Anmeldeprofil ausgewählt.
+- **Vorhandene Einstellungen und Daten bleiben erhalten.** Bestehende Umgebungen, Netzwerk- und Browserkonfigurationen, Terminals und Anmeldedaten werden beibehalten.
+
+Tests mit synthetischen Zugangsdaten sind bestanden; echte Claude-OAuth-Anmeldungen und der Kontostatus nach dem erneuten Öffnen sind noch nicht abschließend geprüft. Siehe den [Prüfumfang](../verification.md#120-验证范围).
+
+### Frühere Neuerungen in 1.1.1
 
 - **Eine eigene Seite für SSH.** Suche gespeicherte Hosts, sieh dir die Verbindungsdetails an und füge bei Bedarf Verbindungen hinzu.
 - **Mehr Platz fürs Terminal.** Es füllt den rechten Arbeitsbereich aus, mit einer einzeiligen Werkzeugleiste, aufklappbaren Menüs für gespeicherte Terminals und Einstellungen sowie einer klaren Schaltfläche zum Schließen.
@@ -97,15 +105,15 @@ Die Oberfläche mit drei Spalten unterstützt einen hellen und dunklen Modus ode
 
 ## Herunterladen und installieren
 
-Lade auf [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) das DMG- oder ZIP-Paket für **macOS Apple Silicon (arm64)** herunter. Öffne die DMG-Datei und ziehe Envara in den Ordner „Programme“. Prüfsummen und Versionshinweise werden mit dem Release bereitgestellt.
+Lade auf [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) die **DMG- oder ZIP-Datei von 1.2.0 für macOS Apple Silicon (arm64)** samt SHA-256-Prüfsummen herunter. Öffne die DMG-Datei und ziehe Envara in den Ordner „Programme“.
 
-**Die aktuellen macOS-Artefakte sind weder mit einer Apple Developer ID signiert noch notarisiert.** Beim ersten Öffnen können die Sicherheitsprüfungen von macOS den Start verhindern. Vergewissere dich, dass der Download aus diesem Repository stammt, und prüfe die Prüfsumme. Envara schaltet die Sicherheitsprüfungen des Systems nicht automatisch aus. Die Systemkomponente für das Routing angebundener Anwendungen benötigt eine gesonderte Administratorfreigabe. Der Start eines Browsers oder des normalen Arbeitsbereichs installiert sie nicht automatisch.
+**Diese Version verwendet eine Ad-hoc-Signatur, keine Apple-Developer-ID-Signatur und keine Notarisierung.** Beim ersten Öffnen können die Sicherheitsprüfungen von macOS den Start verhindern. Vergewissere dich, dass der Download aus diesem Repository stammt, und prüfe die Prüfsumme. Envara schaltet die Sicherheitsprüfungen des Systems nicht automatisch aus. Die Systemkomponente für das Routing angebundener Anwendungen benötigt eine gesonderte Administratorfreigabe. Der Start eines Browsers oder des normalen Arbeitsbereichs installiert sie nicht automatisch.
 
 | Plattform | Veröffentlichte Artefakte |
 | --- | --- |
-| macOS Apple Silicon | Für diese Version: DMG, ZIP und SHA-256-Prüfsummendatei |
+| macOS Apple Silicon | DMG, ZIP und SHA-256-Prüfsummendatei |
 | macOS Intel | Quellcode für diese Plattform bleibt erhalten; keine verifizierten Artefakte verfügbar |
-| Windows / Linux | Zugehöriger Quellcode bleibt erhalten; für diese Version werden keine Artefakte veröffentlicht. Den Umfang der Tests auf echter Hardware beschreibt die Funktionsmatrix |
+| Windows / Linux | Zugehöriger Quellcode bleibt erhalten; für 1.2.0 gibt es keine Artefakte für diese Plattformen. Den Umfang der Tests auf echter Hardware beschreibt die Funktionsmatrix |
 
 Browser-Engines installierst du über die entsprechende Funktion in der App; es gelten ihre jeweiligen Lizenzen. Die App enthält die Laufzeitabhängigkeiten für den Desktopbetrieb. Node.js und Go müssen nicht separat installiert werden.
 

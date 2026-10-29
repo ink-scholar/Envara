@@ -10,6 +10,16 @@ import { networkFlowEnglish } from './network-flow-english.mjs';
 import { networkFlowTranslations } from './network-flow-translations.mjs';
 
 export const english = {
+  "Claude 钥匙串准备的收尾检查未通过。请保留现有资料并联系维护者处理。": "Final checks for Claude Keychain setup did not pass. Keep the existing data and contact the maintainer.",
+  "登录钥匙串已锁定。请在 macOS“钥匙串访问”中解锁后，新建 Claude 终端。": "The login keychain is locked. Unlock it in macOS Keychain Access, then open a new Claude terminal.",
+  "未找到可用的系统登录钥匙串。请在 macOS“钥匙串访问”中检查后重试。": "No usable system login keychain was found. Check it in macOS Keychain Access and try again.",
+  "Claude 钥匙串正在准备中，请稍后重试。": "Claude Keychain setup is in progress. Try again shortly.",
+  "此环境已有钥匙串设置，但当前无法使用。请在 macOS“钥匙串访问”中检查后重试。": "This environment has Keychain settings that cannot currently be used. Check them in macOS Keychain Access and try again.",
+  "系统钥匙串设置在准备期间发生变化。请检查后新建 Claude 终端。": "System Keychain settings changed during setup. Check them, then open a new Claude terminal.",
+  "Claude 钥匙串准备的临时资料未能完成清理。请保留现有资料并联系维护者处理。": "Temporary data from Claude Keychain setup could not be fully cleaned up. Keep the existing data and contact the maintainer.",
+  "无法验证 Claude 钥匙串组件，请检查 Envara 安装后重试。": "Could not verify the Claude Keychain component. Check the Envara installation and try again.",
+  "Claude 钥匙串准备超时，请稍后重试。": "Claude Keychain setup timed out. Try again shortly.",
+  "Claude 登录凭据存储暂不可用，请检查钥匙串后重试。": "Claude credential storage is temporarily unavailable. Check Keychain access and try again.",
   "连接线路": "Connection route",
   "连接固定使用所选线路，失败不会切换。": "This connection uses the selected route and will not switch if it fails.",
   "本机网络会向远端显示该出口 IP。": "The remote host sees the local network’s egress IP.",

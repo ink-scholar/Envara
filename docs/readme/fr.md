@@ -5,14 +5,14 @@
 <p align="center"><strong>Un environnement dédié à chaque contexte de travail.</strong><br />Votre navigateur, votre terminal et vos applications, dans un même environnement.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licence du code original : MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.2.0-475569" alt="Envara 1.2.0" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README en 9 langues" /></a>
 </p>
 <p align="center">
   <a href="../../README.md">简体中文</a> · <a href="zh-TW.md">繁體中文</a> · <a href="en.md">English</a> · <a href="ja.md">日本語</a> · <a href="ko.md">한국어</a> · <a href="es.md">Español</a> · <strong>Français</strong> · <a href="de.md">Deutsch</a> · <a href="pt-BR.md">Português (Brasil)</a>
 </p>
 <p align="center">
-  <a href="https://github.com/ink-scholar/Envara/releases/latest">Télécharger pour macOS</a> · <a href="../capability-matrix.md">Fonctionnalités et limites</a> · <a href="../../CONTRIBUTING.md">Contribuer</a> · <a href="../SUPPORT.md">Soutenir le projet</a>
+  <a href="https://github.com/ink-scholar/Envara/releases/latest">Télécharger macOS 1.2.0</a> · <a href="../capability-matrix.md">Fonctionnalités et limites</a> · <a href="../../CONTRIBUTING.md">Contribuer</a> · <a href="../SUPPORT.md">Soutenir le projet</a>
 </p>
 
 **Naviguez, exécutez vos commandes et utilisez vos applications de bureau au sein d’un même environnement de travail.**
@@ -21,7 +21,15 @@ Envara est un espace de travail local et open source qui réunit sortie réseau,
 
 ![Espace de travail natif Envara en chinois](../media/workspace-zh-CN.png)
 
-## Nouveautés de la version 1.1.1
+## Nouveautés de 1.2.0 : compatibilité avec le trousseau macOS
+
+Les scénarios avec des identifiants synthétiques ont été vérifiés ; l’authentification OAuth réelle de Claude et l’état du compte après réouverture restent à valider. Voir le [périmètre de vérification](../verification.md#120-验证范围).
+
+- **Compatibilité avec le trousseau macOS.** Corrige la persistance des identifiants Claude lorsque le `HOME` privé de l’environnement n’a pas de trousseau par défaut sélectionné. Lors d’un lancement explicite, Envara complète uniquement les métadonnées de sélection dans ce `HOME` pour réutiliser le trousseau de session système disponible. La correction ne lit, ne modifie ni ne transfère les identifiants et ne change ni le trousseau par défaut ni la liste de recherche du système hôte.
+- **Le profil choisi reste sélectionné.** Rouvrir ou dupliquer un terminal enregistré conserve le profil de connexion nommé qui lui est associé.
+- **Les données existantes sont conservées.** Environnements, réglages réseau, navigateurs, terminaux et données de connexion restent en place.
+
+### Nouveautés antérieures — version 1.1.1
 
 - **Une page dédiée à SSH.** Recherchez les hôtes enregistrés, consultez les détails et ajoutez des connexions au besoin.
 - **Plus de place pour le terminal.** Il occupe tout l’espace de travail à droite, avec une barre d’outils sur une ligne, des panneaux flottants pour les terminaux enregistrés et les paramètres, et un bouton de fermeture explicite.
@@ -97,15 +105,15 @@ L’interface à trois colonnes propose un mode clair, sombre ou adapté au syst
 
 ## Téléchargement et installation
 
-Téléchargez le paquet DMG ou ZIP pour **macOS Apple Silicon (arm64)** sur [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). Ouvrez le DMG, puis faites glisser Envara dans le dossier « Applications ». Les fichiers de sommes de contrôle et les notes de version accompagnent la publication.
+Téléchargez les **fichiers DMG ou ZIP de 1.2.0 pour macOS Apple Silicon (arm64)** et leurs sommes de contrôle SHA-256 depuis [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). Ouvrez le DMG, puis faites glisser Envara dans le dossier « Applications ».
 
-**Les fichiers macOS actuels ne sont ni signés avec un Apple Developer ID ni notariés.** Les contrôles de sécurité de macOS peuvent bloquer la première ouverture. Vérifiez que le téléchargement provient de ce dépôt et contrôlez sa somme de contrôle. Envara ne désactive pas automatiquement les contrôles de sécurité du système. Le composant système de routage des applications associées nécessite une autorisation administrateur distincte ; le lancement d’un navigateur ou de l’espace de travail ordinaire ne l’installe pas automatiquement.
+**Cette version utilise une signature ad-hoc, sans signature Apple Developer ID ni notarisation.** Les contrôles de sécurité de macOS peuvent bloquer la première ouverture. Vérifiez que le téléchargement provient de ce dépôt et contrôlez sa somme de contrôle. Envara ne désactive pas automatiquement les contrôles de sécurité du système. Le composant système de routage des applications associées nécessite une autorisation administrateur distincte ; le lancement d’un navigateur ou de l’espace de travail ordinaire ne l’installe pas automatiquement.
 
 | Plateforme | Fichiers proposés |
 | --- | --- |
-| macOS Apple Silicon | Pour cette version : DMG, ZIP et fichier de sommes de contrôle SHA-256 |
+| macOS Apple Silicon | DMG, ZIP et fichier de sommes de contrôle SHA-256 |
 | macOS Intel | Code source conservé ; aucun fichier compilé et vérifié proposé |
-| Windows / Linux | Code source correspondant conservé ; aucun fichier compilé publié pour cette version. Le périmètre des essais sur matériel réel figure dans la matrice des fonctionnalités |
+| Windows / Linux | Code source correspondant conservé ; aucun paquet 1.2.0 pour ces plateformes. Le périmètre des essais sur matériel réel figure dans la matrice des fonctionnalités |
 
 Les moteurs de navigateur s’installent depuis l’application à votre initiative et restent soumis à leurs licences respectives. L’application intègre les dépendances nécessaires à son exécution sur le bureau ; aucune installation séparée de Node.js ou de Go n’est requise.
 

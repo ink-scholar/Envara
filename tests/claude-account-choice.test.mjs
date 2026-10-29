@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { NEW_CLAUDE_ACCOUNT, validClaudeAccountChoice, claudeAccountLabel, reconcileClaudeAccountChoice, claudeSessionForRequest, claudeInstallPresentation, claudeErrorMessage, validClaudeInstallationChoice, claudeInstallationOptions } from '../src/claude-account-choice.mjs';
 import { terminalSessionOptions } from '../src/terminal-session-choice.mjs';
 import { TerminalStreamStore } from '../src/terminal-state.mjs';
-import { translationCatalog } from '../src/i18n.mjs';
+import { translate, translationCatalog } from '../src/i18n.mjs';
 
 test('installation source is explicit only for a first install and cannot reuse another environment status', () => {
   const missing = { profileId: 'ph', status: 'ready', installed: false };
@@ -86,6 +86,45 @@ test('Claude cleanup failures have fixed actionable copy in all nine interface l
       assert.equal(typeof catalog[key], 'string', `${language}: ${key}`);
       assert(catalog[key].trim());
       if (language !== 'zh-CN') assert.notEqual(catalog[key], key, language);
+    }
+  }
+});
+
+test('Keychain failures explain recovery without displaying native details', () => {
+  const locked = '登录钥匙串已锁定。请在 macOS“钥匙串访问”中解锁后，新建 Claude 终端。';
+  const missing = '未找到可用的系统登录钥匙串。请在 macOS“钥匙串访问”中检查后重试。';
+  const cleanup = 'Claude 钥匙串准备的临时资料未能完成清理。请保留现有资料并联系维护者处理。';
+  const finalCheck = 'Claude 钥匙串准备的收尾检查未通过。请保留现有资料并联系维护者处理。';
+  const unavailable = 'Claude 登录凭据存储暂不可用，请检查钥匙串后重试。';
+  const detail = 'native failure at /private/fixture/login.keychain-db, status=-25307';
+  assert.equal(claudeErrorMessage(detail, 'CLAUDE_KEYCHAIN_LOCKED'), locked);
+  assert.equal(claudeErrorMessage(detail, 'CLAUDE_KEYCHAIN_MISSING'), missing);
+  assert.equal(claudeErrorMessage(detail, 'CLAUDE_KEYCHAIN_CLEANUP_FAILED'), cleanup);
+  assert.equal(claudeErrorMessage(detail, 'CLAUDE_KEYCHAIN_HOST_CHECK_FAILED'), finalCheck);
+  assert.equal(claudeErrorMessage('CLAUDE_KEYCHAIN_HOST_CHECK_FAILED'), finalCheck);
+  assert.notEqual(finalCheck, cleanup, 'an incomplete check does not establish a cleanup failure');
+  for (const code of ['CLAUDE_KEYCHAIN_INVALID_ARGUMENT', 'CLAUDE_KEYCHAIN_UNSAFE_PATH',
+    'CLAUDE_KEYCHAIN_UNAVAILABLE', 'CLAUDE_KEYCHAIN_PREPARATION_FAILED', 'CLAUDE_KEYCHAIN_PROTOCOL_ERROR',
+    'CLAUDE_KEYCHAIN_FUTURE_FAILURE', `CLAUDE_KEYCHAIN_${detail}`]) {
+    assert.equal(claudeErrorMessage(detail, code), unavailable, code);
+    assert.equal(claudeErrorMessage(code), unavailable, code);
+  }
+  assert.equal(claudeErrorMessage('Unrelated failure'), 'Unrelated failure');
+});
+
+test('all Keychain recovery messages are translated in all nine interface languages', () => {
+  const codes = ['INVALID_ARGUMENT', 'UNSAFE_PATH', 'BUSY', 'MISSING', 'LOCKED', 'UNAVAILABLE',
+    'EXISTING_SELECTION', 'PREPARATION_FAILED', 'HOST_CHANGED', 'HOST_CHECK_FAILED', 'CLEANUP_FAILED', 'RESOURCE_INVALID',
+    'PROTOCOL_ERROR', 'TIMEOUT', 'FUTURE_FAILURE'].map(suffix => `CLAUDE_KEYCHAIN_${suffix}`);
+  assert.equal(Object.keys(translationCatalog).length, 9);
+  for (const code of codes) {
+    const message = claudeErrorMessage('private native detail', code);
+    for (const [language, catalog] of Object.entries(translationCatalog)) {
+      assert.equal(typeof catalog[message], 'string', `${language}: ${code}`);
+      assert(catalog[message].trim(), `${language}: ${code}`);
+      assert(!catalog[message].includes('CLAUDE_KEYCHAIN_'), `${language}: ${code}`);
+      assert.equal(translate(message, language), catalog[message], `${language}: secondary ${code}`);
+      if (language !== 'zh-CN') assert.notEqual(catalog[message], message, `${language}: ${code}`);
     }
   }
 });

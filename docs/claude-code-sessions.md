@@ -1,6 +1,6 @@
 # Claude Code sessions
 
-This document describes Envara 1.1.3 for macOS arm64, including terminal query handling that continues when its views are hidden, per-connection SSH route selection and first-contact fingerprint confirmation. Release-specific checks remain in [release verification](verification.md); earlier terminal input measurements retain their [1.0.2 scope](verification.md#102-发布验证). Historical measurements do not establish real Claude account login or model-directed tool use. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
+This document describes Envara 1.2.0 for macOS arm64. This release uses ad-hoc signing, without an Apple Developer ID signature or notarization. Release-specific checks remain in [release verification](verification.md#120-验证范围); earlier terminal input measurements retain their [1.0.2 scope](verification.md#102-发布验证). Historical and synthetic measurements do not establish real Claude account login or model-directed tool use. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
 
 ## Start and installation
 
@@ -41,9 +41,19 @@ Named profiles use separate Claude configuration directories within one environm
 
 Each selected profile pins both `CLAUDE_CONFIG_DIR` and `ANTHROPIC_CONFIG_DIR`; the latter is an owned subdirectory of the former. This also separates newer Console profile files that `CLAUDE_CONFIG_DIR` alone does not scope. An old environment-wide `HOME/.config/anthropic` directory is preserved without assigning it to a named profile or copying its credentials. If it exists, the session asks the user to sign in again within the selected profile.
 
+### macOS Keychain compatibility in 1.2.0
+
+A fresh environment HOME can lack a default Keychain selection even when the host has a usable login Keychain. This can prevent native credential storage from working. When you explicitly create a Claude terminal, Envara checks the selected environment HOME and prepares its missing selection metadata using the host’s available, unlocked default Keychain. Existing usable selections are retained; an invalid existing selection is not silently replaced. Reopening a saved terminal or duplicating a session keeps its chosen named profile and checks preparation again.
+
+This prepares **selection metadata in the environment HOME**, not a separate Keychain or macOS account. The helper inspects Keychain metadata, without reading or migrating credential items, unlocking the host Keychain, or changing the host’s default Keychain or search list. Credential contents remain under the official CLI and macOS Keychain controls. Named configuration directories do not by themselves establish a separate system Keychain boundary.
+
+A missing, locked or unusable Keychain stops the new terminal with a recovery message and preserves existing settings and data. Use macOS Keychain Access to resolve the reported issue, then create a new Claude terminal. Envara does not ask for a Keychain or administrator password. Closing a terminal view retains its process and does not rerun preparation; read-only workspace and installation-status checks do not prepare a Keychain selection.
+
+Synthetic acceptance uses a disposable Keychain, separate test configuration directories and fresh processes to check selection and credential persistence. It uses a fixed test service with distinct account names, so it does not verify the official CLI’s service/account naming. Real Claude OAuth sign-in, token refresh and account state after reopening remain unverified. See the [verification scope](verification.md#120-验证范围).
+
 Envara displays profile names, not inferred authentication status. Closing a terminal, stopping the program or updating Envara does not delete profile data. Official sign-in, token refresh, account policies and remote model availability remain the service's responsibility. Browser website sign-in and CLI sign-in are distinct.
 
-Terminal export includes only the chosen Claude profile, including its scoped Anthropic directory, plus shared shell configuration/history. It excludes other profiles, the old shared Anthropic directory, program files, caches and host credentials. Encrypted import creates a new environment and requires explicit proxy mapping. macOS Keychain entries are not exported; copied files do not guarantee cross-machine sign-in.
+Terminal export includes only the chosen Claude profile, including its scoped Anthropic directory, plus shared shell configuration/history. It excludes other profiles, the old shared Anthropic directory, program files, caches and host credentials. Encrypted import creates a new environment and requires explicit proxy mapping. macOS Keychain entries, machine-local selection metadata and preparation locks are excluded from export and from restoration of older archives. Import does not merge or reset existing profiles; copied files do not guarantee cross-machine sign-in.
 
 ### Profile management
 

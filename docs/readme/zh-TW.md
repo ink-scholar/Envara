@@ -5,14 +5,14 @@
 <p align="center"><strong>讓每一套工作，都有獨立的境艙。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原創程式碼授權：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.2.0-475569" alt="Envara 1.2.0" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="9 種 README 語言" /></a>
 </p>
 <p align="center">
   <a href="../../README.md">简体中文</a> · <strong>繁體中文</strong> · <a href="en.md">English</a> · <a href="ja.md">日本語</a> · <a href="ko.md">한국어</a> · <a href="es.md">Español</a> · <a href="fr.md">Français</a> · <a href="de.md">Deutsch</a> · <a href="pt-BR.md">Português (Brasil)</a>
 </p>
 <p align="center">
-  <a href="https://github.com/ink-scholar/Envara/releases/latest">下載 macOS 版</a> · <a href="../capability-matrix.md">功能與邊界</a> · <a href="../../CONTRIBUTING.md">參與貢獻</a> · <a href="../SUPPORT.md">支持專案</a>
+  <a href="https://github.com/ink-scholar/Envara/releases/latest">下載 macOS 1.2.0</a> · <a href="../capability-matrix.md">功能與邊界</a> · <a href="../../CONTRIBUTING.md">參與貢獻</a> · <a href="../SUPPORT.md">支持專案</a>
 </p>
 
 **開啟瀏覽器、執行命令、連接桌面應用程式，讓同一套工作環境串起整個流程。**
@@ -21,11 +21,13 @@
 
 ![Envara 中文原生工作區](../media/workspace-zh-CN.png)
 
-## 1.1.1：更順手的 SSH 與終端工作區
+## 1.2.0：修正 macOS Keychain 相容性
 
-- **獨立 SSH 設定頁**：搜尋主機、檢視連線詳細資訊，並在需要時新增連線。
-- **更寬敞的終端工作區**：終端填滿右側工作區，工具列集中為單行；已儲存終端機清單與工作階段設定改用浮層，關閉操作也更清楚。
-- **修正時區變更後的關閉判定**：修正主機時區變更後，終端關閉狀態被誤判的問題。
+- **補齊環境內的鑰匙圈選擇**：修正獨立 HOME 缺少預設鑰匙圈選擇時的憑證儲存相容問題；僅在建立 Claude 終端時準備環境內的選擇中繼資料。
+- **沿用選定的登入設定檔**：重新開啟已儲存終端或複製工作階段時，保留所選設定檔；鑰匙圈無法使用時說明原因並保留既有資料。
+- **保留既有工作區**：環境、網路、瀏覽器、終端設定與登入資料繼續保留；鑰匙圈準備不讀取或移轉主機憑證，也不變更主機的預設鑰匙圈與搜尋列表。
+
+合成憑證情境已驗證；真實 Claude OAuth 登入及重新開啟後的帳號狀態仍未驗收，詳見[驗證範圍](../verification.md#120-验证范围)。
 
 <p align="center"><sub>原生 Electron 工作區，截圖使用合成範例資料。</sub></p>
 
@@ -97,13 +99,13 @@ Claude Code 是其中一項整合：每個環境獨立安裝**未經修改的官
 
 ## 下載與安裝
 
-從 [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) 下載 **macOS Apple Silicon（arm64）** 的 DMG 或 ZIP 安裝包。開啟 DMG 後，將 Envara 拖入「應用程式」。校驗檔與版本說明隨 Release 提供。
+從 [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) 下載 **1.2.0 macOS Apple Silicon（arm64）** 的 DMG、ZIP 與 SHA-256 校驗檔。開啟 DMG 後，可將 Envara 拖入「應用程式」。
 
-**目前 macOS 成品未使用 Apple Developer ID 簽章，也未經公證。** 首次開啟可能受到 macOS 安全檢查；請確認下載來自本儲存庫並核對校驗值。Envara 不會自動關閉系統安全檢查。附加軟體的系統路由元件需要另外取得管理員授權，啟動瀏覽器或一般工作區不會自動安裝它。
+**本版沿用 ad-hoc 臨時簽章，未使用 Apple Developer ID，也未經公證。** 首次開啟可能受到 macOS 安全檢查；請確認下載來自本儲存庫並核對校驗值。Envara 不會自動關閉系統安全檢查。附加軟體的系統路由元件需要另外取得管理員授權，啟動瀏覽器或一般工作區不會自動安裝它。
 
-| 平台 | 發布範圍 |
+| 平台 | 1.2.0 提供範圍 |
 | --- | --- |
-| macOS Apple Silicon | 本次提供 DMG、ZIP 與 SHA-256 校驗檔 |
+| macOS Apple Silicon | 提供 DMG、ZIP 與 SHA-256 校驗檔 |
 | macOS Intel | 保留原始碼路徑，未提供已驗證成品 |
 | Windows / Linux | 保留相關原始碼；本次不發布成品，實機驗證範圍請見功能矩陣 |
 

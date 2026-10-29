@@ -8,6 +8,7 @@ import { constants } from 'node:fs';
 import { captureTerminalProcess, closeTerminalProcess } from './terminal-process.mjs';
 import { TerminalNetworkFence } from './terminal-network-fence.mjs';
 import { findClaudeExecutable, prepareClaudeSession } from './claude-code-session.mjs';
+import { ClaudeKeychainManager } from './claude-keychain.mjs';
 import { ensureClaudeInstallation, claudeInstallationStatus as inspectClaudeInstallation } from './claude-code-installation.mjs';
 import { ClaudeAccountStore, DEFAULT_CLAUDE_ACCOUNT, claudeAccountId as validateClaudeAccountId } from './claude-account-store.mjs';
 import { TerminalEntryStore } from './terminal-entry-store.mjs';
@@ -151,7 +152,7 @@ export class TerminalService {
     networkFence = process.platform === 'darwin' ? new TerminalNetworkFence() : null,
     /* Links a fenced terminal asks to open come back through this channel and
      * are opened by the app, never by the host's default browser. */
-    linkChannel = null, browserBroker = null, sshManager = null, resolveSshContext = resolveContext, claudeExecutableResolver = findClaudeExecutable, claudeInstaller = ensureClaudeInstallation, availableLocales = null,
+    linkChannel = null, browserBroker = null, sshManager = null, resolveSshContext = resolveContext, claudeExecutableResolver = findClaudeExecutable, claudeInstaller = ensureClaudeInstallation, claudeKeychain = new ClaudeKeychainManager(), availableLocales = null,
     getTheme = () => getTerminalTheme('dark'), diagnostics = null }) {
     if (!path.isAbsolute(dataDir ?? '') || typeof resolveContext !== 'function') throw codeError('终端数据目录或环境解析器无效。');
     this.dataDir = path.resolve(dataDir);
@@ -178,9 +179,14 @@ export class TerminalService {
     this.sshManager = sshManager;
     this.claudeExecutableResolver = claudeExecutableResolver;
     this.claudeInstaller = claudeInstaller;
+    if (!claudeKeychain || typeof claudeKeychain.prepare !== 'function') throw codeError('Claude 登录凭据存储暂不可用，请检查钥匙串后重试。', 'CLAUDE_KEYCHAIN_UNAVAILABLE');
+    this.claudeKeychain = claudeKeychain;
     if (availableLocales !== null && (!Array.isArray(availableLocales) || availableLocales.some(value => typeof value !== 'string'))) throw codeError('终端语言区域列表无效。');
     this.availableLocales = availableLocales && [...availableLocales];
     this.hostHome = os.homedir();
+    // Keychain selection belongs to the OS account, even when Envara was
+    // launched by a shell with an overridden HOME.
+    this.hostKeychainHome = process.platform === 'darwin' ? os.userInfo().homedir : this.hostHome;
     this.settings = new Map();
     this.contexts = new Map();
     this.sessions = new Map();
@@ -905,6 +911,16 @@ export class TerminalService {
       if (kind === 'claude-code') {
         if (!proxy || !loopbackRoutePort(session.bridge, endpoint) || !this.networkFence) throw codeError('Claude Code 专用会话需要支持网络围栏的代理线路。', 'CLAUDE_NETWORK_FENCE_REQUIRED');
         if (!this.browserBroker || !linkShim) throw codeError('Claude 浏览器通道不可用，未启动会话。', 'CLAUDE_BROWSER_UNAVAILABLE');
+        // A private HOME has no macOS default Keychain on a clean launch. Only
+        // this explicit session start may prepare its local selection metadata.
+        // The helper never reads credentials or changes the host selection.
+        session.keychainPreparation = this.claudeKeychain.prepare({ home: directories.home, hostHome: this.hostKeychainHome }).catch(error => {
+          if (error?.keychainPreparationIncomplete && typeof error.cleanupError === 'string') session.keychainPreparationIssue = error.cleanupError;
+          throw error;
+        });
+        try { await session.keychainPreparation; }
+        finally { session.keychainPreparation = null; }
+        this.assertStarting(session);
         const installation = await this.claudeInstaller({ home: directories.home, source: session.claudeInstallSource,
           findHostExecutable: () => this.claudeExecutableResolver({ hostHome: this.hostHome, platform: process.platform, additionalExecutablePaths: this.additionalExecutablePaths }),
           downloadContext: { proxyUrl: endpoint, signal: session.abortController.signal },
@@ -1006,7 +1022,7 @@ export class TerminalService {
         await this.retainLaunchCleanup(session, 'claudeLaunch', { cleanup: error.claudeCleanup });
       }
       const reported = session.networkFailure ? codeError(session.networkFailure.message, session.networkFailure.code)
-        : session.startCancelled || this.closed ? codeError('终端启动已取消。', 'TERMINAL_START_CANCELLED') : storageFailure(error);
+        : (session.startCancelled || this.closed) && !error?.code?.startsWith('CLAUDE_KEYCHAIN_') ? codeError('终端启动已取消。', 'TERMINAL_START_CANCELLED') : storageFailure(error);
       session.error ??= this.redact(session, reported.message ?? '终端无法启动。', true);
       session.errorCode ??= reported.code ?? 'TERMINAL_START_FAILED';
       session.status = 'closing';
@@ -1171,6 +1187,9 @@ export class TerminalService {
       const attempt = async operation => { try { await operation(); } catch (error) { failure ??= error; } };
       // Revoke first. A private-directory removal failure must never skip the
       // process family, proxy bridge, or other independently owned resources.
+      // Native preparation is bounded and owns its staging cleanup. Wait for
+      // its result rather than kill it midway through publishing a selector.
+      if (session.keychainPreparation) await session.keychainPreparation.catch(() => {});
       await attempt(async () => {
         if (session.sshRevocation) {
           try { await session.sshRevocation; } catch (error) { session.sshRevocation = null; throw error; }
@@ -1201,7 +1220,9 @@ export class TerminalService {
         }
         throw failure;
       }
-      session.cleanupError = null;
+      // Closing a terminal cannot repair an uncertain native preparation or
+      // erase the diagnostic that its retained files/settings need inspection.
+      session.cleanupError = session.keychainPreparationIssue ?? null;
     });
     // A later explicit Close can retry a failed filesystem cleanup.
     void session.cleanupPromise.catch(() => { session.cleanupPromise = null; });

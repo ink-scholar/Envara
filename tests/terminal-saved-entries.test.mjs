@@ -24,6 +24,7 @@ async function fixture(t) {
         environment: { ENVARA_BROWSER_SOCKET: '/private/fixture-browser.sock', ENVARA_BROWSER_TOKEN: 'fixture-browser-token', ENVARA_LINK_SOCKET: '/private/fixture-link.sock', ENVARA_LINK_TOKEN: 'fixture-link-token' },
         mcpServer: { command: process.execPath, args: [path.join(root, 'fixture-mcp.mjs')] }, dispose: async () => {} }) },
       claudeExecutableResolver: async () => native,
+      claudeKeychain: { prepare: async () => ({ status: 'ready', changed: false }) },
       claudeInstaller: options => ensureClaudeInstallation({ ...options, downloadNative: async ({ destination }) => { await copyFile(native, destination); return { version: '2.1.296' }; } }),
       networkFence: { wrap: async (launch, options) => ({ ...launch, deviceIdentifierRestrictions: options.restrictDeviceIdentifiers === true }) },
       ptyFactory: (executable, args, options) => {

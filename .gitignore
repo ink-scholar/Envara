@@ -3,6 +3,7 @@ dist/
 release/
 build/backend/
 build/native/
+build/claude-keychain/
 build/proxy-core/
 build/app-routing/
 build/development-app-routing/

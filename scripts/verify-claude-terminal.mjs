@@ -348,6 +348,9 @@ try {
   linkChannel = new TerminalLinkChannel({ root: dataDir, onLink: () => { throw new Error('Claude must not call the ordinary mutable browser route.'); } });
   await linkChannel.listen();
   terminal = new TerminalService({ dataDir, browserBroker: broker, linkChannel, additionalExecutablePaths: [path.dirname(nodeExecutable)],
+    // This routing/MCP fixture does not use the user's Keychain. The separate
+    // verify-claude-keychain acceptance owns a synthetic native Keychain.
+    claudeKeychain: { prepare: async () => ({ status: 'not-tested', changed: false }) },
     resolveContext: id => service.resolveWorkspaceContext(id),
     claudeInstaller: installer,
     ...(installingDownload ? { claudeExecutableResolver: fixtureExecutableResolver } : {}),
@@ -494,6 +497,7 @@ try {
   // so the same lifecycle notification as a real proxy-core exit is exercised.
   // The real PTY, Claude executable, fence, route and broker remain unchanged.
   routeTerminal = new TerminalService({ dataDir: path.join(temporary, 'route-loss-data'), browserBroker: broker, linkChannel, additionalExecutablePaths: [path.dirname(nodeExecutable)],
+    claudeKeychain: { prepare: async () => ({ status: 'not-tested', changed: false }) },
     claudeInstaller: installer,
     ...(installingDownload ? { claudeExecutableResolver: fixtureExecutableResolver } : {}),
     resolveContext: async id => ({ ...await service.resolveWorkspaceContext(id), managedProxy: true }),

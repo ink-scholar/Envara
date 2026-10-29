@@ -5,13 +5,13 @@
 <p align="center"><strong>Give each workflow a place of its own.</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="MIT license for original code" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.3-475569" alt="Envara 1.1.3" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.2.0-475569" alt="Envara 1.2.0" /></a>
 </p>
 <p align="center">
   <a href="../../README.md">简体中文</a> · <a href="zh-TW.md">繁體中文</a> · <strong>English</strong> · <a href="ja.md">日本語</a> · <a href="ko.md">한국어</a> · <a href="es.md">Español</a> · <a href="fr.md">Français</a> · <a href="de.md">Deutsch</a> · <a href="pt-BR.md">Português (Brasil)</a>
 </p>
 <p align="center">
-  <a href="https://github.com/ink-scholar/Envara/releases/latest">Download for macOS</a> · <a href="../user-guide.md">User guide</a> · <a href="../capability-matrix.md">All features</a> · <a href="../SUPPORT.md">Support</a>
+  <a href="https://github.com/ink-scholar/Envara/releases/latest">Download macOS 1.2.0</a> · <a href="../user-guide.md">User guide</a> · <a href="../capability-matrix.md">All features</a> · <a href="../SUPPORT.md">Support</a>
 </p>
 
 **Bring your browser, terminal and desktop apps into separate working environments.**
@@ -20,11 +20,13 @@ Envara is an open-source local desktop workspace. Keep separate networks, browse
 
 ![Envara workspace with synthetic example data](../media/workspace-zh-CN.png)
 
-## New in 1.1.3
+## New in 1.2.0: macOS Keychain compatibility
 
-- **Keep terminal queries working when a view is hidden.** Fixes a missing-response bug that could leave command-line programs waiting and typed input without an echo after switching pages or closing a terminal view.
-- **Use several views of the same session.** Each session handles terminal queries once, so opening another window or restoring output does not send duplicate replies.
-- **Diagnose slow operations.** Local stage records help investigate delays and failures without recording commands, conversations or credentials. Existing environment settings and sign-in data are retained.
+- **Prepare the environment’s Keychain selection.** Fixes credential-storage compatibility when a private HOME has no default Keychain selection. Envara prepares local selection metadata only when you start a Claude terminal.
+- **Keep the chosen login profile.** Reopening saved terminals and duplicating sessions retain the selected profile. If the Keychain is unavailable, Envara explains the problem and preserves existing data.
+- **Keep your workspace settings.** Existing environment, network, browser and terminal settings and sign-in data are retained. Keychain preparation does not read or migrate host credentials, or change the host’s default Keychain or search list.
+
+Synthetic credential scenarios have been verified; real Claude OAuth login and account state after reopening remain unverified. See the [verification scope](../verification.md#120-验证范围).
 
 ## Concerned about account and environment linking in Claude Code?
 
@@ -55,7 +57,7 @@ See [capabilities and limits](../capability-matrix.md) for attached-app system a
 
 ## Get started
 
-Download the DMG or ZIP package for **macOS Apple Silicon (arm64)** from [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest), with SHA-256 checksums. Current artifacts are not signed with an Apple Developer ID or notarized; see the guide for installation steps. Verified builds for other platforms are not available yet.
+Download the **1.2.0 macOS Apple Silicon (arm64)** DMG or ZIP from [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest), with SHA-256 checksums. This release uses ad-hoc signing, without an Apple Developer ID signature or notarization; see the guide for installation steps. Verified builds for other platforms remain unavailable.
 
 **For your first session, start with one project.** Add and check a network route, then create an environment and choose a browser. Select a working directory when opening a terminal, or attach a supported desktop app as needed. Return to the same environment to reuse your saved browser data, terminal settings and app data, with less setup when switching between tools.
 

@@ -5,13 +5,13 @@
 <p align="center"><strong>给每一套工作，一个独立的境舱。</strong><br />One environment. Your browser, terminal and apps.</p>
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="原创代码许可证：MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.3-475569" alt="Envara 1.1.3" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.2.0-475569" alt="Envara 1.2.0" /></a>
 </p>
 <p align="center">
   <strong>简体中文</strong> · <a href="docs/readme/zh-TW.md">繁體中文</a> · <a href="docs/readme/en.md">English</a> · <a href="docs/readme/ja.md">日本語</a> · <a href="docs/readme/ko.md">한국어</a> · <a href="docs/readme/es.md">Español</a> · <a href="docs/readme/fr.md">Français</a> · <a href="docs/readme/de.md">Deutsch</a> · <a href="docs/readme/pt-BR.md">Português (Brasil)</a>
 </p>
 <p align="center">
-  <a href="https://github.com/ink-scholar/Envara/releases/latest">下载 macOS 版</a> · <a href="docs/user-guide.md">使用指南</a> · <a href="docs/capability-matrix.md">全部功能</a> · <a href="docs/SUPPORT.md">支持项目</a>
+  <a href="https://github.com/ink-scholar/Envara/releases/latest">下载 macOS 1.2.0</a> · <a href="docs/user-guide.md">使用指南</a> · <a href="docs/capability-matrix.md">全部功能</a> · <a href="docs/SUPPORT.md">支持项目</a>
 </p>
 
 **浏览器、终端和桌面应用，放进各自独立的工作环境。**
@@ -20,11 +20,13 @@ Envara 境舱是开源的本地桌面工作台。为不同项目、账号或地�
 
 ![Envara 工作区，使用合成示例数据](docs/media/workspace-zh-CN.png)
 
-## 1.1.3：切换页面，终端继续工作
+## 1.2.0：修复 macOS Keychain 兼容性
 
-- **隐藏后继续应答**：修复切走页面或关闭终端视图后，命令行程序因收不到终端查询回应而一直等待、输入没有回显的问题。
-- **同一会话支持多个视图**：终端查询由会话统一处理，打开独立窗口或恢复历史画面不会重复回应。
-- **卡顿有迹可查**：慢操作与失败会生成仅保存在本机的阶段诊断，不记录命令、聊天内容或凭据。已有环境配置和登录资料继续保留。
+- **补齐环境内的钥匙串选择**：修复独立 HOME 缺少默认钥匙串选择时的凭据保存兼容问题，仅在新建 Claude 终端时准备环境内的选择元数据。
+- **沿用所选登录档案**：重开已保存终端和复制会话继续使用所选档案；钥匙串不可用时提示原因，保留现有资料。
+- **保留已有工作区**：环境、网络、浏览器、终端配置及登录资料继续保留；钥匙串准备不读取或迁移宿主凭据，也不改变宿主钥匙串默认选择与搜索列表。
+
+合成凭据场景已验证；真实 Claude OAuth 登录和重新打开后的账号状态仍未验收，详见[验证范围](docs/verification.md#120-验证范围)。
 
 ## Claude Code「防封」与环境隔离
 
@@ -55,7 +57,7 @@ Envara 境舱是开源的本地桌面工作台。为不同项目、账号或地�
 
 ## 开始使用
 
-从 [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) 下载 **macOS Apple Silicon（arm64）** 的 DMG 或 ZIP 安装包，附 SHA-256 校验文件。当前制品未使用 Apple Developer ID 签名，也未公证；安装步骤见指南。其他平台暂不提供已验证制品。
+从 [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) 下载 **1.2.0 macOS Apple Silicon（arm64）** 的 DMG 或 ZIP，附 SHA-256 校验文件。本版沿用 ad-hoc 临时签名，未使用 Apple Developer ID，也未公证；安装步骤见指南。其他平台暂不提供已验证制品。
 
 **第一次使用，建议从一个项目开始。** 先添加并检测网络出口，再创建环境、选择浏览器；需要终端时选好工作目录，需要桌面软件时绑定受支持的应用。以后回到同一环境，可以沿用已保存的浏览资料、终端配置和应用数据，减少切换工具时的重复配置。
 

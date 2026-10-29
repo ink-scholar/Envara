@@ -5,14 +5,14 @@
 <p align="center"><strong>Um espaço próprio para cada fluxo de trabalho.</strong><br />Um ambiente. Seu navegador, terminal e aplicativos.</p>
 <p align="center">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b9cff" alt="Licença do código original: MIT" /></a>
-  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.1.1-475569" alt="Envara 1.1.1" /></a>
+  <a href="https://github.com/ink-scholar/Envara/releases"><img src="https://img.shields.io/badge/version-1.2.0-475569" alt="Envara 1.2.0" /></a>
   <a href="en.md"><img src="https://img.shields.io/badge/README-9_languages-6366f1" alt="README em 9 idiomas" /></a>
 </p>
 <p align="center">
   <a href="../../README.md">简体中文</a> · <a href="zh-TW.md">繁體中文</a> · <a href="en.md">English</a> · <a href="ja.md">日本語</a> · <a href="ko.md">한국어</a> · <a href="es.md">Español</a> · <a href="fr.md">Français</a> · <a href="de.md">Deutsch</a> · <strong>Português (Brasil)</strong>
 </p>
 <p align="center">
-  <a href="https://github.com/ink-scholar/Envara/releases/latest">Baixar para macOS</a> · <a href="../capability-matrix.md">Recursos e limites</a> · <a href="../../CONTRIBUTING.md">Contribuir</a> · <a href="../SUPPORT.md">Apoiar o projeto</a>
+  <a href="https://github.com/ink-scholar/Envara/releases/latest">Baixar macOS 1.2.0</a> · <a href="../capability-matrix.md">Recursos e limites</a> · <a href="../../CONTRIBUTING.md">Contribuir</a> · <a href="../SUPPORT.md">Apoiar o projeto</a>
 </p>
 
 **Abra o navegador, execute comandos e conecte aplicativos desktop em um ambiente que acompanha todo o seu trabalho.**
@@ -21,7 +21,15 @@ O Envara é um espaço de trabalho desktop local e de código aberto que reúne 
 
 ![Espaço de trabalho nativo do Envara em chinês](../media/workspace-zh-CN.png)
 
-## Novidades da versão 1.1.1
+## Novidades da versão 1.2.0: compatibilidade com o Acesso às Chaves do macOS
+
+Os cenários com credenciais sintéticas foram verificados; a autenticação OAuth real do Claude e o estado da conta após a reabertura ainda aguardam validação. Consulte o [escopo de verificação](../verification.md#120-验证范围).
+
+- **Compatibilidade com o Keychain do macOS.** Corrige a persistência das credenciais do Claude quando o `HOME` privado do ambiente não tem uma seleção de Keychain padrão. Ao iniciar explicitamente a sessão, o Envara completa apenas os metadados de seleção nesse `HOME` para reutilizar o Keychain de login disponível no sistema. A correção não lê, altera nem migra credenciais e não muda o Keychain padrão nem a lista de busca do sistema hospedeiro.
+- **O perfil escolhido continua selecionado.** Reabrir ou duplicar um terminal salvo mantém o perfil de login nomeado associado a ele.
+- **Os dados existentes são preservados.** Ambientes, configurações de rede, navegadores, terminais e dados de login permanecem como estão.
+
+### Novidades anteriores — versão 1.1.1
 
 - **Uma página dedicada ao SSH.** Pesquise hosts salvos, veja os detalhes da conexão e adicione novas conexões quando precisar.
 - **Mais espaço para o terminal.** Ele ocupa toda a área de trabalho à direita, com barra de ferramentas em uma linha, painéis flutuantes para terminais salvos e configurações, e uma ação clara para fechar.
@@ -97,15 +105,15 @@ O espaço de trabalho com três colunas oferece os modos claro, escuro ou confor
 
 ## Download e instalação
 
-Baixe o pacote DMG ou ZIP para **macOS Apple Silicon (arm64)** em [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). Abra o DMG e arraste o Envara para Aplicativos. Os arquivos de verificação e as notas da versão acompanham a publicação.
+Baixe os **arquivos DMG ou ZIP da versão 1.2.0 para macOS Apple Silicon (arm64)** e suas somas de verificação SHA-256 em [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). Abra o DMG e arraste o Envara para Aplicativos.
 
-**Os pacotes atuais para macOS não têm assinatura Apple Developer ID nem notarização.** As verificações de segurança do macOS podem ser aplicadas na primeira abertura; confirme que o download veio deste repositório e confira a soma de verificação. O Envara não desativa automaticamente as verificações de segurança do sistema. O componente de roteamento do sistema para aplicativos vinculados exige autorização separada do administrador; iniciar o navegador ou o espaço de trabalho comum não o instala automaticamente.
+**Esta versão usa assinatura ad-hoc, sem assinatura Apple Developer ID nem notarização.** As verificações de segurança do macOS podem ser aplicadas na primeira abertura; confirme que o download veio deste repositório e confira a soma de verificação. O Envara não desativa automaticamente as verificações de segurança do sistema. O componente de roteamento do sistema para aplicativos vinculados exige autorização separada do administrador; iniciar o navegador ou o espaço de trabalho comum não o instala automaticamente.
 
 | Plataforma | Escopo da publicação |
 | --- | --- |
-| macOS Apple Silicon | Esta publicação oferece DMG, ZIP e arquivos de somas de verificação SHA-256 |
+| macOS Apple Silicon | DMG, ZIP e arquivo de somas de verificação SHA-256 |
 | macOS Intel | O código-fonte para a plataforma é mantido; não há pacotes verificados disponíveis |
-| Windows / Linux | O código-fonte correspondente é mantido; esta publicação não oferece pacotes. Consulte a matriz de recursos para conhecer o escopo dos testes em máquinas reais |
+| Windows / Linux | O código-fonte correspondente é mantido; não há pacotes 1.2.0 para essas plataformas. Consulte a matriz de recursos para conhecer o escopo dos testes em máquinas reais |
 
 Os motores de navegador são instalados pelo usuário dentro do aplicativo e seguem suas próprias licenças. O aplicativo inclui as dependências de execução do desktop; não é preciso instalar Node.js ou Go separadamente.
 

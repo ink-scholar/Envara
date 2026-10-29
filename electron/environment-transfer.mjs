@@ -10,6 +10,7 @@ import { ATTACHED_APPLICATION_DATA_ROOT, REGENERABLE_CACHE_ENTRIES } from './app
 import { EXPORT_SCHEMA, checkedExportPassword, writeEnvironmentExport } from './environment-export.mjs';
 import { claudeAccountId } from './claude-account-store.mjs';
 import { APPLICATION_LOCAL_SELECTOR_PATH, APPLICATION_LOCAL_KEYCHAINS_PATH, machineLocalApplicationEntry } from './application-transfer-policy.mjs';
+import { machineLocalTerminalEntry } from './terminal-transfer-policy.mjs';
 
 const fail = (message, code) => Object.assign(new Error(message), { code });
 const LIVE_TERMINAL = new Set(['starting', 'running', 'closing']);
@@ -54,11 +55,14 @@ async function emptyTarget(target) {
 }
 /* Staging remains intact until the complete import succeeds. Copying rather
  * than consuming it makes a failed import genuinely retryable. */
-async function copyInto(source, target, applicationLeaf) {
+async function copyInto(source, target, applicationLeaf, terminalLeaf) {
   await cp(source, target, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true,
     ...(applicationLeaf !== undefined ? { filter: filename => {
       const relative = path.relative(source, filename).split(path.sep).join('/');
       return !machineLocalApplicationEntry(applicationLeaf ? `${applicationLeaf}/${relative}` : relative);
+    } } : terminalLeaf !== undefined ? { filter: filename => {
+      const relative = path.relative(source, filename).split(path.sep).join('/');
+      return !machineLocalTerminalEntry(relative ? `${terminalLeaf}/${relative}` : terminalLeaf);
     } } : {}) });
 }
 const homeRelative = value => value.slice('Home/'.length).split('/');
@@ -180,7 +184,7 @@ export async function exportEnvironment({ profile, password, file, service, term
   }
   if ((scope === 'environment' || scope === 'terminal') && terminal?.profilesDir) {
     sources.push({ section: 'terminal', root: path.join(terminal.profilesDir, profile.id), exclude: (relative, name) => {
-      if (TERMINAL_EXCLUDED.has(relative) || TRANSIENT.has(name)) return true;
+      if (TERMINAL_EXCLUDED.has(relative) || TRANSIENT.has(name) || machineLocalTerminalEntry(relative)) return true;
       if (scope === 'environment') return false; // Existing internal legacy-export callers; the desktop offers only SCOPES.
       return !selectedTerminalEntry(relative, accountId);
     } });
@@ -312,7 +316,7 @@ export async function restoreEnvironment({ staging, manifest, profileId, service
     if (await present(target)) await checkedDirectory(target);
     for (const name of await readdir(terminalSource)) {
       const destination = path.join(target, name);
-      plans.push({ source: path.join(terminalSource, name), target: destination, existed: await emptyTarget(destination) });
+      plans.push({ source: path.join(terminalSource, name), target: destination, existed: await emptyTarget(destination), terminalLeaf: name });
     }
     restored.terminal = true;
   }
@@ -330,7 +334,7 @@ export async function restoreEnvironment({ staging, manifest, profileId, service
     // account-metadata error rolls the whole fresh environment back.
     for (const plan of plans) {
       plan.temporary = path.join(path.dirname(plan.target), `.envara-import-${randomUUID()}`);
-      await copyInto(plan.source, plan.temporary, plan.application ? '' : undefined);
+      await copyInto(plan.source, plan.temporary, plan.application ? '' : undefined, plan.terminalLeaf);
       if (plan.application) await writeFile(path.join(plan.temporary, 'pending.json'),
         JSON.stringify({ identity: plan.application.identity, name: plan.application.name, path: plan.application.path }), { mode: 0o600 });
     }

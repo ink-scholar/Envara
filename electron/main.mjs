@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage, nativeTheme } from 'electron';
+import { ClaudeKeychainManager } from './claude-keychain.mjs';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -782,6 +783,7 @@ async function initializeDesktopServices({ checkOpen }) {
         resolveRoute: settings => terminal.resolveSshRoute(settings),
         nodeExecutable: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'backend', 'playwright-driver', process.platform === 'win32' ? 'node.exe' : 'node') }),
       browserBroker: terminalBrowserBroker,
+      claudeKeychain: new ClaudeKeychainManager({ resourcesDir: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'claude-keychain') }),
       additionalExecutablePaths: [path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'backend', 'playwright-driver')],
       resolveContext: id => service.resolveWorkspaceContext(id),
       resolveSshContext: id => service.resolveWorkspaceContext(id, { requireManagedRoute: true }),

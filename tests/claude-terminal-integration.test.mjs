@@ -26,6 +26,8 @@ async function fixture(t, overrides = {}) {
   } };
   const service = new TerminalService({ dataDir: path.join(root, 'data'), resolveContext: async () => structuredClone(context), browserBroker,
     availableLocales: ['C', 'en_US.UTF-8', 'en_PH.UTF-8'],
+    // Native Keychain persistence has its own disposable-keychain acceptance.
+    claudeKeychain: { prepare: async () => { order.push('keychain'); return { status: 'ready', changed: false }; } },
     claudeExecutableResolver: async () => hostExecutable,
     // Product launches default to an explicit download. This suite exercises
     // that policy with native fixture bytes and never reaches a real network.
@@ -54,6 +56,87 @@ function managedContext(context, id = 'chosen', proxyId = 'route_a') {
   return { ...structuredClone(context), id, proxyId, managedProxy: true,
     managedRoute: { proxyId, routeIdentity: `fixture-${proxyId}`, coreGeneration: 1, corePid: 1234 } };
 }
+
+test('Keychain preparation only follows an explicit Claude start and keeps the selected account directories', async t => {
+  const calls = [];
+  const f = await fixture(t, { claudeKeychain: { prepare: async request => { calls.push(request); return { status: 'ready', changed: calls.length === 1 }; } } });
+  await f.service.snapshot({ id: 'chosen' });
+  await f.service.claudeInstallationStatus({ id: 'chosen' });
+  const { account } = await f.service.createClaudeAccount({ id: 'chosen', name: 'Work fixture' });
+  await f.service.listClaudeAccounts({ id: 'chosen' });
+  assert.deepEqual(calls, [], 'read-only status and account metadata must not initialize a Keychain');
+  const started = await f.service.create({ id: 'chosen', directory: f.cwd, kind: 'claude-code', browserProfileId: 'chosen', claudeAccountId: account.id, fresh: true });
+  await f.service.duplicate({ sessionId: started.sessionId });
+  assert.equal(calls.length, 2, 'each new shell checks readiness again');
+  assert.deepEqual(calls[0], { home: f.launches[0].options.env.HOME, hostHome: f.service.hostKeychainHome });
+  assert.deepEqual(calls[1], calls[0]);
+  assert(f.launches[0].options.env.CLAUDE_CONFIG_DIR.endsWith(`/claude-accounts/${account.id}`));
+  assert.equal(f.launches[0].options.env.CFFIXED_USER_HOME, undefined);
+});
+
+test('macOS Keychain source uses the OS account home when the launch HOME is overridden', { skip: process.platform !== 'darwin' }, async t => {
+  const old = process.env.HOME, calls = [];
+  let f;
+  try {
+    process.env.HOME = '/private/tmp/envara-synthetic-launch-home';
+    f = await fixture(t, { claudeKeychain: { prepare: async request => { calls.push(request); return { status: 'ready', changed: false }; } } });
+  } finally {
+    if (old === undefined) delete process.env.HOME; else process.env.HOME = old;
+  }
+  await f.start();
+  assert.equal(calls[0].hostHome, os.userInfo().homedir);
+  assert.notEqual(calls[0].hostHome, '/private/tmp/envara-synthetic-launch-home');
+});
+
+test('Keychain refusal preserves account data and starts no installation, browser broker or shell', async t => {
+  let installations = 0;
+  const f = await fixture(t, {
+    claudeInstaller: async () => { installations++; throw new Error('Must not install'); },
+    claudeKeychain: { prepare: async () => { throw Object.assign(new Error('Synthetic keychain locked'), { code: 'CLAUDE_KEYCHAIN_LOCKED' }); } },
+  });
+  await f.service.ready;
+  const directories = await f.service.directories('chosen');
+  const marker = path.join(directories.claude, '.credentials.json');
+  await writeFile(marker, 'synthetic existing account state', { mode: 0o600 });
+  await assert.rejects(f.start(), { code: 'CLAUDE_KEYCHAIN_LOCKED' });
+  assert.equal(installations, 0); assert.equal(f.bindings.length, 0); assert.equal(f.launches.length, 0);
+  assert.equal(await readFile(marker, 'utf8'), 'synthetic existing account state');
+});
+
+test('Close during Keychain preparation waits for its bounded result and never starts a late shell', async t => {
+  const gate = deferred(), entered = deferred(); let installations = 0;
+  const f = await fixture(t, {
+    claudeInstaller: async () => { installations++; throw new Error('Must not install'); },
+    claudeKeychain: { prepare: async () => { entered.resolve(); await gate.promise; return { status: 'ready', changed: true }; } },
+  });
+  const starting = f.start();
+  const rejected = assert.rejects(starting);
+  await entered.promise;
+  const sessionId = [...f.service.sessions.keys()][0];
+  const closing = f.service.close({ sessionId });
+  let closed = false;
+  closing.then(() => { closed = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closed, false, 'Close must not finish while native preparation owns resources');
+  gate.resolve();
+  await rejected; await closing;
+  assert.equal(installations, 0); assert.equal(f.bindings.length, 0); assert.equal(f.launches.length, 0);
+});
+
+test('native preparation failure and its incomplete cleanup survive repeated Close separately', async t => {
+  const cleanupError = 'Synthetic native preparation cleanup is incomplete.';
+  const f = await fixture(t, { claudeKeychain: { prepare: async () => {
+    throw Object.assign(new Error('Synthetic original failure'), { code: 'CLAUDE_KEYCHAIN_HOST_CHECK_FAILED', keychainPreparationIncomplete: true, cleanupError });
+  } } });
+  await assert.rejects(f.start(), { code: 'CLAUDE_KEYCHAIN_HOST_CHECK_FAILED' });
+  const session = [...f.service.sessions.values()][0];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await f.service.close({ sessionId: session.sessionId });
+    assert.equal(session.errorCode, 'CLAUDE_KEYCHAIN_HOST_CHECK_FAILED');
+    assert.equal(session.cleanupError, cleanupError);
+    assert.equal(f.launches.length, 0);
+  }
+});
 
 test('dedicated session opens a shell with a manual Claude wrapper and pinned MCP/link credentials', async t => {
   const f = await fixture(t), session = await f.start(), launch = f.launches[0];

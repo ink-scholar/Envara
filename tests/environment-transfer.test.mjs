@@ -101,7 +101,8 @@ test('an encrypted environment transfer preserves browser sign-ins, terminal/Cla
   for (const [name, data] of Object.entries(terminalFiles)) await put(sourceTerminal, name, data);
   for (const [name, data] of Object.entries(appFiles)) await put(sourceApplication, name, data);
   for (const name of ['Default/Cache/bytes', 'Default/Code Cache/bytes', 'SingletonLock', 'SingletonCookie', 'DevToolsActivePort']) await put(sourceBrowser, name, 'not-exported');
-  for (const name of ['tmp/run', 'home/.cache/cache', 'home/.local/share/claude/version', 'home/.local/bin/claude', 'SingletonSocket']) await put(sourceTerminal, name, 'not-exported');
+  for (const name of ['tmp/run', 'home/.cache/cache', 'home/.local/share/claude/version', 'home/.local/bin/claude',
+    'home/Library/Preferences/com.apple.security.plist', 'home/Library/Keychains/fixture.keychain-db', 'home/.envara-keychain.lock', 'SingletonSocket']) await put(sourceTerminal, name, 'not-exported');
   for (const name of ['Cache/cache', 'Temp/run', 'Program/Executable', 'UserData/Cache/cache', 'UserData/code.lock']) await put(sourceApplication, name, 'not-exported');
   await put(f.registration(OTHER_ID, OTHER_APP), 'UserData/Cookies', 'other-environment-secret');
   const outside = await put(f.root, 'host-credentials', 'host-secret-not-exported');
@@ -124,7 +125,8 @@ test('an encrypted environment transfer preserves browser sign-ins, terminal/Cla
   assert.deepEqual(manifest.applications, [applicationManifest()]);
   for (const [section, files] of [['browser', browserFiles], ['terminal', terminalFiles], ['app-0', appFiles]])
     for (const [name, data] of Object.entries(files)) assert.equal(await readFile(path.join(staging, section, name), 'utf8'), data);
-  for (const name of ['browser/Default/Cache', 'browser/Default/Code Cache', 'browser/SingletonLock', 'terminal/tmp', 'terminal/home/.cache', 'terminal/home/.local/share/claude', 'terminal/home/.local/bin/claude', 'terminal/host-link', 'app-0/Cache', 'app-0/Temp', 'app-0/Program', 'app-0/UserData/Cache', 'app-0/UserData/code.lock', 'app-1']) await absent(path.join(staging, name));
+  for (const name of ['browser/Default/Cache', 'browser/Default/Code Cache', 'browser/SingletonLock', 'terminal/tmp', 'terminal/home/.cache', 'terminal/home/.local/share/claude', 'terminal/home/.local/bin/claude',
+    'terminal/home/Library/Preferences/com.apple.security.plist', 'terminal/home/Library/Keychains', 'terminal/home/.envara-keychain.lock', 'terminal/host-link', 'app-0/Cache', 'app-0/Temp', 'app-0/Program', 'app-0/UserData/Cache', 'app-0/UserData/code.lock', 'app-1']) await absent(path.join(staging, name));
   const restored = await restoreEnvironment({ ...f, staging, manifest, profileId: IMPORTED_ID, platform: 'darwin' });
   assert.deepEqual(restored, { browser: true, terminal: true, applications: [{ name: TARGET_APP.name, bound: true, reason: null }] });
   const importedBrowser = path.join(await f.service.checkedDirectory({ id: IMPORTED_ID }), 'browser-data');
@@ -153,6 +155,24 @@ test('non-macOS export omits privileged application data and missing optional da
   const manifest = await readEnvironmentExport({ file, password: PASSWORD, staging: path.join(f.root, 'staging') });
   assert.deepEqual(manifest.applications, []);
   assert.deepEqual(manifest.terminal.accounts, []);
+});
+
+test('legacy terminal imports drop machine-local Keychain aliases and unfinished preparation while retaining account and shell data', async t => {
+  const f = await fixture(t), staging = path.join(f.root, 'legacy-staging');
+  const localFiles = ['HoMe/lIbRaRy/PrEfErEnCeS/COM.APPLE.SECURITY.PLIST',
+    'HoMe/lIbRaRy/KEYCHAINS/fixture.keychain-db', 'HoMe/.ENVARA-KEYCHAIN.LOCK',
+    'HoMe/.envara-keychain-stage-fixture/Library/Preferences/com.apple.security.plist'];
+  const portableFiles = { 'HoMe/.envara_history': 'synthetic shell history',
+    'claude/.credentials.json': 'synthetic portable profile', 'claude/settings.json': 'synthetic settings' };
+  for (const name of localFiles) await put(path.join(staging, 'terminal'), name, 'synthetic machine-local state');
+  for (const [name, data] of Object.entries(portableFiles)) await put(path.join(staging, 'terminal'), name, data);
+  const restored = await restoreEnvironment({ ...f, staging, manifest: manifestFor(), profileId: IMPORTED_ID, platform: 'darwin' });
+  assert.equal(restored.terminal, true);
+  for (const name of localFiles) {
+    await absent(path.join(f.profilesDir, IMPORTED_ID, name));
+    assert.equal(await readFile(path.join(staging, 'terminal', name), 'utf8'), 'synthetic machine-local state', 'import leaves staging intact');
+  }
+  for (const [name, data] of Object.entries(portableFiles)) assert.equal(await readFile(path.join(f.profilesDir, IMPORTED_ID, name), 'utf8'), data);
 });
 
 test('checkedExportManifest accepts exactly one environment and rejects malformed profile/application/account shapes', async t => {

@@ -22,7 +22,27 @@ const downloadErrors = {
   CLAUDE_CODE_PLATFORM_UNSUPPORTED: '当前平台尚不支持 Claude 专用安装。',
 };
 
-export const claudeErrorMessage = (message, code) => downloadErrors[code] ?? downloadErrors[message] ?? message;
+const keychainErrors = {
+  CLAUDE_KEYCHAIN_LOCKED: '登录钥匙串已锁定。请在 macOS“钥匙串访问”中解锁后，新建 Claude 终端。',
+  CLAUDE_KEYCHAIN_MISSING: '未找到可用的系统登录钥匙串。请在 macOS“钥匙串访问”中检查后重试。',
+  CLAUDE_KEYCHAIN_BUSY: 'Claude 钥匙串正在准备中，请稍后重试。',
+  CLAUDE_KEYCHAIN_EXISTING_SELECTION: '此环境已有钥匙串设置，但当前无法使用。请在 macOS“钥匙串访问”中检查后重试。',
+  CLAUDE_KEYCHAIN_HOST_CHANGED: '系统钥匙串设置在准备期间发生变化。请检查后新建 Claude 终端。',
+  CLAUDE_KEYCHAIN_HOST_CHECK_FAILED: 'Claude 钥匙串准备的收尾检查未通过。请保留现有资料并联系维护者处理。',
+  CLAUDE_KEYCHAIN_CLEANUP_FAILED: 'Claude 钥匙串准备的临时资料未能完成清理。请保留现有资料并联系维护者处理。',
+  CLAUDE_KEYCHAIN_RESOURCE_INVALID: '无法验证 Claude 钥匙串组件，请检查 Envara 安装后重试。',
+  CLAUDE_KEYCHAIN_TIMEOUT: 'Claude 钥匙串准备超时，请稍后重试。',
+  CLAUDE_KEYCHAIN_UNAVAILABLE: 'Claude 登录凭据存储暂不可用，请检查钥匙串后重试。',
+};
+
+function keychainErrorMessage(value) {
+  if (typeof value !== 'string' || !value.startsWith('CLAUDE_KEYCHAIN_')) return undefined;
+  // An unknown helper failure must not expose a private path or native detail.
+  return Object.hasOwn(keychainErrors, value) ? keychainErrors[value] : keychainErrors.CLAUDE_KEYCHAIN_UNAVAILABLE;
+}
+
+export const claudeErrorMessage = (message, code) => keychainErrorMessage(code) ?? downloadErrors[code]
+  ?? keychainErrorMessage(message) ?? downloadErrors[message] ?? message;
 
 export function validClaudeInstallationChoice(installation, profileId, source) {
   return Boolean(profileId && installation.profileId === profileId && installation.status === 'ready'

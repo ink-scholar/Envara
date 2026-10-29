@@ -22,6 +22,8 @@ import { PF_RUNTIME_MODULE_FILES } from './build-macos-pf-routing.mjs';
 import { bundledPFRoutingPaths } from '../electron/macos-pf-resources.mjs';
 import { inspectElectronLicenseResources } from './electron-license-resources.mjs';
 import { parsePFPackageCandidate } from './macos-pf-package-contract.mjs';
+import { inspectClaudeKeychainResource } from '../electron/claude-keychain.mjs';
+import { checkClaudeKeychainResources } from './build-macos-claude-keychain.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const posix = value => value.split(path.sep).join('/');
@@ -381,6 +383,14 @@ async function verify(options) {
       });
     }
     report.checks.push('Every configured extraResources inventory, file SHA-256, permission mode and symlink compared; .swift-build excluded');
+    await check('resources/claude-keychain/source-and-runtime', async () => {
+      if (target.platform !== 'darwin') return;
+      const resourcesDir = path.join(target.resources, 'claude-keychain');
+      const inspected = await inspectClaudeKeychainResource({ resourcesDir, architecture: target.arch });
+      await checkClaudeKeychainResources(path.join(resourcesDir, `darwin-${target.arch}`), target.arch);
+      report.claudeKeychain = { architecture: target.arch, sha256: inspected.manifest.sha256, executed: false };
+      report.checks.push('Claude Keychain helper bytes, platform, architecture and source/builder digests verified without reading credentials or preparing a HOME');
+    });
     await check('resources/app-routing/macos-pf-manifest', async () => {
       if (target.platform !== 'darwin') return;
       report.pfResources = await inspectPFRoutingResources({ resourceRoot: bundledPFRoutingPaths(target.resources).directory, arch: target.arch });

@@ -145,10 +145,15 @@ export class ProxyNetworkProbe {
     this.endpoints = endpoints.map((endpoint) => { const url = new URL(endpoint.url); if (url.protocol !== 'https:' || url.username || url.password || url.hash || !['ipwho', 'ipapi'].includes(endpoint.format)) throw failure('INVALID_PROBE_OPTIONS'); return { url: url.href, source: endpoint.source, format: endpoint.format }; });
     this.transport = transport; this.timeoutMs = timeoutMs; this.maxBodyBytes = maxBodyBytes;
     this.cacheTtlMs = cacheTtlMs; this.nowMs = nowMs; this.tlsOptions = tlsOptions;
-    this.cache = new Map(); this.inflight = new Map(); this.controllers = new Set(); this.closed = false;
+    this.cache = new Map(); this.inflight = new Map(); this.controllers = new Set(); this.closed = false; this.networkRevision = 0;
   }
   peek(proxy) { const entry = this.cache.get(proxyFingerprint(proxy)); return entry ? { ...entry.result, stale: this.nowMs() - entry.timestamp >= this.cacheTtlMs } : null; }
   invalidate(proxy) { const key = proxyFingerprint(proxy); this.cache.delete(key); this.inflight.delete(key); }
+  invalidateNetwork() {
+    this.networkRevision++;
+    this.cache.clear(); this.inflight.clear();
+    for (const controller of this.controllers) controller.abort();
+  }
   close() { this.closed = true; for (const controller of this.controllers) controller.abort(); }
   async probe(input, { force = false } = {}) {
     if (this.closed) throw failure('APP_CLOSING');
@@ -171,14 +176,16 @@ export class ProxyNetworkProbe {
     finally { if (this.inflight.get(key) === operation) this.inflight.delete(key); }
   }
   async lookup(proxy) {
+    const revision = this.networkRevision;
     const started = this.nowMs(); let code = 'NETWORK_FAILED', source = null;
     for (const endpoint of this.endpoints) {
-      if (this.closed) break;
+      if (this.closed || revision !== this.networkRevision) break;
       source = endpoint.source;
       let agent; const controller = new AbortController(); this.controllers.add(controller);
       try {
         agent = createProxyAgent(proxy, this.timeoutMs, this.tlsOptions, controller.signal);
         const data = await this.transport({ url: endpoint.url, agent, timeoutMs: this.timeoutMs, maxBodyBytes: this.maxBodyBytes, tlsOptions: this.tlsOptions, controller });
+        if (revision !== this.networkRevision) break;
         const geo = parseGeoResponse(data, endpoint, proxy);
         return { ok: true, scope: 'egress', ...geo, source, checkedAt: new Date(this.nowMs()).toISOString(), latencyMs: Math.max(0, Math.round(this.nowMs() - started)), message: '已通过 HTTPS 验证实际网络出口；位置为 IP 地理估算。' };
       } catch (value) { code = Object.hasOwn(messages, value.code) ? value.code : 'NETWORK_FAILED'; }

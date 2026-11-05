@@ -7,8 +7,7 @@ import path from 'node:path';
 import tls from 'node:tls';
 import { domainToASCII, pathToFileURL } from 'node:url';
 
-const MAX_TARGET_BYTES = 16 * 1024;
-const MAX_TARGETS = 128;
+const MAX_TARGET_BYTES = 1024 * 1024;
 const failure = (code, message) => Object.assign(new Error(message), { code });
 const invalid = () => failure('SSH_PROXY_CONFIGURATION', 'SSH proxy configuration is unavailable or invalid.');
 
@@ -74,12 +73,18 @@ export function validateSshProxyUrl(value) {
 }
 
 function validateTargets(value) {
-  if (!Array.isArray(value) || !value.length || value.length > MAX_TARGETS) throw invalid();
-  return value.map(target => {
+  if (!Array.isArray(value) || !value.length) throw invalid();
+  const targets = [];
+  let bytes = 2;
+  for (const target of value) {
     if (!target || typeof target !== 'object' || Array.isArray(target)
       || Object.keys(target).some(key => !['host', 'port'].includes(key))) throw invalid();
-    return validateSshTarget(target.host, target.port);
-  });
+    const checked = validateSshTarget(target.host, target.port);
+    bytes += Buffer.byteLength(JSON.stringify(checked)) + 1;
+    if (bytes > MAX_TARGET_BYTES) throw invalid();
+    targets.push(checked);
+  }
+  return targets;
 }
 
 /** The main process also fences writes to this file and its parent directories.

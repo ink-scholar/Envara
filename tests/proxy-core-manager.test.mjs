@@ -21,10 +21,10 @@ async function fixture(t, overrides = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'envara-proxy-core-test-'));
   const calls = [], bridges = []; let nextPort = 42000;
   const createCompatibilityBridge = async (settings, options) => {
-    const entry = { settings: structuredClone(settings), options, closes: 0 };
+    const entry = { settings: structuredClone(settings), options, closes: 0, updates: [] };
     entry.bridge = { protocol: 'http', host: '127.0.0.1', port: 45000 + bridges.length,
       username: 'fixture-bridge-user', password: `fixture-bridge-password-${bridges.length}`,
-      close: async () => { entry.closes++; } };
+      close: async () => { entry.closes++; }, updateNetworkContext: context => { entry.updates.push(context); } };
     bridges.push(entry); return entry.bridge;
   };
   const spawn = (binary, args, options) => {
@@ -529,4 +529,59 @@ test('listener readiness proves randomized credentials without sending an outbou
   assert.equal(received.length, 4); assert.deepEqual(received[0], [5, 1, 2]);
   // Greeting and username/password only; no SOCKS CONNECT command or destination.
   assert.equal(received[1][0], 1); assert.equal(received[3][0], 1);
+});
+
+test('same Wi-Fi interface with a new DHCP address refreshes HTTP binding without replacing the running route', async t => {
+  let address = '192.0.2.10', online = true, resolutions = 0;
+  const { manager, calls, bridges } = await fixture(t, { platform: 'darwin', bootstrapAddress: () => address,
+    detectInterface: async () => { if (!online) throw new Error('fixture offline'); return 'en0'; },
+    resolveBootstrapHost: async () => { resolutions++; return resolutions === 1 ? '93.184.215.14' : '93.184.215.15'; } });
+  const proxy = { id: 'moving-http', protocol: 'https', host: 'node.example.test', port: 443 };
+  const wire = await manager.ensure(proxy), identity = manager.routingIdentity(proxy.id);
+  assert.equal(bridges[0].options.localAddress, '192.0.2.10');
+  online = false;
+  assert.deepEqual(await manager.recoverNetwork(), { ok: false });
+  assert.equal(calls.length, 1); assert.equal(bridges[0].closes, 0);
+  online = true; address = '198.51.100.20';
+  assert.deepEqual(await manager.recoverNetwork(), { ok: true });
+  assert.deepEqual(bridges[0].updates, [{ localAddress: address, upstreamAddress: '93.184.215.15' }]);
+  assert.deepEqual(await manager.ensure(proxy), wire);
+  assert.deepEqual(manager.routingIdentity(proxy.id), identity);
+  assert.equal(calls.length, 1); assert.equal(bridges[0].closes, 0); assert.equal(calls[0].child.kills.length, 0);
+  assert.equal(resolutions, 2, 'unchanged source address does not resolve or rebuild again');
+});
+
+test('failed source refresh remains retryable on the same listener and does not discard existing route', async t => {
+  let address = '192.0.2.10', resolveWorks = true;
+  const { manager, calls, bridges } = await fixture(t, { platform: 'darwin', bootstrapAddress: () => address,
+    resolveBootstrapHost: async () => { if (!resolveWorks) throw new Error('fixture DNS offline'); return '93.184.215.14'; } });
+  const proxy = { id: 'moving-http-dns', protocol: 'http', host: 'node.example.test', port: 8080 };
+  const wire = await manager.ensure(proxy);
+  address = '198.51.100.20'; resolveWorks = false;
+  assert.deepEqual(await manager.recoverNetwork(), { ok: false });
+  assert.equal(bridges[0].updates.length, 0); assert.equal(bridges[0].closes, 0);
+  resolveWorks = true;
+  assert.deepEqual(await manager.recoverNetwork(), { ok: true });
+  assert.deepEqual(await manager.ensure(proxy), wire); assert.equal(calls.length, 1);
+  assert.equal(bridges[0].updates.length, 1);
+});
+
+test('rejoining the same address refreshes pinned node DNS once and retries leave healthy bridges intact', async t => {
+  let address = '192.0.2.10', failure = false, answer = '93.184.215.14';
+  const { manager, calls, bridges } = await fixture(t, { platform: 'darwin', bootstrapAddress: () => address,
+    resolveBootstrapHost: async host => { if (failure && host === 'failed.example.test') throw new Error('fixture unreachable'); return answer; } });
+  const good = { id: 'same-address', protocol: 'https', host: 'healthy.example.test', port: 443 };
+  const bad = { ...good, id: 'failed-address', host: 'failed.example.test' };
+  const original = await manager.ensure(good); await manager.ensure(bad);
+  const identity = manager.routingIdentity(good.id);
+  answer = '93.184.215.15'; failure = true;
+  assert.deepEqual(await manager.recoverNetwork(), { ok: false });
+  assert.deepEqual(bridges[0].updates, [{ localAddress: address, upstreamAddress: answer }]);
+  assert.equal(bridges[1].updates.length, 0);
+  failure = false;
+  assert.deepEqual(await manager.recoverNetwork({ retry: true }), { ok: true });
+  assert.equal(bridges[0].updates.length, 1, 'healthy node is not refreshed by another node retry');
+  assert.equal(bridges[1].updates.length, 1);
+  assert.deepEqual(await manager.ensure(good), original); assert.deepEqual(manager.routingIdentity(good.id), identity);
+  assert.equal(calls.length, 2); assert.equal(bridges[0].closes, 0);
 });

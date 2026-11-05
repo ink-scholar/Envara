@@ -28,7 +28,7 @@ test('SSH protection rejects malformed or cross-session public paths before laun
     { ...validProtection(), protectedPaths: ['/owned/agents', '/owned/../store'] },
     { ...validProtection(), readOnlyPaths: ['relative'] },
     { ...validProtection(), deniedAgentSockets: ['/owned/agent\n.sock'] },
-    { ...validProtection(), readablePaths: Array(257).fill('/owned/agents/a/public') },
+    { ...validProtection(), readablePaths: Array(6000).fill('/owned/agents/a/public') },
   ]) assert.throws(() => terminalFenceProfile({ sshProtection: value }), refused);
 });
 
@@ -242,4 +242,28 @@ test('production SSH target reader traverses own public ancestors without gainin
       ownPublicListing: true, rootListingDenied: true, sessionListingDenied: true,
       otherMetadataDenied: true, otherContentDenied: true, publicWriteDenied: true }, child ? 'exec child' : 'direct');
   }
+});
+
+
+test('SSH file protection covers 300 saved key paths without a connection count cap', () => {
+  const keys = Array.from({ length: 300 }, (_, index) => `/owned/keys/environment-${Math.floor(index / 150)}/key-${index}`);
+  const profile = terminalFenceProfile({ sshProtection: { ...validProtection(), protectedPaths: [...validProtection().protectedPaths, ...keys] } });
+  for (const key of keys) assert.ok(profile.includes(`(subpath "${key}")`));
+  assert.throws(() => terminalFenceProfile({ sshProtection: { ...validProtection(),
+    protectedPaths: [...validProtection().protectedPaths, ...Array.from({ length: 300 }, (_, index) => `/owned/keys/${index}-${'x'.repeat(1024)}`)] } }), refused);
+});
+
+test('real Seatbelt keeps the first and last of 300 saved private paths unreadable while an unrelated file stays readable', onlyMac, async t => {
+  const directory = await realpath(await mkdtemp('/private/tmp/envara-many-keys-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const agents = path.join(directory, 'agents'); await mkdir(agents, { mode: 0o700 });
+  const keys = Array.from({ length: 300 }, (_, index) => path.join(directory, `private-fixture-${index}`));
+  await Promise.all(keys.map(filename => writeFile(filename, 'DISPOSABLE-PRIVATE-FIXTURE', { mode: 0o600 })));
+  const control = path.join(directory, 'unrelated'); await writeFile(control, 'allowed-fixture');
+  const profile = terminalFenceProfile({ sshProtection: { protectedPaths: [agents, ...keys], agentRoot: agents } });
+  const probe = `const fs=require('node:fs');const paths=${JSON.stringify([keys[0], keys.at(-1)])};
+    const denied=paths.map(filename=>{try{fs.readFileSync(filename);return false;}catch(e){return ['EPERM','EACCES'].includes(e.code);}});
+    console.log(JSON.stringify({denied,control:fs.readFileSync(${JSON.stringify(control)},'utf8')}));`;
+  const result = JSON.parse((await execute(TERMINAL_FENCE_EXECUTABLE, ['-p', profile, process.execPath, '-e', probe], { timeout: 10000 })).stdout);
+  assert.deepEqual(result, { denied: [true, true], control: 'allowed-fixture' });
 });

@@ -209,3 +209,17 @@ test('IP coordinates are coarse and invalid coordinates cannot become device loc
     if (expected) assert.deepEqual(result.geolocation, { latitude, longitude, accuracy: 50000 });
   }
 });
+
+test('network changes abort old lookup and permit a fresh request without stale fallback or cache writes', async () => {
+  let finish, calls = 0, oldController;
+  const probe = new ProxyNetworkProbe({ transport: async ({ controller }) => {
+    calls++; if (calls === 1) { oldController = controller; return new Promise(resolve => { finish = resolve; }); }
+    return { ...geo, ip: '1.1.1.1' };
+  } });
+  const proxy = { protocol: 'http', host: 'proxy.example', port: 8080 };
+  const old = probe.probe(proxy);
+  probe.invalidateNetwork(); assert.equal(oldController.signal.aborted, true);
+  const fresh = await probe.probe(proxy); assert.equal(fresh.ip, '1.1.1.1');
+  finish(geo); assert.equal((await old).ok, false);
+  assert.equal(calls, 2); assert.equal(probe.peek(proxy).ip, '1.1.1.1');
+});

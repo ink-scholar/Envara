@@ -365,6 +365,24 @@ test('nine languages keep compact saved-entry names, account names, folders and 
     const details = page.locator('.terminal-saved-terminals');
     assert.equal(await details.locator('summary').getAttribute('aria-label'), translate('已保存终端', language));
     assert.equal(await details.locator('summary').getAttribute('title'), translate('已保存终端', language));
+    await details.locator('summary').hover();
+    const tooltip = page.getByRole('tooltip');
+    await tooltip.waitFor({ state: 'visible' });
+    assert.equal(await tooltip.locator('span').textContent(), translate('新建后自动保存终端入口，可在此重开或重命名。', language));
+    const hintBounds = await tooltip.evaluate(element => {
+      const rect = element.getBoundingClientRect();
+      return { inside: rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight,
+        overflows: element.scrollWidth > element.clientWidth + 1 };
+    });
+    assert.equal(hintBounds.inside, true, language);
+    assert.equal(hintBounds.overflows, false, language);
+    if (language === 'zh-CN' || language === 'de') {
+      const artifacts = fileURLToPath(new URL('../test-artifacts/terminal-toolbar-hints/', import.meta.url));
+      await mkdir(artifacts, { recursive: true, mode: 0o700 });
+      await page.screenshot({ path: path.join(artifacts, `${language}-saved-hint.png`) });
+    }
+    await page.mouse.move(2, 2);
+    await tooltip.waitFor({ state: 'hidden' });
     const row = rowFor();
     assert.equal(await row.getByRole('button', { name: translate('打开终端「{name}」', language, { name: long.name }), exact: true }).count(), 1, language);
     assert.equal(await row.getByRole('button', { name: translate('重命名终端「{name}」', language, { name: long.name }), exact: true }).count(), 1, language);

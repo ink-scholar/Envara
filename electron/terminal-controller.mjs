@@ -6,7 +6,7 @@ const identifier = (value) => {
   return value;
 };
 
-export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'renameSavedTerminal', 'removeSavedTerminal', 'reopenSavedTerminal', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'deleteClaudeAccount', 'claudeInstallationStatus', 'listTerminalSshConnections', 'prepareTerminalSshIdentity', 'prepareTerminalSshPassword', 'setTerminalSshPassword', 'saveTerminalSshConnection', 'removeTerminalSshConnection']);
+export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'renameSavedTerminal', 'removeSavedTerminal', 'reopenSavedTerminal', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'deleteClaudeAccount', 'claudeInstallationStatus', 'listTerminalSshConnections', 'prepareTerminalSshIdentity', 'prepareTerminalSshPassword', 'setTerminalSshPassword', 'forgetTerminalSshPassword', 'saveTerminalSshConnection', 'removeTerminalSshConnection']);
 const PROFILE_CONFIGURATION = new Set(['updateProfile', 'deleteProfile']);
 const PROXY_CONFIGURATION = new Set(['saveProxy', 'deleteProxy']);
 const GROUP_CONFIGURATION = new Set(['saveGroup', 'deleteGroup', 'clearGroupProxy']);
@@ -14,7 +14,7 @@ const SSH_SELECTION_LIFETIME = 30 * 60 * 1000;
 const sshPublicFields = ['id', 'name', 'alias', 'host', 'port', 'user', 'keyLabel', 'keyFingerprint'];
 const sshPublicIdentity = value => ({ ...Object.fromEntries(sshPublicFields.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])),
   ...(['password', 'publickey'].includes(value.authType) ? { authType: value.authType } : {}),
-  ...(value.authType === 'password' ? { passwordReady: value.passwordReady === true } : {}),
+  ...(value.authType === 'password' ? { passwordReady: value.passwordReady === true, passwordSaved: value.passwordSaved === true } : {}),
   route: normalizeSshRoute(value.route, { legacy: true }),
   ...(['probe', 'host-known-hosts'].includes(value.trustSource) ? { trustSource: value.trustSource } : {}),
   hostFingerprints: Array.isArray(value.hostFingerprints) ? value.hostFingerprints.filter(item => typeof item === 'string') : [] });
@@ -286,11 +286,11 @@ export class TerminalController {
       await this.profile(args.id);
       if (method === 'saveTerminalSshConnection') return this.saveSSHConnection(args, context);
       if (method === 'setTerminalSshPassword') return this.setSSHPassword(args, context);
-      if (method === 'removeTerminalSshConnection') {
+      if (method === 'removeTerminalSshConnection' || method === 'forgetTerminalSshPassword') {
         sshWindow(context);
         await this.assertSSHIdle(args.id);
         sshWindow(context);
-        await this.terminal.removeTerminalSshConnection({ id: args.id, connectionId: args.connectionId });
+        await this.terminal[method]({ id: args.id, connectionId: args.connectionId });
         sshWindow(context);
         return this.sshList(args.id);
       }

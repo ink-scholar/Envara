@@ -210,7 +210,7 @@ test('all SSH connection actions remain inside the independent terminal window e
   const f = fixture();
   Object.assign(f.views.get(f.event.sender), { kind: 'terminal', profileId: 'prof_fixture' });
   await f.startup.start();
-  const methods = ['listTerminalSshConnections', 'prepareTerminalSshIdentity', 'prepareTerminalSshPassword', 'setTerminalSshPassword', 'saveTerminalSshConnection', 'removeTerminalSshConnection'];
+  const methods = ['listTerminalSshConnections', 'prepareTerminalSshIdentity', 'prepareTerminalSshPassword', 'setTerminalSshPassword', 'forgetTerminalSshPassword', 'saveTerminalSshConnection', 'removeTerminalSshConnection'];
   for (const method of methods) {
     await assert.rejects(f.api.call(method, { id: 'other-profile' }), { message: /此窗口仅操作当前环境/ });
     await assert.rejects(f.api.call(method, {}), { message: /此窗口仅操作当前环境/ });
@@ -361,10 +361,21 @@ test('the actual shutdown can clean remaining resources after the application st
 test('a genuine attached-application cleanup failure still retains its network and later owned resources', async () => {
   const error = new Error('fixture native cleanup uncertain'), events = [];
   const shutdown = shutdownFixture({ applications: { ready: Promise.resolve(), shutdown: async () => { throw error; } },
+    networkRecovery: { close: async () => events.push('network-recovery') },
     terminal: { shutdown: async () => events.push('terminal') }, sidecar: { shutdown: async () => events.push('sidecar') },
     proxyCore: { close: async () => events.push('proxy-core') } });
   await assert.rejects(shutdown(), actual => actual === error);
   assert.deepEqual(events, []);
+});
+
+test('network recovery stops before terminal and backend teardown after application cleanup', async () => {
+  const events = [];
+  await shutdownFixture({ applications: { ready: Promise.resolve(), shutdown: async () => events.push('applications') },
+    networkRecovery: { close: async () => events.push('network-recovery') },
+    terminal: { shutdown: async () => events.push('terminal') },
+    service: { ready: Promise.resolve(), shutdown: async () => events.push('service') },
+    proxyCore: { close: async () => events.push('proxy-core') } })();
+  assert.deepEqual(events, ['applications', 'network-recovery', 'terminal', 'service', 'proxy-core']);
 });
 
 test('runtime diagnostics retain a swallowed cleanup failure while later owned cleanup still runs', async () => {

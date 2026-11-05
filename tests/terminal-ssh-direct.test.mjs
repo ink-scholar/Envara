@@ -27,14 +27,15 @@ async function directory(t) {
   t.after(() => rm(root, { recursive: true, force: true })); return root;
 }
 async function fixture(t, { onConnection = socket => { socket.on('end', () => socket.end()); socket.resume(); },
-  connect: injectedConnect, connectTimeoutMs = 500, handshakeTimeoutMs = 500, cleanupTimeoutMs = 2000 } = {}) {
+  connect: injectedConnect, connectionCount = 1, connectTimeoutMs = 500, handshakeTimeoutMs = 500, cleanupTimeoutMs = 2000 } = {}) {
   const root = await mkdtemp(path.join(await realpath('/tmp'), 'evsd-')); await chmod(root, 0o700);
   const upstreams = new Set(), calls = []; let active = true, transport;
   const server = net.createServer({ allowHalfOpen: true }, socket => {
     upstreams.add(socket); socket.on('error', () => {}); socket.once('close', () => upstreams.delete(socket)); onConnection(socket);
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  const port = server.address().port, connections = [{ alias, host: '127.0.0.1', port }];
+  const port = server.address().port, connections = Array.from({ length: connectionCount }, (_, index) => ({
+    alias: index ? `envara-${index.toString(16).padStart(12, '0')}` : alias, host: '127.0.0.1', port }));
   t.after(async () => {
     await transport?.dispose();
     const closing = new Promise(resolve => server.close(resolve)); for (const socket of upstreams) socket.destroy(); await closing;
@@ -47,6 +48,18 @@ async function fixture(t, { onConnection = socket => { socket.on('end', () => so
 }
 const run = (f, extra = {}) => runSshDirect({ alias, socket: f.transport.socket, token: f.transport.token,
   input: Readable.from([]), output: collector().output, connectTimeoutMs: 1000, ...extra });
+
+test('a direct transport with 150 saved endpoints connects the last alias without widening authorization', async t => {
+  const f = await fixture(t, { connectionCount: 150, onConnection: socket => {
+    socket.on('end', () => socket.end('owned transport accepted')); socket.resume();
+  } });
+  const output = collector();
+  await run(f, { alias: f.connections.at(-1).alias, output: output.output });
+  assert.equal(output.bytes().toString(), 'owned transport accepted');
+  assert.deepEqual(f.calls, [{ host: '127.0.0.1', port: f.port, allowHalfOpen: true }]);
+  await assert.rejects(run(f, { alias: 'envara-ffffffffffff' }), { code: 'SSH_DIRECT_AUTHORIZATION' });
+  assert.equal(f.calls.length, 1);
+});
 async function rawRequest(socketPath, payload) {
   const channel = net.connect({ path: socketPath, allowHalfOpen: true }), chunks = [];
   channel.on('error', () => {}); channel.on('data', chunk => chunks.push(chunk));

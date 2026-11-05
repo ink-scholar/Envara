@@ -13,7 +13,7 @@ import { languages, translate, translationCatalog } from '../src/i18n.mjs';
 const noDisplay = process.platform === 'linux' && !process.env.DISPLAY;
 const connection = { id: 'ssh_ui_fixture', alias: 'envara-fixture', name: 'Synthetic server', host: 'ssh-fixture.invalid', port: 2222, user: 'fixture',
   keyLabel: 'Synthetic key', keyFingerprint: 'SHA256:fixture-key', hostFingerprints: ['SHA256:fixture-host'] };
-const passwordConnection = { id: 'ssh_password_fixture', alias: 'envara-password-fixture', name: 'Synthetic password server', host: 'password-fixture.invalid', port: 2222, user: 'fixture', authType: 'password', passwordReady: false, hostFingerprints: ['SHA256:fixture-host'] };
+const passwordConnection = { id: 'ssh_password_fixture', alias: 'envara-password-fixture', name: 'Synthetic password server', host: 'password-fixture.invalid', port: 2222, user: 'fixture', authType: 'password', passwordReady: false, passwordSaved: false, hostFingerprints: ['SHA256:fixture-host'] };
 const hostRoute = { kind: 'host' };
 const environmentRoute = { kind: 'environment', profileId: 'ssh_ui_environment' };
 const secondRoute = { kind: 'environment', profileId: 'ssh_ui_route_second' };
@@ -64,15 +64,21 @@ window.sshApi = async (method, args) => {
   if (['prepareTerminalSshPassword', 'prepareTerminalSshIdentity'].includes(method)) return window.sshPrepare(method, args);
   if (method === 'saveTerminalSshConnection') {
     if (window.sshFixture.deferSave) await new Promise(resolve => { window.sshFinishSave = resolve; });
-    if (window.sshFixture.saveFailure) throw Object.assign(new Error('Synthetic save failure'), { code: 'SSH_PASSWORD_INVALID' });
-    window.sshFixture.connections = [{ ...(args.password ? { ...window.sshPasswordConnection, passwordReady: true } : window.sshConnection),
+    if (window.sshFixture.saveFailure) throw Object.assign(new Error('Synthetic save failure'), { code: window.sshFixture.saveFailure.code || 'SSH_PASSWORD_INVALID' });
+    window.sshFixture.connections = [{ ...(args.password ? { ...window.sshPasswordConnection, passwordReady: true, passwordSaved: true } : window.sshConnection),
       route: window.sshPreparedByToken[args.selectionToken], trustSource: window.sshFixture.trustSource || 'host-known-hosts' }];
     return window.sshResult(args);
   }
   if (method === 'setTerminalSshPassword') {
     if (window.sshFixture.deferPassword) await new Promise(resolve => { window.sshFinishPassword = resolve; });
-    if (window.sshFixture.passwordFailure) throw Object.assign(new Error('Synthetic password failure'), { code: 'SSH_PASSWORD_INVALID' });
-    window.sshFixture.connections = window.sshFixture.connections.map(item => item.id === args.connectionId ? { ...item, passwordReady: true } : item);
+    if (window.sshFixture.passwordFailure) throw Object.assign(new Error('Synthetic password failure'), { code: window.sshFixture.passwordFailure.code || 'SSH_PASSWORD_INVALID' });
+    window.sshFixture.connections = window.sshFixture.connections.map(item => item.id === args.connectionId ? { ...item, passwordReady: true, passwordSaved: true } : item);
+    return window.sshResult(args);
+  }
+  if (method === 'forgetTerminalSshPassword') {
+    if (window.sshFixture.deferForget) await new Promise(resolve => { window.sshFinishForget = resolve; });
+    if (window.sshFixture.forgetFailure) throw Object.assign(new Error('Synthetic forget failure'), { code: 'SSH_STORAGE_UNAVAILABLE' });
+    window.sshFixture.connections = window.sshFixture.connections.map(item => item.id === args.connectionId ? { ...item, passwordReady: false, passwordSaved: false } : item);
     return window.sshResult(args);
   }
   if (method === 'removeTerminalSshConnection') {
@@ -100,7 +106,7 @@ let version = 0;
 window.sshMount = value => {
   window.sshFixture = { routeOptions: window.sshRouteOptions, defaultRoute: window.sshEnvironmentRoute, ...value };
   window.sshLanguage = value.language || 'zh-CN'; window.sshCalls = []; window.sshNavigations = []; window.sshPreparedByToken = {};
-  for (const name of ['sshFinishList', 'sshFinishPrepare', 'sshFinishSave', 'sshFinishPassword']) delete window[name];
+  for (const name of ['sshFinishList', 'sshFinishPrepare', 'sshFinishSave', 'sshFinishPassword', 'sshFinishForget']) delete window[name];
   root.render(<Workspace key={++version} />);
 };
 window.sshReady = true;
@@ -134,8 +140,10 @@ after(async () => {
   try {
     if (screenshotRoot && page) {
       await mkdir(screenshotRoot, { recursive: true, mode: 0o700 });
-      await open({ create: false, connections: [connection, passwordConnection] });
-      await page.screenshot({ path: path.join(screenshotRoot, 'zh-CN-selected-host.png') });
+      const workspace = await open({ create: false, connections: [{ ...passwordConnection, passwordReady: true, passwordSaved: true }, connection] });
+      await page.screenshot({ path: path.join(screenshotRoot, 'zh-CN-saved-password.png') });
+      await workspace.getByRole('button', { name: '忘记密码', exact: true }).click();
+      await page.screenshot({ path: path.join(screenshotRoot, 'zh-CN-forget-password.png') });
       await open({ language: 'de' });
       await page.screenshot({ path: path.join(screenshotRoot, 'de-add-connection.png') });
     }
@@ -174,6 +182,22 @@ test('SSH has an independent workspace with a saved-host list and no terminal or
   assert.deepEqual(await page.evaluate(() => window.sshNavigations), []);
   await workspace.getByRole('button', { name: '打开终端', exact: true }).click();
   assert.deepEqual(await page.evaluate(() => window.sshNavigations), ['ssh_ui_environment']);
+  assert.deepEqual(await permittedCalls(), ['listTerminalSshConnections']);
+});
+
+test('a workspace can list and search 150 saved hosts without disabling additions or opening a connection', { skip: noDisplay }, async () => {
+  const connections = Array.from({ length: 150 }, (_, index) => ({ ...connection, id: `ssh_fixture_${index}`, alias: `envara-fixture-${index}`,
+    name: `Synthetic server ${String(index).padStart(3, '0')}`, host: `server-${index}.invalid` }));
+  const workspace = await open({ create: false, connections });
+  const list = workspace.getByRole('list', { name: 'SSH 连接', exact: true });
+  assert.equal(await list.getByRole('button').count(), 150);
+  assert.equal(await workspace.getByRole('button', { name: '添加连接', exact: true }).isEnabled(), true);
+  await workspace.getByRole('searchbox', { name: '搜索 SSH 主机' }).fill('server-149.invalid');
+  assert.equal(await list.getByRole('button').count(), 1);
+  await list.getByRole('button').click();
+  assert.equal(await workspace.getByLabel('连接命令', { exact: true }).inputValue(), 'ssh envara-fixture-149');
+  await workspace.getByRole('searchbox', { name: '搜索 SSH 主机' }).fill('');
+  assert.equal(await list.getByRole('button').count(), 150);
   assert.deepEqual(await permittedCalls(), ['listTerminalSshConnections']);
 });
 
@@ -281,7 +305,7 @@ test('browser preview shows the dedicated SSH page without requesting desktop au
 
 test('all nine languages show the new setup, discovery, empty state and standard command', { skip: noDisplay }, async () => {
   for (const language of languages) {
-    for (const message of ['连接固定使用所选线路，失败不会切换。', '连接线路', '主机指纹（首次探测，尚未确认）', '我已核对并信任此主机指纹', '我已核对密钥并信任此主机指纹', '密码仅本次运行有效，退出清除。', '使用说明', '连接详情', '先结束此环境的终端会话，再修改连接。', '暂无已保存主机', '添加连接', '搜索 SSH 主机', '选择环境', '选择一个环境', '选择主机以查看连接详情。', 'SSH 连接需要境舱桌面应用。', '未找到匹配的主机']) {
+    for (const message of ['连接固定使用所选线路，失败不会切换。', '连接线路', '主机指纹（首次探测，尚未确认）', '我已核对并信任此主机指纹', '我已核对密钥并信任此主机指纹', '密码由系统加密保存在本机，重启后仍可使用。', '使用说明', '连接详情', '先结束此环境的终端会话，再修改连接。', '暂无已保存主机', '添加连接', '搜索 SSH 主机', '选择环境', '选择一个环境', '选择主机以查看连接详情。', 'SSH 连接需要境舱桌面应用。', '未找到匹配的主机']) {
       assert.ok(Object.hasOwn(translationCatalog[language], message), `${language}: missing ${message}`);
       assert.equal(typeof translationCatalog[language][message], 'string');
       assert.ok(translationCatalog[language][message].trim(), `${language}: empty ${message}`);
@@ -525,7 +549,7 @@ test('password save clears the input before IPC completes and exposes only safe 
   assert.equal(submitted[0].args.hostKeyConfirmed, true);
   await page.evaluate(() => window.sshFinishSave());
   const row = dialog.locator('.terminal-ssh-connection'); await row.waitFor();
-  assert.equal(await row.getByText('密码已就绪', { exact: true }).count(), 1);
+  assert.equal(await row.getByText('密码已保存', { exact: true }).count(), 1);
   assert.equal(await row.getByLabel('连接命令', { exact: true }).inputValue(), `ssh ${passwordConnection.alias}`);
   assert.equal(await row.getByLabel('常用写法', { exact: true }).isVisible(), false);
   await row.locator('.terminal-ssh-details > summary').click();
@@ -571,7 +595,7 @@ test('passwords clear after failed save, failed trust preparation, auth changes 
   assert.equal(await dialog.getByLabel('密码', { exact: true }).inputValue(), '');
 });
 
-test('saved password connections can be unlocked without adding the password to commands or public metadata', { skip: noDisplay }, async () => {
+test('legacy password connections can save a password without adding it to commands or public metadata', { skip: noDisplay }, async () => {
   const dialog = await open({ connections: [passwordConnection], deferPassword: true, create: false });
   const row = dialog.locator('.terminal-ssh-connection');
   await row.getByText('需先提供密码，不会切换线路。', { exact: true }).waitFor();
@@ -587,13 +611,82 @@ test('saved password connections can be unlocked without adding the password to 
   await page.waitForFunction(() => typeof window.sshFinishPassword === 'function');
   assert.equal(await input.inputValue(), '');
   await page.evaluate(() => window.sshFinishPassword());
-  await row.getByText('密码已就绪', { exact: true }).waitFor();
+  await row.getByText('密码已保存', { exact: true }).waitFor();
   assert.equal(await row.getByRole('button', { name: '更新密码', exact: true }).count(), 1);
   assert.equal(await row.locator('input[type="password"]').count(), 0);
   assert.equal(await row.getByLabel('连接命令', { exact: true }).inputValue(), `ssh ${passwordConnection.alias}`);
   const calls = await page.evaluate(() => window.sshCalls.filter(call => call.method === 'setTerminalSshPassword'));
   assert.equal(calls.length, 1); assert.equal(calls[0].args.connectionId, passwordConnection.id);
   assert.equal(await page.evaluate(() => Object.hasOwn(window.sshFixture.connections[0], 'password')), false);
+});
+
+test('saved passwords remain ready when the workspace is reopened and forgetting keeps the connection and trust', { skip: noDisplay }, async () => {
+  const saved = { ...passwordConnection, passwordReady: true, passwordSaved: true };
+  let dialog = await open({ connections: [saved], create: false });
+  let row = dialog.locator('.terminal-ssh-connection');
+  await row.getByText('密码已保存', { exact: true }).waitFor();
+  assert.equal(await row.locator('input[type="password"]').count(), 0);
+  assert.deepEqual(await permittedCalls(), ['listTerminalSshConnections']);
+  dialog = await open({ connections: [saved], create: false });
+  row = dialog.locator('.terminal-ssh-connection');
+  await row.getByText('密码已保存', { exact: true }).waitFor();
+  await row.getByRole('button', { name: '忘记密码', exact: true }).click();
+  await row.getByText('仅删除此连接保存的密码，连接配置和主机指纹会保留。', { exact: true }).waitFor();
+  await row.getByRole('button', { name: '取消', exact: true }).click();
+  assert.deepEqual(await permittedCalls(), ['listTerminalSshConnections']);
+  await row.getByRole('button', { name: '忘记密码', exact: true }).click();
+  await row.getByRole('button', { name: '确认忘记', exact: true }).click();
+  await row.getByText('需先提供密码，不会切换线路。', { exact: true }).waitFor();
+  assert.equal(await row.getByLabel('连接命令', { exact: true }).inputValue(), `ssh ${passwordConnection.alias}`);
+  assert.equal(await row.getByRole('button', { name: '忘记密码', exact: true }).count(), 0);
+  assert.equal(await row.getByRole('button', { name: '提供密码', exact: true }).count(), 1);
+  const calls = await page.evaluate(() => window.sshCalls.filter(call => call.method === 'forgetTerminalSshPassword'));
+  assert.deepEqual(calls, [{ method: 'forgetTerminalSshPassword', args: { id: 'ssh_ui_environment', connectionId: passwordConnection.id } }]);
+  assert.deepEqual(await page.evaluate(() => window.sshFixture.connections[0]), passwordConnection);
+  assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
+});
+
+test('an unavailable saved password is distinguished from a missing password and can be forgotten on an unavailable route', { skip: noDisplay }, async () => {
+  const saved = { ...passwordConnection, passwordSaved: true, route: { kind: 'environment', profileId: 'ssh_ui_route_unavailable' } };
+  const dialog = await open({ connections: [saved], create: false });
+  const row = dialog.locator('.terminal-ssh-connection');
+  await row.getByText('已保存的密码暂不可用', { exact: true }).waitFor();
+  await row.getByText('已保存的密码暂不可用，请检查系统凭据存储或重新提供密码。', { exact: true }).waitFor();
+  assert.equal(await row.getByRole('button', { name: '更新密码', exact: true }).isDisabled(), true);
+  assert.equal(await row.getByRole('button', { name: '忘记密码', exact: true }).isEnabled(), true);
+  await row.getByRole('button', { name: '忘记密码', exact: true }).click();
+  await row.getByRole('button', { name: '确认忘记', exact: true }).click();
+  await row.getByText('需先提供密码，不会切换线路。', { exact: true }).waitFor();
+  assert.equal(await row.getByRole('button', { name: '提供密码', exact: true }).isDisabled(), true);
+});
+
+test('failed password persistence leaves the connection locked and clears the submitted password', { skip: noDisplay }, async () => {
+  const dialog = await open({ connections: [passwordConnection], passwordFailure: { code: 'SSH_PASSWORD_STORAGE_UNAVAILABLE' }, create: false });
+  const row = dialog.locator('.terminal-ssh-connection');
+  await row.getByRole('button', { name: '提供密码', exact: true }).click();
+  await row.getByLabel('密码', { exact: true }).fill('synthetic-password-not-a-secret');
+  await row.getByRole('button', { name: '保存密码', exact: true }).click();
+  await dialog.getByText('系统密码存储不可用，密码未保存。请检查后重试。', { exact: true }).waitFor();
+  assert.equal(await row.getByLabel('密码', { exact: true }).inputValue(), '');
+  assert.equal(await row.getByRole('button', { name: '忘记密码', exact: true }).count(), 0);
+  assert.equal(await page.evaluate(() => window.sshFixture.connections[0].passwordSaved), false);
+  assert.equal(await dialog.textContent().then(value => /synthetic-password|Synthetic password failure/.test(value)), false);
+});
+
+test('active sessions and failed storage prevent forgetting a saved password', { skip: noDisplay }, async () => {
+  const saved = { ...passwordConnection, passwordReady: true, passwordSaved: true };
+  let dialog = await open({ connections: [saved], create: false, active: true });
+  let row = dialog.locator('.terminal-ssh-connection');
+  assert.equal(await row.getByRole('button', { name: '忘记密码', exact: true }).isDisabled(), true);
+  assert.equal(await row.getByRole('button', { name: '更新密码', exact: true }).isDisabled(), true);
+  assert.deepEqual(await permittedCalls(), ['listTerminalSshConnections']);
+  dialog = await open({ connections: [saved], create: false, forgetFailure: true });
+  row = dialog.locator('.terminal-ssh-connection');
+  await row.getByRole('button', { name: '忘记密码', exact: true }).click();
+  await row.getByRole('button', { name: '确认忘记', exact: true }).click();
+  await dialog.getByText('无法保存 SSH 配置，原有数据已保留。', { exact: true }).waitFor();
+  assert.equal(await row.getByText('密码已保存', { exact: true }).count(), 1);
+  assert.equal(await page.evaluate(() => window.sshFixture.connections[0].passwordSaved), true);
 });
 
 test('a failed password unlock clears the input and active sessions prohibit password mutations', { skip: noDisplay }, async () => {
@@ -647,27 +740,41 @@ test('an active terminal discards a late host-preparation authorization instead 
 
 test('all nine languages translate password selection, privacy, trust and locked connection state', { skip: noDisplay }, async () => {
   for (const language of languages) {
+    for (const message of ['密码由系统加密保存在本机，重启后仍可使用。', '密码使用系统加密保存在本机，不会写入命令或提供给 Claude。结束会话、线路停止或退出应用会关闭连接，但不会删除已保存的密码。', '密码已保存', '已保存的密码暂不可用', '此连接尚未保存密码。重新提供一次后，重启应用仍可使用。', '已保存的密码暂不可用，请检查系统凭据存储或重新提供密码。', '系统密码存储不可用，密码未保存。请检查后重试。', '忘记密码', '确认忘记', '仅删除此连接保存的密码，连接配置和主机指纹会保留。', '无法忘记密码，请重试。', '仅移除此环境的连接配置及已保存的密码。']) {
+      assert.ok(Object.hasOwn(translationCatalog[language], message), `${language}: missing ${message}`);
+      assert.ok(translationCatalog[language][message].trim(), `${language}: empty ${message}`);
+    }
     const dialog = await open({ language, connections: [passwordConnection], create: false });
     assert.equal(await dialog.getByText(translate('需先提供密码，不会切换线路。', language), { exact: true }).count(), 1, language);
     await dialog.getByRole('button', { name: translate('添加连接', language), exact: true }).click();
     assert.equal(await dialog.getByLabel(translate('登录方式', language), { exact: true }).inputValue(), 'password');
-    assert.equal(await dialog.getByText(translate('密码仅本次运行有效，退出清除。', language), { exact: true }).isVisible(), true, language);
+    assert.equal(await dialog.getByText(translate('密码由系统加密保存在本机，重启后仍可使用。', language), { exact: true }).isVisible(), true, language);
     const help = dialog.locator('.terminal-ssh-help');
-    const privacy = help.getByText(translate('密码在本次应用运行期间有效，不会定时到期，退出即清除，也不会写入命令或提供给 Claude。结束会话、线路停止或退出应用仍会关闭连接。', language), { exact: true });
+    const privacy = help.getByText(translate('密码使用系统加密保存在本机，不会写入命令或提供给 Claude。结束会话、线路停止或退出应用会关闭连接，但不会删除已保存的密码。', language), { exact: true });
     assert.equal(await privacy.isVisible(), false, language);
     await help.locator('summary').click();
     assert.equal(await privacy.isVisible(), true, language);
     assert.equal(await dialog.getByRole('button', { name: translate('读取主机指纹', language), exact: true }).count(), 1, language);
     assert.equal(await dialog.locator('.terminal-ssh-fields input[type="password"]').getAttribute('autocomplete'), 'off');
+    const saved = await open({ language, connections: [{ ...passwordConnection, passwordReady: true, passwordSaved: true }], create: false });
+    const row = saved.locator('.terminal-ssh-connection');
+    await row.getByText(translate('密码已保存', language), { exact: true }).waitFor();
+    await row.getByRole('button', { name: translate('忘记密码', language), exact: true }).click();
+    await row.getByText(translate('仅删除此连接保存的密码，连接配置和主机指纹会保留。', language), { exact: true }).waitFor();
+    assert.equal(await row.getByRole('button', { name: translate('确认忘记', language), exact: true }).isEnabled(), true);
   }
 });
 
 
-test('switching environments discards delayed password preparation, save and unlock results', { skip: noDisplay }, async () => {
-  for (const action of ['prepare', 'save', 'unlock']) {
-    let dialog = await open({ twoProfiles: true, deferPrepare: action === 'prepare', deferSave: action === 'save', deferPassword: action === 'unlock',
-      connections: action === 'unlock' ? [passwordConnection] : [], create: action !== 'unlock' });
-    if (action === 'unlock') {
+test('switching environments discards delayed password preparation, save, unlock and forget results', { skip: noDisplay }, async () => {
+  for (const action of ['prepare', 'save', 'unlock', 'forget']) {
+    let dialog = await open({ twoProfiles: true, deferPrepare: action === 'prepare', deferSave: action === 'save', deferPassword: action === 'unlock', deferForget: action === 'forget',
+      connections: action === 'forget' ? [{ ...passwordConnection, passwordReady: true, passwordSaved: true }] : action === 'unlock' ? [passwordConnection] : [], create: !['unlock', 'forget'].includes(action) });
+    if (action === 'forget') {
+      const row = dialog.locator('.terminal-ssh-connection');
+      await row.getByRole('button', { name: '忘记密码', exact: true }).click();
+      await row.getByRole('button', { name: '确认忘记', exact: true }).click();
+    } else if (action === 'unlock') {
       const row = dialog.locator('.terminal-ssh-connection');
       await row.getByRole('button', { name: '提供密码', exact: true }).click();
       await row.getByLabel('密码', { exact: true }).fill('synthetic-password-not-a-secret');
@@ -680,7 +787,7 @@ test('switching environments discards delayed password preparation, save and unl
       await dialog.getByLabel('用户名', { exact: true }).fill(passwordConnection.user);
       await dialog.getByRole('button', { name: '读取主机指纹', exact: true }).click();
     }
-    const finish = action === 'prepare' ? 'sshFinishPrepare' : action === 'save' ? 'sshFinishSave' : 'sshFinishPassword';
+    const finish = action === 'prepare' ? 'sshFinishPrepare' : action === 'save' ? 'sshFinishSave' : action === 'forget' ? 'sshFinishForget' : 'sshFinishPassword';
     await page.waitForFunction(name => typeof window[name] === 'function', finish);
     await page.getByLabel('选择环境', { exact: true }).selectOption('ssh_ui_second');
     await dialog.getByText('暂无已保存主机', { exact: true }).waitFor();

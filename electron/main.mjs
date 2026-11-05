@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage, nativeTheme } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage, nativeTheme, safeStorage, net, powerMonitor } from 'electron';
 import { ClaudeKeychainManager } from './claude-keychain.mjs';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
@@ -41,6 +41,7 @@ import { DesktopEnvironmentTransferLock, discardPendingEnvironmentImport, expire
 import { verifyPFInstallation } from '../native/macos-pf-routing/controller.mjs';
 import { applicationWorkspaceContext } from './workspace-context.mjs';
 import { ProxyNetworkProbe } from './proxy-network.mjs';
+import { createNetworkRecoveryMonitor } from './network-recovery.mjs';
 import { parseGoogleMapsLocation } from '../shared/network-location.mjs';
 import { createWorkspaceWindowController, createOwnedQuitController } from './desktop-lifecycle.mjs';
 import { createStartupDiagnostics } from './startup-diagnostics.mjs';
@@ -83,6 +84,7 @@ let terminal;
 let terminalBrowserBroker;
 let terminalController;
 let proxyCore;
+let networkRecovery;
 let applications;
 let notionTrialAvailability = null;
 let notionTrialAvailabilityAt = 0;
@@ -195,7 +197,7 @@ async function openOutsideEnvironment(url) {
   return shellOpen(url);
 }
 const shutdownOwnedServices = () => shutdownDesktopServices({ applications, diagnostics: notionDiagnostics,
-  terminal, terminalBrowserBroker, linkChannel, routerChannel, service, sidecar, proxyCore, runtimeDiagnostics });
+  terminal, terminalBrowserBroker, linkChannel, routerChannel, service, sidecar, proxyCore, networkRecovery, runtimeDiagnostics });
 
 async function publish() {
   if (desktopStartup.phase !== 'ready' || quitting || !service || !views.size) return;
@@ -779,7 +781,7 @@ async function initializeDesktopServices({ checkOpen }) {
       dataDir,
       diagnostics: runtimeDiagnostics, getTheme: () => getTerminalTheme(appearance.snapshot().effective),
       linkChannel,
-      sshManager: new TerminalSshManager({ dataDir, hostHome: app.getPath('home'),
+      sshManager: new TerminalSshManager({ dataDir, hostHome: app.getPath('home'), passwordStorage: safeStorage,
         resolveRoute: settings => terminal.resolveSshRoute(settings),
         nodeExecutable: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'backend', 'playwright-driver', process.platform === 'win32' ? 'node.exe' : 'node') }),
       browserBroker: terminalBrowserBroker,
@@ -860,6 +862,8 @@ async function initializeDesktopServices({ checkOpen }) {
       profileExists: async id => (await service.snapshot()).profiles.some(profile => profile.id === id), onEvent: publish });
     await initializeStep('applications-store', () => applications.ready);
     await initializeStep('application-routing-status', () => applications.getApplicationRoutingStatus());
+    networkRecovery = createNetworkRecoveryMonitor({ recover: options => service.recoverNetwork(options),
+      isOnline: () => net.isOnline(), powerMonitor });
   }
 }
 

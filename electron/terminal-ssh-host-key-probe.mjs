@@ -63,6 +63,8 @@ export async function probeSshHostKey({ target, routeBinding, connector, isActiv
   const controller = new AbortController();
   const abort = () => controller.abort();
   signal?.addEventListener('abort', abort, { once:true });
+  // Owned-directory creation yields after the initial caller-signal check.
+  if (signal?.aborted) abort();
   const cleanup = async () => {
     controller.abort();
     let uncertain = false;
@@ -123,7 +125,7 @@ export async function probeSshHostKey({ target, routeBinding, connector, isActiv
     const environment={PATH:'/usr/bin:/bin:/usr/sbin:/sbin',HOME:home,USERPROFILE:home,TMPDIR:home+'/',
       LANG:'C',LC_ALL:'C',TZ:'UTC',SHELL:'/bin/sh',ELECTRON_RUN_AS_NODE:'1',
       ENVARA_SSH_DIRECT_SOCKET:transport.socket,ENVARA_SSH_DIRECT_TOKEN:transport.token};
-    if (!active()) throw fail('SSH_HOST_PROBE_REVOKED');
+    if (!active()) throw fail(signal?.aborted?'SSH_HOST_PROBE_CANCELLED':'SSH_HOST_PROBE_REVOKED');
     // Capture a waiting child before exec, eliminating fast-exit PID ambiguity.
     child=spawn('/bin/sh',['-c','IFS= read -r ready; [ "$ready" = start ] || exit 1; exec "$@"','envara-probe',
       TERMINAL_FENCE_EXECUTABLE,'-p',profile,'/usr/bin/ssh','-F',config,'-n','-N','-T',alias],
@@ -136,7 +138,11 @@ export async function probeSshHostKey({ target, routeBinding, connector, isActiv
     child.stdout.on('data',drain);child.stderr.on('data',drain);
     identity=await captureTerminalProcess(child.pid);
     const interrupted=new Promise((_,reject)=>{
-      controller.signal.addEventListener('abort',()=>reject(fail(signal?.aborted?'SSH_HOST_PROBE_CANCELLED':'SSH_HOST_PROBE_REVOKED')),{once:true});
+      const cancelled=()=>reject(fail(signal?.aborted?'SSH_HOST_PROBE_CANCELLED':'SSH_HOST_PROBE_REVOKED'));
+      controller.signal.addEventListener('abort',cancelled,{once:true});
+      // Cancellation during native identity capture already fired its event;
+      // registering a listener alone would wait until the unrelated deadline.
+      if(controller.signal.aborted)cancelled();
       deadlineTimer=setTimeout(()=>reject(fail('SSH_HOST_PROBE_TIMEOUT')),timeoutMs);
       revokeTimer=setInterval(()=>{if(!active())controller.abort();},50);revokeTimer.unref();
     });

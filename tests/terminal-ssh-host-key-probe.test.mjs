@@ -7,6 +7,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { probeSshHostKey } from '../electron/terminal-ssh-host-key-probe.mjs';
+import { createSshDirectTransport } from '../electron/terminal-ssh-direct.mjs';
 import { parseSshPublicKey } from '../electron/terminal-ssh-key.mjs';
 const run=promisify(execFile),darwin=process.platform==='darwin';
 const environment={PATH:'/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',LANG:'C',LC_ALL:'C'};
@@ -119,10 +120,38 @@ test('timeout and active cancellation close owned transports without authenticat
  const connector=()=>net.connect({host:'127.0.0.1',port:blackhole.address().port});
  try{
   await assert.rejects(probeSshHostKey(options({connector,timeoutMs:200})),{code:'SSH_HOST_PROBE_TIMEOUT'});
-  const controller=new AbortController();const pending=probeSshHostKey(options({connector,signal:controller.signal}));
-  const timer=setTimeout(()=>controller.abort(),150);try{await assert.rejects(pending,{code:'SSH_HOST_PROBE_CANCELLED'});}finally{clearTimeout(timer);}
+  const controller=new AbortController();let connected=false;
+  const pending=probeSshHostKey(options({signal:controller.signal,connector:()=>{
+   const socket=connector();socket.once('connect',()=>{connected=true;controller.abort();});return socket;
+  }}));
+  await assert.rejects(pending,{code:'SSH_HOST_PROBE_CANCELLED'});assert.equal(connected,true);
  }finally{for(const socket of peers)socket.destroy();await new Promise(resolve=>blackhole.close(resolve));}
  await ownedClean();
+});
+
+test('cancellation during owned-directory setup keeps its cancellation result and cleans transport',{skip:!darwin},async context=>{
+ if(!directory){context.skip('Paramiko unavailable');return;}
+ const controller=new AbortController();let cancellationQueued=false;const before=stats.connections;
+ await assert.rejects(probeSshHostKey(options({connector:hostConnector,signal:controller.signal,isActive:()=>{
+  // The initial active check returns before owned-directory creation yields;
+  // cancellation therefore precedes registration of the forwarding listener.
+  if(!cancellationQueued){cancellationQueued=true;queueMicrotask(()=>controller.abort());}return true;
+ }})),{code:'SSH_HOST_PROBE_CANCELLED'});
+ assert.equal(cancellationQueued,true);assert.equal(stats.connections,before);await ownedClean();
+});
+
+test('cancellation during native child identity capture is observed without waiting for timeout',{skip:!darwin},async context=>{
+ if(!directory){context.skip('Paramiko unavailable');return;}
+ const controller=new AbortController();let transportReady=false,cancellationQueued=false;const before=stats.connections;
+ await assert.rejects(probeSshHostKey(options({connector:hostConnector,signal:controller.signal,
+  createTransport:async settings=>{const transport=await createSshDirectTransport(settings);transportReady=true;return transport;},
+  isActive:()=>{
+   // The pre-spawn check completes synchronously. This microtask runs when
+   // captureTerminalProcess yields, before the interruption listener exists.
+   if(transportReady&&!cancellationQueued){cancellationQueued=true;queueMicrotask(()=>controller.abort());}return true;
+  },
+ })),{code:'SSH_HOST_PROBE_CANCELLED'});
+ assert.equal(cancellationQueued,true);assert.equal(stats.connections,before);await ownedClean();
 });
 
 

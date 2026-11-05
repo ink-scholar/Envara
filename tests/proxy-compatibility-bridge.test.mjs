@@ -387,3 +387,77 @@ test('early ACK buffer overflow and normal bridge close discard all buffered byt
   assert.equal(Buffer.concat(data).toString(), 'HTTP/1.1 200 Connection Established\r\n\r\n');
   assert.equal(bridge.snapshot().failedConnections, 1); await until(() => bridge.snapshot().ownedSockets === 0);
 });
+
+test('source-address refresh recovers real proxy traffic without replacing the listener or credentials', async t => {
+  const sources = [];
+  const server = http.createServer((request, response) => { sources.push(request.socket.remoteAddress); response.end('recovered'); });
+  const port = await listen(t, server);
+  const bridge = await createProxyCompatibilityBridge({ protocol: 'http', host: '127.0.0.1', port }, {
+    localAddress: '192.0.2.10', connectTimeoutMs: 100,
+  });
+  t.after(() => bridge.close());
+  const identity = { host: bridge.host, port: bridge.port, username: bridge.username, password: bridge.password };
+  assert.equal((await httpRequest(bridge)).status, 502);
+  assert.deepEqual(sources, [], 'unavailable source binding must not fall back to an unbound socket');
+  bridge.updateNetworkContext({ localAddress: '127.0.0.1' });
+  const result = await httpRequest(bridge);
+  assert.equal(result.status, 200); assert.equal(result.body.toString(), 'recovered');
+  assert.deepEqual(sources, ['127.0.0.1']);
+  assert.deepEqual({ host: bridge.host, port: bridge.port, username: bridge.username, password: bridge.password }, identity);
+});
+
+test('network refresh aborts pending handshakes and resolver work while established tunnels stay usable', async t => {
+  const generations = []; let pendingResolver = false; let resolverAborted = false;
+  const { bridge } = await fixture(t, ({ request, socket }) => {
+    if (request.url === 'pending.invalid:443') return reply(socket, 502);
+    socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+    socket.on('data', chunk => socket.write(chunk));
+  }, { resolver: undefined, localAddress: '127.0.0.1', resolverFactory: (_proxy, context) => {
+    const record = { context, closed: false }; generations.push(record);
+    return { close() { record.closed = true; }, resolve(_name, { signal }) {
+      pendingResolver = true;
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => {
+        resolverAborted = true; reject(new Error('fixture aborted'));
+      }, { once: true }));
+    } };
+  } });
+  const established = net.connect(bridge.port, bridge.host); established.on('error', () => {}); t.after(() => established.destroy());
+  await once(established, 'connect'); const chunks = [];
+  established.on('data', chunk => chunks.push(chunk)); established.write(connectBytes(bridge, 'established.invalid:443'));
+  await until(() => Buffer.concat(chunks).includes(Buffer.from('\r\n\r\n')));
+  const pending = raw(bridge, connectBytes(bridge, 'pending.invalid:443'));
+  await until(() => pendingResolver);
+  bridge.updateNetworkContext({ upstreamAddress: '127.0.0.1', localAddress: '127.0.0.1' });
+  assert.match((await pending).toString(), /^HTTP\/1\.1 502 /);
+  assert.equal(resolverAborted, true); assert.equal(generations[0].closed, true);
+  assert.equal(generations.length, 2); assert.equal(generations[1].context.upstreamAddress, '127.0.0.1');
+  assert.equal(generations[1].context.localAddress, '127.0.0.1');
+  assert.equal(established.destroyed, false);
+  established.write('still-established'); await until(() => Buffer.concat(chunks).includes(Buffer.from('still-established')));
+  await until(() => bridge.snapshot().pendingConnections === 0);
+  await bridge.close(); assert.equal(generations[1].closed, true);
+});
+
+test('network refresh refuses invalid or cleared pins and factory failure preserves the active binding', async t => {
+  let broken = false; let closeCount = 0;
+  const { bridge } = await fixture(t, ({ response }) => response.end('unchanged'), {
+    resolver: undefined, upstreamAddress: '127.0.0.1', localAddress: '127.0.0.1', resolverFactory: () => {
+      if (broken) throw new Error('fixture resolver construction failed');
+      return { resolve: async () => assert.fail('unexpected DNS'), close() { closeCount++; } };
+    },
+  });
+  for (const context of [{ localAddress: 'invalid' }, { upstreamAddress: '127.0.0.2' }, { localAddress: null }, { upstreamAddress: null }]) {
+    assert.throws(() => bridge.updateNetworkContext(context), TypeError);
+  }
+  broken = true;
+  assert.throws(() => bridge.updateNetworkContext({ localAddress: '192.0.2.10' }), /fixture resolver/);
+  assert.equal(closeCount, 0); assert.equal((await httpRequest(bridge)).body.toString(), 'unchanged');
+  await bridge.close(); assert.equal(closeCount, 1);
+  assert.throws(() => bridge.updateNetworkContext({}), { code: 'PROXY_CONNECT_FAILED' });
+});
+
+test('a fixed injected resolver cannot silently retain its old route during refresh', async t => {
+  const { bridge } = await fixture(t, ({ response }) => response.end('same route'), { localAddress: '127.0.0.1' });
+  assert.throws(() => bridge.updateNetworkContext({ localAddress: '192.0.2.10' }), TypeError);
+  assert.equal((await httpRequest(bridge)).body.toString(), 'same route');
+});

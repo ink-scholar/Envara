@@ -15,6 +15,9 @@ import path from 'node:path';
 import { promisify, stripVTControlCharacters } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { createFixturePasswordStorage } from './fixtures/ssh-password-storage.mjs';
+
+const passwordStorage = createFixturePasswordStorage();
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2), options = {};
 for (let index = 0; index < argv.length; index++) {
@@ -69,7 +72,7 @@ const wait = async (predicate, code, milliseconds = 15000, allowCancelled = fals
 };
 const proof = { schema: 'envara.ssh-selected-route-fixture/v1', passed: false, mode: application ? 'packaged' : 'source',
   platform: `${process.platform}-${process.arch}`, electron: process.versions.electron, checks: [], limitations: [
-    'Only generated keys, memory-only synthetic passwords and owned loopback SSH/proxy listeners are exercised; no real account or public egress is tested.',
+    'Only generated keys, encrypted synthetic passwords using a disposable in-memory test key, and owned loopback SSH/proxy listeners are exercised; no real account or public egress is tested.',
     'A saved direct SSH server necessarily observes its TCP peer. The fixture returns that peer as synthetic SSH_CONNECTION output; arbitrary remote output is not filtered.',
     'The unknown-host listener is never contacted; all key/password logins use explicit saved routes and fixture-only accounts.',
     'Actual SSH env/PTY requests and native process environment are inspected. This does not create a virtual machine or hide SSH protocol fingerprints and PTY metadata.',
@@ -246,7 +249,7 @@ try {
   await writeFile(path.join(hostHome,'.ssh/known_hosts'),'',{mode:0o600});
   const selectedURL=`http://${encodeURIComponent(proxyUser)}:${encodeURIComponent(proxyPassword)}@127.0.0.1:${selectedProxyServer.address().port}`;
   let selectedActive=true;
-  manager=new TerminalSshManager({dataDir,hostHome,nodeExecutable:node,agentRoot:path.join(temporary,'agents'),
+  manager=new TerminalSshManager({dataDir,hostHome,passwordStorage,nodeExecutable:node,agentRoot:path.join(temporary,'agents'),
     resolveRoute:async({route})=>({route,routeIdentity:route.kind==='host'?'host-generation':'selected-B-generation',
       ...(route.kind==='environment'?{proxyUrl:selectedURL}:{}),isActive:()=>route.kind==='host'||selectedActive,dispose:async()=>{}}),
     spawn:(program,args,settings)=>nativeLaunch(program,args,settings)});

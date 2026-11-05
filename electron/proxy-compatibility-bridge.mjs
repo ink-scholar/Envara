@@ -131,10 +131,13 @@ export async function createProxyCompatibilityBridge(input, options = {}) {
   const protocol = input?.protocol ?? input?.type;
   if (!['http', 'https'].includes(protocol) || (input?.protocol && input?.type && input.protocol !== input.type)) throw new TypeError('HTTP or HTTPS proxy required');
   const proxy = { protocol, host: host(input.host), port: integer(input.port, null, 1, 65535), ...credentials(input) };
-  const upstreamAddress = options.upstreamAddress;
-  const localAddress = options.localAddress;
-  if (upstreamAddress != null && (!net.isIP(upstreamAddress) || (!isPublicDestinationIPv4(upstreamAddress) && upstreamAddress !== proxy.host)) ||
-      localAddress != null && net.isIP(localAddress) !== 4) throw new TypeError('Invalid proxy compatibility address');
+  let upstreamAddress = options.upstreamAddress;
+  let localAddress = options.localAddress;
+  const validateAddresses = (upstream, local) => {
+    if (upstream != null && (!net.isIP(upstream) || (!isPublicDestinationIPv4(upstream) && upstream !== proxy.host)) ||
+        local != null && net.isIP(local) !== 4) throw new TypeError('Invalid proxy compatibility address');
+  };
+  validateAddresses(upstreamAddress, localAddress);
   const maxConnections = integer(options.maxConnections, 64, 1, 512);
   const maxRequests = integer(options.maxRequests, 64, 1, 512);
   const maxHeaderBytes = integer(options.maxHeaderBytes, 16384, 1024, 65536);
@@ -148,8 +151,15 @@ export async function createProxyCompatibilityBridge(input, options = {}) {
   const local = credentials(options.credentials ?? { username: crypto.randomBytes(16).toString('hex'), password: crypto.randomBytes(32).toString('hex') }, true);
   const localAuth = Buffer.from(`Basic ${Buffer.from(`${local.username}:${local.password}`).toString('base64')}`);
   const upstreamAuth = proxy.username || proxy.password ? `Basic ${Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64')}` : null;
-  const resolver = options.resolver ?? createProxyDestinationResolver(proxy, { upstreamAddress, localAddress, ...(options.ca ? { ca: options.ca } : {}) });
-  if (!resolver || typeof resolver.resolve !== 'function' || typeof resolver.close !== 'function') throw new TypeError('Invalid proxy compatibility resolver');
+  const resolverFactory = options.resolverFactory ?? createProxyDestinationResolver;
+  if (typeof resolverFactory !== 'function') throw new TypeError('Invalid proxy compatibility resolver');
+  const checkedResolver = value => {
+    if (!value || typeof value.resolve !== 'function' || typeof value.close !== 'function') throw new TypeError('Invalid proxy compatibility resolver');
+    return value;
+  };
+  const newResolver = (upstream, local) => checkedResolver(resolverFactory(proxy,
+    { upstreamAddress: upstream, localAddress: local, ...(options.ca ? { ca: options.ca } : {}) }));
+  let resolver = checkedResolver(options.resolver ?? newResolver(upstreamAddress, localAddress));
   const sockets = new Set(); const incoming = new Set(); const operations = new Set();
   let closing = false; let closePromise; let recovered = 0; let failed = 0; let lastErrorCode = null; let lastUpstreamStatus = null;
   const diagnostic = (stage, status, recovery, code) => {
@@ -397,12 +407,31 @@ export async function createProxyCompatibilityBridge(input, options = {}) {
     }
     return closePromise;
   };
+  // A laptop can keep the same Wi-Fi interface while its IPv4 address changes.
+  // Rebind future requests without replacing the authenticated listener or
+  // disrupting tunnels that have already established their upstream socket.
+  const updateNetworkContext = (context = {}) => {
+    if (closing) throw failure();
+    const nextUpstream = Object.hasOwn(context, 'upstreamAddress') ? context.upstreamAddress : upstreamAddress;
+    const nextLocal = Object.hasOwn(context, 'localAddress') ? context.localAddress : localAddress;
+    validateAddresses(nextUpstream, nextLocal);
+    if (upstreamAddress != null && nextUpstream == null || localAddress != null && nextLocal == null ||
+        options.resolver && !options.resolverFactory) throw new TypeError('Invalid proxy compatibility network update');
+    // Construct before changing any live state. Failed validation/factory calls
+    // leave the prior binding and its operations untouched.
+    const replacement = newResolver(nextUpstream, nextLocal);
+    if (replacement === resolver) throw new TypeError('A fresh proxy compatibility resolver is required');
+    const previous = resolver;
+    upstreamAddress = nextUpstream; localAddress = nextLocal; resolver = replacement;
+    for (const state of operations) state.finish();
+    try { previous.close(); } catch { /* Pending operations are already aborted. */ }
+  };
   server.on('error', () => { if (!closing) { try { options.onError?.({ code: 'PROXY_COMPATIBILITY_BRIDGE_FAILED' }); } catch {} void close(); } });
   server.on('close', () => { if (!closing) { try { options.onClose?.({ code: 'PROXY_COMPATIBILITY_BRIDGE_CLOSED' }); } catch {} void close(); } });
   try {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => { server.off('error', reject); resolve(); }); });
   } catch { await close(); throw failure(); }
-  return Object.freeze({ host: '127.0.0.1', port: server.address().port, ...local, protocol: 'http', close,
+  return Object.freeze({ host: '127.0.0.1', port: server.address().port, ...local, protocol: 'http', close, updateNetworkContext,
     snapshot: () => Object.freeze({ status: closing ? 'closed' : 'running', activeConnections: incoming.size, pendingConnections: operations.size,
       ownedSockets: sockets.size, recoveredConnections: recovered, failedConnections: failed, lastErrorCode, lastUpstreamStatus }) });
 }

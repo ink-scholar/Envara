@@ -114,6 +114,13 @@ test('owned native TCP attestation, exact DOMAIN/auth/FIN, two realms, refusal a
         const build = await exec('/usr/bin/clang', ['-Wall', '-Wextra', '-Werror', path.resolve('native/macos-pf-routing', source), '-o', binary])
         assert.equal(build.code, 0, build.error); await chmod(binary, 0o700)
       }
+      // First execution of a freshly built macOS binary can consume the
+      // attestor's 500 ms handshake budget. Complete that startup and verify
+      // the owned test process before measuring the socket protocol deadlines.
+      const ready = await exec(attestor, ['identity', String(process.pid)])
+      assert.equal(ready.code, 0, 'Owned attestor must start before protocol checks')
+      const readiness = JSON.parse(ready.output)
+      assert.equal(readiness.verified, true); assert.equal(readiness.identity.pid, process.pid)
       await t.test('DOMAIN octets unchanged, RFC1929 auth required, complete large tail after client FIN', async () => {
         const c = await owner(), tail = randomBytes(262144), u = await core({ tail }), f = await front(c, u)
         assert.equal(await handshake(c, f), true); assert.equal(u.stats.requests[0].equals(request()), true)

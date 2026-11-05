@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,13 +21,23 @@ const run = (command, args, options = {}) => new Promise((resolve, reject) => {
 });
 const code = expected => error => error.code === expected;
 const native = { skip: process.platform !== 'darwin' };
+// Real authenticated encryption with an ephemeral fixture key; production uses
+// Electron safeStorage and never writes an application-owned encryption key.
+const fixturePasswordStorage = () => {
+  const key = randomBytes(32);
+  return { isEncryptionAvailable: () => true, getSelectedStorageBackend: () => 'fixture',
+    encryptString(value) { const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', key, iv);
+      const bytes = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]); return Buffer.concat([iv, cipher.getAuthTag(), bytes]); },
+    decryptString(value) { const decipher = createDecipheriv('aes-256-gcm', key, value.subarray(0, 12));
+      decipher.setAuthTag(value.subarray(12, 28)); return Buffer.concat([decipher.update(value.subarray(28)), decipher.final()]).toString('utf8'); } };
+};
 const publicKey = seed => {
   const fields = [Buffer.from('ssh-ed25519'), createHash('sha256').update(seed).digest()];
   const bytes = Buffer.concat(fields.flatMap(value => { const length = Buffer.alloc(4); length.writeUInt32BE(value.length); return [length, value]; }));
   return `ssh-ed25519 ${bytes.toString('base64')}`;
 };
 
-async function fixture(t, { real = false, passphrase = '', now = Date.now, execute: overrideExecute, spawn, createPasswordBroker, createDirectTransport } = {}) {
+async function fixture(t, { real = false, passphrase = '', now = Date.now, execute: overrideExecute, spawn, createPasswordBroker, createDirectTransport, passwordStorage = fixturePasswordStorage() } = {}) {
   const root = await realpath(await mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(), 'evssh-')));
   const dataDir = path.join(root, 'data'), hostHome = path.join(root, 'host'), keyDirectory = path.join(root, 'keys');
   await Promise.all([dataDir, hostHome, keyDirectory].map(directory => mkdir(directory, { mode: 0o700 })));
@@ -57,7 +67,7 @@ async function fixture(t, { real = false, passphrase = '', now = Date.now, execu
     throw new Error(`Unexpected native command ${command}`);
   });
   const nodeExecutable = await realpath(process.execPath);
-  const options = { dataDir, hostHome, nodeExecutable, agentRoot: path.join(root, 'agents'), platform: 'darwin', execute, now,
+  const options = { dataDir, hostHome, nodeExecutable, agentRoot: path.join(root, 'agents'), platform: 'darwin', execute, now, passwordStorage,
     ...(spawn ? { spawn } : {}), ...(createPasswordBroker ? { createPasswordBroker } : {}), ...(createDirectTransport ? { createDirectTransport } : {}) };
   const createManager = (extra = {}) => { const manager = new TerminalSshManager({ ...options, ...extra }); managers.push(manager); return manager; };
   const manager = createManager();
@@ -245,7 +255,7 @@ test('saved aliases use only their fixed direct transport and replaced password 
 
 test('unknown-host configuration keeps environment trust persistent and configured locked targets in its immutable refusal set', async t => {
   const f = await fixture(t), saved = await f.savePassword();
-  const unlocked = f.createManager(); await unlocked.ready;
+  const unlocked = f.createManager({ passwordStorage: null }); await unlocked.ready;
   const envHome = path.join(f.root, 'environment-home'); await mkdir(envHome, { mode: 0o700 });
   const envConfig = path.join(envHome, '.config'); await mkdir(envConfig, { mode: 0o700 });
   const args = { profileId: 'profile-a', sessionId: 'locked-with-proxy', proxyUrl, directories: { home: envHome, config: envConfig } };
@@ -283,7 +293,10 @@ test('legacy expanded IPv6 records retain their stored identity and exact truste
   assert.equal(lookups.at(-1).args[1], `[${expanded}]:2222`);
   const config = await readFile(path.join(path.dirname(binding.binDirectory), 'config'), 'utf8');
   assert.ok(config.includes(`HostName ${expanded}`)); assert.ok(config.includes(`HostKeyAlias ${saved.alias}`));
-  assert.equal(await readFile(f.manager.filename, 'utf8'), original, 'loading/unlocking/reopening must not migrate the store or rewrite its identity');
+  const updatedRecord = JSON.parse(await readFile(f.manager.filename, 'utf8')).profiles[0].connections[0];
+  const { passwordCiphertext: ignoredOld, ...originalIdentity } = stored;
+  const { passwordCiphertext: ignoredNew, ...updatedIdentity } = updatedRecord;
+  assert.deepEqual(updatedIdentity, originalIdentity, 'unlocking retains the exact legacy identity');
   await binding.dispose();
 });
 
@@ -342,8 +355,9 @@ test('selection expires and failed persistence retains the selection and previou
   assert.equal((await f.manager.list({ id: 'profile-a' })).connections.length, 2);
 });
 
-test('password metadata is trust-bound and persists without secrets or key references; reopening is locked', async t => {
-  const f = await fixture(t, { spawn: () => { throw new Error('Password-only sessions never start ssh-agent'); } });
+test('password metadata is trust-bound and OS-encrypted persistence restores a new manager without plaintext or key references', async t => {
+  const brokers = passwordBrokers(t);
+  const f = await fixture(t, { createPasswordBroker: brokers.create, spawn: () => { throw new Error('Password-only sessions never start ssh-agent'); } });
   await assert.rejects(f.selectPassword({ port: 22 }), code('SSH_HOST_UNTRUSTED'));
   const selected = await f.selectPassword();
   assert.equal(selected.authType, 'password'); assert.equal(Object.hasOwn(selected, 'keyLabel'), false);
@@ -353,13 +367,15 @@ test('password metadata is trust-bound and persists without secrets or key refer
   assert.equal(saved.authType, 'password'); assert.equal(saved.passwordReady, true);
   for (const field of ['password', 'keyLabel', 'keyFingerprint', 'keyPath', 'keyStat', 'publicKey']) assert.equal(Object.hasOwn(saved, field), false);
   const bytes = await readFile(f.manager.filename, 'utf8'), record = JSON.parse(bytes).profiles[0].connections[0];
-  assert.deepEqual(Object.keys(record).sort(), ['alias', 'authType', 'host', 'hostFingerprints', 'hostKeys', 'id', 'name', 'port', 'route', 'trustSource', 'user'].sort());
+  assert.deepEqual(Object.keys(record).sort(), ['alias', 'authType', 'host', 'hostFingerprints', 'hostKeys', 'id', 'name', 'passwordCiphertext', 'port', 'route', 'trustSource', 'user'].sort());
   assert.ok(!bytes.includes('never-persist-this-synthetic-password')); assert.ok(!bytes.includes(f.keyDirectory));
   const reopened = f.createManager(); await reopened.ready;
-  assert.deepEqual((await reopened.list({ id: 'profile-a' })).connections, [{ ...saved, passwordReady: false }]);
+  assert.deepEqual((await reopened.list({ id: 'profile-a' })).connections, [saved]);
+  assert.equal(saved.passwordSaved, true);
+  assert.equal(Object.hasOwn(saved, 'passwordCiphertext'), false);
   const session = await reopened.createSession({ profileId: 'profile-a', sessionId: 'locked', proxyUrl, nodeExecutable: f.nodeExecutable });
-  assert.equal(session.describe().status, 'empty'); assert.equal(session.agentSocket, null);
-  assert.equal(session.environment.SSH_AUTH_SOCK, undefined); assert.equal(session.environment.ENVARA_SSH_PROXY_URL, undefined);
+  assert.equal(session.describe().status, 'ready'); assert.equal(session.agentSocket, null);
+  assert.equal(session.environment.SSH_AUTH_SOCK, undefined); assert.equal(session.environment.ENVARA_SSH_PROXY_URL, proxyUrl);
   assert.ok(session.protectedPaths.every(value => typeof value === 'string'));
   await session.dispose();
 });
@@ -428,7 +444,8 @@ test('password unlock cannot mutate active leases; duplicates have independent b
   await second.dispose();
   const storeBefore = await readFile(f.manager.filename, 'utf8');
   await f.manager.setPassword({ id: 'profile-a', connectionId: saved.id, password: 'synthetic-replacement' });
-  assert.equal(await readFile(f.manager.filename, 'utf8'), storeBefore);
+  assert.notEqual(await readFile(f.manager.filename, 'utf8'), storeBefore);
+  assert.ok(!(await readFile(f.manager.filename, 'utf8')).includes('synthetic-replacement'));
   const next = await f.session({ sessionId: 'session-c' });
   assert.equal(brokers.calls[2].passwords.get(saved.alias).toString(), 'synthetic-replacement');
   await f.manager.close(); assert.equal(next.describe().status, 'closed');
@@ -875,4 +892,97 @@ test('close during agent loading cancels setup, waits for cleanup and cannot ret
   await reached; const closed = f.manager.close(); release(); await rejected; await closed;
   assert.equal(f.manager.sessions.size, 0); assert.deepEqual(await readdir(f.manager.agentRoot), []);
   await f.manager.close();
+});
+
+test('150 password connections survive restart and all reach the session transport without per-profile or store count limits', async t => {
+  const brokers = passwordBrokers(t), relays = directTransports(t);
+  const f = await fixture(t, { createPasswordBroker: brokers.create, createDirectTransport: relays.create });
+  const records = [];
+  for (let index = 0; index < 150; index++) records.push(await f.savePassword({ name: `Server ${index}`, password: `synthetic-password-${index}` }));
+  await f.savePassword({ id: 'profile-b', name: 'Separate environment', password: 'synthetic-other-environment' });
+  await f.manager.close();
+  const restored = f.createManager(); await restored.ready;
+  assert.equal((await restored.list({ id: 'profile-a' })).connections.length, 150);
+  assert.ok((await restored.list({ id: 'profile-a' })).connections.every(record => record.passwordSaved && record.passwordReady));
+  assert.equal((await restored.list({ id: 'profile-b' })).connections.length, 1);
+  const session = await restored.createSession({ profileId: 'profile-a', sessionId: 'large-fixture', proxyUrl });
+  assert.equal(session.describe().connections.length, 150);
+  assert.equal(relays.calls[0].options.connections.length, 150);
+  assert.equal(brokers.calls[0].passwords.get(records.at(-1).alias).toString(), 'synthetic-password-149');
+  const publicDirectory = path.dirname(session.binDirectory), store = await readFile(restored.filename, 'utf8');
+  assert.ok(!store.includes('synthetic-password-'));
+  for (const entry of await readdir(publicDirectory, { withFileTypes: true })) if (entry.isFile()) {
+    const content = await readFile(path.join(publicDirectory, entry.name), 'utf8');
+    assert.ok(!content.includes('synthetic-password-')); assert.ok(!content.includes('passwordCiphertext'));
+  }
+  await session.dispose();
+});
+
+test('forget is durable, preserves connection trust, blocks active sessions and never restores a revoked password', async t => {
+  const brokers = passwordBrokers(t), f = await fixture(t, { createPasswordBroker: brokers.create });
+  const saved = await f.savePassword(), session = await f.session();
+  await assert.rejects(f.manager.forgetPassword({ id: 'profile-a', connectionId: saved.id }), code('SSH_CONNECTION_IN_USE'));
+  await session.dispose();
+  const before = f.manager.passwordGrant(saved.id).secret;
+  const forgotten = await f.manager.forgetPassword({ id: 'profile-a', connectionId: saved.id });
+  assert.deepEqual(forgotten, { ...saved, passwordReady: false, passwordSaved: false });
+  assert.ok(before.every(byte => byte === 0));
+  const restored = f.createManager(); await restored.ready;
+  assert.deepEqual((await restored.list({ id: 'profile-a' })).connections, [forgotten]);
+  const next = await restored.createSession({ profileId: 'profile-a', sessionId: 'forgotten-fixture', proxyUrl });
+  assert.equal(next.describe().status, 'empty'); await next.dispose();
+  const updated = await restored.setPassword({ id: 'profile-a', connectionId: saved.id, password: 'synthetic-new-secret' });
+  assert.equal(updated.passwordSaved, true);
+  const again = f.createManager(); await again.ready;
+  assert.equal((await again.list({ id: 'profile-a' })).connections[0].passwordReady, true);
+  await again.remove({ id: 'profile-a', connectionId: saved.id });
+  assert.equal((await f.createManager().list({ id: 'profile-a' })).connections.length, 0);
+});
+
+test('unavailable secure storage refuses writes and never destroys saved ciphertext or unrelated configuration', async t => {
+  let available = true, reads = 0;
+  const base = fixturePasswordStorage(), passwordStorage = { ...base, isEncryptionAvailable: () => available,
+    decryptString(value) { reads++; return base.decryptString(value); } };
+  const f = await fixture(t, { passwordStorage });
+  const saved = await f.savePassword(), original = await readFile(f.manager.filename, 'utf8');
+  available = false;
+  await assert.rejects(f.savePassword({ name: 'Unavailable' }), code('SSH_PASSWORD_STORAGE_UNAVAILABLE'));
+  await assert.rejects(f.manager.setPassword({ id: 'profile-a', connectionId: saved.id, password: 'synthetic-replacement' }), code('SSH_PASSWORD_STORAGE_UNAVAILABLE'));
+  assert.equal(await readFile(f.manager.filename, 'utf8'), original);
+  assert.equal(f.manager.passwordGrant(saved.id).secret.toString(), 'synthetic-password-only');
+  const restored = f.createManager(); await restored.ready;
+  assert.deepEqual((await restored.list({ id: 'profile-a' })).connections, [{ ...saved, passwordReady: false }]);
+  assert.equal(await readFile(f.manager.filename, 'utf8'), original);
+  // Do not repeatedly invoke OS decryption for the same locked credential.
+  available = true; await restored.list({ id: 'profile-a' }); assert.equal(reads, 0);
+  assert.equal((await f.createManager().list({ id: 'profile-a' })).connections[0].passwordReady, true);
+  const noAdapter = f.createManager({ passwordStorage: null }); await noAdapter.ready;
+  await assert.rejects(noAdapter.setPassword({ id: 'profile-a', connectionId: saved.id, password: 'synthetic' }), code('SSH_PASSWORD_STORAGE_UNAVAILABLE'));
+});
+
+test('swapping encrypted credentials between records, environments or changed targets never grants a password', async t => {
+  const f = await fixture(t); await f.savePassword({ name: 'First' }); await f.savePassword({ name: 'Second' });
+  const original = JSON.parse(await readFile(f.manager.filename, 'utf8'));
+  for (const mutate of [
+    document => { const records = document.profiles[0].connections; [records[0].passwordCiphertext, records[1].passwordCiphertext] = [records[1].passwordCiphertext, records[0].passwordCiphertext]; },
+    document => { document.profiles[0].id = 'profile-b'; },
+    document => { document.profiles[0].connections.forEach(record => { record.host = 'changed-fixture.invalid'; }); },
+  ]) {
+    const document = structuredClone(original); mutate(document);
+    const bytes = JSON.stringify(document); await writeFile(f.manager.filename, bytes);
+    const restored = f.createManager(); await restored.ready;
+    assert.ok((await restored.list({ id: document.profiles[0].id })).connections.every(record => record.passwordSaved && !record.passwordReady));
+    assert.equal(await readFile(f.manager.filename, 'utf8'), bytes);
+  }
+});
+
+test('legacy password records remain readable without credentials and gain encrypted persistence when entered once', async t => {
+  const f = await fixture(t), saved = await f.savePassword();
+  const document = JSON.parse(await readFile(f.manager.filename, 'utf8')); delete document.profiles[0].connections[0].passwordCiphertext;
+  const original = JSON.stringify(document); await writeFile(f.manager.filename, original);
+  const restored = f.createManager(); await restored.ready;
+  assert.deepEqual((await restored.list({ id: 'profile-a' })).connections, [{ ...saved, passwordSaved: false, passwordReady: false }]);
+  assert.equal(await readFile(f.manager.filename, 'utf8'), original);
+  await restored.setPassword({ id: 'profile-a', connectionId: saved.id, password: 'synthetic-migrated-secret' });
+  assert.equal((await f.createManager().list({ id: 'profile-a' })).connections[0].passwordReady, true);
 });

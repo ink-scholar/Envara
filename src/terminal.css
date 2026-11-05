@@ -164,6 +164,9 @@ button:is(.terminal-icon-button, .terminal-text-button, .terminal-empty-start, .
 .terminal-toolbar .terminal-session-tab { min-height: 30px; max-width: 230px; border-radius: var(--radius-control, 8px); padding: 6px 10px; }
 .terminal-toolbar .terminal-session-tab.is-active { background: var(--selected-bg); color: var(--text); }
 .terminal-toolbar-actions { display: flex; align-items: center; flex: none; gap: 3px; }
+.terminal-toolbar-hint { position: fixed; z-index: 1000; display: grid; gap: 4px; width: max-content; max-width: min(290px, calc(100vw - 16px)); padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-control, 8px); background: var(--bg-card); box-shadow: var(--shadow-floating); color: var(--text-secondary); font: var(--font-size-xs, 12px)/1.55 var(--font-ui); overflow-wrap: anywhere; user-select: text; }
+.terminal-toolbar-hint > strong { color: var(--text); font-weight: var(--weight-medium, 500); }
+.terminal-toolbar-hint > span { color: var(--text-muted); }
 .terminal-toolbar .terminal-close-session { margin-left: 3px; padding: 0; }
 .terminal-saved-terminals, .terminal-context-menu { flex: none; min-width: 0; border: 0; background: transparent; font-size: var(--font-size-xs, 12px); }
 .terminal-saved-terminals > summary, .terminal-context-menu > summary { display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; min-height: 30px; padding: 0; border-radius: var(--radius-control, 8px); color: var(--text-muted); cursor: pointer; list-style: none; }
@@ -177,6 +180,7 @@ button:is(.terminal-icon-button, .terminal-text-button, .terminal-empty-start, .
 .terminal-menu-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; color: var(--text-secondary); font-size: var(--font-size-xs, 12px); }
 .terminal-menu-heading > strong { font-weight: var(--weight-medium, 500); }
 .terminal-menu-heading > small { color: var(--text-muted); font-size: inherit; font-variant-numeric: tabular-nums; }
+.terminal-saved-note { margin: -2px 0 10px; color: var(--text-muted); font-size: var(--font-size-xs, 12px); line-height: 1.55; }
 .terminal-saved-list { max-height: 320px; overflow-y: auto; padding: 0; }
 .terminal-saved-entry + .terminal-saved-entry { margin-top: 3px; }
 .terminal-saved-row { padding-block: 2px; }

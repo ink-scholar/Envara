@@ -36,12 +36,13 @@ async function fixture(t, options = {}) {
   const fakes = [], bindings = [], browserBindings = [], wraps = [], clock = { now: Date.now() };
   const savedConnections = new Map([['chosen', structuredClone(options.connections ?? connections)]]);
   const selectedConnections = id => savedConnections.get(id) ?? options.connections ?? connections;
-  const calls = { list: [], describe: [], browserCreate: [], create: [], save: [], remove: [], prepare: [], preparePassword: [], setPassword: [], close: 0, processClose: 0, installer: 0 };
+  const calls = { list: [], describe: [], browserCreate: [], create: [], save: [], remove: [], prepare: [], preparePassword: [], setPassword: [], forgetPassword: [], close: 0, processClose: 0, installer: 0 };
   const sshManager = { ready: Promise.resolve(),
     list: async ({ id }) => { calls.list.push({ id }); return { supported: options.supported !== false, connections: structuredClone(selectedConnections(id)) }; },
     prepareIdentity: async args => { calls.prepare.push(args); return { selectionToken: 'synthetic-selection' }; },
     preparePassword: async args => { calls.preparePassword.push(args); return { authType: 'password', selectionToken: 'synthetic-password-selection' }; },
     setPassword: async args => { calls.setPassword.push(args); },
+    forgetPassword: async args => { calls.forgetPassword.push(args); },
     save: async args => { calls.save.push(args); }, remove: async args => { calls.remove.push(args); },
     close: async () => { calls.close++; },
     async createSession(args) {
@@ -170,14 +171,42 @@ test('password preparation and grants forward only selected fields and refuse mu
   const save = { id: 'chosen', name: 'Password server', selectionToken: prepared.selectionToken, hostKeyConfirmed: true, password: args.password };
   const session = await f.start();
   await assert.rejects(f.service.setTerminalSshPassword(args), { code: 'TERMINAL_SSH_BUSY' });
+  await assert.rejects(f.service.forgetTerminalSshPassword(args), { code: 'TERMINAL_SSH_BUSY' });
   await assert.rejects(f.service.saveTerminalSshConnection(save), { code: 'TERMINAL_SSH_BUSY' });
   assert.deepEqual(f.calls.setPassword, []); assert.deepEqual(f.calls.save, []);
+  assert.deepEqual(f.calls.forgetPassword, []);
   await f.service.close({ sessionId: session.sessionId });
   assert.equal((await f.service.setTerminalSshPassword({ ...args, host: 'forged.invalid' })).supported, true);
   assert.deepEqual(f.calls.setPassword, [args]);
+  assert.equal((await f.service.forgetTerminalSshPassword({ ...args, host: 'forged.invalid' })).supported, true);
+  assert.deepEqual(f.calls.forgetPassword, [{ id: args.id, connectionId: args.connectionId }]);
   await f.service.saveTerminalSshConnection({ ...save, keyPath: '/not-forwarded' });
   assert.deepEqual(f.calls.save, [save]);
   assert.ok(!JSON.stringify(await f.service.snapshot()).includes(args.password));
+});
+
+test('two sessions can retain 150 SSH route leases each and clean them independently', async t => {
+  const f = await fixture(t);
+  const first = await f.start(), second = await f.service.duplicate({ sessionId: first.sessionId });
+  const groups = [];
+  try {
+    for (const session of [first, second]) {
+      const leases = [];
+      groups.push(leases);
+      for (let index = 0; index < 150; index++) leases.push(await f.service.resolveSshRoute({
+        ownerProfileId: 'chosen', route: { kind: 'host' }, sessionId: session.sessionId,
+      }));
+    }
+    assert.equal(f.service.sshRouteLeases.size, 300);
+    assert.ok(groups.flat().every(lease => lease.isActive()));
+    await Promise.all(groups[0].map(lease => lease.dispose()));
+    assert.equal(f.service.sshRouteLeases.size, 150);
+    assert.ok(groups[0].every(lease => !lease.isActive()));
+    assert.ok(groups[1].every(lease => lease.isActive()));
+    await f.service.close({ sessionId: second.sessionId });
+    assert.ok(groups[1].every(lease => !lease.isActive()));
+  } finally { await Promise.all(groups.flat().map(lease => lease.dispose())); }
+  assert.equal(f.service.sshRouteLeases.size, 0);
 });
 
 test('main-only host route has no proxy resolution and cannot be used after disposal', async t => {

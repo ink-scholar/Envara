@@ -218,6 +218,7 @@ function sshFixture(pickSSHIdentity) {
   f.terminal.prepareTerminalSshIdentity = async args => { calls.push(['prepare', publicArguments(args)]); return { ...publicConnection, selectionToken: 'manager-token', keyPath: '/never-public/key', privateBytes: 'not-public' }; };
   f.terminal.prepareTerminalSshPassword = async args => { calls.push(['prepare-password', publicArguments(args)]); return { ...publicConnection, authType: 'password', selectionToken: 'manager-password-token', password: 'synthetic-hidden-value' }; };
   f.terminal.setTerminalSshPassword = async args => { calls.push(['set-password', args]); };
+  f.terminal.forgetTerminalSshPassword = async args => { calls.push(['forget-password', args]); };
   f.terminal.saveTerminalSshConnection = async args => { calls.push(['save', args]); return publicConnection; };
   f.terminal.removeTerminalSshConnection = async args => { calls.push(['remove', args]); return { removed: true }; };
   return { ...f, calls, signals, publicArguments, sourceWindow, context: { window: sourceWindow }, publicConnection,
@@ -455,13 +456,35 @@ test('password grants require a live owning window, an idle environment and a bo
   assert.equal(f.calls.some(([type]) => type === 'set-password'), false);
   f.state.profiles[0].sessions = [];
   f.terminal.listTerminalSshConnections = async () => ({ supported: true, connections: [{ ...f.publicConnection,
-    authType: 'password', passwordReady: true, password: 'synthetic-password', privateGrant: Buffer.from('synthetic-password') }] });
+    authType: 'password', passwordReady: true, passwordSaved: true, encryptedPassword: 'synthetic-ciphertext', password: 'synthetic-password', privateGrant: Buffer.from('synthetic-password') }] });
   const result = await f.controller.dispatch('setTerminalSshPassword', args, f.context);
   assert.deepEqual(f.calls.find(([type]) => type === 'set-password'), ['set-password', { id: 'prof_a', connectionId: 'ssh_a', password: 'synthetic-password' }]);
   assert.equal(result.connections[0].passwordReady, true);
+  assert.equal(result.connections[0].passwordSaved, true);
+  assert.ok(!JSON.stringify(result).includes('synthetic-ciphertext'));
   assert.ok(!JSON.stringify(result).includes('synthetic-password'));
   f.sourceWindow.destroyed = true;
   await assert.rejects(f.controller.dispatch('setTerminalSshPassword', args, f.context), { code: 'SSH_WINDOW_CLOSED' });
+});
+
+test('forgetting a saved password requires an idle environment and exposes only public metadata', async () => {
+  const f = sshFixture(), args = { id: 'prof_a', connectionId: 'ssh_a', password: 'discard-this', encryptedPassword: 'discard-this' };
+  await assert.rejects(f.controller.dispatch('forgetTerminalSshPassword', args), { code: 'SSH_WINDOW_CLOSED' });
+  for (const status of ['starting', 'running', 'closing']) {
+    f.state.profiles[0].sessions = [{ sessionId: 'active', status }];
+    await assert.rejects(f.controller.dispatch('forgetTerminalSshPassword', args, f.context), { code: 'SSH_TERMINAL_BUSY' });
+  }
+  assert.equal(f.calls.some(([type]) => type === 'forget-password'), false);
+  f.state.profiles[0].sessions = [];
+  f.terminal.listTerminalSshConnections = async () => ({ supported: true, connections: [{ ...f.publicConnection,
+    authType: 'password', passwordReady: false, passwordSaved: false, encryptedPassword: 'never-public' }] });
+  const result = await f.controller.dispatch('forgetTerminalSshPassword', args, f.context);
+  assert.deepEqual(f.calls.find(([type]) => type === 'forget-password'), ['forget-password', { id: 'prof_a', connectionId: 'ssh_a' }]);
+  assert.equal(result.connections[0].passwordSaved, false);
+  assert.equal(result.connections[0].passwordReady, false);
+  assert.ok(!JSON.stringify(result).includes('never-public'));
+  f.sourceWindow.destroyed = true;
+  await assert.rejects(f.controller.dispatch('forgetTerminalSshPassword', args, f.context), { code: 'SSH_WINDOW_CLOSED' });
 });
 
 test('password preparation refuses stale windows and foreign or expired selection capabilities', async () => {

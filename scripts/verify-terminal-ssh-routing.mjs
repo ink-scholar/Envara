@@ -15,6 +15,9 @@ import path from 'node:path';
 import { promisify, stripVTControlCharacters } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { createFixturePasswordStorage } from './fixtures/ssh-password-storage.mjs';
+
+const passwordStorage = createFixturePasswordStorage();
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2), options = {};
 for (let index = 0; index < argv.length; index++) {
@@ -69,7 +72,7 @@ const wait = async (predicate, code, milliseconds = 15000, allowCancelled = fals
 };
 const proof = { schema: 'envara.ssh-routing-fixture/v1', passed: false, mode: application ? 'packaged' : 'source',
   platform: `${process.platform}-${process.arch}`, electron: process.versions.electron, checks: [], limitations: [
-    'Only generated keys, memory-only synthetic passwords and owned loopback SSH/proxy listeners are exercised; no real account or public egress is tested.',
+    'Only generated keys, encrypted synthetic passwords using a disposable in-memory test key, and owned loopback SSH/proxy listeners are exercised; no real account or public egress is tested.',
     'A saved direct SSH server necessarily observes its TCP peer. The fixture returns that peer as synthetic SSH_CONNECTION output; arbitrary remote output is not filtered.',
     'An ad hoc fixture account accepts SSH none authentication after interactive host trust, so this case proves routing and trust handling rather than ad hoc password authentication.',
     'Actual SSH env/PTY requests and native process environment are inspected. This does not create a virtual machine or hide SSH protocol fingerprints and PTY metadata.',
@@ -328,7 +331,7 @@ try {
   localCommandMarker = path.join(working, 'host-config-was-read');
   const hostileConfig = `Host *\n  SendEnv *\n  SetEnv ENVARA_HOST_CONFIG=fixture-must-not-send\n  PermitLocalCommand yes\n  ForwardAgent yes\n  LocalCommand /usr/bin/touch ${quote(localCommandMarker)}\n`;
   await writeFile(path.join(hostHome, '.ssh/config'), hostileConfig, { mode: 0o600 });
-  manager = new TerminalSshManager({ dataDir, hostHome, nodeExecutable: node, agentRoot: path.join(temporary, 'agents'),
+  manager = new TerminalSshManager({ dataDir, hostHome, passwordStorage, nodeExecutable: node, agentRoot: path.join(temporary, 'agents'),
     spawn: (program, args, settings) => nativeLaunch(program, args, settings) });
   managers.push(manager); await manager.ready;
   const originalBroker = manager.createPasswordBroker;
@@ -515,11 +518,12 @@ console.log(JSON.stringify({key:denied(()=>fs.readFileSync(${JSON.stringify(path
   const publicData = JSON.stringify({ list: await manager.list({ id: 'routing-main' }), snapshot: await terminal.snapshot(), records: { ...records, key } });
   assert(!publicData.includes(password)); for (const value of outputs.values()) assert(!value.includes(password));
   proof.password = { ownedFilesScanned: await scanPasswordFiles(temporary), publicProjectionContainsPassword: false, terminalOutputContainsPassword: false };
-  stage = 'application restart retains locked destination identity';
+  stage = 'forget then application restart retains locked destination identity';
   assert.equal((await manager.list({ id: 'routing-revoke' })).connections[0].passwordReady, true);
   await bounded(() => terminal.shutdown(), 'FIXTURE_RESTART_TERMINAL_DEADLINE');
+  await manager.forgetPassword({ id: 'routing-revoke', connectionId: records['routing-revoke'].id });
   await bounded(() => manager.close(), 'FIXTURE_RESTART_MANAGER_DEADLINE');
-  manager = new TerminalSshManager({ dataDir, hostHome, nodeExecutable: node, agentRoot: path.join(temporary, 'agents'),
+  manager = new TerminalSshManager({ dataDir, hostHome, passwordStorage, nodeExecutable: node, agentRoot: path.join(temporary, 'agents'),
     spawn: (program, args, settings) => nativeLaunch(program, args, settings) });
   managers.push(manager); await manager.ready;
   const restored = await manager.list({ id: 'routing-revoke' });
@@ -538,7 +542,7 @@ console.log(JSON.stringify({key:denied(()=>fs.readFileSync(${JSON.stringify(path
   assert.deepEqual({ saved: opened('saved'), proxy: proxyEvents.length }, restartCounts);
   const afterRestartUnknown = await command(afterRestart, `ssh -T ${target} envara-fixture`, { interactiveTrust: true });
   assert.equal(afterRestartUnknown.code, 0); assert(afterRestartUnknown.text.includes('ENVARA_SSH_ROUTING_OK'));
-  check('after a manager restart, saved password destinations stay locked while a truly unconfigured destination still uses the proxy');
+  check('after forgetting and a manager restart, saved password destinations stay locked while a truly unconfigured destination still uses the proxy');
   stage = 'final evidence';
   assert.equal(events.filter(item => item.event === 'env').length, 0); await assert.rejects(lstat(localCommandMarker), { code: 'ENOENT' });
   proof.sourceHashes = {};

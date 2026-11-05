@@ -14,6 +14,9 @@ import path from 'node:path';
 import { promisify, stripVTControlCharacters } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { createFixturePasswordStorage } from './fixtures/ssh-password-storage.mjs';
+
+const passwordStorage = createFixturePasswordStorage();
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2), options = new Set(['--run', '--packaged', '--claude', '--node', '--python']);
 for (let i = 0; i < argv.length; i++) {
@@ -59,6 +62,7 @@ const proxyUser = randomBytes(12).toString('hex'), proxyPassword = randomBytes(2
 const secrets = [password, wrongPassword];
 const proof = { schema: 'envara.ssh-password-app-lifetime-fixture/v1', passed: false, packagedModules: !!resources, checks: [],
   limitations: ['Saved key/password SSH uses host-direct relays to an owned loopback Paramiko server; no real account, public host exit or external endpoint is tested.',
+    'Password persistence uses a disposable AES test adapter across manager recreation; this does not verify macOS Keychain or a full Electron process restart.',
     'The environment proxy rejects all CONNECT requests and must remain unused; unsaved-host proxy routing is covered by the separate routing fixture.',
     'Optional official Claude runs --version only. MCP bindings are synthetic; no model request or browser launch.',
     'Time advancement uses only injected clocks, never the system clock. Route revocation uses the real service failure callback, not a real core crash.'] };
@@ -210,7 +214,7 @@ try {
   await mkdir(path.join(hostHome, '.ssh'), { mode: 0o700 });
   const hostPublic = (await readFile(path.join(temporary, 'server.pub'), 'utf8')).trim().split(/\s+/).slice(0, 2).join(' ');
   await writeFile(path.join(hostHome, '.ssh/known_hosts'), `[127.0.0.1]:${sshPort} ${hostPublic}\n`, { mode: 0o600 });
-  manager = new TerminalSshManager({ dataDir, hostHome, nodeExecutable: node, agentRoot: path.join(temporary, 'agents'), now,
+  manager = new TerminalSshManager({ dataDir, hostHome, passwordStorage, nodeExecutable: node, agentRoot: path.join(temporary, 'agents'), now,
     spawn: (...args) => { const child = spawn(...args); managersChildren.push(child); return child; } });
   const actualBrokerFactory = manager.createPasswordBroker;
   manager.createPasswordBroker = async settings => {
@@ -252,7 +256,7 @@ try {
   finiteAlias = records.get('pw-finite').alias;
   const mixedIdentity = await manager.prepareIdentity({ id: 'pw-mixed', host: '127.0.0.1', port: sshPort, user: 'fixture', keyPath: path.join(temporary, 'client') });
   const mixedKey = await manager.save({ id: 'pw-mixed', name: 'Disposable app-lifetime key authority', selectionToken: mixedIdentity.selectionToken, hostKeyConfirmed: true });
-  check('Temporary password grants use existing isolated host trust and main memory; connection records contain no password.');
+  check('Synthetic passwords use isolated host trust and encrypted storage; connection records contain no plaintext password.');
   const proxy = { protocol: 'http', host: '127.0.0.1', port: proxyServer.address().port, username: proxyUser, password: proxyPassword };
   const context = id => ({ id, name: 'Synthetic password fixture', timezone: 'UTC', locale: 'en-US', proxy, proxyId: id === 'pw-revoke' ? 'fixture-revoke' : 'fixture-route', managedProxy: true,
     privacy: { mode: 'standard' }, network: { ok: true, source: 'owned-loopback-fixture' } });
@@ -471,26 +475,62 @@ try {
   if (dedicated) await terminal.close({ sessionId: dedicated.sessionId });
   await terminal.close({ sessionId: first.sessionId }); await terminal.close({ sessionId: second.sessionId });
   assert.equal(manager.sessions.size, 0); assert.deepEqual(await readdir(manager.agentRoot), []);
+  phase = 'large-connection-library';
+  const library = [];
+  for (let index = 0; index < 150; index++) {
+    const prepared = await manager.preparePassword({ id: 'pw-library', host: '127.0.0.1', port: sshPort, user: 'fixture' });
+    library.push(await manager.save({ id: 'pw-library', name: `Disposable saved server ${index + 1}`, selectionToken: prepared.selectionToken,
+      hostKeyConfirmed: true, password }));
+  }
+  assert.equal((await manager.list({ id: 'pw-library' })).connections.length, 150);
+  const librarySession = await create('pw-library');
+  const libraryDescription = terminal.readSessionSshConnections(terminal.sessions.get(librarySession.sessionId));
+  assert.equal(libraryDescription.connections.length, 150);
+  for (const index of [0, 74, 149]) {
+    const result = await command(librarySession, `ssh -T ${library[index].alias} envara-fixture`);
+    assert.equal(result.code, 0);
+  }
+  await terminal.close({ sessionId: librarySession.sessionId });
+  proof.largeLibrary = { savedConnections: 150, sessionConnections: 150, nativeAuthenticationSamples: 3 };
+  check('One environment loads 150 saved password connections into a real fenced terminal; the first, middle and last aliases authenticate with native SSH.');
   phase = 'application-restart';
   await terminal.shutdown(); await manager.close();
-  manager = new TerminalSshManager({ dataDir, hostHome, nodeExecutable: node, agentRoot: path.join(temporary, 'agents'), now,
+  manager = new TerminalSshManager({ dataDir, hostHome, passwordStorage, nodeExecutable: node, agentRoot: path.join(temporary, 'agents'), now,
     spawn: (...args) => { const child = spawn(...args); managersChildren.push(child); return child; } });
   await manager.ready;
+  assert.equal((await manager.list({ id: 'pw-library' })).connections.length, 150);
   const reopened = await manager.list({ id: 'pw-main' });
-  assert.equal(reopened.connections.length, 1); assert.equal(reopened.connections[0].passwordReady, false);
+  assert.equal(reopened.connections.length, 1); assert.equal(reopened.connections[0].passwordReady, true); assert.equal(reopened.connections[0].passwordSaved, true);
   terminal = new TerminalService({ dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'], additionalExecutablePaths: [path.dirname(node)],
     resolveContext: async id => context(id), ptyFactory: (file, args, settings) => { inspectLaunch(file, args, settings); return require('node-pty').spawn(file, args, settings); },
     onEvent: event => { if (event.type === 'data') output.set(event.sessionId, (output.get(event.sessionId) ?? '') + event.data); } });
   await terminal.ready; terminal.hostHome = hostHome;
   const afterRestart = await create('pw-main'), trafficBeforeRestart = countSnapshot();
   const restartedDescription = terminal.readSessionSshConnections(terminal.sessions.get(afterRestart.sessionId));
-  assert.equal(restartedDescription.status, 'empty'); assert.equal(restartedDescription.expiresAt, null);
-  const restartResult = await invoke(afterRestart); assert.notEqual(restartResult.code, 0);
-  assertNoConnection(trafficBeforeRestart);
+  assert.equal(restartedDescription.status, 'ready'); assert.equal(restartedDescription.expiresAt, null);
+  const restartResult = await invoke(afterRestart); assert.equal(restartResult.code, 0);
+  assert.equal(stats.authenticated, trafficBeforeRestart.authenticated + 1);
+  assert.equal(stats.proxyConnections, trafficBeforeRestart.proxyConnections);
   await terminal.close({ sessionId: afterRestart.sessionId });
-  proof.applicationRestart = { savedConnectionPreserved: true, passwordReady: false, newConnectionRefused: true,
-    serverContacted: false, proxyContacted: false };
-  check('Closing and recreating the manager models an application restart: public connection settings remain but the memory-only password is unavailable and no route or authentication is attempted.');
+  proof.applicationRestart = { savedConnectionPreserved: true, passwordReady: true, nativeAuthenticationSucceeded: true,
+    serverContacted: true, proxyContacted: false, secureStorage: 'synthetic-aes-adapter' };
+  check('Recreating the manager restores the encrypted password and a new fenced terminal completes real native SSH authentication without reentry.');
+  phase = 'forget-and-restart';
+  await manager.forgetPassword({ id: 'pw-main', connectionId: records.get('pw-main').id });
+  await terminal.shutdown(); await manager.close();
+  manager = new TerminalSshManager({ dataDir, hostHome, passwordStorage, nodeExecutable: node, agentRoot: path.join(temporary, 'agents'), now });
+  await manager.ready;
+  const forgotten = await manager.list({ id: 'pw-main' });
+  assert.equal(forgotten.connections.length, 1); assert.equal(forgotten.connections[0].passwordReady, false); assert.equal(forgotten.connections[0].passwordSaved, false);
+  terminal = new TerminalService({ dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'], additionalExecutablePaths: [path.dirname(node)],
+    resolveContext: async id => context(id), ptyFactory: (file, args, settings) => { inspectLaunch(file, args, settings); return require('node-pty').spawn(file, args, settings); },
+    onEvent: event => { if (event.type === 'data') output.set(event.sessionId, (output.get(event.sessionId) ?? '') + event.data); } });
+  await terminal.ready; terminal.hostHome = hostHome;
+  const afterForget = await create('pw-main'), beforeForgotten = countSnapshot();
+  const refused = await invoke(afterForget); assert.notEqual(refused.code, 0); assertNoConnection(beforeForgotten);
+  await terminal.close({ sessionId: afterForget.sessionId });
+  proof.forgetRestart = { connectionPreserved: true, passwordSaved: false, passwordReady: false, serverContacted: false };
+  check('Forgetting removes the persisted password: another manager restart preserves connection metadata but refuses SSH before contacting the server.');
   proof.secretChecks.boundedConfigurationFilesChecked = await inspectSecretFiles(temporary, excludedProgram);
   proof.secretChecks.launchSpecificationsChecked = launchSpecificationsChecked;
   for (const secret of secrets) for (const value of output.values()) assert(!value.includes(secret));

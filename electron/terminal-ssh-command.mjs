@@ -9,7 +9,7 @@ import { normalizeSshRoute, sameSshRoute } from './terminal-ssh-route.mjs';
 
 export const SSH_SESSION_SCHEMA = 'envara.ssh-session';
 export const SSH_SESSION_VERSION = 2;
-const MAX_CONNECTIONS = 20;
+const MAX_CONNECTION_BYTES = 1024 * 1024;
 const USER = /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/;
 const ALIAS = /^envara-[a-f0-9]{12}$/;
 const MESSAGES = Object.freeze({
@@ -67,9 +67,10 @@ export function createSshChildEnvironment({ home, proxyUrl, targetsPath, directS
 }
 
 function publicConnections(value) {
-  if (!Array.isArray(value) || value.length > MAX_CONNECTIONS) throw failure('SSH_SESSION_INVALID');
-  const aliases = new Set(), ids = new Set();
-  return Array.from(value).map(record => {
+  if (!Array.isArray(value)) throw failure('SSH_SESSION_INVALID');
+  const aliases = new Set(), ids = new Set(), connections = [];
+  let bytes = 2;
+  for (const record of value) {
     if (!record || typeof record !== 'object' || Array.isArray(record)
       || typeof record.id !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(record.id)
       || typeof record.name !== 'string' || !record.name.trim() || record.name.length > 80 || /[\x00-\x1f\x7f]/.test(record.name)
@@ -81,9 +82,13 @@ function publicConnections(value) {
     ids.add(record.id); aliases.add(record.alias);
     // Explicit projection: callers may hold private metadata, but discovery
     // never forwards paths, credentials, arbitrary usage strings or key bytes.
-    return { id: record.id, name: record.name, alias: record.alias, ...target, user: record.user,
+    const connection = { id: record.id, name: record.name, alias: record.alias, ...target, user: record.user,
       ...(Object.hasOwn(record, 'route') ? { route } : {}) };
-  });
+    bytes += Buffer.byteLength(JSON.stringify(connection)) + 1;
+    if (bytes > MAX_CONNECTION_BYTES) throw failure('SSH_SESSION_INVALID');
+    connections.push(connection);
+  }
+  return connections;
 }
 
 /** Describe a fixed session manifest, never the mutable global connection store.
@@ -264,7 +269,7 @@ export async function runSshCommand({ argv = [], entry = 'ssh', manifest, config
         || typeof passwordBroker.socket !== 'string' || !path.isAbsolute(passwordBroker.socket)
         || path.normalize(passwordBroker.socket) !== passwordBroker.socket || /[\x00-\x1f\x7f]/.test(passwordBroker.socket)
         || Buffer.byteLength(passwordBroker.socket) > 100 || !Array.isArray(passwordBroker.aliases)
-        || !passwordBroker.aliases.length || passwordBroker.aliases.length > MAX_CONNECTIONS
+        || !passwordBroker.aliases.length || passwordBroker.aliases.length > description.connections.length
         || new Set(passwordBroker.aliases).size !== passwordBroker.aliases.length
         || passwordBroker.aliases.some(alias => !description.connections.some(record => record.alias === alias
           && (description.version === 1 || record.authType === 'password')))) throw failure('SSH_SESSION_INVALID');

@@ -168,6 +168,7 @@ export class BrowseForgeService {
     this.proxyWires = new Map();
     this.managedProxyRevisions = new Map();
     this.locationPreviews = new Map();
+    this.networkRevision = 0; this.checkedProxyIds = new Set(); this.networkRecovery = null; this.networkRecoveryFailures = new Set();
     if (options.profilesDir && !path.isAbsolute(options.profilesDir)) throw error('BrowseForge 资料目录必须是绝对路径。');
     this.profilesDir = path.resolve(options.profilesDir ?? path.join(this.dataDir, 'browseforge', 'profiles'));
     const legacyProfilesDir = path.join(this.dataDir, 'profiles');
@@ -279,6 +280,7 @@ export class BrowseForgeService {
   }
   async snapshot() {
     await this.ready;
+    const networkRevision = this.networkRevision;
     const trace = (stage, operation) => this.options.diagnostics ? this.options.diagnostics.step(stage, operation) : operation();
     const [workspace, remote] = await Promise.all([trace('snapshot.store', () => this.store.read()), trace('snapshot.remote', () => this.remote())]);
     const proxies = this.proxies(workspace, remote);
@@ -320,7 +322,7 @@ export class BrowseForgeService {
     catch (value) { legacyMigration = { available: false, count: 0, migrated: 0, error: value.message }; }
     const connection = await trace('snapshot.connection', () => this.options.getConnectionInfo?.()) ?? {};
     const publicConnection = Object.fromEntries(['apiUrl', 'mcpUrl', 'status', 'version', 'sourceCommit'].filter((key) => Object.hasOwn(connection, key)).map((key) => [key, connection[key]]));
-    return { profiles: profiles.sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '')), proxies, groups: this.groups(workspace, remote.groups).map((group) => ({ ...group, proxyId: group.proxy ? proxies.find((proxy) => proxy.id === group.proxy.id)?.id ?? proxies.find((proxy) => sameProxy(proxy, group.proxy))?.id ?? null : null, proxy: undefined })), engines, engine: engines.find((item) => item.id === remote.defaultEngine) ?? engines[0] ?? {}, settings: { ...workspace.settings, defaultEngine: remote.defaultEngine }, events: workspace.events, legacyMigration, system: this.system, integration: { backup: { configExport: true, browserDataExport: false, credentialExport: false }, mcp: { supported: true, authentication: 'bearer', ...publicConnection } } };
+    return { networkRevision, profiles: profiles.sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '')), proxies, groups: this.groups(workspace, remote.groups).map((group) => ({ ...group, proxyId: group.proxy ? proxies.find((proxy) => proxy.id === group.proxy.id)?.id ?? proxies.find((proxy) => sameProxy(proxy, group.proxy))?.id ?? null : null, proxy: undefined })), engines, engine: engines.find((item) => item.id === remote.defaultEngine) ?? engines[0] ?? {}, settings: { ...workspace.settings, defaultEngine: remote.defaultEngine }, events: workspace.events, legacyMigration, system: this.system, integration: { backup: { configExport: true, browserDataExport: false, credentialExport: false }, mcp: { supported: true, authentication: 'bearer', ...publicConnection } } };
   }
   find(remote, profileId) { identifier(profileId); const profile = remote.profiles.find((item) => item.id === profileId); if (!profile) throw error('环境不存在。', 'PROFILE_NOT_FOUND'); return profile; }
   async assertStopped(remote, profileId) {
@@ -718,15 +720,16 @@ export class BrowseForgeService {
     await this.store.transaction((next) => { next.proxies = next.proxies.filter((item) => item.id !== proxyId); event(next, 'proxy', `删除网络出口「${proxy.name}」`); });
     await this.releaseProxy(proxy);
   }
-  async prepareProxy(proxy, { requireManagedRoute = false } = {}) {
+  async prepareProxy(proxy, { requireManagedRoute = false, signal } = {}) {
     if (!proxy && requireManagedRoute) throw error('托管网络出口绑定缺失，请先选择代理节点。', 'MANAGED_PROXY_BINDING_MISSING');
     if (!proxy) return { wire: null, managed: false };
     assertHttpProxyUsername(proxy.protocol ?? proxy.type, proxy.username);
     if (!usesManagedProxy(proxy) && !requireManagedRoute) return { wire: { ...proxyConfig(proxy), region: browseForgeRegionFor(proxy) ?? '' }, managed: false };
     if (!this.options.proxyCore?.ensure) throw error('内置代理网络内核尚未就绪。', 'PROXY_CORE_UNAVAILABLE');
     let candidate;
-    try { candidate = await this.options.proxyCore.ensure({ ...proxyConfig(proxy), id: identifier(proxy.id) }); }
+    try { candidate = await this.options.proxyCore.ensure({ ...proxyConfig(proxy), id: identifier(proxy.id) }, { signal }); }
     catch (value) {
+      if (signal?.aborted) throw value;
       this.invalidateManagedProxy(proxy.id);
       let message = String(value?.message ?? '未知错误');
       for (const secret of [proxy.password, proxy.username]) if (secret) message = message.split(secret).join('[redacted]');
@@ -754,33 +757,113 @@ export class BrowseForgeService {
     this.changed();
   }
   async releaseProxy(proxy) {
+    this.checkedProxyIds.delete(proxy.id); this.networkRecoveryFailures.delete(proxy.id);
     if (proxy.protocol !== 'anytls') this.networkProbe.invalidate(proxy);
     const wire = this.proxyWires.get(proxy.id);
     if (wire) this.networkProbe.invalidate(wire);
     this.proxyWires.delete(proxy.id);
     await this.options.proxyCore?.release?.(proxy.id);
   }
-  async checkProxy({ id: proxyId, proxy: draft } = {}, afterProbe) {
+  async checkProxy({ id: proxyId, proxy: draft } = {}, afterProbe, { signal } = {}) {
+    const networkRevision = this.networkRevision;
+    const assertCurrent = () => {
+      this.assertNetworkRevision(networkRevision);
+      if (signal?.aborted) throw error('网络已改变，请重新识别实际出口。', 'NETWORK_CHANGED');
+    };
     const prepare = async () => {
+      assertCurrent();
       if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
       let proxy;
       if (draft != null) { if (proxyId != null) throw error('请选择已保存代理或草稿，不能同时提供。'); proxy = { ...proxyConfig(draft), id: `draft_${randomUUID()}` }; }
       else { const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]); proxy = this.proxies(workspace, remote).find((item) => item.id === proxyId); if (!proxy) throw error('网络出口不存在。', 'PROXY_NOT_FOUND'); }
       const revision = this.managedProxyRevisions.get(proxy.id) ?? 0;
-      try { return { proxy, revision, ...(await this.prepareProxy(proxy)) }; }
+      assertCurrent();
+      // Remember a valid saved selection even if its first route preparation
+      // fails offline, so the next network event can retry that same node.
+      if (draft == null) this.checkedProxyIds.add(proxy.id);
+      try { return { proxy, revision, ...(await this.prepareProxy(proxy, { signal })) }; }
       catch (value) { if (draft != null && usesManagedProxy(proxy)) await this.releaseProxy(proxy); throw value; }
     };
     const { proxy, wire, revision, managed } = draft == null ? await this.serialize(prepare) : await prepare();
     try {
+      assertCurrent();
       const result = await this.networkProbe.probe(wire, { force: true });
+      assertCurrent();
       if (managed && revision !== (this.managedProxyRevisions.get(proxy.id) ?? 0)) throw error('代理网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
       // Main-only callback keeps optional map context on the exact verified
       // wire until the owned draft is released. IPC cannot supply this callback.
       if (afterProbe) await afterProbe(result, wire);
+      assertCurrent();
       if (managed && revision !== (this.managedProxyRevisions.get(proxy.id) ?? 0)) throw error('代理网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
       if (draft == null) this.changed();
       return result;
     } finally { if (draft != null && managed) await this.releaseProxy(proxy); }
+  }
+  assertNetworkRevision(revision) {
+    if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
+    if (revision !== this.networkRevision) throw error('网络已改变，请重新识别实际出口。', 'NETWORK_CHANGED');
+  }
+  /** Native lifecycle hook, never renderer-selected routes or replacement settings. */
+  recoverNetwork({ retry = false, signal } = {}) {
+    if (this.networkRecovery && retry) return this.networkRecovery;
+    if (!retry) {
+      this.networkRecoveryAbort?.abort();
+      this.networkRevision++;
+      this.networkProbe.invalidateNetwork?.();
+      this.locationPreviews.clear(); this.networkRecoveryFailures.clear();
+      for (const context of this.workspaceContexts.values()) context.network = null;
+      this.changed();
+    }
+    const revision = this.networkRevision;
+    const controller = new AbortController(); this.networkRecoveryAbort = controller;
+    const cancel = () => {
+      controller.abort();
+      if (this.networkRevision === revision) { this.networkRevision++; this.networkProbe.invalidateNetwork?.(); }
+    };
+    signal?.addEventListener('abort', cancel, { once: true });
+    if (signal?.aborted) cancel();
+    const operation = (async () => {
+      await this.ready;
+      this.assertNetworkRevision(revision);
+      const core = await this.options.proxyCore?.recoverNetwork?.({ retry, signal: controller.signal });
+      this.assertNetworkRevision(revision);
+      const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
+      const selected = this.proxies(workspace, remote).filter(proxy => retry ? this.networkRecoveryFailures.has(proxy.id) : this.checkedProxyIds.has(proxy.id) || this.proxyWires.has(proxy.id));
+      let ok = core?.ok !== false;
+      // Keep background verification bounded when many nodes are saved. Only
+      // previously used or measured nodes are contacted, through their own route.
+      let cursor = 0;
+      await Promise.all(Array.from({ length: Math.min(3, selected.length) }, async () => {
+        while (cursor < selected.length) {
+          const proxy = selected[cursor++];
+          this.assertNetworkRevision(revision);
+          let network;
+          try { network = await this.checkProxy({ id: proxy.id }, undefined, { signal: controller.signal }); }
+          catch { this.assertNetworkRevision(revision); this.networkRecoveryFailures.add(proxy.id); ok = false; continue; }
+          this.assertNetworkRevision(revision);
+          if (!network.ok) { this.networkRecoveryFailures.add(proxy.id); ok = false; }
+          else this.networkRecoveryFailures.delete(proxy.id);
+          for (const profile of remote.profiles) {
+            const context = this.workspaceContexts.get(profile.id);
+            if (!context) continue;
+            const effective = this.effectiveProxy(profile, remote.groups, workspace);
+            if (!effective.proxy || !(effective.proxy.id === proxy.id || sameProxy(effective.proxy, proxy))) continue;
+            if (context.signature !== this.contextSignature(profile, effective)) continue;
+            context.network = network;
+            context.networkLastError = network.ok ? null : network.message;
+            if (network.ok && context.selectedLocation) {
+              try { assertNetworkLocationMatchesEgress(context.selectedLocation, network); }
+              catch (failure) { context.networkLastError = failure.message; }
+            }
+          }
+        }
+      }));
+      this.assertNetworkRevision(revision); this.changed();
+      return { ok };
+    })();
+    this.networkRecovery = operation;
+    operation.finally(() => { signal?.removeEventListener('abort', cancel); if (this.networkRecovery === operation) this.networkRecovery = null; }).catch(() => {});
+    return operation;
   }
   async previewProxyNetwork({ proxy, language = 'en' }) {
     await this.ready;
@@ -821,6 +904,7 @@ export class BrowseForgeService {
   contextSignature(profile, effective) { return `${profile.id}:${JSON.stringify(profile.launch_overrides ?? {})}:${JSON.stringify({ timezone: profileGeoField(profile, 'timezone'), locale: profileGeoField(profile, 'locale') })}:${rawProxyFingerprint(effective.proxy)}:${JSON.stringify(effective.proxy?.location ?? null)}`; }
   /** Main-process only: this returns proxy credentials and is deliberately absent from call()/IPC. */
   async resolveWorkspaceContext(profileId, { remote: providedRemote, force = false, requireManagedRoute = false } = {}) {
+    const networkRevision = this.networkRevision;
     await this.ready;
     if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
     const remote = providedRemote ?? await this.remote(), profile = this.find(remote, profileId);
@@ -830,6 +914,7 @@ export class BrowseForgeService {
       const listed = this.proxies(workspace, remote).find((proxy) => sameProxy(proxy, effective.proxy));
       if (listed) effective.proxy = { ...effective.proxy, id: listed.id, protocol: listed.protocol };
     }
+    if (effective.proxy?.id) this.checkedProxyIds.add(effective.proxy.id);
     if (profile.managed_proxy_required && effective.proxy?.protocol !== 'anytls') throw error('托管网络出口绑定缺失，请重新选择 AnyTLS 节点后再启动。', 'MANAGED_PROXY_BINDING_MISSING');
     if (effective.proxy?.protocol === 'anytls' && !profile.managed_proxy_required) { await this.request('PUT', `/api/profiles/${encoded(profileId)}`, { managed_proxy_required: true }); profile.managed_proxy_required = true; }
     const revision = this.managedProxyRevisions.get(effective.proxy?.id) ?? 0;
@@ -840,6 +925,7 @@ export class BrowseForgeService {
     const fixedTimezone = confirmedTimezone ? null : manualTimezone(profileGeoField(profile, 'timezone'));
     let resolvedTimezone, timezoneSource, networkLastError = null;
     const network = await this.networkProbe.probe(wire, { force: force || !!selectedLocation });
+    this.assertNetworkRevision(networkRevision);
     if (managed && revision !== (this.managedProxyRevisions.get(effective.proxy.id) ?? 0)) throw error('代理网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
     if (selectedLocation) {
       try { assertNetworkLocationMatchesEgress(selectedLocation, network); }
@@ -1046,7 +1132,7 @@ export class BrowseForgeService {
     } catch (value) { const failures = []; for (const item of created) { try { await this.request('DELETE', `/api/profiles/${encoded(item.profile.id)}`); } catch { failures.push(item.profile.id); } } value.message += `；原资料未修改，备份位于 ${backupDir}${failures.length ? `；新环境回滚未完成：${failures.join(', ')}` : ''}`; throw value; }
     return { migratedCount: created.length, backupDir, createdIds: created.map((item) => item.profile.id) };
   }
-  async shutdown() { await this.ready; this.closed = true; this.locationPreviews.clear(); this.networkProbe.close?.(); this.addressGeocoder.close?.(); await this.options.cancelInstall?.(); await Promise.allSettled([this.queue, ...this.profileQueues.values(), ...(this.pendingInstall ? [this.pendingInstall] : [])]); try { if (this.options.shutdown) await this.options.shutdown(); else await this.request('POST', '/api/shutdown'); } finally { await this.options.proxyCore?.close?.(); this.proxyWires.clear(); } }
+  async shutdown() { await this.ready; this.closed = true; this.networkRecoveryAbort?.abort(); this.locationPreviews.clear(); this.networkProbe.close?.(); this.addressGeocoder.close?.(); await this.options.cancelInstall?.(); await Promise.allSettled([this.queue, ...(this.networkRecovery ? [this.networkRecovery] : []), ...this.profileQueues.values(), ...(this.pendingInstall ? [this.pendingInstall] : [])]); try { if (this.options.shutdown) await this.options.shutdown(); else await this.request('POST', '/api/shutdown'); } finally { await this.options.proxyCore?.close?.(); this.proxyWires.clear(); } }
 }
 
 export default BrowseForgeService;

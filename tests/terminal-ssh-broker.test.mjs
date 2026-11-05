@@ -81,6 +81,19 @@ test('password SSH receives only its exact session direct socket capability insi
   f.children[0].finish(); await waitFor(() => c.frames.some(frame => frame.type === 'exit')); c.channel.destroy();
 });
 
+test('a broker with 150 password authorizations starts the last saved connection and selects only its secret', async t => {
+  const connections = Array.from({ length: 150 }, (_, index) => ({ ...connection,
+    id: `ssh_fixture_${index}`, alias: `envara-${index.toString(16).padStart(12, '0')}`,
+    name: `Fixture ${index}`, authType: 'password', expiresAt: null }));
+  const last = connections.at(-1), passwords = new Map(connections.map((record, index) => [record.alias, Buffer.from(`synthetic-password-${index}`)]));
+  const f = await fixture(t, { expiresAt: null, manifest: session(connections), passwords });
+  const client = await connect(f, [last.alias, 'id']);
+  await waitFor(() => client.frames[0]?.type === 'ready');
+  assert.deepEqual(f.wrapped[0].command.args.slice(-3), ['--', last.alias, 'id']);
+  assert.deepEqual(await askpass(f), { code: 0, text: 'synthetic-password-149\n' });
+  f.children[0].finish(); await waitFor(() => client.frames.some(frame => frame.type === 'exit')); client.channel.destroy();
+});
+
 test('password SSH rejects foreign transport paths and incomplete session capabilities before spawning', async t => {
   for (const values of [{ transportSocket: '/tmp/foreign.sock', directToken: 'a'.repeat(64) },
     { transportSocket: null, directToken: 'a'.repeat(64) }, { transportSocket: '/tmp/transport.sock', directToken: null }]) {

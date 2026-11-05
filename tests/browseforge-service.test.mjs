@@ -1579,3 +1579,153 @@ test('AnyTLS old failed lookup cannot overwrite a recovered successful context a
   assert.equal(current.network.ok, true); assert.equal(current.network.ip, '203.0.113.9');
   assert.equal(current.resolvedTimezone, 'Asia/Tokyo'); assert.equal(current.networkLastError, null);
 });
+
+test('network recovery refreshes existing managed routes and measured egress without altering saved context or sessions', async t => {
+  const managed = managedProxyFixture(); let recoveries = 0, ip = '8.8.8.8';
+  managed.proxyCore.recoverNetwork = async () => { recoveries++; return { ok: true }; };
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => ({ ...networkGeo, ip }) });
+  const { service, client } = await fixture(t, { ...managed, networkProbe });
+  const first = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  await service.call('saveProxy', { proxy: anytlsConfig({ name: 'unused', host: 'unused.example.test' }) });
+  const profile = await create(service, { proxyId: first.id, timezone: 'Asia/Tokyo' });
+  await service.resolveWorkspaceContext(profile.id);
+  await service.call('startProfile', { id: profile.id });
+  const before = JSON.stringify(await service.store.read()), sessions = structuredClone(client.sessions);
+  const wire = structuredClone(managed.wires.get(first.id));
+  ip = '1.1.1.1';
+  assert.deepEqual(await service.recoverNetwork(), { ok: true });
+  const snapshot = await service.snapshot();
+  assert.equal(snapshot.networkRevision, 1);
+  assert.equal(snapshot.profiles[0].network.ip, '1.1.1.1');
+  assert.equal(snapshot.proxies.find(item => item.id === first.id).network.ip, '1.1.1.1');
+  assert.equal(snapshot.proxies.find(item => item.name === 'unused').network, null);
+  assert.equal(snapshot.profiles[0].resolvedTimezone, 'Asia/Tokyo');
+  assert.deepEqual(client.sessions, sessions); assert.deepEqual(managed.wires.get(first.id), wire);
+  assert.equal(JSON.stringify(await service.store.read()), before); assert.equal(recoveries, 1);
+  assert.equal(managed.calls.some(item => item.host === 'unused.example.test'), false);
+});
+
+test('network recovery rejects pre-change egress completion and later failures remain retryable', async t => {
+  let finish, entered, offline = false, pending = false;
+  const started = new Promise(resolve => { entered = resolve; });
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => {
+    if (pending) { pending = false; entered(); await new Promise(resolve => { finish = resolve; }); return networkGeo; }
+    if (offline) throw new Error('owned fixture offline');
+    return { ...networkGeo, ip: '1.1.1.1' };
+  } });
+  const { service } = await fixture(t, { networkProbe });
+  const proxy = (await service.call('saveProxy', { proxy: { name: 'moving', protocol: 'http', host: 'proxy.example.test', port: 8080 } })).proxies[0];
+  pending = true;
+  const old = service.checkProxy({ id: proxy.id }); await started;
+  assert.deepEqual(await service.recoverNetwork(), { ok: true });
+  finish(); await assert.rejects(old, { code: 'NETWORK_CHANGED' });
+  assert.equal((await service.snapshot()).proxies[0].network.ip, '1.1.1.1');
+  offline = true; assert.deepEqual(await service.recoverNetwork(), { ok: false });
+  offline = false; assert.deepEqual(await service.recoverNetwork(), { ok: true });
+  assert.equal((await service.snapshot()).proxies[0].network.ip, '1.1.1.1');
+});
+
+test('a failed node retry preserves healthy probes, revision and an independent in-flight verification', async t => {
+  let failed = false, gateNext = false, finish, entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const counts = new Map();
+  const networkProbe = new ProxyNetworkProbe({ transport: async ({ agent }) => {
+    const host = agent.proxy.host; counts.set(host, (counts.get(host) ?? 0) + 1);
+    if (gateNext && host === 'healthy.example.test') { gateNext = false; entered(); await new Promise(resolve => { finish = resolve; }); }
+    if (failed && host === 'failed.example.test') throw new Error('fixture unavailable');
+    return networkGeo;
+  } });
+  const { service } = await fixture(t, { networkProbe });
+  await service.call('saveProxy', { proxy: { name: 'healthy', protocol: 'socks5', host: 'healthy.example.test', port: 8080 } });
+  const saved = await service.call('saveProxy', { proxy: { name: 'failed', protocol: 'socks5', host: 'failed.example.test', port: 8080 } });
+  const good = saved.proxies.find(item => item.name === 'healthy'), bad = saved.proxies.find(item => item.name === 'failed');
+  await service.checkProxy({ id: good.id }); await service.checkProxy({ id: bad.id }); failed = true;
+  assert.deepEqual(await service.recoverNetwork(), { ok: false });
+  const revision = service.networkRevision, healthyCount = counts.get('healthy.example.test');
+  gateNext = true; const manual = service.checkProxy({ id: good.id }); await started;
+  failed = false; assert.deepEqual(await service.recoverNetwork({ retry: true }), { ok: true });
+  assert.equal(service.networkRevision, revision);
+  finish(); assert.equal((await manual).ok, true);
+  assert.equal(counts.get('healthy.example.test'), healthyCount + 1, 'only the manual request contacted healthy proxy');
+  assert.equal((await service.snapshot()).proxies.find(item => item.id === good.id).network.ok, true);
+});
+
+test('a new network event supersedes a slow offline recovery before its stale probes finish', async t => {
+  let slow = false, finish, entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => {
+    if (slow) { slow = false; entered(); await new Promise(resolve => { finish = resolve; }); return { ...networkGeo, ip: '8.8.8.8' }; }
+    return { ...networkGeo, ip: '1.1.1.1' };
+  } });
+  const { service } = await fixture(t, { networkProbe });
+  const proxy = (await service.call('saveProxy', { proxy: { name: 'moving', protocol: 'http', host: 'moving.example.test', port: 8080 } })).proxies[0];
+  await service.checkProxy({ id: proxy.id }); slow = true;
+  const old = service.recoverNetwork(); await started;
+  const latest = await service.recoverNetwork();
+  assert.deepEqual(latest, { ok: true }); assert.equal(service.networkRevision, 2);
+  finish(); await assert.rejects(old, { code: 'NETWORK_CHANGED' });
+  assert.equal((await service.snapshot()).proxies[0].network.ip, '1.1.1.1');
+  assert.equal(service.networkRecoveryFailures.size, 0);
+});
+
+test('an in-flight snapshot cannot stamp pre-change measurements with the new network revision', async t => {
+  let gated = false, finish, entered, ip = '8.8.8.8';
+  const started = new Promise(resolve => { entered = resolve; });
+  const networkProbe = new ProxyNetworkProbe({ transport: async () => ({ ...networkGeo, ip }) });
+  const { service } = await fixture(t, { networkProbe, getMetrics: async () => {
+    if (gated) { gated = false; entered(); await new Promise(resolve => { finish = resolve; }); } return {};
+  } });
+  const proxy = (await service.call('saveProxy', { proxy: { name: 'snapshot', protocol: 'http', host: 'snapshot.example.test', port: 8080 } })).proxies[0];
+  await service.checkProxy({ id: proxy.id }); gated = true;
+  const old = service.snapshot(); await started;
+  ip = '1.1.1.1'; await service.recoverNetwork(); finish();
+  const stale = await old, current = await service.snapshot();
+  assert.equal(stale.networkRevision, 0); assert.equal(stale.proxies[0].network.ip, '8.8.8.8');
+  assert.equal(current.networkRevision, 1); assert.equal(current.proxies[0].network.ip, '1.1.1.1');
+});
+
+test('monitor cancellation prevents queued recovery probes from preparing a route during shutdown', async t => {
+  const managed = managedProxyFixture();
+  const { service } = await fixture(t, managed);
+  const proxy = (await service.call('saveProxy', { proxy: anytlsConfig() })).proxies[0];
+  await service.checkProxy({ id: proxy.id }); const calls = managed.calls.length;
+  let release, entered;
+  const blocked = new Promise(resolve => { entered = resolve; });
+  service.serialize(async () => { entered(); await new Promise(resolve => { release = resolve; }); });
+  await blocked;
+  const controller = new AbortController();
+  const recovery = service.recoverNetwork({ signal: controller.signal });
+  await new Promise(resolve => setImmediate(resolve));
+  controller.abort(); release();
+  await assert.rejects(recovery, { code: 'NETWORK_CHANGED' });
+  assert.equal(managed.calls.length, calls);
+});
+
+test('network change during draft startup still releases its owned managed listener', async t => {
+  const managed = managedProxyFixture(); let finish, entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const originalEnsure = managed.proxyCore.ensure.bind(managed.proxyCore);
+  managed.proxyCore.ensure = async (...args) => { const wire = await originalEnsure(...args); entered(); await new Promise(resolve => { finish = resolve; }); return wire; };
+  const { service } = await fixture(t, managed);
+  const pending = service.checkProxy({ proxy: anytlsConfig() }); await started;
+  await service.recoverNetwork(); finish();
+  await assert.rejects(pending, { code: 'NETWORK_CHANGED' });
+  assert.equal(managed.wires.size, 0); assert.equal(managed.releases.length, 1);
+  assert.match(managed.releases[0], /^draft_/);
+});
+
+test('a saved node first checked offline is retried after connectivity returns without tracking invalid IDs', async t => {
+  const managed = managedProxyFixture();
+  const { service } = await fixture(t, managed);
+  const saved = (await service.call('saveProxy', { proxy: { name: 'first-offline', protocol: 'https', host: 'first-offline.example.test', port: 443 } })).proxies[0];
+  await assert.rejects(service.checkProxy({ id: 'missing-node' }), { code: 'PROXY_NOT_FOUND' });
+  assert.equal(service.checkedProxyIds.size, 0);
+  managed.proxyCore.failure = true;
+  await assert.rejects(service.checkProxy({ id: saved.id }), { code: 'PROXY_CORE_FAILED' });
+  assert.deepEqual([...service.checkedProxyIds], [saved.id]);
+  assert.equal(managed.wires.size, 0); assert.equal(service.proxyWires.size, 0); assert.equal(managed.probes.length, 0);
+  managed.proxyCore.failure = false;
+  assert.deepEqual(await service.recoverNetwork(), { ok: true });
+  assert.equal(managed.calls.length, 2); assert.equal(managed.calls[1].id, saved.id);
+  assert.equal(managed.probes.length, 1); assert.equal(managed.wires.has(saved.id), true);
+});

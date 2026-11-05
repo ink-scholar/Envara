@@ -75,7 +75,7 @@ export async function createPasswordSshBroker({ directory, publicDirectory, node
   if (publicDirectory !== path.join(directory, 'public') || !configPath.startsWith(`${publicDirectory}/`)
     || !targetsPath.startsWith(`${publicDirectory}/`) || typeof now !== 'function' || typeof monotonicNow !== 'function' || typeof isActive !== 'function'
     || isConnectionActive !== null && typeof isConnectionActive !== 'function'
-    || !(passwords instanceof Map) || !passwords.size || passwords.size > 20) throw fail('SSH_BROKER_INVALID');
+    || !(passwords instanceof Map) || !passwords.size) throw fail('SSH_BROKER_INVALID');
   if (transportSocket !== null || directToken !== null) {
     if (transportSocket !== path.join(directory, 'transport.sock') || typeof directToken !== 'string' || !/^[a-f0-9]{64}$/.test(directToken)) throw fail('SSH_BROKER_INVALID');
     const info = await lstat(transportSocket);
@@ -85,6 +85,7 @@ export async function createPasswordSshBroker({ directory, publicDirectory, node
   if (!Number.isFinite(monotonicStart)) throw fail('SSH_BROKER_INVALID');
   const description = describeSshSession(structuredClone(manifest), createdAt);
   if (description.status !== 'ready') throw fail('SSH_AUTHORIZATION_EXPIRED');
+  if (passwords.size > description.connections.length) throw fail('SSH_BROKER_INVALID');
   const fixedManifest = { schema: description.schema, version: description.version,
     expiresAt: description.expiresAt, connections: description.connections };
   const authorizations = new Map();

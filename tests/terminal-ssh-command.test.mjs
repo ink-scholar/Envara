@@ -74,6 +74,26 @@ test('discovery refuses malformed schemas, records, expiration and duplicate ide
   }
 });
 
+test('150 saved connections remain discoverable and the last password alias reaches its broker', async () => {
+  const connections = Array.from({ length: 150 }, (_, index) => ({ ...passwordConnection,
+    id: `ssh_fixture_${index}`, alias: `envara-${index.toString(16).padStart(12, '0')}`,
+    host: `ssh-${index}.fixture.invalid`, name: `Fixture ${index}` }));
+  const selected = manifest(connections), last = connections.at(-1);
+  assert.equal(describeSshSession(selected, now).connections.length, 150);
+  assert.equal(parse([last.alias], connections).alias, last.alias);
+  const listed = await invoke({ entry: 'envara-ssh', argv: ['list', '--json'], selected });
+  assert.equal(listed.code, 0); assert.equal(JSON.parse(listed.stdout).connections.at(-1).alias, last.alias);
+  let dispatched = false;
+  const result = await invoke({ argv: [last.alias, 'id'], selected, configuredConnections: connections,
+    passwordBroker: { socket: '/tmp/owned-fixture/command.sock', aliases: connections.map(record => record.alias) },
+    passwordClient: async ({ argv }) => { dispatched = true; assert.deepEqual(argv, [last.alias, 'id']); return 0; } });
+  assert.equal(result.code, 0); assert.equal(dispatched, true); assert.equal(result.calls.length, 0);
+  const oversized = Array.from({ length: 4000 }, (_, index) => ({ ...connection,
+    id: `ssh_large_${index}`, alias: `envara-${index.toString(16).padStart(12, '0')}`,
+    name: 'N'.repeat(80), host: `${'h'.repeat(60)}.${'h'.repeat(60)}.${'h'.repeat(60)}.invalid` }));
+  assert.throws(() => describeSshSession(manifest(oversized), now), fail('SSH_SESSION_INVALID'));
+});
+
 test('v2 permits app-lifetime authorization for either authentication type and validates aggregate expiration exactly', () => {
   for (const authType of ['password', 'publickey']) {
     for (const expiresAt of [null, now + 1, Number.MAX_SAFE_INTEGER]) {

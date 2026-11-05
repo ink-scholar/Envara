@@ -200,6 +200,70 @@ test('close acts only on the selected session and keeps the other process view',
   await assertNoCommandOrSpawn();
 });
 
+test('toolbar hints explain every icon on hover and focus without opening or ending a session', { skip: noDisplay }, async () => {
+  await mount();
+  const controls = [
+    [page.locator('.terminal-saved-terminals > summary'), '已保存终端', '新建后自动保存终端入口，可在此重开或重命名。'],
+    [page.getByRole('button', { name: '新建会话', exact: true }), '新建会话', '选择网络、浏览器和工作目录。'],
+    [page.locator('.terminal-context-menu > summary'), '会话设置', '查看工作目录、网络和会话选项。'],
+    [page.getByRole('button', { name: '独立终端窗口', exact: true }), '独立终端窗口', '在独立窗口中查看此环境的终端'],
+    [page.getByRole('button', { name: '收起终端', exact: true }), '收起终端', '收起终端，会话继续运行'],
+    [page.getByRole('button', { name: '关闭会话', exact: true }), '结束会话', '结束当前会话，已保存的终端入口会保留。'],
+  ];
+  for (const [control, title, description] of controls) {
+    await control.hover();
+    const hint = page.getByRole('tooltip');
+    await hint.waitFor({ state: 'visible' });
+    assert.equal(await hint.count(), 1);
+    assert.equal(await hint.locator('strong').textContent(), title);
+    assert.equal(await hint.locator('span').textContent(), description);
+    assert.equal(await control.getAttribute('aria-describedby'), await hint.getAttribute('id'));
+    assert.equal(await control.getAttribute('title'), null, 'native and styled hints must not overlap');
+    if (title === '已保存终端') {
+      const artifacts = fileURLToPath(new URL('../test-artifacts/terminal-toolbar-hints/', import.meta.url));
+      await mkdir(artifacts, { recursive: true, mode: 0o700 });
+      await page.screenshot({ path: path.join(artifacts, 'zh-CN-workspace-hint.png') });
+    }
+    await page.mouse.move(2, 2);
+    await hint.waitFor({ state: 'hidden' });
+    await control.focus();
+    await hint.waitFor({ state: 'visible' });
+    await page.keyboard.press('Escape');
+    await hint.waitFor({ state: 'hidden' });
+    assert.equal(await control.evaluate(element => document.activeElement === element), true);
+  }
+  assert.equal(await page.locator('.terminal-saved-terminals').evaluate(element => element.open), false);
+  assert.equal(await page.locator('.terminal-context-menu').evaluate(element => element.open), false);
+  assert.equal(await page.locator('.terminal-new-session').count(), 0);
+  assert.deepEqual((await calls()).filter(call => call.method === 'closeTerminal'), []);
+  await assertNoCommandOrSpawn();
+});
+
+test('toolbar hints stay hoverable, dismiss on activation and disappear with a hidden dock', { skip: noDisplay }, async () => {
+  await mount();
+  const saved = page.locator('.terminal-saved-terminals > summary'), hint = page.getByRole('tooltip');
+  await saved.hover(); await hint.waitFor({ state: 'visible' });
+  await hint.hover();
+  await page.waitForTimeout(150);
+  assert.equal(await hint.isVisible(), true);
+  await saved.click();
+  await hint.waitFor({ state: 'hidden' });
+  assert.equal(await page.locator('.terminal-saved-note').textContent(), '新建后自动保存终端入口，可在此重开或重命名。');
+  await saved.click();
+  await page.mouse.move(2, 2);
+  await saved.hover(); await hint.waitFor({ state: 'visible' });
+  await page.evaluate(() => window.compactSetVisible(false));
+  assert.equal(await hint.count(), 0, 'a portal cannot outlive the visible terminal view');
+  await assertNoCommandOrSpawn();
+  await mount({ sessions: [] });
+  const close = page.getByRole('button', { name: '关闭会话', exact: true });
+  assert.equal(await close.isDisabled(), true);
+  await close.hover();
+  await hint.waitFor({ state: 'visible' });
+  assert.equal(await hint.locator('strong').textContent(), '结束会话');
+  assert.deepEqual((await calls()).filter(call => call.method === 'closeTerminal'), []);
+});
+
 test('hiding and restoring workspace and standalone views retains xterm and subscriptions without closing sessions', { skip: noDisplay }, async () => {
   for (const standalone of [false, true]) {
     await mount({ standalone, visible: false });

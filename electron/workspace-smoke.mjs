@@ -8,8 +8,9 @@ import { BrowserWindow } from 'electron';
 import { languages } from '../shared/interface-languages.mjs';
 import { translate } from '../src/i18n.mjs';
 
-const chineseNavigation = ['环境', '网络出口', '浏览器', '终端', '附加软件', '运行监控'];
-const englishNavigation = ['Environments', 'Networks', 'Browsers', 'Terminals', 'Attached applications', 'Monitor'];
+const chineseNavigation = ['环境', '网络出口', '浏览器', '终端', 'SSH 连接', '附加软件', '运行监控'];
+const englishNavigation = ['Environments', 'Networks', 'Browsers', 'Terminals', 'SSH connections', 'Attached applications', 'Monitor'];
+const pageNames = ['environments', 'networks', 'browsers', 'terminals', 'ssh-connections', 'applications', 'monitor'];
 
 export async function runWorkspaceSmoke({ app, window, service, terminal, applications, shutdown }) {
   const artifactDir = process.env.ENVARA_WORKSPACE_SMOKE_ARTIFACTS;
@@ -32,9 +33,11 @@ export async function runWorkspaceSmoke({ app, window, service, terminal, applic
   const navigate = async (index, language = 'zh-CN') => {
     const expected = (language === 'en' ? englishNavigation : chineseNavigation)[index];
     await evaluate(`document.querySelectorAll('.navigation .nav-item')[${index}].click()`);
-    await waitFor(() => evaluate(`document.querySelector('.page-header h1')?.textContent?.trim() === ${JSON.stringify(expected)}`), `${expected} page`);
+    await waitFor(() => evaluate(index === 3
+      ? `document.querySelector('.terminal-workspace .navigation .nav-item[aria-current="page"] .nav-label')?.textContent?.trim() === ${JSON.stringify(expected)} && Boolean(document.querySelector('.terminal-dock.is-workspace.is-open:not([hidden])'))`
+      : `document.querySelector('.page-header h1')?.textContent?.trim() === ${JSON.stringify(expected)}`), `${expected} page`);
   };
-  const capture = async (name, target = window, expectedHeading, headingSelector = '.page-header h1, .terminal-window-heading h1') => {
+  const capture = async (name, target = window, expectedHeading, headingSelector = '.page-header h1, .terminal-window-heading h1, .terminal-workspace .navigation .nav-item[aria-current="page"] .nav-label') => {
     target.show(); target.focus();
     // DOM updates can precede native presentation, especially while the window
     // is occluded. Wait for renderer frames and an invalidated compositor frame.
@@ -70,7 +73,7 @@ export async function runWorkspaceSmoke({ app, window, service, terminal, applic
     assert.equal(app.isPackaged, false, 'Harness cannot run in a release');
     assert.ok(path.isAbsolute(artifactDir ?? ''), 'Artifact directory must be absolute');
     await mkdir(artifactDir, { recursive: true }); await ready();
-    await waitFor(async () => (await navigation()).length === 6, 'six navigation destinations');
+    await waitFor(async () => (await navigation()).length === chineseNavigation.length, 'seven navigation destinations');
     const initial = await call('snapshot');
     assert.equal(initial.profiles.length, 0); assert.equal(initial.proxies.length, 0); assert.equal(initial.applications.length, 0);
     assert.equal(initial.settings.language, undefined);
@@ -209,7 +212,14 @@ export async function runWorkspaceSmoke({ app, window, service, terminal, applic
     result.checks.push('Real local application binding is saved; unverified/unauthorized native routing refuses launch without a PID or direct fallback');
     }
 
-    for (let index = 0; index < 6; index++) { await navigate(index); await capture(`${index + 1}-${['environments', 'networks', 'browsers', 'terminals', 'applications', 'monitor'][index]}-zh.png`, window, chineseNavigation[index]); }
+    for (let index = 0; index < chineseNavigation.length; index++) { await navigate(index); await capture(`${index + 1}-${pageNames[index]}-zh.png`, window, chineseNavigation[index]); }
+    await navigate(4);
+    await waitFor(() => evaluate("Boolean(document.querySelector('.ssh-connections-workspace .ssh-workspace-list-empty'))"), 'loaded empty SSH connection list');
+    assert.equal(await evaluate("document.querySelectorAll('.ssh-workspace-host-list > li').length"), 0);
+    assert.equal(await evaluate("document.querySelector('.ssh-workspace-list-empty strong')?.textContent"), '暂无已保存主机');
+    assert.deepEqual((await call('listTerminalSshConnections', { id: profile.id })).connections, []);
+    assert.equal((await call('terminalSnapshot', { id: profile.id })).profiles[0].sessions.filter(item => item.status === 'running').length, 2);
+    result.checks.push('The dedicated SSH page loads its empty saved-host list through production IPC without creating connections or ending existing PTYs');
     await navigate(3);
     await waitFor(() => evaluate("document.querySelectorAll('.terminal-session-tab').length === 2"), 'two terminal tabs');
     // Account-management acceptance uses a disposable saved route/profile but
@@ -218,8 +228,13 @@ export async function runWorkspaceSmoke({ app, window, service, terminal, applic
     const accountProxy = (await call('saveProxy', { proxy: { name: accountProxyName, protocol: 'http', host: '127.0.0.1', port: 65534 } })).proxies.find(item => item.name === accountProxyName);
     const accountProfileName = 'Claude 档案管理验收';
     const accountProfile = (await call('createProfile', { profile: { name: accountProfileName, proxyId: accountProxy.id } })).profiles.find(item => item.name === accountProfileName);
-    await waitFor(() => evaluate(`Boolean(document.getElementById(${JSON.stringify(`terminal-env-${accountProfile.id}`)}))`), 'disposable account environment');
-    await evaluate("document.querySelector('.terminal-context-bar .terminal-start-button').click()");
+    const selectTerminalEnvironment = async id => {
+      await waitFor(() => evaluate(`Array.from(document.querySelectorAll('.terminal-environment-picker option')).some(option => option.value === ${JSON.stringify(id)})`), 'terminal environment choice');
+      await evaluate(`(() => { const select = document.querySelector('.terminal-environment-picker select'); select.value = ${JSON.stringify(id)}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+      await waitFor(() => evaluate(`document.querySelector('.terminal-environment-picker select')?.value === ${JSON.stringify(id)}`), 'selected terminal environment');
+    };
+    await selectTerminalEnvironment(accountProfile.id);
+    await evaluate("document.querySelector('.terminal-toolbar-actions button[aria-label=\"新建会话\"]').click()");
     await waitFor(() => evaluate("Boolean(document.querySelector('.terminal-new-session'))"), 'new terminal chooser for account management');
     await evaluate("Array.from(document.querySelectorAll('.terminal-session-kind button')).find(button => button.textContent === 'Claude Code').click()");
     await waitFor(() => evaluate("Boolean(document.querySelector('.terminal-account-field select[aria-label=\"登录档案\"]:not(:disabled)'))"), 'loaded Claude account selector');
@@ -263,18 +278,20 @@ export async function runWorkspaceSmoke({ app, window, service, terminal, applic
     await waitFor(() => evaluate("!document.querySelector('.terminal-new-session')"), 'closed account chooser');
     assert.equal((await call('terminalSnapshot', { id: accountProfile.id })).profiles[0]?.sessions.length ?? 0, 0, 'Account management never invokes Claude');
     await call('deleteProfile', { id: accountProfile.id }); await call('deleteProxy', { id: accountProxy.id });
-    await evaluate(`document.getElementById(${JSON.stringify(`terminal-env-${profile.id}`)}).click()`);
+    await selectTerminalEnvironment(profile.id);
     await waitFor(() => evaluate("document.querySelectorAll('.terminal-session-tab').length === 2"), 'original PTYs retained after account management');
     result.checks.push('Claude account creation, rename, named delete confirmation/cancellation and default rename use production UI/IPC; unconfirmed deletion is rejected, the default is retained, and no Claude process or login is started');
-    await evaluate("document.querySelector('[aria-label=\"放大终端\"]').click()");
-    await waitFor(() => evaluate("Boolean(document.querySelector('.terminal-dock.is-expanded'))"), 'expanded terminal');
+    await waitFor(() => evaluate("Boolean(document.querySelector('.terminal-dock.is-workspace.is-expanded'))"), 'full terminal workspace');
     await waitFor(() => evaluate("Boolean(document.querySelector('.app-shell.terminal-expanded') && getComputedStyle(document.querySelector('.main-panel')).display === 'none' && document.querySelector('.terminal-dock').getBoundingClientRect().top < 40)"), 'expanded terminal occupying main area');
     result.terminalExpandedLayout = await evaluate("(() => { const rect = document.querySelector('.terminal-dock').getBoundingClientRect(); return { top: rect.top, height: rect.height, viewportHeight: innerHeight, mainDisplay: getComputedStyle(document.querySelector('.main-panel')).display }; })()");
     assert.ok(result.terminalExpandedLayout.height >= result.terminalExpandedLayout.viewportHeight - 40);
     await capture('terminal-expanded-zh.png', window, '终端');
-    await evaluate("document.querySelector('[aria-label=\"还原终端大小\"]').click()");
-    await waitFor(() => evaluate("!document.querySelector('.terminal-dock.is-expanded')"), 'restored terminal');
-    result.checks.push('Six production pages render in the native window; terminal expands and restores');
+    await evaluate("document.querySelector('.terminal-toolbar [aria-label=\"收起终端\"]').click()");
+    await waitFor(() => evaluate("!document.querySelector('.app-shell.terminal-expanded') && Boolean(document.querySelector('.terminal-dock[hidden]'))"), 'hidden terminal view');
+    assert.equal((await call('terminalSnapshot', { id: profile.id })).profiles[0].sessions.filter(item => item.status === 'running').length, 2);
+    await navigate(3);
+    await waitFor(() => evaluate("document.querySelectorAll('.terminal-session-tab').length === 2"), 'reopened existing terminal workspace');
+    result.checks.push('Seven production pages render in the native window; the full terminal workspace can be hidden and reopened without ending either PTY');
 
     const opened = await call('openTerminalWindow', { id: profile.id, sessionId: duplicate.sessionId });
     assert.equal(opened.ok, true); assert.equal(opened.profileId, profile.id); assert.equal(opened.sessionId, duplicate.sessionId);
@@ -294,11 +311,16 @@ export async function runWorkspaceSmoke({ app, window, service, terminal, applic
     assert.equal(retained.profiles[0].sessions.filter(item => item.status === 'running').length, 2);
     result.checks.push('Independent native terminal window uses the existing session, rejects unrelated IPC actions, and closing its view preserves both PTYs');
 
+    const retainedLabels = await evaluate("Array.from(document.querySelectorAll('.terminal-session-name')).map(tab => tab.textContent.trim())");
+    assert.equal(retainedLabels.length, 2);
+    assert.ok(retained.profiles[0].sessions.filter(item => item.status === 'running').every(item => typeof item.savedTerminalName === 'string' && item.savedTerminalName.length));
     await switchLanguage('en'); await navigate(3, 'en'); await capture('terminal-en.png', window, 'Terminals');
     assert.deepEqual(await navigation(), englishNavigation);
-    const dom = await evaluate("({lang:document.documentElement.lang, heading:document.querySelector('.page-header h1')?.textContent, terminalTabs:Array.from(document.querySelectorAll('.terminal-session-tab')).map(tab=>tab.textContent.trim())})");
-    assert.equal(dom.lang, 'en'); assert.equal(dom.heading, 'Terminals'); assert.ok(dom.terminalTabs.every(item => item.includes('Session')));
-    result.checks.push('Active terminal view and session labels switch to English without restarting either process');
+    const dom = await evaluate("({lang:document.documentElement.lang, heading:document.querySelector('.terminal-workspace .navigation .nav-item[aria-current=page] .nav-label')?.textContent, terminalTabs:Array.from(document.querySelectorAll('.terminal-session-tab')).map(tab=>tab.textContent.trim())})");
+    assert.equal(dom.lang, 'en'); assert.equal(dom.heading, 'Terminals'); assert.deepEqual(dom.terminalTabs, retainedLabels);
+    assert.equal(await evaluate("document.querySelector('.terminal-session-tabs')?.getAttribute('aria-label')"), translate('终端会话', 'en'));
+    assert.equal(await evaluate(`Boolean(document.querySelector('.terminal-toolbar-actions button[aria-label=${JSON.stringify(translate('新建会话', 'en'))}]'))`), true);
+    result.checks.push('Active terminal controls switch to English while saved terminal names and both running processes are preserved');
     for (const sessionId of terminalIds) await call('closeTerminal', { sessionId });
     assert.equal((await call('terminalSnapshot', { id: profile.id })).profiles[0].sessions.some(item => ['running', 'starting', 'closing'].includes(item.status)), false);
     result.checks.push('Explicitly closing sessions ends both owned PTYs');

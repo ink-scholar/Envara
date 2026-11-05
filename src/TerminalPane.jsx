@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { TerminalWindow, FolderOpen, Plus, X, CaretDown, ArrowsOutSimple, ArrowsInSimple, ArrowSquareOut, Copy, DotsThree, ArrowsClockwise, PencilSimple, Trash, SlidersHorizontal, BookmarksSimple, GlobeHemisphereWest, DownloadSimple, Browsers } from '@phosphor-icons/react';
 import { api } from './client.js';
+import { TerminalToolbarHint } from './TerminalToolbarHint.jsx';
 import { useI18n } from './i18n.jsx';
 import { useAppearance } from './appearance.jsx';
 import { getTerminalTheme, terminalFontFamily } from './terminal-theme.mjs';
@@ -729,14 +730,15 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
       <div className="terminal-session-tabs" ref={sessionTabsRef} role="tablist" aria-label={t('终端会话')}>{sessions.map((session, index) => <button key={session.sessionId} ref={session.sessionId === selectedSession?.sessionId ? selectedSessionTabRef : undefined} className={`terminal-session-tab ${session.sessionId === selectedSession?.sessionId ? 'is-active' : ''}`} title={sessionName(session, index)} role="tab" aria-selected={session.sessionId === selectedSession?.sessionId} tabIndex={session.sessionId === selectedSession?.sessionId || (!selectedSession && index === 0) ? 0 : -1} onKeyDown={event => navigateTabs(event, sessions, index, target => setActiveSessions(value => ({ ...value, [activeProfileId]: target.sessionId })))} onClick={() => setActiveSessions(value => ({ ...value, [activeProfileId]: session.sessionId }))}><span className={`terminal-tab-dot ${session.status === 'running' ? 'is-running' : ''}`} /><span className="terminal-session-name">{sessionName(session, index)}</span>{session.status !== 'running' && <small>{t(statusLabels[session.status] || session.status)}</small>}</button>)}</div>
       <div className="terminal-toolbar-actions">
       {selectedProfile && <details className="terminal-saved-terminals" open={savedMenuOpen}>
-        <summary aria-label={t('已保存终端')} title={t('已保存终端')} onClick={event => {
+        <TerminalToolbarHint enabled={shown} label={t('已保存终端')} description={t('新建后自动保存终端入口，可在此重开或重命名。')}><summary aria-label={t('已保存终端')} title={t('已保存终端')} onClick={event => {
           event.preventDefault();
           const open = !savedMenuOpen;
           if (open) { setContextOpen(false); setNewSession(null); }
           setSavedEntriesOpen(value => ({ ...value, [activeProfileId]: open }));
           if (!open) setSavedEntryEditor(null);
-        }}><BookmarksSimple size={17} /></summary>
+        }}><BookmarksSimple size={17} /></summary></TerminalToolbarHint>
         <div className="terminal-saved-panel"><div className="terminal-menu-heading"><strong>{t('已保存终端')}</strong><small>{savedEntries.length}</small></div>
+        <p className="terminal-saved-note">{t('新建后自动保存终端入口，可在此重开或重命名。')}</p>
         <div className="terminal-saved-list">
           {!savedEntries.length && <p className="terminal-saved-empty">{t('新建会话后会自动保存在这里。')}</p>}
           {savedEntries.map(entry => {
@@ -764,9 +766,9 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
           })}
         </div></div>
       </details>}
-        <button className="terminal-icon-button" disabled={!desktopAvailable || !selectedProfile || !!pending} onClick={openNewSessionChooser} aria-label={t('新建会话')} title={t('新建会话')}><Plus size={17} /></button>
+        <TerminalToolbarHint enabled={shown} label={t('新建会话')} description={t('选择网络、浏览器和工作目录。')}><button className="terminal-icon-button" disabled={!desktopAvailable || !selectedProfile || !!pending} onClick={openNewSessionChooser} aria-label={t('新建会话')} title={t('新建会话')}><Plus size={17} /></button></TerminalToolbarHint>
         <details className="terminal-context-menu" open={contextOpen}>
-          <summary aria-label={t('会话设置')} title={t('会话设置')} onClick={event => { event.preventDefault(); setContextOpen(value => !value); setSavedEntriesOpen(value => ({ ...value, [activeProfileId]: false })); setSavedEntryEditor(null); setNewSession(null); }}><SlidersHorizontal size={17} /></summary>
+          <TerminalToolbarHint enabled={shown} label={t('会话设置')} description={t('查看工作目录、网络和会话选项。')}><summary aria-label={t('会话设置')} title={t('会话设置')} onClick={event => { event.preventDefault(); setContextOpen(value => !value); setSavedEntriesOpen(value => ({ ...value, [activeProfileId]: false })); setSavedEntryEditor(null); setNewSession(null); }}><SlidersHorizontal size={17} /></summary></TerminalToolbarHint>
           <div className="terminal-context-panel">
             <div className="terminal-menu-heading"><strong>{t('会话设置')}</strong></div>
             <dl className="terminal-context-values">
@@ -785,11 +787,11 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
           </div>
         </details>
         {!standalone && <>
-          <button className="terminal-icon-button" disabled={!desktopAvailable || !selectedProfile || !!pending} onClick={() => void openWindow(activeProfileId, selectedSession?.sessionId)} aria-label={t('独立终端窗口')} title={t('在独立窗口中查看此环境的终端')}><ArrowSquareOut size={17} /></button>
-          {!workspace && <button className="terminal-icon-button" disabled={!onToggleExpanded} onClick={onToggleExpanded} aria-label={t(expanded ? '还原终端大小' : '放大终端')} title={t(expanded ? '还原终端大小' : '放大终端')}>{expanded ? <ArrowsInSimple size={17} /> : <ArrowsOutSimple size={17} />}</button>}
-          <button className="terminal-icon-button" onClick={onHide} aria-label={t('收起终端')} title={t('收起终端，会话继续运行')}><CaretDown size={17} /></button>
+          <TerminalToolbarHint enabled={shown} label={t('独立终端窗口')} description={t('在独立窗口中查看此环境的终端')}><button className="terminal-icon-button" disabled={!desktopAvailable || !selectedProfile || !!pending} onClick={() => void openWindow(activeProfileId, selectedSession?.sessionId)} aria-label={t('独立终端窗口')} title={t('在独立窗口中查看此环境的终端')}><ArrowSquareOut size={17} /></button></TerminalToolbarHint>
+          {!workspace && <TerminalToolbarHint enabled={shown} label={t(expanded ? '还原终端大小' : '放大终端')}><button className="terminal-icon-button" disabled={!onToggleExpanded} onClick={onToggleExpanded} aria-label={t(expanded ? '还原终端大小' : '放大终端')} title={t(expanded ? '还原终端大小' : '放大终端')}>{expanded ? <ArrowsInSimple size={17} /> : <ArrowsOutSimple size={17} />}</button></TerminalToolbarHint>}
+          <TerminalToolbarHint enabled={shown} label={t('收起终端')} description={t('收起终端，会话继续运行')}><button className="terminal-icon-button" onClick={onHide} aria-label={t('收起终端')} title={t('收起终端，会话继续运行')}><CaretDown size={17} /></button></TerminalToolbarHint>
         </>}
-        <button className="terminal-icon-button terminal-close-session" disabled={!canCloseSelected} onClick={() => void closeSession(selectedSession)} aria-label={t(selectedSession?.status === 'starting' && selectedSession?.kind === CLAUDE_SESSION ? '取消安装' : '关闭会话')} title={t('关闭当前终端会话')}><X size={17} /></button>
+        <TerminalToolbarHint enabled={shown} label={t(selectedSession?.status === 'starting' && selectedSession?.kind === CLAUDE_SESSION ? '取消安装' : '结束会话')} description={selectedSession?.status === 'starting' && selectedSession?.kind === CLAUDE_SESSION ? undefined : t('结束当前会话，已保存的终端入口会保留。')}><button className="terminal-icon-button terminal-close-session" disabled={!canCloseSelected} onClick={() => void closeSession(selectedSession)} aria-label={t(selectedSession?.status === 'starting' && selectedSession?.kind === CLAUDE_SESSION ? '取消安装' : '关闭会话')} title={t('关闭当前终端会话')}><X size={17} /></button></TerminalToolbarHint>
       </div>
     </header>
     <div id="terminal-environment-panel" className="terminal-environment-panel" aria-label={t('{name}终端工作区', { name: selectedProfile?.name || t('环境') })}>

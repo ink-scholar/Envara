@@ -10,7 +10,7 @@ const dataMutations = new Set(['createProfile', 'updateProfile', 'cloneProfile',
   'reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal',
   'renameClaudeAccount', 'deleteClaudeAccount', 'saveApplication', 'startApplication', 'runNotionTrial', 'deleteApplication', 'clearApplicationData',
   'deleteSignInData', 'setApplicationLinkBrowser', 'setupApplicationRouting', 'reclaimApplicationStorage',
-  'saveTerminalSshConnection', 'setTerminalSshPassword', 'removeTerminalSshConnection']);
+  'saveTerminalSshConnection', 'setTerminalSshPassword', 'forgetTerminalSshPassword', 'removeTerminalSshConnection']);
 
 export function isEnvironmentDataMutation(method, args = {}) {
   return dataMutations.has(method) && !(method === 'bulkProfiles' && args?.action === 'stop');

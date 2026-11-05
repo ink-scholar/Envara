@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 import { validateSshTarget } from './terminal-ssh-proxy.mjs';
 
 const MAX_HANDSHAKE_BYTES = 512, MAX_CLIENTS = 16, MAX_RUNS = 4;
+const MAX_CONNECTION_BYTES = 1024 * 1024;
 const fail = (code = 'SSH_DIRECT_UNAVAILABLE') => Object.assign(new Error('The protected SSH direct transport is unavailable.'), { code });
 const allowedCodes = new Set(['SSH_DIRECT_CONFIGURATION', 'SSH_DIRECT_UNAVAILABLE', 'SSH_DIRECT_AUTHORIZATION',
   'SSH_DIRECT_TIMEOUT', 'SSH_DIRECT_BUSY', 'SSH_DIRECT_CANCELLED', 'SSH_DIRECT_IO', 'SSH_DIRECT_CLEANUP_FAILED']);
@@ -51,13 +52,16 @@ export async function createSshDirectTransport({ directory, connections, isActiv
   const targets = new Map();
   let directoryIdentity;
   try {
-    if (!Array.isArray(connections) || connections.length > 20 || typeof isActive !== 'function' || typeof connect !== 'function'
+    if (!Array.isArray(connections) || typeof isActive !== 'function' || typeof connect !== 'function'
         || openConnection !== undefined && typeof openConnection !== 'function' ||
         ![connectTimeoutMs, handshakeTimeoutMs, cleanupTimeoutMs].every(deadlineValid)) throw fail('SSH_DIRECT_CONFIGURATION');
     directoryIdentity = await checkedDirectory(directory);
+    let bytes = 2;
     for (const record of connections) {
       if (!exact(record, ['alias', 'host', 'port']) || !aliasValid(record.alias) || targets.has(record.alias)) throw fail('SSH_DIRECT_CONFIGURATION');
       targets.set(record.alias, validateSshTarget(record.host, record.port));
+      bytes += Buffer.byteLength(JSON.stringify(record)) + 1;
+      if (bytes > MAX_CONNECTION_BYTES) throw fail('SSH_DIRECT_CONFIGURATION');
     }
   } catch { throw fail('SSH_DIRECT_CONFIGURATION'); }
   const socket = path.join(directory, 'transport.sock');

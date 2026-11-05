@@ -70,7 +70,7 @@ test('saved terminal starts and metadata changes exclude transfers in both direc
 test('SSH configuration changes respect environment transfer locks while read-only selection remains available', async () => {
   const lock = new DesktopEnvironmentTransferLock(), gate = deferred();
   const transfer = lock.transfer(() => gate.promise, 'env_one');
-  for (const method of ['saveTerminalSshConnection', 'setTerminalSshPassword', 'removeTerminalSshConnection']) {
+  for (const method of ['saveTerminalSshConnection', 'setTerminalSshPassword', 'forgetTerminalSshPassword', 'removeTerminalSshConnection']) {
     assert.equal(isEnvironmentDataMutation(method), true);
     assert.equal(environmentMutationProfile(method, { id: 'env_one' }), 'env_one');
     await assert.rejects(lock.mutate(method, {}, async () => assert.fail('configuration must not change during transfer'), 'env_one'), { code: 'ENVIRONMENT_TRANSFER_BUSY' });

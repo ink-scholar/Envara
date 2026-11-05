@@ -20,6 +20,8 @@ export const KNOWN_LOCAL_PROXY_PORTS = Object.freeze([53, 853, 1053, 1080, 1081,
   7890, 7891, 7892, 7893, 7895, 7897, 7898, 7899, 10808, 10809, 20170, 20171, 20172]);
 // DNS-SD client endpoints from Apple's dnssd_ipc.h and mDNSResponder.sb; the
 // Notion launch profile denies the same set.
+// Bound generated policy size without imposing a saved-connection count cap.
+const MAX_SSH_POLICY_BYTES = 128 * 1024;
 const DNSSD_SOCKETS = Object.freeze(['/private/var/run/mDNSResponder', '/var/run/mDNSResponder', '/private/var/tmp/mDNSResponder', '/var/tmp/mDNSResponder']);
 const fail = message => Object.assign(new Error(message), { code: 'TERMINAL_NETWORK_FENCE_UNAVAILABLE' });
 const deviceRestrictionFailure = () => Object.assign(new Error('设备标识读取限制不可用，未启动终端。'), { code: 'TERMINAL_DEVICE_IDENTIFIERS_UNAVAILABLE' });
@@ -72,10 +74,18 @@ function sshProtectionRules(value) {
       || name.length > 4096 || /[\x00-\x1f\x7f]/.test(name)) throw sshProtectionFailure();
     return name;
   };
+  let pathBytes = 0;
+  const countPath = filename => {
+    pathBytes += Buffer.byteLength(filename) + 32;
+    if (pathBytes > MAX_SSH_POLICY_BYTES) throw sshProtectionFailure();
+    return filename;
+  };
   const paths = field => {
     const items = value[field] ?? [];
-    if (!Array.isArray(items) || items.length > 256) throw sshProtectionFailure();
-    return [...new Set(items.map(checkedPath))];
+    if (!Array.isArray(items)) throw sshProtectionFailure();
+    const result = new Set();
+    for (const item of items) result.add(countPath(checkedPath(item)));
+    return [...result];
   };
   const protectedPaths = paths('protectedPaths'), readablePaths = paths('readablePaths');
   const readOnlyPaths = paths('readOnlyPaths'), deniedAgentSockets = paths('deniedAgentSockets');
@@ -94,7 +104,9 @@ function sshProtectionRules(value) {
   // other sessions' agents remain inaccessible to this process tree.
   const traversalPaths = new Set();
   for (const filename of [...readablePaths, ...allowedSockets]) {
-    for (let parent = path.dirname(filename); parent === agentRoot || inside(parent); parent = path.dirname(parent)) traversalPaths.add(parent);
+    for (let parent = path.dirname(filename); parent === agentRoot || inside(parent); parent = path.dirname(parent)) {
+      if (!traversalPaths.has(parent)) traversalPaths.add(countPath(parent));
+    }
   }
   // The helper verifies every ancestor with lstat before opening its public
   // target file. Permit metadata for those exact directories, not listing or
@@ -108,7 +120,7 @@ function sshProtectionRules(value) {
     const ancestors = new Set();
     for (const filename of readOnlyPaths) {
       for (let parent = path.dirname(filename); ; parent = path.dirname(parent)) {
-        ancestors.add(parent);
+        if (!ancestors.has(parent)) ancestors.add(countPath(parent));
         if (path.dirname(parent) === parent) break;
       }
     }
@@ -118,6 +130,7 @@ function sshProtectionRules(value) {
     rules.push(`(allow file-read* file-write-data ${filter('literal', socket)})`,
       `(allow network-outbound (remote unix-socket ${filter('literal', socket)}))`);
   }
+  if (Buffer.byteLength(rules.join('\n')) > MAX_SSH_POLICY_BYTES) throw sshProtectionFailure();
   return rules;
 }
 

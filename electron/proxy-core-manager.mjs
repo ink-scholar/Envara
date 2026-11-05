@@ -225,6 +225,7 @@ export class ProxyCoreManager {
     this.resolveBootstrapHost = resolveBootstrapHost; this.bootstrapAddress = bootstrapAddress;
     this.createCompatibilityBridge = createCompatibilityBridge;
     this.routes = new Map(); this.queues = new Map(); this.generations = new Map(); this.closed = false;
+    this.networkRecoveryFailures = new Set();
     this.binary = null; this.binaryPromise = null; this.resourceError = null;
   }
   async _bundledBinary() {
@@ -296,7 +297,7 @@ export class ProxyCoreManager {
     route.cleanupPromise = (async () => { try { await this._stopChild(route); } finally { await this._discard(route); } })();
     route.cleanupPromise.catch(() => {});
   }
-  async ensure(proxy, { signal } = {}) {
+  async ensure(proxy, { signal, refreshNetwork = false } = {}) {
     const settings = managedProxySettings(proxy); const key = this._key(proxy, settings);
     const digest = createHash('sha256').update(JSON.stringify(settings)).digest('hex');
     const generation = this.generations.get(key) ?? 0;
@@ -310,19 +311,38 @@ export class ProxyCoreManager {
       }
       if (this.closed || signal?.aborted || (this.generations.get(key) ?? 0) !== generation) throw cancelled();
       const existing = this.routes.get(key);
-      if (existing?.status === 'running' && existing.digest === digest && existing.interfaceName === interfaceName && !existing.exited) return { ...existing.wire };
+      // Wi-Fi can retain en0 while DHCP replaces its source address. The HTTP
+      // bridge pins that address, so checking only the interface kept every new
+      // connection bound to the previous network until the application quit.
+      let localAddress;
+      if (interfaceName && ['http', 'https'].includes(settings.protocol) && net.isIP(settings.host) !== 6) localAddress = this.bootstrapAddress(interfaceName);
+      if (existing?.status === 'running' && existing.digest === digest && existing.interfaceName === interfaceName && !existing.exited) {
+        if ((refreshNetwork || existing.localAddress !== localAddress) && existing.compatibilityBridge) {
+          let resolvedServer;
+          if (interfaceName && !net.isIP(settings.host)) {
+            try { resolvedServer = await this.resolveBootstrapHost(settings.host, { localAddress, signal: signal ? AbortSignal.any([signal, existing.controller.signal]) : existing.controller.signal }); }
+            catch { throw fail('PROXY_CORE_BOOTSTRAP_UNAVAILABLE', '无法安全解析节点入口；未切换为系统 DNS 或直接连接。'); }
+            if (net.isIP(resolvedServer) !== 4 || !isPublicIP(resolvedServer)) throw fail('PROXY_CORE_BOOTSTRAP_UNAVAILABLE', '节点解析未返回有效的公开 IPv4 地址。');
+          }
+          this._assertLive(existing);
+          if (this.closed || signal?.aborted || (this.generations.get(key) ?? 0) !== generation) throw cancelled();
+          existing.compatibilityBridge.updateNetworkContext({ ...(localAddress ? { localAddress } : {}), ...(resolvedServer ? { upstreamAddress: resolvedServer } : {}) });
+          existing.localAddress = localAddress;
+        }
+        return { ...existing.wire };
+      }
       const recoveryWire = existing?.digest === digest ? (existing.recoveryWire ? { ...existing.recoveryWire } :
         existing.status === 'running' && existing.wire ? { ...existing.wire } : null) : null;
       if (existing) await this._stop(existing);
       const route = { key, digest, routeIdentity: randomUUID(), coreGeneration: null, controller: new AbortController(), status: 'starting', child: null, directory: null, exited: false,
-        recoveryWire, interfaceName, nodeType: settings.protocol };
+        recoveryWire, interfaceName, nodeType: settings.protocol, settings, localAddress };
       this.routes.set(key, route);
       const onAbort = () => route.controller.abort();
       signal?.addEventListener('abort', onAbort, { once: true });
       if (signal?.aborted) onAbort();
       try {
         await this.initialize(); this._assertLive(route);
-        let resolvedServer, localAddress;
+        let resolvedServer;
         if (this.platform === 'darwin' && !isLoopbackHost(settings.host) && !net.isIP(settings.host)) {
           localAddress = this.bootstrapAddress(interfaceName);
           try { resolvedServer = await this.resolveBootstrapHost(settings.host, { localAddress, signal: route.controller.signal }); }
@@ -362,6 +382,7 @@ export class ProxyCoreManager {
                 route.compatibilityPublishTimer.unref();
               },
             });
+            route.localAddress = localAddress;
             this._assertLive(route);
           }
           route.directory = await this._privateDirectory(); this._assertLive(route);
@@ -430,6 +451,19 @@ export class ProxyCoreManager {
       } finally { signal?.removeEventListener('abort', onAbort); }
     });
   }
+  /** Refresh only routes already owned by this process; no configuration writes. */
+  async recoverNetwork({ retry = false, signal } = {}) {
+    const routes = [...this.routes.values()].filter(route => ['running', 'failed'].includes(route.status) && (!retry || this.networkRecoveryFailures.has(route.key)));
+    if (!retry) this.networkRecoveryFailures.clear();
+    let ok = true;
+    for (const route of routes) {
+      if (this.closed || signal?.aborted) return { ok: false };
+      if (this.routes.get(route.key) !== route || !route.settings) continue;
+      try { await this.ensure({ ...route.settings, id: route.key }, { refreshNetwork: true, signal }); if (!signal?.aborted) this.networkRecoveryFailures.delete(route.key); }
+      catch { if (!signal?.aborted) this.networkRecoveryFailures.add(route.key); ok = false; }
+    }
+    return { ok };
+  }
   async _stopChild(route) {
     const child = route.child;
     if (!child || route.exited) return;
@@ -476,6 +510,7 @@ export class ProxyCoreManager {
   }
   async release(proxyOrId) {
     const key = typeof proxyOrId === 'string' ? proxyOrId : this._key(proxyOrId, normalizeManagedProxySettings(proxyOrId));
+    this.networkRecoveryFailures.delete(key);
     this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
     this.routes.get(key)?.controller.abort();
     return this._queue(key, async () => { const route = this.routes.get(key); if (route) await this._stop(route); });

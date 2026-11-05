@@ -3,13 +3,14 @@
  * startup resources by repeating the same configuration error during shutdown.
  */
 export async function shutdownDesktopServices({ applications, diagnostics, terminal, terminalBrowserBroker,
-  linkChannel, routerChannel, service, sidecar, proxyCore, runtimeDiagnostics = null }) {
+  linkChannel, routerChannel, service, sidecar, proxyCore, networkRecovery = null, runtimeDiagnostics = null }) {
   const trace = (stage, operation) => runtimeDiagnostics ? runtimeDiagnostics.step(stage, operation) : operation();
   try {
     if (applications) await trace('shutdown.applications', async () => {
       if (await applications.ready.then(() => true, () => false)) await applications.shutdown();
     });
   } finally { await trace('shutdown.diagnostics', async () => diagnostics?.pending).catch(() => {}); }
+  await trace('shutdown.network-recovery', async () => networkRecovery?.close());
   await trace('shutdown.terminal', async () => terminal?.shutdown()).catch(() => {});
   await trace('shutdown.broker', async () => terminalBrowserBroker?.shutdown()).catch(() => {});
   await trace('shutdown.links', async () => linkChannel?.close()).catch(() => {});

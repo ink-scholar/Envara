@@ -31,6 +31,7 @@ const initialSnapshot = {
   engines: [],
   groups: [],
   events: [],
+  networkRevision: 0,
   system: {}
 };
 const profileFields = ["name", "group", "notes", "engine", "platform", "seed", "locale", "timezone", "width", "height", "startUrl", "proxyId", "privacy", "deviceProfileId"];
@@ -950,6 +951,7 @@ function WorkspaceApp() {
     pendingRef = useRef(new Set()),
     snapshotRef = useRef(initialSnapshot),
     proxyTestTokens = useRef({}),
+    proxyTestsRef = useRef({}),
     modalRef = useRef(null);
   const [terminalExpanded, setTerminalExpanded] = useState(false);
   const [terminalHeight, setTerminalHeight] = useState(360);
@@ -962,18 +964,44 @@ function WorkspaceApp() {
   const terminalMaxHeight = Math.max(320, viewportHeight - 180);
   const resizeTerminalDock = useCallback(height => setTerminalHeight(Math.round(Math.max(320, Math.min(height, Math.max(320, window.innerHeight - 180))))), []);
   modalRef.current = modal;
+  const updateProxyTests = useCallback(update => {
+    const next = typeof update === "function" ? update(proxyTestsRef.current) : update;
+    proxyTestsRef.current = next;
+    setProxyTests(next);
+  }, []);
   const acceptSnapshot = useCallback(value => {
     if (!value || !Array.isArray(value.profiles) || !Array.isArray(value.proxies) || !value.system || typeof value.system !== "object") return false;
+    const networkRevision = value.networkRevision ?? 0;
+    if (!Number.isSafeInteger(networkRevision) || networkRevision < 0) return false;
+    const previous = snapshotRef.current;
+    // Delayed snapshots and probe promises belong to the network they started
+    // on. Invalidate synchronously, before another promise can update the UI.
+    if (networkRevision < previous.networkRevision) return true;
+    if (networkRevision > previous.networkRevision) {
+      for (const id of Object.keys(proxyTestTokens.current)) proxyTestTokens.current[id] += 1;
+      updateProxyTests({});
+    } else {
+      const tests = { ...proxyTestsRef.current };
+      for (const proxy of value.proxies) {
+        const local = tests[proxy.id];
+        if (!local || local.checking) continue;
+        const measuredAt = Date.parse(proxy.network?.checkedAt);
+        const localAt = Date.parse(local.checkedAt);
+        if (Number.isFinite(measuredAt) && Number.isFinite(localAt) && measuredAt > localAt) delete tests[proxy.id];
+      }
+      if (Object.keys(tests).length !== Object.keys(proxyTestsRef.current).length) updateProxyTests(tests);
+    }
     const next = {
       ...initialSnapshot,
-      ...value
+      ...value,
+      networkRevision
     };
     snapshotRef.current = next;
     setSnapshot(next);
     setSelectedId(current => value.profiles.some(profile => profile.id === current) ? current : value.profiles[0]?.id || null);
     setCheckedIds(ids => ids.filter(id => value.profiles.some(profile => profile.id === id)));
     return true;
-  }, []);
+  }, [updateProxyTests]);
   const refresh = useCallback(async () => {
     const value = await api.call("snapshot");
     acceptSnapshot(value);
@@ -1204,9 +1232,10 @@ function WorkspaceApp() {
   };
   const saveProxy = async (proxy, locationPreviewToken, previewNetwork) => {
     const existingIds = new Set(proxies.map(item => item.id));
+    const networkRevision = snapshotRef.current.networkRevision;
     if (proxy.id) {
       proxyTestTokens.current[proxy.id] = (proxyTestTokens.current[proxy.id] || 0) + 1;
-      setProxyTests(value => {
+      updateProxyTests(value => {
         const next = {
           ...value
         };
@@ -1221,7 +1250,7 @@ function WorkspaceApp() {
       closeModal();
       const next = response.result?.proxies || snapshotRef.current.proxies;
       const saved = proxy.id ? next.find(item => item.id === proxy.id) : next.find(item => !existingIds.has(item.id));
-      if (api.isDesktop && saved && previewNetwork?.ok === true) setProxyTests(value => ({ ...value, [saved.id]: previewNetwork }));
+      if (api.isDesktop && saved && previewNetwork?.ok === true && networkRevision === snapshotRef.current.networkRevision) updateProxyTests(value => ({ ...value, [saved.id]: previewNetwork }));
       else if (api.isDesktop && saved) checkProxy(saved);
     }
   };
@@ -1259,7 +1288,7 @@ function WorkspaceApp() {
     if (!api.isDesktop) return;
     const token = (proxyTestTokens.current[proxy.id] || 0) + 1;
     proxyTestTokens.current[proxy.id] = token;
-    setProxyTests(value => ({
+    updateProxyTests(value => ({
       ...value,
       [proxy.id]: {
         checking: true
@@ -1270,7 +1299,7 @@ function WorkspaceApp() {
         id: proxy.id
       });
       if (proxyTestTokens.current[proxy.id] !== token) return;
-      setProxyTests(value => ({
+      updateProxyTests(value => ({
         ...value,
         [proxy.id]: result
       }));
@@ -1282,10 +1311,11 @@ function WorkspaceApp() {
       await refresh().catch(() => {});
     } catch (error) {
       if (proxyTestTokens.current[proxy.id] !== token) return;
-      setProxyTests(value => ({
+      updateProxyTests(value => ({
         ...value,
         [proxy.id]: {
           ok: false,
+          checkedAt: new Date().toISOString(),
           message: error.message || t("出口识别未完成，请重试。")
         }
       }));

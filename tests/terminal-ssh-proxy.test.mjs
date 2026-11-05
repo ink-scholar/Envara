@@ -75,6 +75,23 @@ async function targetFile(t) {
   return { root, file };
 }
 
+test('a protected targets file supports 150 long host names and still restricts the selected CONNECT target', async t => {
+  const { file } = await targetFile(t);
+  const targets = Array.from({ length: 150 }, (_, index) => ({
+    host: `ssh-${index}.${'a'.repeat(60)}.${'b'.repeat(60)}.fixture.invalid`, port: 2222 }));
+  const serialized = JSON.stringify(targets);
+  assert.ok(Buffer.byteLength(serialized) > 16 * 1024);
+  await chmod(file, 0o600); await writeFile(file, serialized); await chmod(file, 0o400);
+  const loaded = await readSshTargets(file); assert.deepEqual(loaded, targets);
+  const proxy = await proxyFixture(t, socket => { socket.end('HTTP/1.1 200 OK\r\n\r\nowned-ssh-response'); socket.resume(); });
+  const output = collector();
+  await run(proxy, { ...targets.at(-1), allowedTargets: loaded, output: output.output });
+  assert.equal(output.bytes().toString(), 'owned-ssh-response');
+  assert.ok(proxy.requests[0].startsWith(`CONNECT ${targets.at(-1).host}:2222 HTTP/1.1\r\n`));
+  await assert.rejects(run(proxy, { host: 'unknown.fixture.invalid', allowedTargets: loaded }), { code: 'SSH_PROXY_TARGET_DENIED' });
+  assert.equal(proxy.requests.length, 1);
+});
+
 async function invokeCli(t, argv, environment) {
   const env = { ...process.env };
   delete env.ENVARA_SSH_TARGETS;
@@ -153,7 +170,7 @@ test('reads bounded private target files and rejects links, permissive modes and
   await rm(hardlink);
   await writeFile(file, JSON.stringify([{ ...target, wildcard: true }]));
   await assert.rejects(readSshTargets(file), { code: 'SSH_PROXY_CONFIGURATION' });
-  await writeFile(file, ' '.repeat(16 * 1024 + 1));
+  await writeFile(file, ' '.repeat(1024 * 1024 + 1));
   await assert.rejects(readSshTargets(file), { code: 'SSH_PROXY_CONFIGURATION' });
   await writeFile(file, '[]');
   await assert.rejects(readSshTargets(file), { code: 'SSH_PROXY_CONFIGURATION' });

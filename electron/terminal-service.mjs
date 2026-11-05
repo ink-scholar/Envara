@@ -296,7 +296,9 @@ export class TerminalService {
     const preparation = /^ssh(?:prep|save)_[a-f0-9]{16,64}$/.test(sessionId);
     if (this.closed || signal?.aborted || session && session.profileId !== ownerProfileId || !session && !preparation)
       throw codeError('SSH 所选网络不可用，请重新选择。', 'SSH_ROUTE_UNAVAILABLE');
-    if (this.sshRouteLeases.size >= 256) throw codeError('SSH 网络授权过多，请稍后重试。', 'SSH_ROUTE_UNAVAILABLE');
+    // Each saved alias gets a session-scoped lease. A workspace-wide count cap
+    // made duplicating a terminal silently lose larger saved connection sets.
+    // These are main-only metadata; native transport concurrency stays bounded.
     const key = randomUUID(), epoch = route.kind === 'environment' ? this.sshRouteEpochs.get(route.profileId) ?? 0 : 0;
     const failuresAtStart = new Map(this.managedProxyFailures);
     const lease = { key, ownerProfileId, sessionId, route, proxyId: null, generation: 0, disposed: false };
@@ -366,6 +368,15 @@ export class TerminalService {
       if (this.closed || !this.sshManager) throw codeError('SSH 连接服务不可用。', 'TERMINAL_SSH_UNAVAILABLE');
       if (this.active(id)) throw codeError('请先结束此环境的终端会话，再授权 SSH 密码。', 'TERMINAL_SSH_BUSY');
       await this.sshManager.setPassword({ id, connectionId, password });
+      return this.sshManager.list({ id });
+    });
+  }
+  forgetTerminalSshPassword({ id, connectionId }) {
+    validId(id);
+    return this.serialized(id, async () => {
+      if (this.closed || !this.sshManager) throw codeError('SSH 连接服务不可用。', 'TERMINAL_SSH_UNAVAILABLE');
+      if (this.active(id)) throw codeError('请先结束此环境的终端会话，再授权 SSH 密码。', 'TERMINAL_SSH_BUSY');
+      await this.sshManager.forgetPassword({ id, connectionId });
       return this.sshManager.list({ id });
     });
   }

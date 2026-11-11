@@ -652,6 +652,41 @@ test('revalidates key inode and public identity before saving and all saved keys
   assert.equal(f.manager.sessions.size, 0);
 });
 
+test('device changes remain forbidden for pending selections and newly saved keys', async t => {
+  const f = await fixture(t);
+  const selected = await f.select(), identity = f.manager.identity.bind(f.manager);
+  let changed = true;
+  f.manager.identity = async filename => {
+    const value = await identity(filename);
+    if (changed) value.keyStat.dev += 1;
+    return value;
+  };
+  await assert.rejects(f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Changed device',
+    selectionToken: selected.selectionToken }), code('SSH_IDENTITY_CHANGED'));
+  changed = false;
+  await f.manager.save({ hostKeyConfirmed: true, id: 'profile-a', name: 'Stable device', selectionToken: selected.selectionToken });
+  changed = true;
+  await assert.rejects(f.session(), code('SSH_IDENTITY_CHANGED'));
+  assert.equal(f.manager.sessions.size, 0);
+});
+
+test('restoring a persisted key still rejects every other changed identity field', async t => {
+  for (const field of ['ino', 'size', 'mtimeMs', 'ctimeMs', 'publicKey']) await t.test(field, async t => {
+    const f = await fixture(t, { spawn: () => { throw new Error('Must reject before starting an agent'); } });
+    await f.save();
+    const document = JSON.parse(await readFile(f.manager.filename, 'utf8'));
+    const record = document.profiles[0].connections[0]; record.keyStat.dev += 1;
+    if (field === 'publicKey') await writeFile(`${f.keyPath}.pub`, `${publicKey('changed-client')}\n`);
+    else record.keyStat[field] += 1;
+    const stored = JSON.stringify(document); await writeFile(f.manager.filename, stored);
+    const restored = f.createManager(); await restored.ready;
+    await assert.rejects(restored.createSession({ profileId: 'profile-a', sessionId: 'restore-changed',
+      directories: { home: f.hostHome }, proxyUrl }), code('SSH_IDENTITY_CHANGED'));
+    assert.equal(restored.sessions.size, 0);
+    assert.equal(await readFile(f.manager.filename, 'utf8'), stored);
+  });
+});
+
 test('protects selected keys across environments without starting an agent for empty environments', async t => {
   const f = await fixture(t, { spawn: () => { throw new Error('Must not start an agent'); } });
   await f.save();
@@ -757,6 +792,60 @@ test('native agent holds only the chosen identity, refuses unconstrained signing
   await assert.rejects(lstat(directory), { code: 'ENOENT' });
   await assert.rejects(run('/usr/bin/ssh-add', ['-L'], { env: agentEnv }));
   await f.manager.remove({ id: 'profile-a', connectionId: saved.id });
+});
+
+test('native restore accepts an old saved device number once without rewriting saved data', native, async t => {
+  const f = await fixture(t, { real: true }); const saved = await f.save();
+  const document = JSON.parse(await readFile(f.manager.filename, 'utf8'));
+  document.profiles[0].connections[0].keyStat.dev += 1;
+  const stored = JSON.stringify(document); await writeFile(f.manager.filename, stored);
+  const restored = f.createManager(); await restored.ready;
+  const session = await restored.createSession({ profileId: 'profile-a', sessionId: 'restored-session',
+    directories: { home: f.hostHome }, proxyUrl });
+  assert.equal(session.describe().status, 'ready');
+  assert.equal(session.describe().connections[0].alias, saved.alias);
+  const loaded = await run('/usr/bin/ssh-add', ['-L'], {
+    env: restored.nativeEnvironment(path.dirname(session.binDirectory), session.agentSocket) });
+  assert.deepEqual(loaded.stdout.trim().split('\n').map(parseSshPublicKey).map(key => key.fingerprint), [saved.keyFingerprint]);
+  assert.equal(await readFile(f.manager.filename, 'utf8'), stored);
+  await session.dispose();
+  const second = await restored.createSession({ profileId: 'profile-a', sessionId: 'stable-second-session',
+    directories: { home: f.hostHome }, proxyUrl });
+  assert.equal(second.describe().status, 'ready'); await second.dispose();
+  const identity = restored.identity.bind(restored);
+  restored.identity = async filename => {
+    const value = await identity(filename); value.keyStat.dev += 2; return value;
+  };
+  await assert.rejects(restored.createSession({ profileId: 'profile-a', sessionId: 'changed-second-session',
+    directories: { home: f.hostHome }, proxyUrl }), code('SSH_IDENTITY_CHANGED'));
+  assert.equal(restored.sessions.size, 0); assert.deepEqual(await readdir(restored.agentRoot), []);
+  assert.equal(await readFile(f.manager.filename, 'utf8'), stored);
+});
+
+test('native restored keys retain full device checks immediately before and after agent loading', native, async t => {
+  for (const phase of ['before', 'after']) await t.test(phase, async t => {
+    const f = await fixture(t, { real: true }); await f.save();
+    const document = JSON.parse(await readFile(f.manager.filename, 'utf8'));
+    document.profiles[0].connections[0].keyStat.dev += 1;
+    const stored = JSON.stringify(document); await writeFile(f.manager.filename, stored);
+    const restored = f.createManager(); await restored.ready;
+    const identity = restored.identity.bind(restored), execute = restored.execute;
+    let identityReads = 0, additions = 0;
+    restored.identity = async filename => {
+      const value = await identity(filename);
+      if (++identityReads >= (phase === 'before' ? 2 : 3)) value.keyStat.dev += 2;
+      return value;
+    };
+    restored.execute = async (command, args, options) => {
+      if (command === '/usr/bin/ssh-add' && args.includes('-q')) additions++;
+      return execute(command, args, options);
+    };
+    await assert.rejects(restored.createSession({ profileId: 'profile-a', sessionId: `changed-${phase}-load`,
+      directories: { home: f.hostHome }, proxyUrl }), code('SSH_IDENTITY_CHANGED'));
+    assert.equal(additions, phase === 'before' ? 0 : 1);
+    assert.equal(restored.sessions.size, 0); assert.deepEqual(await readdir(restored.agentRoot), []);
+    assert.equal(await readFile(f.manager.filename, 'utf8'), stored);
+  });
 });
 
 test('a single native identity retains constraints for every saved destination', native, async t => {

@@ -1,6 +1,6 @@
 # Claude Code sessions
 
-This document describes Envara 1.2.0 for macOS arm64. This release uses ad-hoc signing, without an Apple Developer ID signature or notarization. Release-specific checks remain in [release verification](verification.md#120-验证范围); earlier terminal input measurements retain their [1.0.2 scope](verification.md#102-发布验证). Historical and synthetic measurements do not establish real Claude account login or model-directed tool use. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
+This document describes Envara 1.2.1 for macOS arm64. This release uses ad-hoc signing, without an Apple Developer ID signature or notarization. Release-specific checks remain in [release verification](verification.md#121-验证范围); earlier terminal input measurements retain their [1.0.2 scope](verification.md#102-发布验证). Historical and synthetic measurements do not establish real Claude account login or model-directed tool use. Envara launches the **unchanged official native Claude Code CLI**; it does not bundle a Claude program, convert subscriptions to an API, or infer whether an account is signed in.
 
 ## Start and installation
 

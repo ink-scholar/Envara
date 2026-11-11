@@ -50,6 +50,10 @@ const target = ({ host, port, user }) => {
   return { ...checked, user };
 };
 const keyIdentity = info => ({ dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs });
+// macOS may assign a different device number after a volume is remounted.
+// Persisted references retain every other file-identity field; an active
+// selection or process still compares the complete stat, including dev.
+const persistedKeyIdentity = ({ ino, size, mtimeMs, ctimeMs }) => ({ ino, size, mtimeMs, ctimeMs });
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const endpoint = ({ host, port }) => port === 22 ? host : `[${host}]:${port}`;
 const authType = record => record.authType ?? 'publickey';
@@ -218,6 +222,7 @@ async function adHocTrustFile(directories) {
 export class TerminalSshManager {
   #passwordGrants = new Map();
   #passwordRestoreAttempts = new Set();
+  #keyIdentities = new Map();
   constructor({ dataDir, hostHome, nodeExecutable, platform = process.platform, execute = nativeExecute, spawn = spawnChild,
     now = Date.now, agentRoot = platform === 'darwin' ? `/private/tmp/envara-ssh-${uid() ?? 'unsupported'}`
       : path.join(dataDir ?? '', 'terminal', 'ssh-access-runtime'),
@@ -467,13 +472,15 @@ export class TerminalSshManager {
     return { selectionToken, ...checkedTarget, route: trust.route, trustSource: trust.trustSource,
       authType: 'password', hostFingerprints: [...value.hostFingerprints] };
   }
-  async revalidate(record, { trust = false } = {}) {
+  async revalidate(record, { trust = false, persisted = false } = {}) {
+    let current;
     if (authType(record) === 'publickey') {
-      let current;
       try { current = await this.identity(record.keyPath); } catch { throw identityChanged(); }
-      if (!same(current.keyStat, record.keyStat) || current.publicKey !== record.publicKey) throw identityChanged();
+      const project = persisted ? persistedKeyIdentity : value => value;
+      if (!same(project(current.keyStat), project(record.keyStat)) || current.publicKey !== record.publicKey) throw identityChanged();
     }
     if (trust && trustSource(record) === 'host-known-hosts' && !same(await this.readTrust(record), record.hostKeys)) throw identityChanged();
+    return current;
   }
   mutate(operation) {
     const task = this.queue.then(async () => { await this.ready; this.assertOpen(); return operation(); });
@@ -522,6 +529,7 @@ export class TerminalSshManager {
         } catch (error) { secret?.fill(0); throw error; }
         this.profiles = next; this.pending.delete(selectionToken);
         if (this.closed) { secret?.fill(0); this.assertOpen(); }
+        if (authType(record) === 'publickey') this.#keyIdentities.set(record.id, { ...record.keyStat });
         if (secret) this.grantPassword(record.id, secret);
         return publicConnection(record, Boolean(secret));
       };
@@ -581,7 +589,7 @@ export class TerminalSshManager {
       if ([...this.sessions.values()].some(session => session.records.some(record => record.id === selectedId)
         || authType(record) === 'password' && session.profileId === profileId)) throw fail('SSH_CONNECTION_IN_USE', '请先结束使用此 SSH 连接的终端会话。');
       const next = new Map(this.profiles); next.set(profileId, previous.filter(record => record.id !== selectedId));
-      await this.persist(next); this.profiles = next; this.clearPassword(selectedId); return { removed: true };
+      await this.persist(next); this.profiles = next; this.clearPassword(selectedId); this.#keyIdentities.delete(selectedId); return { removed: true };
     });
   }
   removeProfile({ id: profileId }) {
@@ -591,7 +599,7 @@ export class TerminalSshManager {
       const previousRecords = this.profiles.get(profileId) ?? [];
       const next = new Map(this.profiles); next.delete(profileId);
       if (this.profiles.has(profileId)) { await this.persist(next); this.profiles = next; }
-      for (const record of previousRecords) this.clearPassword(record.id);
+      for (const record of previousRecords) { this.clearPassword(record.id); this.#keyIdentities.delete(record.id); }
       for (const [token, selected] of this.pending) if (selected.profileId === profileId) this.pending.delete(token);
       return { removed: true };
     });
@@ -671,7 +679,20 @@ export class TerminalSshManager {
           host: record.host, port: record.port, user: record.user, route: normalizeSshRoute(record.route, { legacy: true }),
           authType: authType(record), expiresAt: null })) };
       describeSshSession(manifest, this.now());
-      for (const record of records) { await this.revalidate(record, { trust: true }); check(); }
+      for (const record of records) {
+        const baseline = this.#keyIdentities.get(record.id);
+        if (baseline) record.keyStat = { ...baseline };
+        const current = await this.revalidate(record, { trust: true, persisted: !baseline }); check();
+        if (current) {
+          // Only the first restoration may disregard the saved device number.
+          // Bind the full identity after trust succeeds, including when another
+          // session completed restoration while this one was awaiting I/O.
+          const established = this.#keyIdentities.get(record.id);
+          if (established && !same(established, current.keyStat)) throw identityChanged();
+          this.#keyIdentities.set(record.id, { ...current.keyStat });
+          record.keyStat = { ...current.keyStat };
+        }
+      }
       // The stable parent is short enough for macOS Unix-domain socket paths.
       const parent = path.dirname(this.agentRoot);
       const parentInfo = await checkedPath(parent);
@@ -881,7 +902,7 @@ export class TerminalSshManager {
     return lease.cleanup;
   }
   async close() {
-    this.closed = true; this.pending.clear();
+    this.closed = true; this.pending.clear(); this.#keyIdentities.clear();
     for (const operation of this.preparations) operation.controller.abort();
     for (const selectedId of this.#passwordGrants.keys()) this.clearPassword(selectedId);
     const preparations = [...this.preparations].map(async operation => { await operation.finished; await this.releasePreparation(operation); });

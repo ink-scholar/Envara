@@ -153,6 +153,7 @@ async function serviceFixture(t) {
   const cwd = path.join(root, 'project'); await mkdir(cwd);
   const pty = new FakePty(), events = [], diagnostics = [];
   const service = new TerminalService({ dataDir: path.join(root, 'data'), networkFence: null, availableLocales: ['C'],
+    claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
     resolveContext: async id => ({ id, timezone: 'UTC', proxy: null }), ptyFactory: () => pty,
     processControl: { capture: async pid => ({ pid }), close: async () => { pty.emit('exit', { exitCode: 0 }); return { ok: true }; } },
     onEvent: event => events.push(event), diagnostics: {

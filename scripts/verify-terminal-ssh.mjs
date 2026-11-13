@@ -114,7 +114,10 @@ try {
   broker = new TerminalBrowserBroker({ service, dataDir, nodeExecutable });
   links = new TerminalLinkChannel({ root: dataDir, onLink: async () => { throw new Error('No links are authorized in this acceptance.'); } });
   await links.listen();
-  terminal = new TerminalService({ dataDir, sshManager: manager, browserBroker: broker, linkChannel: links,
+  terminal = new TerminalService({
+    // Keychain is outside this fixture; verify-claude-keychain.mjs covers it separately.
+    claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
+    dataDir, sshManager: manager, browserBroker: broker, linkChannel: links,
     resolveContext: async () => structuredClone(context), additionalExecutablePaths: [path.dirname(nodeExecutable)],
     claudeExecutableResolver: async () => claudeExecutable,
     onEvent: event => { if (event.type === 'data') output.set(event.sessionId, (output.get(event.sessionId) ?? '') + event.data); },

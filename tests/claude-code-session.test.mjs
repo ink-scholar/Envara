@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
+import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fsPromises from 'node:fs/promises';
@@ -31,15 +33,37 @@ async function fixture(t) {
   await symlink(hostExecutable, path.join(bin, 'claude'));
   const installation = await ensureClaudeInstallation({ home, findHostExecutable: async () => hostExecutable });
   const executable = await resolveClaudeInstallation(installation);
+  // Executed wrappers use a real private authenticated broker fixture. Its
+  // socket stays short even when the session path intentionally contains quotes.
+  const brokerRoot = await realpath(await mkdtemp(path.join(os.tmpdir().length < 40 ? os.tmpdir() : '/tmp', 'envara-preflight-')));
+  await chmod(brokerRoot, 0o700);
+  const socketPath = path.join(brokerRoot, 'prepare.sock'), browserToken = randomBytes(32).toString('hex');
+  const credentials = { calls: 0, status: 200, body: { ready: true }, connected: new Set() };
+  const server = http.createServer(async (incoming, response) => {
+    let body = ''; for await (const chunk of incoming) body += chunk;
+    if (incoming.headers.authorization !== `Bearer ${browserToken}`) { response.writeHead(403); response.end('{}'); return; }
+    if (incoming.method !== 'POST' || incoming.url !== '/credentials/prepare' || body !== '{}') { response.writeHead(400); response.end('{}'); return; }
+    credentials.calls++;
+    response.writeHead(credentials.status, { 'Content-Type': 'application/json' });
+    response.end(typeof credentials.body === 'string' ? credentials.body : JSON.stringify(credentials.body));
+  });
+  server.on('connection', socket => { credentials.connected.add(socket); socket.once('close', () => credentials.connected.delete(socket)); });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
+  await chmod(socketPath, 0o600);
+  t.after(async () => {
+    for (const socket of credentials.connected) socket.destroy();
+    await new Promise(resolve => server.close(resolve));
+    await rm(brokerRoot, { recursive: true, force: true });
+  });
   const environment = { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: claude, ANTHROPIC_CONFIG_DIR: anthropic, TMPDIR: temp, TZ: 'Asia/Manila', LANG: 'en_PH.UTF-8', LC_ALL: 'en_PH.UTF-8',
     PATH: '/owned/bin:/usr/bin:/bin', BROWSER: '/owned/bin/browser', ENVARA_LINK_SOCKET: '/owned/links.sock',
-    ENVARA_BROWSER_SOCKET: '/owned/browser.sock', ENVARA_LINK_TOKEN: 'synthetic-link-secret', ENVARA_BROWSER_TOKEN: 'synthetic-browser-secret',
+    ENVARA_BROWSER_SOCKET: socketPath, ENVARA_LINK_TOKEN: 'synthetic-link-secret', ENVARA_BROWSER_TOKEN: browserToken,
     SSH_AUTH_SOCK: '/owned/ssh/agent.sock', ENVARA_SSH_CONFIG: '/owned/ssh/config', ENVARA_SSH_TARGETS: '/owned/ssh/targets.json', ENVARA_SSH_CONNECTIONS: '/owned/ssh/connections.json',
     ENVARA_SSH_PROXY_URL: 'http://fixture:synthetic-ssh-proxy-secret@127.0.0.1:1234',
     HTTPS_PROXY: 'http://user:synthetic-proxy-secret@127.0.0.1:1234', HTTP_PROXY: 'http://user:synthetic-proxy-secret@127.0.0.1:1234',
     ALL_PROXY: 'http://user:synthetic-proxy-secret@127.0.0.1:1234', NO_PROXY: 'localhost,127.0.0.1,::1', NODE_USE_ENV_PROXY: '1' };
   const request = { sessionId: 'term_one', directories: { temp, home, claude, anthropic }, installation, environment, privacy: { mode: 'standard' }, mcpServer: { command: process.execPath, args: ['/owned/envara-browser-mcp.mjs'] } };
-  return { root, bin, temp, home, claude, anthropic, executable, hostExecutable, installation, request };
+  return { root, bin, temp, home, claude, anthropic, executable, hostExecutable, installation, request, credentials };
 }
 
 const settingsFile = launch => launch.args[launch.args.indexOf('--settings') + 1];
@@ -195,7 +219,7 @@ test('private settings pin context without persisting proxy credentials or MCP/l
   await saveSettings(f, { env: { HTTPS_PROXY: f.request.environment.HTTPS_PROXY, ANTHROPIC_MODEL: 'sonnet' }, model: 'sonnet' });
   const launch = await prepareClaudeSession(f.request);
   const serialized = await readFile(settingsFile(launch), 'utf8');
-  for (const secret of ['synthetic-proxy-secret', 'synthetic-browser-secret', 'synthetic-link-secret', 'synthetic-ssh-proxy-secret']) assert.ok(!serialized.includes(secret));
+  for (const secret of ['synthetic-proxy-secret', f.request.environment.ENVARA_BROWSER_TOKEN, 'synthetic-link-secret', 'synthetic-ssh-proxy-secret']) assert.ok(!serialized.includes(secret));
   const pins = JSON.parse(serialized).env;
   for (const key of ['HOME', 'USERPROFILE', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_CONFIG_DIR', 'TMPDIR', 'TZ', 'LANG', 'LC_ALL', 'BROWSER', 'ENVARA_LINK_SOCKET', 'ENVARA_BROWSER_SOCKET', 'NODE_USE_ENV_PROXY', 'NO_PROXY',
     'SSH_AUTH_SOCK', 'ENVARA_SSH_CONFIG', 'ENVARA_SSH_TARGETS', 'ENVARA_SSH_CONNECTIONS']) assert.equal(pins[key], f.request.environment[key], key);
@@ -407,7 +431,30 @@ test('manual wrapper refuses binding overrides in exact and equals forms before 
     }
   }
   const script = await readFile(launch.wrapperPath, 'utf8');
-  for (const secret of ['synthetic-proxy-secret', 'synthetic-browser-secret', 'synthetic-link-secret']) assert.ok(!script.includes(secret));
+  for (const secret of ['synthetic-proxy-secret', f.request.environment.ENVARA_BROWSER_TOKEN, 'synthetic-link-secret']) assert.ok(!script.includes(secret));
+});
+
+test('the existing wrapper rechecks credential readiness before every native invocation and stops on failure', async t => {
+  const f = await fixture(t); await compileClaudeFixture(f.executable);
+  const launch = await prepareClaudeSession(f.request), original = await readFile(launch.wrapperPath);
+  const invoke = () => execute(launch.wrapperPath, ['--version'], { env: launch.environment, timeout: 5000 });
+  assert.equal(JSON.parse((await invoke()).stdout).home, f.home); assert.equal(f.credentials.calls, 1);
+  f.credentials.status = 503;
+  f.credentials.body = { error: 'credential-preparation-failed', code: 'CLAUDE_KEYCHAIN_LOCKED' };
+  await assert.rejects(invoke(), error => error.code === 78 && error.stdout === '' && error.stderr.includes('CLAUDE_KEYCHAIN_LOCKED'));
+  assert.equal(f.credentials.calls, 2);
+  const secret = '/private/synthetic-keychain-and-token';
+  f.credentials.body = { error: 'credential-preparation-failed', code: 'CLAUDE_KEYCHAIN_UNKNOWN', private: secret };
+  await assert.rejects(invoke(), error => error.code === 78 && error.stdout === '' && error.stderr.includes('CLAUDE_KEYCHAIN_UNAVAILABLE') && !error.stderr.includes(secret));
+  assert.equal(f.credentials.calls, 3);
+  f.credentials.status = 200; f.credentials.body = { ready: true };
+  assert.equal(JSON.parse((await invoke()).stdout).config, f.claude); assert.equal(f.credentials.calls, 4);
+  assert.deepEqual(await readFile(launch.wrapperPath), original, 'readiness is rechecked without replacing the wrapper');
+  await assert.rejects(execute(launch.wrapperPath, ['--version'], {
+    env: { ...launch.environment, ENVARA_BROWSER_TOKEN: 'f'.repeat(64) }, timeout: 5000,
+  }), error => error.code === 78 && error.stdout === '' && !error.stderr.includes('f'.repeat(64)));
+  assert.equal(f.credentials.calls, 4, 'foreign authority cannot reach preparation or the native program');
+  await launch.cleanup();
 });
 
 test('one wrapper uses the upgraded native entry immediately and keeps host, other environments and login data intact', async t => {

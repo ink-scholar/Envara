@@ -1,3 +1,4 @@
+import { sanitizeClaudeKeychainDiagnostic } from '../shared/claude-keychain-diagnostic.mjs';
 import { TERMINAL_METHODS } from './terminal-controller.mjs';
 import { terminalViewSnapshot } from './terminal-view.mjs';
 import { environmentMutationProfile } from './environment-import-lifecycle.mjs';
@@ -55,7 +56,11 @@ export function registerDesktopIPC({ ipcMain, views, startup, lifecycle, service
       if (bootstrapReads.has(request.method)) return await startup.read(dispatch);
       startup.assertReady();
       return await dispatch();
-    } catch (error) { return { ok: false, error: { message: error.message, code: error.code || 'ACTION_FAILED' } }; }
+    } catch (error) {
+      const keychainDiagnostic = sanitizeClaudeKeychainDiagnostic(error.keychainDiagnostic);
+      return { ok: false, error: { message: error.message, code: error.code || 'ACTION_FAILED',
+        ...(keychainDiagnostic ? { keychainDiagnostic } : {}) } };
+    }
   }));
   onReady();
 }

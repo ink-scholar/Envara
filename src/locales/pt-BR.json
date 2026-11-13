@@ -1075,5 +1075,7 @@
   "先授权服务器和密钥，保存后新建终端会话。私钥不会复制到环境。": "Autorize o servidor e a chave, salve e abra uma nova sessão de terminal. A chave privada não é copiada para o ambiente.",
   "让 Claude 运行 envara-ssh list，查看当前会话可用的连接。": "Peça ao Claude para executar envara-ssh list e ver as conexões disponíveis nesta sessão.",
   "尚未授权 SSH 连接。保存配置不会自动连接服务器。": "Ainda não há conexões SSH autorizadas. Salvar as configurações não conecta automaticamente a um servidor.",
-  "常用写法": "Comando comum"
+  "常用写法": "Comando comum",
+  "登录钥匙串已锁定。终端仍可使用；需要钥匙串的登录操作请在解锁后重试。": "As chaves de início de sessão estão bloqueadas. Você pode continuar usando o terminal; desbloqueie-as antes de tentar novamente os logins que precisam delas.",
+  "未找到默认钥匙串。终端仍可使用；请检查 macOS 钥匙串后新建终端。": "Nenhum conjunto de chaves padrão foi encontrado. Você pode continuar usando o terminal; verifique o Acesso às Chaves do macOS e abra um novo terminal."
 }

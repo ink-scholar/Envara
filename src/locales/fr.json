@@ -1075,5 +1075,7 @@
   "先授权服务器和密钥，保存后新建终端会话。私钥不会复制到环境。": "Autorisez le serveur et la clé, enregistrez, puis ouvrez une nouvelle session de terminal. La clé privée n’est pas copiée dans l’environnement.",
   "让 Claude 运行 envara-ssh list，查看当前会话可用的连接。": "Demandez à Claude d’exécuter envara-ssh list pour voir les connexions disponibles dans cette session.",
   "尚未授权 SSH 连接。保存配置不会自动连接服务器。": "Aucune connexion SSH n’est encore autorisée. Enregistrer la configuration ne connecte pas automatiquement à un serveur.",
-  "常用写法": "Commande habituelle"
+  "常用写法": "Commande habituelle",
+  "登录钥匙串已锁定。终端仍可使用；需要钥匙串的登录操作请在解锁后重试。": "Le trousseau de session est verrouillé. Vous pouvez continuer à utiliser le terminal ; déverrouillez-le avant de réessayer les connexions qui en ont besoin.",
+  "未找到默认钥匙串。终端仍可使用；请检查 macOS 钥匙串后新建终端。": "Aucun trousseau par défaut n’a été trouvé. Vous pouvez continuer à utiliser le terminal ; vérifiez Trousseaux d’accès dans macOS, puis ouvrez un nouveau terminal."
 }

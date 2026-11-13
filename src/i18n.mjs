@@ -10,6 +10,8 @@ import { networkFlowEnglish } from './network-flow-english.mjs';
 import { networkFlowTranslations } from './network-flow-translations.mjs';
 
 export const english = {
+  "登录钥匙串已锁定。终端仍可使用；需要钥匙串的登录操作请在解锁后重试。": "The login keychain is locked. You can keep using the terminal; unlock it before retrying sign-ins that need the keychain.",
+  "未找到默认钥匙串。终端仍可使用；请检查 macOS 钥匙串后新建终端。": "No default keychain was found. You can keep using the terminal; check macOS Keychain Access, then open a new terminal.",
   "Claude 钥匙串准备的收尾检查未通过。请保留现有资料并联系维护者处理。": "Final checks for Claude Keychain setup did not pass. Keep the existing data and contact the maintainer.",
   "登录钥匙串已锁定。请在 macOS“钥匙串访问”中解锁后，新建 Claude 终端。": "The login keychain is locked. Unlock it in macOS Keychain Access, then open a new Claude terminal.",
   "未找到可用的系统登录钥匙串。请在 macOS“钥匙串访问”中检查后重试。": "No usable system login keychain was found. Check it in macOS Keychain Access and try again.",

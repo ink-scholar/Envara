@@ -1,3 +1,5 @@
+import { sanitizeClaudeKeychainDiagnostic } from '../shared/claude-keychain-diagnostic.mjs';
+
 /** Failure events and the following snapshot describe the same incident.
  * Keep it visible after its live tab ends, without announcing it repeatedly. */
 export class TerminalErrorNotices {
@@ -12,14 +14,15 @@ export class TerminalErrorNotices {
     const incomingCleanup = typeof value.cleanupError === 'string' ? value.cleanupError.slice(0, 512) : '';
     const cleanupResolved = Boolean(previous?.cleanupError) && !incomingCleanup && (value.cleanupError === null || ['closed', 'exited', 'error'].includes(value.status));
     const cleanupError = incomingCleanup || (cleanupResolved ? '' : previous?.cleanupError ?? '');
-    const signature = JSON.stringify([code, cleanupError]);
+    const keychainDiagnostic = sanitizeClaudeKeychainDiagnostic(value.keychainDiagnostic) ?? previous?.keychainDiagnostic ?? null;
+    const signature = JSON.stringify([code, cleanupError, keychainDiagnostic]);
     const record = previous ?? { signatures: new Set() };
     if (sequence != null) record.sequence = sequence;
     if (record.signature === signature || (!cleanupResolved && record.signatures.has(signature))) return null;
-    record.code = code; record.cleanupError = cleanupError; record.signature = signature; record.signatures.add(signature);
+    record.keychainDiagnostic = keychainDiagnostic; record.code = code; record.cleanupError = cleanupError; record.signature = signature; record.signatures.add(signature);
     while (record.signatures.size > 16) record.signatures.delete(record.signatures.values().next().value);
     this.seen.set(key, record);
     while (this.seen.size > 128) this.seen.delete(this.seen.keys().next().value);
-    return { sessionId: value.sessionId, message: value.error, code, cleanupError, ...(cleanupResolved ? { updateOnly: true } : {}) };
+    return { sessionId: value.sessionId, message: value.error, code, cleanupError, ...(keychainDiagnostic ? { keychainDiagnostic } : {}), ...(cleanupResolved ? { updateOnly: true } : {}) };
   }
 }

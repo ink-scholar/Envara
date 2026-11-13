@@ -17,6 +17,7 @@ import { TerminalStreamStore, splitTerminalInput, terminalHeightForPointer, term
 import { terminalTimezonePresentation } from './network-flow-state.mjs';
 import { NEW_CLAUDE_ACCOUNT, validClaudeAccountChoice, claudeAccountLabel, reconcileClaudeAccountChoice, claudeSessionForRequest, claudeInstallPresentation, claudeErrorMessage, validClaudeInstallationChoice, claudeInstallationOptions } from './claude-account-choice.mjs';
 import { TerminalDeviceIdentifierDetails } from './terminal-device-identifiers.mjs';
+import { TerminalKeychainNotice, terminalKeychainDiagnosticText } from './terminal-keychain-notice.mjs';
 import { reconcileTerminalProfile } from './terminal-profile-selection.mjs';
 import { invalidatePickedTerminalDirectory, terminalDirectoryChoice } from './terminal-directory-choice.mjs';
 import '@xterm/xterm/css/xterm.css';
@@ -227,6 +228,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
   const [focusVersion, setFocusVersion] = useState(0);
   const [dockError, setDockError] = useState('');
   const [dockErrorCode, setDockErrorCode] = useState('');
+  const [dockKeychainDiagnostic, setDockKeychainDiagnostic] = useState('');
   const [dockCleanupError, setDockCleanupError] = useState('');
   const [loading, setLoading] = useState(desktopAvailable);
   const [resizing, setResizing] = useState(false);
@@ -241,11 +243,12 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
 
   const clearFailure = useCallback(() => {
     currentFailureRef.current = null;
-    setDockError(''); setDockErrorCode(''); setDockCleanupError('');
+    setDockError(''); setDockErrorCode(''); setDockKeychainDiagnostic(''); setDockCleanupError('');
   }, []);
-  const reportError = useCallback((message, code = '') => {
+  const reportError = useCallback((message, code = '', diagnostic = null) => {
     if (!mountedRef.current) return;
     currentFailureRef.current = null;
+    setDockKeychainDiagnostic(terminalKeychainDiagnosticText(diagnostic));
     setDockError(message); setDockErrorCode(/^[A-Z][A-Z0-9_]{1,95}$/.test(code) ? code : ''); setDockCleanupError(''); callbacksRef.current.onError?.(message);
   }, []);
   const retainFailure = useCallback(value => {
@@ -255,6 +258,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
     currentFailureRef.current = notice;
     setDockError(claudeErrorMessage(notice.message, notice.code)); setDockErrorCode(notice.code);
     setDockCleanupError(notice.cleanupError);
+    setDockKeychainDiagnostic(terminalKeychainDiagnosticText(notice.keychainDiagnostic));
   }, []);
   const publish = useCallback(() => {
     if (publishFrameRef.current != null || !mountedRef.current) return;
@@ -486,8 +490,8 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
         if (!session?.canceled && mountedRef.current) { acceptSession(session); await refresh(); }
         return true;
       } catch (error) {
-        if (requestId) setNewSession(value => value?.requestId === requestId ? { ...invalidatePickedTerminalDirectory(value), requestId: null, error: claudeErrorMessage(error.message, error.code) || '终端无法启动。' } : value);
-        reportError(claudeErrorMessage(error.message, error.code) || '终端无法启动。', error.code || (/^CLAUDE_CODE_[A-Z_]+$/.test(error.message) ? error.message : ''));
+        if (requestId) setNewSession(value => value?.requestId === requestId ? { ...invalidatePickedTerminalDirectory(value), requestId: null, error: claudeErrorMessage(error.message, error.code) || '终端无法启动。', keychainDiagnostic: terminalKeychainDiagnosticText(error.keychainDiagnostic) } : value);
+        reportError(claudeErrorMessage(error.message, error.code) || '终端无法启动。', error.code || (/^CLAUDE_CODE_[A-Z_]+$/.test(error.message) ? error.message : ''), error.keychainDiagnostic);
         return false;
       }
       finally { if (mountedRef.current) setPending(''); openingRef.current.delete(profileId); openingRequestsRef.current.delete(profileId); }
@@ -576,7 +580,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
     try {
       const created = await api.call('duplicateTerminal', { sessionId: session.sessionId });
       if (!created?.canceled && mountedRef.current) { acceptSession(created); setFocusVersion(value => value + 1); await refresh(); }
-    } catch (error) { reportError(error.message || '无法复制终端会话。'); }
+    } catch (error) { reportError(claudeErrorMessage(error.message, error.code) || '无法复制终端会话。', error.code, error.keychainDiagnostic); }
     finally { if (mountedRef.current) setPending(''); }
   };
   const actOnSavedEntry = async (entry, action, name) => {
@@ -602,7 +606,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
       if (inCurrentScope()) setSavedEntryEditor(null);
       await refresh();
     } catch (error) {
-      if (inCurrentScope()) reportError(savedTerminalErrors[error.code] || error.message || (action === 'open' ? '无法打开已保存终端，请重试。' : '无法更新已保存终端，请重试。'), error.code);
+      if (inCurrentScope()) reportError(savedTerminalErrors[error.code] || error.message || (action === 'open' ? '无法打开已保存终端，请重试。' : '无法更新已保存终端，请重试。'), error.code, error.keychainDiagnostic);
     } finally {
       if (savedEntryActionRef.current === operation) {
         savedEntryActionRef.current = null;
@@ -850,12 +854,12 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
             <div><dt>{t('网络与浏览器')}</dt><dd>{t('固定绑定；网络组件退出时结束会话')}</dd></div>
             <div><dt>{t('官方隐私设置')}</dt><dd>{t({ off: '停用', standard: '标准', strict: '严格' }[privacyMode] ?? '标准')}<small>{t({ off: '不额外关闭遥测与错误上报。', standard: '关闭遥测与错误上报。', strict: '同时关闭非必要网络请求。' }[privacyMode] ?? '关闭遥测与错误上报。')}</small>{privacyMode !== 'off' && <small className="terminal-claude-privacy-note">{t('关闭遥测可能影响 Remote Control 等功能。')}</small>}</dd></div>
           </dl><p>{t('内置浏览器工具绑定所选浏览器；支持此境舱的自定义 MCP。会话内关闭自动更新。')}</p></details>}
-          {newSession.error && <div className="terminal-new-session-error">{t(newSession.error)}</div>}
+          {newSession.error && <div className="terminal-new-session-error">{t(newSession.error)}{newSession.keychainDiagnostic && <code className="terminal-keychain-diagnostic">{newSession.keychainDiagnostic}</code>}</div>}
           {opening && <div className="terminal-install-progress" role="status"><div><ArrowsClockwise className="spin" size={14} /><span>{t(installation?.label || '准备中…')}</span>{installation?.percent != null && <strong>{installation.percent}%</strong>}</div>{installation?.percent != null && <progress max="100" value={installation.percent} />}</div>}
           <div className="terminal-new-session-actions"><button className="terminal-text-button" disabled={!!pending && (!startingSession || !!cancellingSessionId)} onClick={cancelCreation}>{t(cancellingSessionId ? '关闭中…' : opening && claude ? '取消安装' : '取消')}</button><button className="terminal-text-button terminal-start-button" aria-busy={!!pending || undefined} disabled={!!pending || !!editingAccount || !host || !directory.ready || (claude && (!validClaudeAccountChoice(claudeAccounts, host.id, newSession) || !validClaudeInstallationChoice(claudeInstallation, host.id, newSession.installSource)))} onClick={() => void confirmNewSession()}>{t(pending.startsWith('account:') ? '正在创建档案…' : opening ? '启动中…' : newSession.error ? '重试' : '打开终端')}</button></div>
         </div>;
       })()}
-      <footer className={`terminal-footer ${dockError ? 'has-error' : ''}`}><div className="terminal-footer-messages" role={dockError ? 'status' : undefined}><span className="terminal-network-description" title={dockError ? t(dockError) : networkDescription}>{dockError ? t(dockError) : <><GlobeHemisphereWest size={12} /><span>{shownNetwork?.routeName || (shownNetwork?.mode === 'direct' ? t('本机网络') : shownNetwork?.mode ? String(shownNetwork.mode).toUpperCase() : t('启动后读取环境网络设置。'))}</span></>}</span>{dockError && dockCleanupError && <span className="terminal-cleanup-error" title={t(dockCleanupError)}>{t('清理错误')} · {t(dockCleanupError)}</span>}</div>{dockError && dockErrorCode && <code className="terminal-error-code" title={dockErrorCode}>{dockErrorCode}</code>}{standalone && <span className="terminal-view-notice">{t('关闭窗口后，会话继续运行。')}</span>}{selectedSession && <span className="terminal-session-state">{t(statusLabels[selectedSession.status] || selectedSession.status)}{selectedSession.exitCode != null && t(' · 退出码 {code}', { code: selectedSession.exitCode })}</span>}</footer>
+      <footer className={`terminal-footer ${dockError ? 'has-error' : ''}`}><div className="terminal-footer-messages" role={dockError ? 'status' : undefined}><span className="terminal-network-description" title={dockError ? t(dockError) : networkDescription}>{dockError ? t(dockError) : <><GlobeHemisphereWest size={12} /><span>{shownNetwork?.routeName || (shownNetwork?.mode === 'direct' ? t('本机网络') : shownNetwork?.mode ? String(shownNetwork.mode).toUpperCase() : t('启动后读取环境网络设置。'))}</span></>}</span>{!dockError && <TerminalKeychainNotice session={selectedSession} t={t} />}{dockError && dockCleanupError && <span className="terminal-cleanup-error" title={t(dockCleanupError)}>{t('清理错误')} · {t(dockCleanupError)}</span>}</div>{dockError && dockErrorCode && <code className="terminal-error-code" title={[dockErrorCode, dockKeychainDiagnostic].filter(Boolean).join(' · ')}>{dockErrorCode}{dockKeychainDiagnostic && <span className="terminal-keychain-diagnostic">{dockKeychainDiagnostic}</span>}</code>}{standalone && <span className="terminal-view-notice">{t('关闭窗口后，会话继续运行。')}</span>}{selectedSession && <span className="terminal-session-state">{t(statusLabels[selectedSession.status] || selectedSession.status)}{selectedSession.exitCode != null && t(' · 退出码 {code}', { code: selectedSession.exitCode })}</span>}</footer>
     </div>
   </section>;
 }

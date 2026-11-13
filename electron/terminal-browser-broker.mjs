@@ -8,12 +8,16 @@ import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from 'node:f
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { TERMINAL_TOOLS } from './terminal-browser-mcp.mjs';
 import { describeSshSession } from './terminal-ssh-command.mjs';
+import { sanitizeClaudeKeychainDiagnostic } from './claude-keychain.mjs';
 
 const fail = (message, code = 'CLAUDE_BROWSER_UNAVAILABLE') => Object.assign(new Error(message), { code });
 const id = value => { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(value)) throw fail('Invalid browser binding.', 'CLAUDE_BROWSER_INVALID_BINDING'); return value; };
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().filter(key => value[key] !== undefined).map(key => [key, canonical(value[key])])) : value;
 const digest = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 const text = value => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }] });
+const keychainCodes = new Set(['INVALID_ARGUMENT', 'UNSAFE_PATH', 'BUSY', 'MISSING', 'LOCKED', 'UNAVAILABLE',
+  'EXISTING_SELECTION', 'PREPARATION_FAILED', 'HOST_CHANGED', 'HOST_CHECK_FAILED', 'CLEANUP_FAILED',
+  'RESOURCE_INVALID', 'TIMEOUT', 'PROTOCOL_ERROR'].map(value => `CLAUDE_KEYCHAIN_${value}`));
 const profileSignature = profile => digest(Object.fromEntries(['engine', 'platform', 'seed', 'fingerprintGeneration', 'locale', 'timezone', 'launchOverrides', 'fingerprint', 'group', 'proxyId', 'profileProxyId', 'proxyMode'].map(key => [key, profile?.[key] ?? null])));
 
 /** Private identity: proxy credentials are hashed in memory and never exported. */
@@ -111,14 +115,15 @@ export class TerminalBrowserBroker {
     this.protectBrowserOperation = protectBrowserOperation;
     this.sessions = new Map(); this.pending = new Set(); this.closed = false;
   }
-  async createSession({ sessionId, profileId, browserProfileId, context, readSshConnections = null }) {
+  async createSession({ sessionId, profileId, browserProfileId, context, readSshConnections = null, prepareCredentials = null }) {
     id(sessionId); id(profileId);
     if (!browserProfileId || browserProfileId === 'system') throw fail('Choose an Envara browser for Claude Code.', 'CLAUDE_BROWSER_REQUIRED');
     id(browserProfileId);
     if (readSshConnections !== null && typeof readSshConnections !== 'function') throw fail('Invalid SSH discovery binding.', 'CLAUDE_BROWSER_INVALID_BINDING');
+    if (prepareCredentials !== null && typeof prepareCredentials !== 'function') throw fail('Invalid credential preparation binding.', 'CLAUDE_BROWSER_INVALID_BINDING');
     if (this.closed || this.sessions.has(sessionId)) throw fail('Browser session is unavailable.');
     if (context?.id !== profileId || !context.proxy || !context.proxyId || context.network?.ok !== true) throw fail('Verify the selected network before starting Claude Code.', 'CLAUDE_BROWSER_NETWORK_REQUIRED');
-    const session = { sessionId, profileId, browserProfileId, readSshConnections, routeSignature: browserRouteSignature(context), sourceSignature: browserContextSignature(context), token: randomBytes(32).toString('hex'), disposed: false, queue: Promise.resolve(), sockets: new Set() };
+    const session = { sessionId, profileId, browserProfileId, readSshConnections, prepareCredentials, routeSignature: browserRouteSignature(context), sourceSignature: browserContextSignature(context), token: randomBytes(32).toString('hex'), disposed: false, queue: Promise.resolve(), sockets: new Set() };
     this.sessions.set(sessionId, session);
     try {
       const chosen = await this.validateBinding(session, { initial: true });
@@ -173,6 +178,17 @@ export class TerminalBrowserBroker {
     session.queue = pending.catch(() => {});
     this.pending.add(pending); pending.finally(() => this.pending.delete(pending)).catch(() => {});
     return pending;
+  }
+  async prepareSessionCredentials(session) {
+    await this.validateBinding(session);
+    // The main process binds the callback to this terminal's existing HOME.
+    // No path, account, or credential authority comes from the HTTP caller.
+    const prepare = session.prepareCredentials;
+    if (typeof prepare !== 'function') throw fail('Credential preparation is unavailable.', 'CLAUDE_KEYCHAIN_UNAVAILABLE');
+    const result = await prepare();
+    await this.validateBinding(session);
+    if (!['ready', 'not-required'].includes(result?.status)) throw fail('Credential preparation is unavailable.', 'CLAUDE_KEYCHAIN_UNAVAILABLE');
+    return { ready: true };
   }
   async operate(session, name, args) {
     checkedTool(name, args);
@@ -254,11 +270,28 @@ export class TerminalBrowserBroker {
     const received = request.headers.authorization;
     const expected = `Bearer ${session.token}`;
     if (typeof received !== 'string' || Buffer.byteLength(received) !== Buffer.byteLength(expected) || !timingSafeEqual(Buffer.from(received), Buffer.from(expected))) { request.resume(); return send(403, { error: 'unauthorized' }); }
-    if (request.method !== 'POST' || !['/mcp', '/link'].includes(request.url) || request.headers.origin) { request.resume(); return send(404, { error: 'not-found' }); }
+    if (request.method !== 'POST' || !['/mcp', '/link', '/credentials/prepare'].includes(request.url) || request.headers.origin) { request.resume(); return send(404, { error: 'not-found' }); }
     try {
       let size = 0; const chunks = [];
-      for await (const chunk of request) { size += chunk.length; if (size > 256 * 1024) { send(413, { error: 'too-large' }); request.destroy(); return; } chunks.push(chunk); }
-      let payload; try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return send(request.url === '/link' ? 400 : 200, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Invalid JSON.' } }); }
+      const limit = request.url === '/credentials/prepare' ? 1024 : 256 * 1024;
+      for await (const chunk of request) { size += chunk.length; if (size > limit) { send(413, { error: 'too-large' }); request.destroy(); return; } chunks.push(chunk); }
+      let payload; try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {
+        if (request.url === '/credentials/prepare') return send(400, { error: 'invalid-body' });
+        return send(request.url === '/link' ? 400 : 200, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Invalid JSON.' } });
+      }
+      if (request.url === '/credentials/prepare') {
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length)
+          return send(400, { error: 'invalid-body' });
+        try { return send(200, await this.enqueue(session, () => this.prepareSessionCredentials(session))); }
+        catch (error) {
+          // Only fixed categories, stages and numeric status cross the socket.
+          // Never forward paths, raw native output, or callback messages.
+          const diagnostic = sanitizeClaudeKeychainDiagnostic(error?.keychainDiagnostic);
+          return send(503, { error: 'credential-preparation-failed',
+            code: keychainCodes.has(error?.code) ? error.code : 'CLAUDE_KEYCHAIN_UNAVAILABLE',
+            ...(diagnostic ? { keychainDiagnostic: diagnostic } : {}) });
+        }
+      }
       if (request.url === '/link') {
         let url;
         try {
@@ -281,7 +314,7 @@ export class TerminalBrowserBroker {
     // Creation may still be yielding while disposal happens. A second cleanup
     // must collect resources that creation allocated before noticing revocation.
     session.disposed = true; session.token = ''; this.sessions.delete(session.sessionId);
-    session.readSshConnections = null;
+    session.readSshConnections = null; session.prepareCredentials = null;
     // Keep cleanup attempts serialized, but a failed filesystem removal must
     // not poison every later Close. Revocation above never depends on cleanup.
     session.disposal = Promise.resolve(session.disposal).catch(() => {}).then(async () => {

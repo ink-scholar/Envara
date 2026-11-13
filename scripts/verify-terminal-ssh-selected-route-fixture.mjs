@@ -276,7 +276,10 @@ try {
   }
   check('selected B and host key/password probes require explicit confirmation before saving and perform zero authentication');
   const proxy={protocol:'http',host:'127.0.0.1',port:proxyServer.address().port,username:proxyUser,password:proxyPassword};
-  terminal=new TerminalService({dataDir,sshManager:manager,availableLocales:['en_US.UTF-8'],additionalExecutablePaths:[path.dirname(node)],
+  terminal=new TerminalService({
+    // Keychain is outside this fixture; verify-claude-keychain.mjs covers it separately.
+    claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
+    dataDir,sshManager:manager,availableLocales:['en_US.UTF-8'],additionalExecutablePaths:[path.dirname(node)],
     resolveContext:async id=>({id,name:'Owned route owner A',timezone:'UTC',locale:'en-US',proxy,proxyId:'owner-A',managedProxy:true,privacy:{mode:'strict'},network:{ok:true,source:'owned-fixture'}}),
     ptyFactory:(program,args,settings)=>nativeLaunch(program,args,settings,true),onEvent:event=>{if(event.type==='data')outputs.set(event.sessionId,(outputs.get(event.sessionId)??'')+event.data);}});
   services.push(terminal);await terminal.ready;terminal.hostHome=hostHome;

@@ -70,6 +70,7 @@ async function fixture(t, options = {}) {
     },
   };
   const service = new TerminalService({ dataDir: path.join(root, 'data'), sshManager,
+    claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
     availableLocales: ['C', 'en_US.UTF-8'], resolveContext: async id => ({ ...structuredClone(context), id }),
     ...(options.resolveSshContext ? { resolveSshContext: options.resolveSshContext } : {}),
     linkChannel: { executableDirectory: async () => '/owned/link-bin', environment: () => ({ ENVARA_LINK_SOCKET: '/owned/link.sock', ENVARA_LINK_TOKEN: 'synthetic-link-token' }) },

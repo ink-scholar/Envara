@@ -29,7 +29,7 @@ async function fixture(t) {
   };
   const broker = new TerminalBrowserBroker({ service, dataDir: root, nodeExecutable: process.execPath, onError: event => errors.push(event) });
   t.after(async () => { await broker.shutdown(); await rm(root, { recursive: true, force: true }); });
-  const create = (sessionId = 'term_a', browserProfileId = 'prof_b', readSshConnections = null) => broker.createSession({ sessionId, profileId: 'prof_a', browserProfileId, context: clone(contexts.get('prof_a')), readSshConnections });
+  const create = (sessionId = 'term_a', browserProfileId = 'prof_b', readSshConnections = null, prepareCredentials = null) => broker.createSession({ sessionId, profileId: 'prof_a', browserProfileId, context: clone(contexts.get('prof_a')), readSshConnections, prepareCredentials });
   return { broker, service, contexts, state, calls, errors, create };
 }
 const send = (binding, request) => requestBrowserBroker(request, { socketPath: binding.environment.ENVARA_BROWSER_SOCKET, token: binding.environment.ENVARA_BROWSER_TOKEN });
@@ -42,6 +42,109 @@ const postLink = (binding, payload) => new Promise((resolve, reject) => {
   const request = http.request({ socketPath: binding.environment.ENVARA_LINK_SOCKET, path: '/link', method: 'POST', headers: { Authorization: `Bearer ${binding.environment.ENVARA_LINK_TOKEN}`, 'Content-Length': Buffer.byteLength(body) } }, response => {
     let text = ''; response.setEncoding('utf8'); response.on('data', chunk => text += chunk); response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(text) }));
   }); request.on('error', reject); request.end(body);
+});
+const postCredentials = (binding, { body = '{}', token = binding.environment.ENVARA_BROWSER_TOKEN,
+  method = 'POST', endpoint = '/credentials/prepare', origin = null } = {}) => new Promise((resolve, reject) => {
+  const headers = { 'Content-Length': Buffer.byteLength(body), ...(token === null ? {} : { Authorization: `Bearer ${token}` }),
+    ...(origin === null ? {} : { Origin: origin }) };
+  const request = http.request({ socketPath: binding.environment.ENVARA_BROWSER_SOCKET, path: endpoint, method, headers }, response => {
+    let text = ''; response.setEncoding('utf8'); response.on('data', chunk => text += chunk);
+    response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(text) }));
+  }); request.on('error', reject); request.end(body);
+});
+
+test('credential preparation is session-scoped, private, and performs no browser operation', async t => {
+  const f = await fixture(t), calls = [];
+  const a = await f.create('term_a', 'prof_b', null, async (...args) => { calls.push(['a', args]); return { status: 'ready', changed: true }; });
+  const b = await f.create('term_b', 'prof_b', null, async (...args) => { calls.push(['b', args]); return { status: 'not-required', changed: false }; });
+  assert.deepEqual(await postCredentials(a), { status: 200, body: { ready: true } });
+  assert.deepEqual(await postCredentials(b), { status: 200, body: { ready: true } });
+  assert.deepEqual(calls, [['a', []], ['b', []]]);
+  const listed = await send(a, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
+  assert.deepEqual(listed.result.tools.map(item => item.name), TERMINAL_TOOLS.map(item => item.name));
+  assert.equal((await send(a, rpc('credentials_prepare'))).result.isError, true);
+  assert.equal(f.calls.filter(call => ['ensure', 'rest', 'mcp'].includes(call.kind)).length, 0);
+});
+
+test('credential preparation rejects missing or other-session authority and client-selected paths', async t => {
+  const f = await fixture(t); let prepared = 0;
+  const a = await f.create('term_a', 'prof_b', null, async () => { prepared++; return { status: 'ready' }; });
+  const b = await f.create('term_b');
+  for (const token of [null, 'f'.repeat(64), b.environment.ENVARA_BROWSER_TOKEN])
+    assert.equal((await postCredentials(a, { token })).status, 403);
+  for (const body of ['null', '[]', '"text"', '', '{', '{"home":"/private/other"}', '{"sessionId":"term_b"}', '{"profileId":"prof_b"}'])
+    assert.equal((await postCredentials(a, { body })).status, 400);
+  for (const options of [{ method: 'GET' }, { endpoint: '/credentials/prepare?home=other' }, { origin: 'https://example.test' }])
+    assert.equal((await postCredentials(a, options)).status, 404);
+  assert.equal(prepared, 0);
+  assert.equal(f.calls.filter(call => ['ensure', 'rest', 'mcp'].includes(call.kind)).length, 0);
+});
+
+test('credential preparation refuses missing callbacks and sanitizes native failure details', async t => {
+  const f = await fixture(t), missing = await f.create();
+  const unavailable = { status: 503, body: { error: 'credential-preparation-failed', code: 'CLAUDE_KEYCHAIN_UNAVAILABLE' } };
+  assert.deepEqual(await postCredentials(missing), unavailable);
+  const secret = '/private/synthetic-account/token';
+  let outcome = Object.assign(new Error(secret), { code: 'CLAUDE_KEYCHAIN_LOCKED', stdout: secret, osStatus: -25308, stage: 'host-query' });
+  const binding = await f.create('term_b', 'prof_b', null, async () => { if (outcome instanceof Error) throw outcome; return outcome; });
+  assert.deepEqual(await postCredentials(binding), { status: 503, body: { error: 'credential-preparation-failed', code: 'CLAUDE_KEYCHAIN_LOCKED' } });
+  outcome.keychainDiagnostic = { stage: 'host-query', osStatus: -25308 };
+  assert.deepEqual(await postCredentials(binding), { status: 503, body: { error: 'credential-preparation-failed', code: 'CLAUDE_KEYCHAIN_LOCKED',
+    keychainDiagnostic: { stage: 'host-query', osStatus: -25308 } } });
+  for (const invalid of [{ stage: secret, osStatus: 0 }, { stage: 'select', osStatus: 2147483648 },
+    { stage: 'select', osStatus: -2147483649 }, { stage: 'select', osStatus: null, path: secret }, null, []]) {
+    outcome.keychainDiagnostic = invalid;
+    assert.deepEqual(await postCredentials(binding), { status: 503, body: { error: 'credential-preparation-failed', code: 'CLAUDE_KEYCHAIN_LOCKED' } });
+  }
+  for (const bad of [Object.assign(new Error(secret), { code: 'CLAUDE_KEYCHAIN_PRIVATE_SECRET' }),
+    Object.assign(new Error(secret), { code: 'TERMINAL_NOT_RUNNING' }), null, { status: 'maybe-ready', secret }]) {
+    outcome = bad;
+    assert.deepEqual(await postCredentials(binding), unavailable);
+  }
+  await assert.rejects(f.create('term_c', 'prof_b', null, true), { code: 'CLAUDE_BROWSER_INVALID_BINDING' });
+});
+
+test('credential preparation rechecks binding before and after the main-process operation', async t => {
+  const f = await fixture(t); let prepared = 0, changeDuring = false;
+  const binding = await f.create('term_a', 'prof_b', null, async () => {
+    prepared++; if (changeDuring) f.contexts.get('prof_a').managedRoute.coreGeneration = 'changed';
+    return { status: 'ready' };
+  });
+  f.contexts.get('prof_a').managedRoute.coreGeneration = 'changed';
+  assert.equal((await postCredentials(binding)).status, 503); assert.equal(prepared, 0);
+  f.contexts.get('prof_a').managedRoute.coreGeneration = seed.managedRoute.coreGeneration; changeDuring = true;
+  assert.equal((await postCredentials(binding)).status, 503); assert.equal(prepared, 1);
+  assert.equal(f.calls.filter(call => ['ensure', 'rest', 'mcp'].includes(call.kind)).length, 0);
+});
+
+test('credential preparations serialize and run again on each explicit invocation', async t => {
+  const f = await fixture(t); let count = 0, active = 0, maximum = 0, entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const binding = await f.create('term_a', 'prof_b', null, async () => {
+    count++; active++; maximum = Math.max(maximum, active);
+    if (count === 1) { entered(); await gate; }
+    active--; return { status: 'ready' };
+  });
+  const first = postCredentials(binding); await started;
+  const second = postCredentials(binding); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(count, 1); release();
+  assert.equal((await first).status, 200); assert.equal((await second).status, 200);
+  assert.equal(count, 2); assert.equal(maximum, 1);
+});
+
+test('revocation during credential preparation never returns renewed launch authority', async t => {
+  const f = await fixture(t); let entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const binding = await f.create('term_a', 'prof_b', null, async () => { entered(); await gate; return { status: 'ready' }; });
+  const session = f.broker.sessions.get('term_a');
+  const pending = postCredentials(binding).catch(error => error); await started;
+  await binding.dispose(); release();
+  assert.ok(await pending instanceof Error);
+  await Promise.allSettled([...f.broker.pending]);
+  assert.equal(session.prepareCredentials, null); assert.equal(session.token, '');
+  await assert.rejects(postCredentials(binding));
 });
 
 test('a real filesystem cleanup failure revokes authority immediately and an explicit retry removes the runtime', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async t => {

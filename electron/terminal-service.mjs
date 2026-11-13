@@ -8,7 +8,7 @@ import { constants } from 'node:fs';
 import { captureTerminalProcess, closeTerminalProcess } from './terminal-process.mjs';
 import { TerminalNetworkFence } from './terminal-network-fence.mjs';
 import { findClaudeExecutable, prepareClaudeSession } from './claude-code-session.mjs';
-import { ClaudeKeychainManager } from './claude-keychain.mjs';
+import { ClaudeKeychainManager, sanitizeClaudeKeychainDiagnostic } from './claude-keychain.mjs';
 import { ensureClaudeInstallation, claudeInstallationStatus as inspectClaudeInstallation } from './claude-code-installation.mjs';
 import { ClaudeAccountStore, DEFAULT_CLAUDE_ACCOUNT, claudeAccountId as validateClaudeAccountId } from './claude-account-store.mjs';
 import { TerminalEntryStore } from './terminal-entry-store.mjs';
@@ -277,6 +277,8 @@ export class TerminalService {
       ...(session.kind === 'claude-code' ? { claudeAccountId: session.claudeAccountId, claudeAccountName: session.claudeAccountName ?? null, claudeInstallSource: session.claudeInstallSource,
         deviceIdentifierRestrictions: session.deviceIdentifierRestrictions === true } : {}),
       ...(session.claudeInstall ? { claudeInstall: { ...session.claudeInstall } } : {}),
+      keychainWarningCode: session.keychainWarningCode ?? null,
+      keychainDiagnostic: sanitizeClaudeKeychainDiagnostic(session.keychainDiagnostic),
       ...(session.sshConnections ? { ssh: { privateKeyProtection: session.sshPrivateKeyProtection === true,
         available: sshAvailable,
         connections: session.sshConnections } } : {}),
@@ -838,6 +840,77 @@ export class TerminalService {
     session.claudeInstall = safe;
     this.emit(session, 'status', { status: 'starting', claudeInstall: safe });
   }
+  async prepareSessionKeychain(session, home, { required = true } = {}) {
+    // Both terminal kinds share this HOME. Prepare its selection on explicit
+    // startup, and recheck it before each manual dedicated Claude invocation.
+    // All native work stays in the main process, outside the shell's Seatbelt.
+    const previous = session.keychainPreparation ?? Promise.resolve();
+    const pending = previous.catch(() => {}).then(async () => {
+      if (this.closed || session.finished || session.finishing || session.startCancelled
+        || !['starting', 'running'].includes(session.status) || this.sessions.get(session.sessionId) !== session)
+        throw codeError('终端已停止。', 'TERMINAL_NOT_RUNNING');
+      try {
+        const result = await this.claudeKeychain.prepare({ home, hostHome: this.hostKeychainHome });
+        if (!['ready', 'not-required'].includes(result?.status))
+          throw codeError('终端登录凭据存储暂不可用，请检查钥匙串后重试。', 'CLAUDE_KEYCHAIN_UNAVAILABLE');
+        session.keychainWarningCode = null;
+        session.keychainDiagnostic = null;
+        for (const other of this.sessions.values()) {
+          if (other.profileId === session.profileId && other.kind !== 'claude-code'
+            && other.status === 'running' && !other.finished && other.keychainWarningCode) {
+            other.keychainWarningCode = null;
+            other.keychainDiagnostic = null;
+            this.emit(other, 'status', { status: 'running', keychainWarningCode: null });
+          }
+        }
+        return result;
+      } catch (error) {
+        session.keychainDiagnostic = sanitizeClaudeKeychainDiagnostic(error?.keychainDiagnostic);
+        if (error?.keychainPreparationIncomplete && typeof error.cleanupError === 'string')
+          session.keychainPreparationIssue = error.cleanupError;
+        // An unavailable account store must not prevent a basic shell from
+        // opening. Only known, clean refusals are optional; uncertain native
+        // work and unsafe paths remain failures for every terminal kind.
+        if (!required && !error?.keychainPreparationIncomplete && !error?.cleanupError
+          && ['CLAUDE_KEYCHAIN_LOCKED', 'CLAUDE_KEYCHAIN_MISSING'].includes(error?.code)) {
+          session.keychainWarningCode = error.code;
+          return { status: 'unavailable', changed: false };
+        }
+        throw error;
+      }
+    });
+    session.keychainPreparation = pending;
+    try { return await pending; }
+    finally { if (session.keychainPreparation === pending) session.keychainPreparation = null; }
+  }
+  async prepareClaudeCredentials(session, home) {
+    const assertActive = () => {
+      if (this.closed || this.sessions.get(session.sessionId) !== session || session.kind !== 'claude-code'
+        || session.status !== 'running' || session.finished || session.finishing || session.startCancelled
+        || session.abortController.signal.aborted || session.networkFailure || !session.networkFence || !session.browserBinding)
+        throw codeError('Claude 会话已停止或网络已改变，请新建终端。', 'CLAUDE_BROWSER_SESSION_ENDED');
+    };
+    assertActive();
+    if (session.keychainPreparationIssue)
+      throw Object.assign(codeError('Claude 钥匙串准备的收尾检查未通过。请保留现有资料并联系维护者处理。', 'CLAUDE_KEYCHAIN_CLEANUP_FAILED'), {
+        keychainDiagnostic: sanitizeClaudeKeychainDiagnostic(session.keychainDiagnostic),
+      });
+    let result;
+    try { result = await this.prepareSessionKeychain(session, home); }
+    catch (error) {
+      if (session.keychainPreparationIssue) {
+        session.error ??= this.redact(session, error.message, true);
+        session.errorCode ??= error.code;
+        session.cleanupError = session.keychainPreparationIssue;
+      }
+      this.emit(session, 'status', { status: session.status, ...(session.error ? { error: session.error } : {}),
+        ...(session.errorCode ? { errorCode: session.errorCode } : {}), ...(session.cleanupError ? { cleanupError: session.cleanupError } : {}) });
+      throw error;
+    }
+    assertActive();
+    this.emit(session, 'status', { status: session.status });
+    return result;
+  }
   async startSession({ id, cwd, columns, rows, context: copiedContext, source, kind = 'shell', browserProfileId = null, account = null, requestId = null, claudeInstallSource = 'download', savedEntry = null }) {
     if ([...this.sessions.values()].filter(session => ['starting', 'running', 'closing'].includes(session.status)).length >= MAX_SESSIONS) throw codeError('最多同时打开 8 个终端会话。', 'TERMINAL_LIMIT');
     const session = { sessionId: `term_${randomUUID().replaceAll('-', '')}`, profileId: id, kind, requestId, claudeAccountId: account?.id ?? null, claudeAccountName: account?.name ?? null, claudeInstallSource: kind === 'claude-code' ? claudeInstallSource : null, abortController: new AbortController(), browserProfileId: kind === 'claude-code' ? browserProfileId : null, status: 'starting', cwd, columns: integer(columns, 100, 20, 400), rows: integer(rows, 30, 5, 150), startedAt: new Date().toISOString(), sequence: 0, replay: '', events: [], queuedBytes: 0, secretTail: '', secrets: [], disposables: [], finished: false, pumping: false };
@@ -918,27 +991,22 @@ export class TerminalService {
       }
       const withSsh = environment => ({ ...environment, ...session.sshBinding?.environment,
         PATH: [session.sshBinding?.binDirectory, environment.PATH].filter(Boolean).join(path.delimiter) });
-      let claudeLaunch = null;
       if (kind === 'claude-code') {
         if (!proxy || !loopbackRoutePort(session.bridge, endpoint) || !this.networkFence) throw codeError('Claude Code 专用会话需要支持网络围栏的代理线路。', 'CLAUDE_NETWORK_FENCE_REQUIRED');
         if (!this.browserBroker || !linkShim) throw codeError('Claude 浏览器通道不可用，未启动会话。', 'CLAUDE_BROWSER_UNAVAILABLE');
-        // A private HOME has no macOS default Keychain on a clean launch. Only
-        // this explicit session start may prepare its local selection metadata.
-        // The helper never reads credentials or changes the host selection.
-        session.keychainPreparation = this.claudeKeychain.prepare({ home: directories.home, hostHome: this.hostKeychainHome }).catch(error => {
-          if (error?.keychainPreparationIncomplete && typeof error.cleanupError === 'string') session.keychainPreparationIssue = error.cleanupError;
-          throw error;
-        });
-        try { await session.keychainPreparation; }
-        finally { session.keychainPreparation = null; }
-        this.assertStarting(session);
+      }
+      await this.prepareSessionKeychain(session, directories.home, { required: kind === 'claude-code' });
+      this.assertStarting(session);
+      let claudeLaunch = null;
+      if (kind === 'claude-code') {
         const installation = await this.claudeInstaller({ home: directories.home, source: session.claudeInstallSource,
           findHostExecutable: () => this.claudeExecutableResolver({ hostHome: this.hostHome, platform: process.platform, additionalExecutablePaths: this.additionalExecutablePaths }),
           downloadContext: { proxyUrl: endpoint, signal: session.abortController.signal },
           onProgress: progress => this.installProgress(session, progress) });
         this.assertStarting(session);
         const binding = await this.browserBroker.createSession({ sessionId: session.sessionId, profileId: id, browserProfileId, context: session.launchContext,
-          readSshConnections: () => this.readSessionSshConnections(session) });
+          readSshConnections: () => this.readSessionSshConnections(session),
+          prepareCredentials: () => this.prepareClaudeCredentials(session, directories.home) });
         try { this.assertStarting(session); }
         catch (error) { await this.retainLaunchCleanup(session, 'browserBinding', binding); throw error; }
         session.browserBinding = binding;
@@ -1022,7 +1090,8 @@ export class TerminalService {
           networkRef: terminalEntryNetwork(session.launchContext) });
         session.savedTerminalId = entry.id; session.savedTerminalName = entry.name;
         this.assertStarting(session);
-        session.status = 'running'; this.emit(session, 'status', { status: 'running', savedTerminalId: entry.id, savedTerminalName: entry.name });
+        session.status = 'running'; this.emit(session, 'status', { status: 'running', savedTerminalId: entry.id, savedTerminalName: entry.name,
+          keychainWarningCode: session.keychainWarningCode ?? null });
       }
       this.pruneSessions();
       return this.metadata(session);
@@ -1036,12 +1105,14 @@ export class TerminalService {
         : (session.startCancelled || this.closed) && !error?.code?.startsWith('CLAUDE_KEYCHAIN_') ? codeError('终端启动已取消。', 'TERMINAL_START_CANCELLED') : storageFailure(error);
       session.error ??= this.redact(session, reported.message ?? '终端无法启动。', true);
       session.errorCode ??= reported.code ?? 'TERMINAL_START_FAILED';
+      session.keychainDiagnostic ??= sanitizeClaudeKeychainDiagnostic(reported.keychainDiagnostic);
       session.status = 'closing';
       try { await this.cleanup(session); session.finished = true; session.status = reported.code === 'TERMINAL_START_CANCELLED' ? 'closed' : 'error'; this.releaseLaunchContext(session); }
       catch { session.cleanupError = '终端进程清理未完成，请重试关闭会话。'; }
       this.emit(session, 'status', { status: session.status, error: session.error, errorCode: session.errorCode, ...(session.cleanupError ? { cleanupError: session.cleanupError } : {}) });
       this.pruneSessions();
-      throw codeError(session.error, session.errorCode);
+      const diagnostic = sanitizeClaudeKeychainDiagnostic(session.keychainDiagnostic);
+      throw Object.assign(codeError(session.error, session.errorCode), diagnostic ? { keychainDiagnostic: diagnostic } : {});
     }
   }
   releaseLaunchContext(session) {
@@ -1120,7 +1191,8 @@ export class TerminalService {
     })().catch(() => { session.pumping = false; }); });
   }
   emit(session, type, value = {}) {
-    const event = { type, sessionId: session.sessionId, profileId: session.profileId, ...(session.requestId ? { requestId: session.requestId } : {}), sequence: ++session.sequence, ...value };
+    const event = { type, sessionId: session.sessionId, profileId: session.profileId, ...(session.requestId ? { requestId: session.requestId } : {}), sequence: ++session.sequence, ...value,
+      ...(['status', 'exit'].includes(type) ? { keychainDiagnostic: sanitizeClaudeKeychainDiagnostic(session.keychainDiagnostic) } : {}) };
     const bytes = type === 'data' ? Buffer.byteLength(value.data) : 0;
     const delivery = new Promise(resolve => session.events.push({ event, bytes, resolve }));
     session.queuedBytes += bytes;

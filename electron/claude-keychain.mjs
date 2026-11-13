@@ -1,3 +1,4 @@
+import { sanitizeClaudeKeychainDiagnostic } from '../shared/claude-keychain-diagnostic.mjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { constants } from 'node:fs';
@@ -9,7 +10,6 @@ import { promisify } from 'node:util';
 const executeFile = promisify(execFile);
 const nativeCodes = new Set(['INVALID_ARGUMENT', 'UNSAFE_PATH', 'BUSY', 'MISSING', 'LOCKED', 'UNAVAILABLE',
   'EXISTING_SELECTION', 'PREPARATION_FAILED', 'HOST_CHANGED', 'HOST_CHECK_FAILED', 'CLEANUP_FAILED'].map(value => `CLAUDE_KEYCHAIN_${value}`));
-const stages = new Set(['arguments', 'lock', 'scoped-query', 'host-query', 'stage', 'select', 'publish', 'verify', 'host-verify', 'cleanup']);
 const failure = (code = 'CLAUDE_KEYCHAIN_UNAVAILABLE') => Object.assign(new Error('Claude 登录凭据存储暂不可用，请检查钥匙串后重试。'), { code });
 const incompleteCheck = 'Claude 钥匙串准备的收尾检查未通过。请保留现有资料并联系维护者处理。';
 const absolute = value => typeof value === 'string' && path.isAbsolute(value) && path.resolve(value) === value
@@ -18,6 +18,8 @@ const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const sameFile = (a, b) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs
   && a.mode === b.mode && a.uid === b.uid && a.nlink === b.nlink;
+
+export { sanitizeClaudeKeychainDiagnostic } from '../shared/claude-keychain-diagnostic.mjs';
 
 async function resourceFile(filename, limit, executable = false) {
   const before = await lstat(filename);
@@ -60,8 +62,8 @@ export function parseClaudeKeychainReply(text, succeeded) {
     if (!value || Array.isArray(value) || value.schemaVersion !== 1) throw new Error();
     if (succeeded && value.status === 'ready' && typeof value.changed === 'boolean'
       && Object.keys(value).every(key => ['schemaVersion', 'status', 'changed'].includes(key))) return value;
-    if (!succeeded && value.status === 'error' && nativeCodes.has(value.code) && stages.has(value.stage)
-      && (value.osStatus === null || Number.isSafeInteger(value.osStatus) && value.osStatus >= -2147483648 && value.osStatus <= 2147483647)
+    if (!succeeded && value.status === 'error' && nativeCodes.has(value.code)
+      && sanitizeClaudeKeychainDiagnostic({ stage: value.stage, osStatus: value.osStatus })
       && (value.cleanupCode === undefined || value.cleanupCode === 'CLAUDE_KEYCHAIN_CLEANUP_FAILED')
       && (value.hostCheckCode === undefined || ['CLAUDE_KEYCHAIN_HOST_CHANGED', 'CLAUDE_KEYCHAIN_HOST_CHECK_FAILED'].includes(value.hostCheckCode))
       && Object.keys(value).every(key => ['schemaVersion', 'status', 'code', 'stage', 'osStatus', 'cleanupCode', 'hostCheckCode'].includes(key))) return value;
@@ -116,7 +118,11 @@ export class ClaudeKeychainManager {
       throw Object.assign(error, { keychainPreparationIncomplete: true, cleanupError: incompleteCheck });
     }
     if (reply.status !== 'ready') {
-      const error = failure(reply.code);
+      // The parser accepts only fixed stages and an integer/null OS status.
+      // Keep those non-secret facts without retaining native argv or output.
+      const error = Object.assign(failure(reply.code), {
+        keychainDiagnostic: sanitizeClaudeKeychainDiagnostic({ stage: reply.stage, osStatus: reply.osStatus }),
+      });
       if (reply.cleanupCode || reply.code === 'CLAUDE_KEYCHAIN_CLEANUP_FAILED') {
         error.keychainPreparationIncomplete = true;
         error.cleanupError = 'Claude 钥匙串准备的临时资料未能完成清理。请保留现有资料并联系维护者处理。';

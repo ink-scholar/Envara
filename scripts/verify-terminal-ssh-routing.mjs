@@ -352,7 +352,10 @@ try {
   const context = id => ({ id, name: 'Owned routing fixture', timezone: 'UTC', locale: 'en-US', proxy,
     proxyId: id === 'routing-revoke' ? 'fixture-revoke-route' : 'fixture-route', managedProxy: true,
     privacy: { mode: 'strict' }, network: { ok: true, source: 'owned-loopback-fixture' } });
-  terminal = new TerminalService({ dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'], additionalExecutablePaths: [path.dirname(node)],
+  terminal = new TerminalService({
+    // Keychain is outside this fixture; verify-claude-keychain.mjs covers it separately.
+    claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
+    dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'], additionalExecutablePaths: [path.dirname(node)],
     resolveContext: async id => context(id), ptyFactory: (program, args, settings) => nativeLaunch(program, args, settings, true),
     onEvent: event => { if (event.type === 'data') outputs.set(event.sessionId, (outputs.get(event.sessionId) ?? '') + event.data); } });
   services.push(terminal); await terminal.ready; terminal.hostHome = hostHome;
@@ -528,7 +531,10 @@ console.log(JSON.stringify({key:denied(()=>fs.readFileSync(${JSON.stringify(path
   managers.push(manager); await manager.ready;
   const restored = await manager.list({ id: 'routing-revoke' });
   assert.equal(restored.connections.length, 1); assert.equal(restored.connections[0].passwordReady, false);
-  terminal = new TerminalService({ dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'], additionalExecutablePaths: [path.dirname(node)],
+  terminal = new TerminalService({
+    // Keychain is outside this fixture; verify-claude-keychain.mjs covers it separately.
+    claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
+    dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'], additionalExecutablePaths: [path.dirname(node)],
     resolveContext: async id => context(id), ptyFactory: (program, args, settings) => nativeLaunch(program, args, settings, true),
     onEvent: event => { if (event.type === 'data') outputs.set(event.sessionId, (outputs.get(event.sessionId) ?? '') + event.data); } });
   services.push(terminal); await terminal.ready; terminal.hostHome = hostHome;

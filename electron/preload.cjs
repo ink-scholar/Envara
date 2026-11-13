@@ -25,7 +25,7 @@ contextBridge.exposeInMainWorld('envara', Object.freeze({
     if (!result.ok) {
       // contextBridge copies Error.message/stack but drops custom properties.
       // Carry a plain failure across worlds; the renderer restores its Error.
-      throw { name: 'Error', message: result.error.message, code: result.error.code };
+      throw { name: 'Error', message: result.error.message, code: result.error.code, keychainDiagnostic: result.error.keychainDiagnostic };
     }
     return result.value;
   },

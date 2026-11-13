@@ -25,6 +25,7 @@ async function fixture(t, overrides = {}) {
   const fakes = [], events = []; let resolutions = 0;
   const service = new TerminalService({
     dataDir: path.join(root, 'data'),
+    claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
     resolveContext: async id => { resolutions++; return { id, name: id, timezone: 'Asia/Shanghai', timezoneSource: 'manual', proxy: null }; },
     ptyFactory: (_shell, _args, options) => { const pty = new FakePty(options); fakes.push(pty); return pty; },
     processControl: { capture: async pid => ({ pid }), close: async ({ pty }) => { pty.exit(); return { ok: true }; } },
@@ -437,6 +438,7 @@ test('a link-browser preference saved before selecting a folder survives restart
   assert.equal(f.resolutions(), 0);
   await f.service.shutdown();
   const restored = new TerminalService({ dataDir: f.service.dataDir, availableLocales: ['C'], resolveContext: async id => ({ id, timezone: 'UTC', proxy: null }),
+    claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
     ptyFactory: (_shell, _args, options) => new FakePty(options), processControl: { capture: async pid => ({ pid }), close: async ({ pty }) => { pty.exit(); return { ok: true }; } } });
   t.after(() => restored.shutdown().catch(() => {}));
   await restored.ready;

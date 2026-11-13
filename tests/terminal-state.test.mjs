@@ -5,6 +5,27 @@ import { TerminalStreamStore, splitTerminalInput, terminalHeightForPointer, term
 const state = (sequence, replay, status = 'running') => ({ profiles: [{ profileId: 'profile-1', name: 'One', cwd: '/workspace', sessions: [{ sessionId: 'session-1', profileId: 'profile-1', sequence, replay, status, startedAt: '2026-10-07T00:00:00.000Z' }] }] });
 const data = (sequence, value) => ({ type: 'data', profileId: 'profile-1', sessionId: 'session-1', sequence, data: value });
 
+test('keychain warnings follow session status order and clear after preparation succeeds', () => {
+  const store = new TerminalStreamStore();
+  const initial = state(1, 'shell output');
+  initial.profiles[0].sessions[0].keychainWarningCode = 'CLAUDE_KEYCHAIN_LOCKED';
+  store.applySnapshot(initial);
+  const status = (sequence, keychainWarningCode) => ({ type: 'status', profileId: 'profile-1', sessionId: 'session-1',
+    sequence, status: 'running', keychainWarningCode });
+  store.applyEvent(status(3, null));
+  assert.equal(store.getSession('session-1').keychainWarningCode, 'CLAUDE_KEYCHAIN_LOCKED');
+  store.applyEvent(status(2, 'CLAUDE_KEYCHAIN_MISSING'));
+  assert.equal(store.getSession('session-1').keychainWarningCode, null);
+  store.applySnapshot(initial);
+  assert.equal(store.getSession('session-1').keychainWarningCode, null, 'an old snapshot cannot restore a cleared warning');
+  store.applyEvent(status(4, 'untrusted diagnostic text'));
+  assert.equal(store.getSession('session-1').keychainWarningCode, null);
+  const refreshed = state(5, 'shell output');
+  refreshed.profiles[0].sessions[0].keychainWarningCode = null;
+  store.applySnapshot(refreshed);
+  assert.equal(store.getSession('session-1').keychainWarningCode, null);
+});
+
 test('workspace notifications reread persisted state without creating or changing sessions', () => {
   const store = new TerminalStreamStore();
   store.applySnapshot(state(2, 'kept output'));

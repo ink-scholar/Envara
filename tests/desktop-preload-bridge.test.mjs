@@ -16,6 +16,8 @@ const failures = [
   { method: 'prepareTerminalSshPassword', code: 'SSH_HOST_UNTRUSTED', message: 'Synthetic untrusted SSH host.' },
   { method: 'startProfile', code: 'APP_STARTING', message: 'Synthetic startup is still pending.' },
   { method: 'openTerminal', code: 'TERMINAL_ROUTE_UNAVAILABLE', message: '合成线路不可用，请重试。' },
+  { method: 'keychainFailure', code: 'CLAUDE_KEYCHAIN_UNAVAILABLE', message: 'Synthetic Keychain failure.', keychainDiagnostic: { stage: 'host-query', osStatus: -25294 } },
+  { method: 'unsafeDiagnostic', code: 'CLAUDE_KEYCHAIN_UNAVAILABLE', message: 'Synthetic Keychain failure.', keychainDiagnostic: { stage: 'private/path', osStatus: 0 } },
 ];
 let directory, desktop, page, exited;
 const rendererErrors = [];
@@ -51,7 +53,7 @@ for (const [name, value] of Object.entries(${JSON.stringify(directories)})) app.
 const failures = ${JSON.stringify(failures)};
 ipcMain.handle('envara:call', (_event, { method, args }) => {
   const failure = failures.find(item => item.method === method);
-  if (failure) return { ok: false, error: { code: failure.code, message: failure.message } };
+  if (failure) return { ok: false, error: { code: failure.code, message: failure.message, keychainDiagnostic: failure.keychainDiagnostic } };
   if (method === 'uncodedFailure') return { ok: false, error: { message: 'Synthetic uncoded failure.' } };
   if (method === 'success') return { ok: true, value: { method, args, nested: [null, false, 0, '合成数据'] } };
   if (method === 'nullSuccess') return { ok: true, value: null };
@@ -155,4 +157,15 @@ test('uncoded desktop failures remain ordinary renderer Errors without inventing
   });
   assert.deepEqual(result, { message: 'Synthetic uncoded failure.', isError: true, hasCode: false });
   assert.deepEqual(rendererErrors, []);
+});
+
+
+test('the real Electron bridge retains a safe Keychain diagnostic and drops malformed detail in the client', { skip: noDisplay }, async () => {
+  for (const method of ['keychainFailure', 'unsafeDiagnostic']) {
+    const result = await page.evaluate(async method => {
+      try { await window.fixtureApi.call(method); }
+      catch (error) { return { code: error.code, diagnostic: error.keychainDiagnostic ?? null }; }
+    }, method);
+    assert.deepEqual(result, { code: 'CLAUDE_KEYCHAIN_UNAVAILABLE', diagnostic: method === 'keychainFailure' ? { stage: 'host-query', osStatus: -25294 } : null });
+  }
 });

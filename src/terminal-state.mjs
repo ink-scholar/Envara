@@ -1,3 +1,5 @@
+import { sanitizeClaudeKeychainDiagnostic } from '../shared/claude-keychain-diagnostic.mjs';
+
 const validSequence = value => Number.isSafeInteger(value) && value >= 0;
 const MAX_REPLAY_CHARACTERS = 256 * 1024;
 const MAX_RETIRED_SESSIONS = 256;
@@ -54,6 +56,7 @@ export class TerminalStreamStore {
   }
   deliver(entry, event, writes) {
     entry.sequence = event.sequence;
+    if (Object.hasOwn(event, 'keychainDiagnostic')) entry.meta.keychainDiagnostic = sanitizeClaudeKeychainDiagnostic(event.keychainDiagnostic);
     if (event.type === 'data' && typeof event.data === 'string') {
       entry.text = tail(entry.text + event.data);
       if (event.data) writes.push({ sessionId: event.sessionId, data: event.data });
@@ -64,6 +67,8 @@ export class TerminalStreamStore {
       if (typeof event.status === 'string') entry.meta.status = event.status;
       if (typeof event.error === 'string') entry.meta.error = event.error;
       if (typeof event.message === 'string') entry.meta.message = event.message;
+      if (event.keychainWarningCode === null || ['CLAUDE_KEYCHAIN_LOCKED', 'CLAUDE_KEYCHAIN_MISSING'].includes(event.keychainWarningCode))
+        entry.meta.keychainWarningCode = event.keychainWarningCode;
       if (event.claudeInstall && typeof event.claudeInstall === 'object') entry.meta.claudeInstall = { ...event.claudeInstall };
       else if (event.claudeInstall === null) entry.meta.claudeInstall = null;
     }

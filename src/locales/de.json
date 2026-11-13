@@ -1075,5 +1075,7 @@
   "先授权服务器和密钥，保存后新建终端会话。私钥不会复制到环境。": "Autorisiere Server und Schlüssel, speichere und öffne dann eine neue Terminalsitzung. Der private Schlüssel wird nicht in die Umgebung kopiert.",
   "让 Claude 运行 envara-ssh list，查看当前会话可用的连接。": "Bitte Claude, envara-ssh list auszuführen, um die verfügbaren Verbindungen dieser Sitzung anzuzeigen.",
   "尚未授权 SSH 连接。保存配置不会自动连接服务器。": "Es sind noch keine SSH-Verbindungen autorisiert. Das Speichern der Einstellungen verbindet nicht automatisch mit einem Server.",
-  "常用写法": "Üblicher Befehl"
+  "常用写法": "Üblicher Befehl",
+  "登录钥匙串已锁定。终端仍可使用；需要钥匙串的登录操作请在解锁后重试。": "Der Anmeldeschlüsselbund ist gesperrt. Das Terminal bleibt nutzbar. Entsperre den Schlüsselbund, bevor du Anmeldungen erneut versuchst, die ihn benötigen.",
+  "未找到默认钥匙串。终端仍可使用；请检查 macOS 钥匙串后新建终端。": "Kein Standardschlüsselbund gefunden. Das Terminal bleibt nutzbar. Prüfe die macOS-Schlüsselbundverwaltung und öffne anschließend ein neues Terminal."
 }

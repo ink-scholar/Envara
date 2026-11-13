@@ -130,7 +130,10 @@ async function nativeChecks(binaryPath) {
   const observationPath = path.join(selectedDirectory, 'observation.json');
   const clientFile = path.join(selectedDirectory, 'https-client.mjs');
   await writeFile(clientFile, `import https from 'node:https';import fs from 'node:fs';import { HttpsProxyAgent } from ${JSON.stringify(path.join(root, 'node_modules/https-proxy-agent/dist/index.js'))};\nconst p=new URL(process.env.HTTPS_PROXY);const agent=new HttpsProxyAgent(p);const req=https.get(${JSON.stringify(fixture.httpsOriginURL)},{agent,ca:fs.readFileSync(${JSON.stringify(fixture.certificatePath)}),servername:'fixture.anytls.test'},res=>{let body='';res.on('data',c=>body+=c);res.on('end',()=>{fs.writeFileSync(${JSON.stringify(observationPath)},JSON.stringify({status:res.statusCode,body,cwd:process.cwd(),timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,proxyHost:p.hostname,proxyPort:p.port,hasSecret:process.env.ANYTLS_SERVER_PASSWORD!=null}));agent.destroy();});});req.on('error',()=>process.exit(1));req.setTimeout(6000,()=>req.destroy());\n`, { mode: 0o600 });
-  terminal = new TerminalService({ dataDir, resolveContext: id => workspace.resolveWorkspaceContext(id, { force: true }),
+  terminal = new TerminalService({
+    // Keychain is outside this fixture; verify-claude-keychain.mjs covers it separately.
+    claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
+    dataDir, resolveContext: id => workspace.resolveWorkspaceContext(id, { force: true }),
     additionalExecutablePaths: [path.dirname(verificationNode)] });
   await terminal.setDirectory({ id: profileId, path: selectedDirectory });
   const tty = await terminal.create({ id: profileId, columns: 100, rows: 28 });

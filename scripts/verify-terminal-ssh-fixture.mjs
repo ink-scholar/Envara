@@ -169,7 +169,10 @@ try {
     linkChannel = new TerminalLinkChannel({ root: dataDir, onLink: () => { throw new Error('No web links are requested by version-only acceptance.'); } });
     await linkChannel.listen();
   }
-  terminal = new TerminalService({ dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'],
+  terminal = new TerminalService({
+    // Keychain is outside this fixture; verify-claude-keychain.mjs covers it separately.
+    claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
+    dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'],
     ...(claudeExecutable ? { browserBroker: broker, linkChannel, claudeExecutableResolver: async () => claudeExecutable } : {}),
     additionalExecutablePaths: [path.dirname(runtime)], resolveContext: async id => { assert(['ssh-fixture', 'ssh-empty'].includes(id)); return { ...structuredClone(context), id }; },
     ptyFactory: (executable, argv, options) => { const pty = require('node-pty').spawn(executable, argv, options); knownPids.add(pty.pid); return pty; },

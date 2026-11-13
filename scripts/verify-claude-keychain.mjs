@@ -1,4 +1,4 @@
-/** Opt-in macOS Keychain acceptance using an exclusively owned temporary vault.
+/** Opt-in macOS Keychain acceptance using exclusively owned temporary vaults.
  * No real login, account credential, host Keychain item or host default is changed.
  * node scripts/verify-claude-keychain.mjs --helper /absolute/native/helper
  */
@@ -33,13 +33,13 @@ async function privateDirectory(directory) {
  */
 export async function verifyClaudeKeychain({ helperPath, temporaryParent = null, outputPath = null } = {}) {
   const proof = { schemaVersion: 1, checkedAt: new Date().toISOString(), platform: `${process.platform}-${process.arch}`,
-    passed: false, cleanupComplete: false, hostSelectionUnchanged: null, checks: [],
+    passed: false, cleanupComplete: false, hostSelectionUnchanged: null, sourceSelectionUnchanged: null, checks: [],
     limitations: [
       'Synthetic credentials in a temporary Keychain only; no Claude OAuth login or real account persistence is exercised.',
-      'The fixed fixture service and distinct config account names test native Keychain separation, not the official CLI service-name derivation.',
+      'Implicit native credential operations run through real zsh processes, but do not exercise the official CLI service-name derivation or its OAuth flow.',
       'Network checks use owned loopback listeners; this does not repeat all terminal egress acceptance.',
     ] };
-  let stage = 'arguments', temporary, rootIdentity, executable, sourceHome, targetHome, hostHome, fence, hostBefore, failure;
+  let stage = 'arguments', temporary, rootIdentity, executable, sourceHome, targetHome, hostHome, fence, ordinaryFence, hostBefore, sourceBefore, failure;
   let canCleanVault = false, cancellation = false, lastDiagnostic = null;
   const children = new Set(), servers = [];
   const check = description => proof.checks.push(description);
@@ -55,7 +55,7 @@ export async function verifyClaudeKeychain({ helperPath, temporaryParent = null,
   const cancel = () => { cancellation = true; for (const child of children) void stop(child).catch(() => {}); };
   process.on('SIGINT', cancel); process.on('SIGTERM', cancel);
 
-  async function run(command, args, { env, input = '', timeout = 15000, duringCleanup = false } = {}) {
+  async function run(command, args, { env, input = '', timeout = 15000, duringCleanup = false, allowNonzero = false } = {}) {
     if (cancellation && !duringCleanup) throw safeFailure('cancelled');
     lastDiagnostic = null;
     return new Promise((resolve, reject) => {
@@ -78,7 +78,7 @@ export async function verifyClaudeKeychain({ helperPath, temporaryParent = null,
         try {
           if (isAlive(child)) await stop(child);
           children.delete(child);
-          if (code !== 0 || signal || timedOut || overflow) {
+          if ((!allowNonzero && code !== 0) || signal || timedOut || overflow) {
             try {
               const data = JSON.parse(stdout.trim()), diagnostic = {};
               for (const key of ['stage', 'code']) if (typeof data[key] === 'string' && /^[A-Za-z0-9_-]{1,96}$/.test(data[key])) diagnostic[key] = data[key];
@@ -87,39 +87,70 @@ export async function verifyClaudeKeychain({ helperPath, temporaryParent = null,
             } catch {}
             throw safeFailure(stage);
           }
-          resolve({ stdout: stdout.trim(), stderr: stderr.trim() });
+          resolve({ stdout: stdout.trim(), stderr: stderr.trim(), exitCode: code });
         } catch { reject(safeFailure(stage)); }
       });
     });
   }
 
-  const environment = home => ({ ...cleanBase, HOME: home, USERPROFILE: home, TMPDIR: `${temporary}/`,
+  const environment = home => ({ ...cleanBase, HOME: home, USERPROFILE: home, ZDOTDIR: home, TMPDIR: `${temporary}/`,
     CLAUDE_CONFIG_DIR: path.join(temporary, home === sourceHome ? 'config-source' : 'config-a') });
-  async function fixture(mode, home, { args = [], input = '', restricted = true, duringCleanup = false, config = null } = {}) {
+  async function shellRun(argv, home, { dedicated = false, ...options } = {}) {
+    return run('/usr/bin/sandbox-exec', ['-p', dedicated ? fence : ordinaryFence,
+      '/bin/zsh', '-d', '-i', '-c', 'exec "$@"', 'envara-keychain-acceptance', ...argv], {
+      env: environment(home), ...options,
+    });
+  }
+  async function fixture(mode, home, { args = [], input = '', restricted = true, duringCleanup = false, config = null, shell = null } = {}) {
     const command = restricted ? '/usr/bin/sandbox-exec' : executable;
     const argv = [...(restricted ? ['-p', fence, executable] : []), mode, temporary, home, ...args];
     const env = environment(home); if (config) env.CLAUDE_CONFIG_DIR = path.join(temporary, config);
-    const result = await run(command, argv, { env, input, duringCleanup });
+    const result = shell === null ? await run(command, argv, { env, input, duringCleanup })
+      : await shellRun([executable, mode, temporary, home, ...args], home, { dedicated: shell === 'dedicated', env, input, duringCleanup });
     const value = JSON.parse(result.stdout); assert.equal(value.ok, true); return value;
   }
 
-  async function snapshot({ duringCleanup = false } = {}) {
+  async function snapshot(home, { duringCleanup = false } = {}) {
     // Selection metadata only; the fixture never queries any credential in this mode.
     const profile = '(version 1)\n(allow default)\n(deny network*)\n(deny file-write*)\n';
-    const result = await run('/usr/bin/sandbox-exec', ['-p', profile, executable, 'snapshot'], {
-      env: { ...cleanBase, HOME: hostHome, USERPROFILE: hostHome }, duringCleanup,
-    });
-    const value = JSON.parse(result.stdout);
-    assert.equal(value.searchStatus, 0);
-    assert([0, -25307].includes(value.defaultStatus));
-    return value;
+    const selection = {};
+    for (const [domain, mode] of [['common', 'snapshot'], ['user', 'snapshot-user']]) {
+      const result = await run('/usr/bin/sandbox-exec', ['-p', profile, executable, mode], {
+        env: { ...cleanBase, HOME: home, USERPROFILE: home }, duringCleanup,
+      });
+      const value = JSON.parse(result.stdout);
+      assert.equal(value.searchStatus, 0);
+      assert([0, -25307].includes(value.defaultStatus));
+      selection[domain] = value;
+    }
+    return selection;
   }
 
   async function verifyHost({ duringCleanup = false } = {}) {
-    const after = await snapshot({ duringCleanup });
+    const after = await snapshot(hostHome, { duringCleanup });
     const same = JSON.stringify(after) === JSON.stringify(hostBefore);
     proof.hostSelectionUnchanged = proof.hostSelectionUnchanged === false ? false : same;
     assert.equal(same, true, 'Host selection metadata changed.');
+  }
+
+  async function verifySource({ duringCleanup = false } = {}) {
+    if (!sourceBefore) return;
+    const same = JSON.stringify(await snapshot(sourceHome, { duringCleanup })) === JSON.stringify(sourceBefore);
+    proof.sourceSelectionUnchanged = proof.sourceSelectionUnchanged === false ? false : same;
+    assert.equal(same, true, 'Synthetic source selection metadata changed.');
+  }
+
+  async function verifyShellSelection({ dedicated = false, present = true } = {}) {
+    const selected = await shellRun(['/usr/bin/security', 'default-keychain', '-d', 'user'], targetHome, { dedicated, allowNonzero: !present });
+    const list = await shellRun(['/usr/bin/security', 'list-keychains', '-d', 'user'], targetHome, { dedicated });
+    if (present) {
+      const expected = JSON.stringify(path.join(temporary, 'vault', 'acceptance.keychain-db'));
+      assert.equal(selected.exitCode, 0); assert.equal(selected.stdout.trim(), expected);
+      assert.equal(list.stdout.trim(), expected);
+    } else {
+      assert.notEqual(selected.exitCode, 0); assert.equal(selected.stdout, ''); assert.equal(list.stdout, '');
+    }
+    await verifyHost(); await verifySource();
   }
 
   async function listener() {
@@ -147,6 +178,10 @@ export async function verifyClaudeKeychain({ helperPath, temporaryParent = null,
     sourceHome = path.join(temporary, 'source-home'); targetHome = path.join(temporary, 'target-home');
     for (const name of ['source-home', 'target-home', 'vault', 'config-source', 'config-a', 'config-b'])
       await mkdir(path.join(temporary, name), { mode: 0o700 });
+    for (const home of [sourceHome, targetHome]) {
+      await writeFile(path.join(home, '.zshenv'), 'unsetopt GLOBAL_RCS\n', { mode: 0o600, flag: 'wx' });
+      await writeFile(path.join(home, '.zshrc'), 'unsetopt GLOBAL_RCS\n', { mode: 0o600, flag: 'wx' });
+    }
     await mkdir(path.join(sourceHome, 'Library'), { mode: 0o700 });
     await mkdir(path.join(sourceHome, 'Library/Preferences'), { mode: 0o700 });
     const helperFingerprint = async () => {
@@ -172,15 +207,17 @@ export async function verifyClaudeKeychain({ helperPath, temporaryParent = null,
       fixtureSource, '-framework', 'Security', '-framework', 'CoreFoundation', '-o', executable], {
       env: environment(sourceHome), timeout: 30000,
     });
-    stage = 'snapshot-host-selection'; hostBefore = await snapshot();
+    stage = 'snapshot-host-selection'; hostBefore = await snapshot(hostHome);
     const allowed = await listener(), refused = await listener();
-    fence = `${terminalFenceProfile({ deniedLoopbackPorts: [refused.port], restrictDeviceIdentifiers: true })}\n` +
-      `(deny file-write*)\n(allow file-write* (subpath ${JSON.stringify(temporary)}))\n` +
+    const fixtureProtection = `(deny file-write*)\n(allow file-write* (subpath ${JSON.stringify(temporary)}))\n` +
       `(deny file-read-data (subpath ${JSON.stringify(path.join(hostHome, 'Library/Keychains'))}) (subpath "/Library/Keychains"))\n`;
+    ordinaryFence = `${terminalFenceProfile({ deniedLoopbackPorts: [refused.port] })}\n${fixtureProtection}`;
+    fence = `${terminalFenceProfile({ deniedLoopbackPorts: [refused.port], restrictDeviceIdentifiers: true })}\n${fixtureProtection}`;
     stage = 'empty-private-home';
     const empty = await fixture('default', targetHome);
     assert.equal(empty.osStatus, -25307); assert.equal(empty.present, false);
-    check('A fresh private HOME has no default Keychain.');
+    await verifyShellSelection({ present: false });
+    check('A fresh private HOME in an ordinary zsh terminal has no user default Keychain and an empty user search list.');
     stage = 'network-positive-control';
     const outside = await fixture('network', sourceHome, { restricted: false, args: [String(allowed.port), String(refused.port)] });
     assert.equal(outside.allowedErrno, 0); assert.equal(outside.deniedErrno, 0); await sleep(25);
@@ -199,7 +236,10 @@ export async function verifyClaudeKeychain({ helperPath, temporaryParent = null,
     stage = 'source-default-new-process';
     const sourceDefault = await fixture('default', sourceHome);
     assert.equal(sourceDefault.osStatus, 0); assert.equal(sourceDefault.matchesOwnedKeychain, true);
-    check('Only the owned source HOME selects the newly created synthetic Keychain.');
+    sourceBefore = await snapshot(sourceHome);
+    assert.equal(sourceBefore.user.defaultStatus, 0); assert.equal(sourceBefore.user.searchCount, 2);
+    await verifySource();
+    check('Only the owned source HOME selects the synthetic default and retains a second owned Keychain in its search list.');
     stage = 'production-helper-prepare';
     // Production preparation precedes the shell fence. Its own metadata/select
     // workers apply Seatbelt; macOS rejects nesting a second sandbox_init.
@@ -210,36 +250,47 @@ export async function verifyClaudeKeychain({ helperPath, temporaryParent = null,
       finally { await verifyHelper(); }
     };
     const prepared = await prepare();
-    assert.equal(prepared.schemaVersion, 1); assert.equal(prepared.status, 'ready'); assert.equal(prepared.changed, true); await verifyHost();
+    assert.equal(prepared.schemaVersion, 1); assert.equal(prepared.status, 'ready'); assert.equal(prepared.changed, true); await verifyHost(); await verifySource();
     const selected = await fixture('default', targetHome);
     assert.equal(selected.osStatus, 0); assert.equal(selected.matchesOwnedKeychain, true);
-    const repeated = await prepare(); assert.equal(repeated.status, 'ready'); assert.equal(repeated.changed, false); await verifyHost();
-    check('The production helper selects the owned Keychain for the target HOME and preserves it on a repeated preparation.');
-    for (const [account, value, config] of [[firstAccount, firstValue, 'config-a'], [secondAccount, secondValue, 'config-b']]) {
+    const repeated = await prepare(); assert.equal(repeated.status, 'ready'); assert.equal(repeated.changed, false); await verifyHost(); await verifySource();
+    await verifyShellSelection(); await verifyShellSelection({ dedicated: true });
+    check('Ordinary and dedicated zsh terminals resolve the same prepared user default and search list; repeated preparation preserves both source Keychains.');
+    for (const [account, value, config, shell] of [[firstAccount, firstValue, 'config-a', 'ordinary'], [secondAccount, secondValue, 'config-b', 'dedicated']]) {
       stage = `synthetic-write-${config}`;
-      const written = await fixture('write', targetHome, { args: [account], input: `${password}\n${value}\n`, config });
-      assert.equal(written.osStatus, 0); await verifyHost();
+      const written = await fixture('write', targetHome, { args: [account], input: `${value}\n`, config, shell });
+      assert.equal(written.osStatus, 0); await verifyHost(); await verifySource();
       stage = `fresh-process-read-${config}`;
-      const reopened = await fixture('read', targetHome, { args: [account], input: `${password}\n${value}\n`, config });
+      const reopened = await fixture('read', targetHome, { args: [account], input: `${value}\n`, config, shell });
       assert.equal(reopened.osStatus, 0); assert.equal(reopened.matchesSyntheticValue, true);
     }
-    check('Two fresh processes reopen and read distinct synthetic account values under a fixed service and separate config directories.');
+    check('Fresh ordinary and dedicated shell processes write and read distinct synthetic accounts through implicit default/search-list APIs, without opening or unlocking a vault explicitly.');
+    stage = 'removed-selector-control';
+    const selector = path.join(targetHome, 'Library', 'Preferences', 'com.apple.security.plist');
+    const selectorInfo = await lstat(selector);
+    assert(selectorInfo.isFile() && !selectorInfo.isSymbolicLink() && selectorInfo.uid === process.getuid() && selectorInfo.nlink === 1);
+    await rm(selector);
+    await verifyShellSelection({ present: false });
+    stage = 'reprepare-after-selector-removal';
+    const repaired = await prepare(); assert.equal(repaired.status, 'ready'); assert.equal(repaired.changed, true);
+    await verifyShellSelection(); await verifyShellSelection({ dedicated: true });
+    check('Removing only the owned target selector reproduces the missing-default failure; preparation repairs it without changing the host or source selection.');
     stage = 'account-separation';
-    const different = await fixture('read', targetHome, { args: [firstAccount], input: `${password}\n${secondValue}\n`, config: 'config-b' });
+    const different = await fixture('read', targetHome, { args: [firstAccount], input: `${secondValue}\n`, config: 'config-b', shell: 'dedicated' });
     assert.equal(different.osStatus, 0); assert.equal(different.matchesSyntheticValue, false);
     stage = 'delete-first-synthetic-item';
-    const removed = await fixture('delete-item', targetHome, { args: [firstAccount], input: `${password}\n` });
-    assert.equal(removed.osStatus, 0); await verifyHost();
-    const absent = await fixture('read', targetHome, { args: [firstAccount], input: `${password}\n${firstValue}\n` });
+    const removed = await fixture('delete-item', targetHome, { args: [firstAccount], shell: 'ordinary' });
+    assert.equal(removed.osStatus, 0); await verifyHost(); await verifySource();
+    const absent = await fixture('read', targetHome, { args: [firstAccount], input: `${firstValue}\n`, shell: 'ordinary' });
     assert.equal(absent.osStatus, -25300); assert.equal(absent.found, false);
-    const retained = await fixture('read', targetHome, { args: [secondAccount], input: `${password}\n${secondValue}\n`, config: 'config-b' });
+    const retained = await fixture('read', targetHome, { args: [secondAccount], input: `${secondValue}\n`, config: 'config-b', shell: 'dedicated' });
     assert.equal(retained.osStatus, 0); assert.equal(retained.matchesSyntheticValue, true);
     stage = 'delete-second-synthetic-item';
-    const last = await fixture('delete-item', targetHome, { args: [secondAccount], input: `${password}\n`, config: 'config-b' });
-    assert.equal(last.osStatus, 0); await verifyHost();
-    const lastAbsent = await fixture('read', targetHome, { args: [secondAccount], input: `${password}\n${secondValue}\n`, config: 'config-b' });
+    const last = await fixture('delete-item', targetHome, { args: [secondAccount], config: 'config-b', shell: 'dedicated' });
+    assert.equal(last.osStatus, 0); await verifyHost(); await verifySource();
+    const lastAbsent = await fixture('read', targetHome, { args: [secondAccount], input: `${secondValue}\n`, config: 'config-b', shell: 'dedicated' });
     assert.equal(lastAbsent.osStatus, -25300); assert.equal(lastAbsent.found, false);
-    check('Deleting one synthetic account leaves the other intact; both items are then independently confirmed absent.');
+    check('Selector repair preserves synthetic credentials; deleting one account leaves the other intact, and both items are then independently confirmed absent.');
     await verifyHelper();
     proof.passed = true;
   } catch {
@@ -250,6 +301,7 @@ export async function verifyClaudeKeychain({ helperPath, temporaryParent = null,
     for (const child of children) { try { await stop(child); children.delete(child); } catch { cleanupFailure = true; } }
     if (temporary && !cleanupFailure) {
       try {
+        await verifySource({ duringCleanup: true });
         if (canCleanVault) {
           stage = 'delete-owned-keychain';
           const cleanup = await fixture('delete-keychain', sourceHome, { duringCleanup: true });
@@ -272,7 +324,7 @@ export async function verifyClaudeKeychain({ helperPath, temporaryParent = null,
     for (const server of servers) await new Promise(resolve => server.close(resolve));
     if (cleanupFailure) { proof.cleanupComplete = false; proof.cleanupFailure = true; proof.passed = false; failure ??= safeFailure('owned-resource-cleanup'); }
     if (cancellation) { proof.passed = false; proof.cancelled = true; failure ??= safeFailure('cancelled'); }
-    if (proof.passed && proof.cleanupComplete) check('The owned Keychain, processes and temporary files are removed; the host default and search list remain unchanged.');
+    if (proof.passed && proof.cleanupComplete) check('Both owned Keychains, processes and temporary files are removed; the host default and search lists remain unchanged.');
     else proof.passed = false;
     if (outputPath !== null) {
       try { await writeFile(outputPath, JSON.stringify(proof, null, 2) + '\n', { mode: 0o600, flag: 'wx' }); }

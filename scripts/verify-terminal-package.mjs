@@ -76,6 +76,8 @@ async function verifyInside(resources, runDir) {
       process.stdout.write(${JSON.stringify(marker)} + JSON.stringify(document) + '\\n');
     `, { mode: 0o600 });
     service = new TerminalService({
+      // Keychain is outside this fixture; verify-claude-keychain.mjs covers it separately.
+      claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
       dataDir, additionalExecutablePaths: [driverDirectory],
       resolveContext: async id => ({ id, name: 'Packaged terminal fixture', timezone: 'Asia/Shanghai', timezoneSource: 'manual', proxy: null }),
       onEvent: event => {

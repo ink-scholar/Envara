@@ -45,3 +45,15 @@ test('cleanup text is bounded and explicit successful cleanup only updates the c
   assert.equal(resolved.cleanupError, ''); assert.equal(resolved.updateOnly, true); assert.equal(resolved.sessionId, 'term_a');
   assert.equal(notices.take({ ...primary, status: 'closed' }), null);
 });
+
+
+test('Keychain diagnostics enrich an incident once and stale snapshots cannot replace them', () => {
+  const notices = new TerminalErrorNotices();
+  const event = { sessionId: 'term_keychain', error: 'Synthetic unavailable storage.', errorCode: 'CLAUDE_KEYCHAIN_UNAVAILABLE', sequence: 1 };
+  notices.take(event);
+  const keychainDiagnostic = { stage: 'scoped-query', osStatus: -25294 };
+  assert.deepEqual(notices.take({ ...event, sequence: 2, keychainDiagnostic }).keychainDiagnostic, keychainDiagnostic);
+  assert.equal(notices.take({ ...event, sequence: 2, keychainDiagnostic }), null);
+  assert.equal(notices.take({ ...event, keychainDiagnostic: { stage: 'host-query', osStatus: 0 } }), null);
+  assert.equal(notices.take({ ...event, sequence: 3, keychainDiagnostic: { stage: 'private/path', osStatus: 0 } }), null);
+});

@@ -412,3 +412,19 @@ test('independent terminal saved-entry operations retain their bound environment
     assert.equal(f.calls.pop().method, method);
   }
 });
+
+test('desktop IPC retains only allowlisted Keychain diagnostics across its preload', async () => {
+  const f = fixture(); await f.startup.start();
+  for (const diagnostic of [{ stage: 'scoped-query', osStatus: -25294 },
+    { stage: 'private/path', osStatus: 0 }, { stage: 'verify', osStatus: 0, stderr: 'private detail' }]) {
+    f.context.handleCall = async () => { throw Object.assign(new Error('Synthetic Keychain failure'), {
+      code: 'CLAUDE_KEYCHAIN_UNAVAILABLE', keychainDiagnostic: diagnostic, stderr: 'private native output',
+    }); };
+    await assert.rejects(f.api.call('openTerminal', { id: 'fixture' }), error => {
+      assert.equal(error.code, 'CLAUDE_KEYCHAIN_UNAVAILABLE');
+      assert.equal(error.stderr, undefined);
+      assert.equal(JSON.stringify(error.keychainDiagnostic), diagnostic.stage === 'scoped-query' ? JSON.stringify(diagnostic) : undefined);
+      return true;
+    });
+  }
+});

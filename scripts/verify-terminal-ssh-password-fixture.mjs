@@ -266,7 +266,10 @@ try {
     broker = new TerminalBrowserBroker({ service, dataDir, nodeExecutable: node });
     links = new TerminalLinkChannel({ root: dataDir, onLink: () => { throw new Error('No links are requested.'); } }); await links.listen();
   }
-  terminal = new TerminalService({ dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'], additionalExecutablePaths: [path.dirname(node)], resolveContext: async id => context(id),
+  terminal = new TerminalService({
+    // Keychain is outside this fixture; verify-claude-keychain.mjs covers it separately.
+    claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
+    dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'], additionalExecutablePaths: [path.dirname(node)], resolveContext: async id => context(id),
     ...(claude ? { browserBroker: broker, linkChannel: links, claudeExecutableResolver: async () => claude } : {}),
     ptyFactory: (command, args, settings) => { inspectLaunch(command, args, settings); return require('node-pty').spawn(command, args, settings); },
     onEvent: event => { if (event.type === 'data') output.set(event.sessionId, (output.get(event.sessionId) ?? '') + event.data); } });
@@ -501,7 +504,10 @@ try {
   assert.equal((await manager.list({ id: 'pw-library' })).connections.length, 150);
   const reopened = await manager.list({ id: 'pw-main' });
   assert.equal(reopened.connections.length, 1); assert.equal(reopened.connections[0].passwordReady, true); assert.equal(reopened.connections[0].passwordSaved, true);
-  terminal = new TerminalService({ dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'], additionalExecutablePaths: [path.dirname(node)],
+  terminal = new TerminalService({
+    // Keychain is outside this fixture; verify-claude-keychain.mjs covers it separately.
+    claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
+    dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'], additionalExecutablePaths: [path.dirname(node)],
     resolveContext: async id => context(id), ptyFactory: (file, args, settings) => { inspectLaunch(file, args, settings); return require('node-pty').spawn(file, args, settings); },
     onEvent: event => { if (event.type === 'data') output.set(event.sessionId, (output.get(event.sessionId) ?? '') + event.data); } });
   await terminal.ready; terminal.hostHome = hostHome;
@@ -522,7 +528,10 @@ try {
   await manager.ready;
   const forgotten = await manager.list({ id: 'pw-main' });
   assert.equal(forgotten.connections.length, 1); assert.equal(forgotten.connections[0].passwordReady, false); assert.equal(forgotten.connections[0].passwordSaved, false);
-  terminal = new TerminalService({ dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'], additionalExecutablePaths: [path.dirname(node)],
+  terminal = new TerminalService({
+    // Keychain is outside this fixture; verify-claude-keychain.mjs covers it separately.
+    claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
+    dataDir, sshManager: manager, availableLocales: ['en_US.UTF-8'], additionalExecutablePaths: [path.dirname(node)],
     resolveContext: async id => context(id), ptyFactory: (file, args, settings) => { inspectLaunch(file, args, settings); return require('node-pty').spawn(file, args, settings); },
     onEvent: event => { if (event.type === 'data') output.set(event.sessionId, (output.get(event.sessionId) ?? '') + event.data); } });
   await terminal.ready; terminal.hostHome = hostHome;

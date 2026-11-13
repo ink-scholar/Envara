@@ -57,7 +57,7 @@ function managedContext(context, id = 'chosen', proxyId = 'route_a') {
     managedRoute: { proxyId, routeIdentity: `fixture-${proxyId}`, coreGeneration: 1, corePid: 1234 } };
 }
 
-test('Keychain preparation only follows an explicit Claude start and keeps the selected account directories', async t => {
+test('Keychain preparation follows explicit ordinary and dedicated starts while inspection stays inert', async t => {
   const calls = [];
   const f = await fixture(t, { claudeKeychain: { prepare: async request => { calls.push(request); return { status: 'ready', changed: calls.length === 1 }; } } });
   await f.service.snapshot({ id: 'chosen' });
@@ -65,13 +65,167 @@ test('Keychain preparation only follows an explicit Claude start and keeps the s
   const { account } = await f.service.createClaudeAccount({ id: 'chosen', name: 'Work fixture' });
   await f.service.listClaudeAccounts({ id: 'chosen' });
   assert.deepEqual(calls, [], 'read-only status and account metadata must not initialize a Keychain');
+  const ordinary = await f.service.create({ id: 'chosen', directory: f.cwd, kind: 'shell', fresh: true });
+  const ordinaryDuplicate = await f.service.duplicate({ sessionId: ordinary.sessionId });
+  await f.service.close({ sessionId: ordinary.sessionId });
+  await f.service.close({ sessionId: ordinaryDuplicate.sessionId });
+  const reopened = await f.service.reopenSavedTerminal({ id: 'chosen', entryId: ordinary.savedTerminalId });
+  assert.equal(reopened.kind, 'shell');
   const started = await f.service.create({ id: 'chosen', directory: f.cwd, kind: 'claude-code', browserProfileId: 'chosen', claudeAccountId: account.id, fresh: true });
   await f.service.duplicate({ sessionId: started.sessionId });
-  assert.equal(calls.length, 2, 'each new shell checks readiness again');
+  assert.equal(calls.length, 5, 'each new shell, including a saved ordinary terminal, checks readiness again');
   assert.deepEqual(calls[0], { home: f.launches[0].options.env.HOME, hostHome: f.service.hostKeychainHome });
-  assert.deepEqual(calls[1], calls[0]);
-  assert(f.launches[0].options.env.CLAUDE_CONFIG_DIR.endsWith(`/claude-accounts/${account.id}`));
+  assert(calls.every(call => call.home === calls[0].home && call.hostHome === calls[0].hostHome));
+  assert(f.launches[3].options.env.CLAUDE_CONFIG_DIR.endsWith(`/claude-accounts/${account.id}`));
   assert.equal(f.launches[0].options.env.CFFIXED_USER_HOME, undefined);
+});
+
+test('ordinary shells tolerate only clean locked or missing stores and clear shared warnings after readiness', async t => {
+  for (const code of ['CLAUDE_KEYCHAIN_LOCKED', 'CLAUDE_KEYCHAIN_MISSING']) await t.test(code, async t => {
+    let unavailable = true; const events = [];
+    const f = await fixture(t, { onEvent: event => events.push(event), claudeKeychain: { prepare: async () => {
+      if (unavailable) throw Object.assign(new Error('Synthetic unavailable Keychain'), { code });
+      return { status: 'ready', changed: true };
+    } } });
+    const ordinary = await f.service.create({ id: 'chosen', directory: f.cwd, kind: 'shell', fresh: true });
+    const duplicate = await f.service.duplicate({ sessionId: ordinary.sessionId });
+    assert.equal(ordinary.status, 'running'); assert.equal(ordinary.keychainWarningCode, code);
+    assert.equal(duplicate.keychainWarningCode, code);
+    assert(events.some(event => event.sessionId === ordinary.sessionId && event.status === 'running' && event.keychainWarningCode === code));
+    assert.equal(f.bindings.length, 0, 'ordinary preparation does not create a Claude broker');
+    unavailable = false;
+    const dedicated = await f.start();
+    assert.equal(dedicated.keychainWarningCode, null);
+    for (const sessionId of [ordinary.sessionId, duplicate.sessionId]) {
+      assert.equal(f.service.metadata(f.service.sessions.get(sessionId)).keychainWarningCode, null);
+      assert(events.some(event => event.sessionId === sessionId && event.status === 'running' && event.keychainWarningCode === null));
+    }
+  });
+});
+
+test('ordinary shells fail closed on unsafe or uncertain Keychain preparation without losing existing data', async t => {
+  for (const failure of [
+    { code: 'CLAUDE_KEYCHAIN_UNSAFE_PATH' }, { code: 'CLAUDE_KEYCHAIN_UNAVAILABLE' },
+    { code: 'CLAUDE_KEYCHAIN_TIMEOUT', keychainPreparationIncomplete: true, cleanupError: 'Synthetic incomplete cleanup' },
+    { code: 'CLAUDE_KEYCHAIN_MISSING', keychainPreparationIncomplete: true, cleanupError: 'Synthetic incomplete cleanup' },
+    { code: 'CLAUDE_KEYCHAIN_LOCKED', cleanupError: 'Synthetic cleanup uncertainty' },
+  ]) await t.test(failure.code + (failure.cleanupError ? '-uncertain' : ''), async t => {
+    const f = await fixture(t, { claudeKeychain: { prepare: async () => { throw Object.assign(new Error('Synthetic original failure'), failure); } } });
+    await f.service.ready;
+    const directories = await f.service.directories('chosen');
+    const marker = path.join(directories.claude, 'keep.json');
+    await writeFile(marker, 'synthetic account content');
+    await assert.rejects(f.service.create({ id: 'chosen', directory: f.cwd, kind: 'shell', fresh: true }), { code: failure.code });
+    assert.equal(f.launches.length, 0); assert.equal(f.bindings.length, 0);
+    assert.equal(await readFile(marker, 'utf8'), 'synthetic account content');
+  });
+});
+
+test('each manual Claude preflight prepares only its bound HOME and repairs a missing selector before launch', async t => {
+  const calls = [];
+  const f = await fixture(t, { claudeKeychain: { prepare: async request => {
+    calls.push(request);
+    await writeFile(path.join(request.home, 'synthetic-selector'), 'owned selection');
+    return { status: 'ready', changed: true };
+  } } });
+  const started = await f.start(), home = f.launches[0].options.env.HOME;
+  const prepare = f.bindings[0].args.prepareCredentials;
+  assert.equal(typeof prepare, 'function');
+  const account = path.join(f.launches[0].options.env.CLAUDE_CONFIG_DIR, 'keep.json');
+  await writeFile(account, 'synthetic login data');
+  await rm(path.join(home, 'synthetic-selector'));
+  assert.equal((await prepare({ home: '/untrusted/path' })).status, 'ready');
+  assert.equal(await readFile(path.join(home, 'synthetic-selector'), 'utf8'), 'owned selection');
+  await prepare();
+  assert.equal(calls.length, 3);
+  assert(calls.every(call => call.home === home && call.hostHome === f.service.hostKeychainHome));
+  assert.equal(await readFile(account, 'utf8'), 'synthetic login data');
+  await f.service.close({ sessionId: started.sessionId });
+  await assert.rejects(prepare(), { code: 'CLAUDE_BROWSER_SESSION_ENDED' });
+  assert.equal(calls.length, 3, 'a revoked callback cannot renew preparation authority');
+});
+
+test('Close and route revocation wait for manual credential preparation and never accept late readiness', async t => {
+  for (const action of ['close', 'route']) await t.test(action, async t => {
+    const gate = deferred(), entered = deferred(); let calls = 0;
+    const f = await fixture(t, { claudeKeychain: { prepare: async () => {
+      if (++calls > 1) { entered.resolve(); await gate.promise; }
+      return { status: 'ready', changed: false };
+    } } });
+    Object.assign(f.context, managedContext(f.context));
+    const started = await f.start();
+    const operation = f.bindings[0].args.prepareCredentials();
+    const refused = assert.rejects(operation, { code: 'CLAUDE_BROWSER_SESSION_ENDED' });
+    await entered.promise;
+    const closing = action === 'close' ? f.service.close({ sessionId: started.sessionId }) : f.service.invalidateManagedProxy('route_a');
+    let complete = false; closing.then(() => { complete = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(complete, false);
+    gate.resolve();
+    await refused; await closing;
+    await assert.rejects(f.bindings[0].args.prepareCredentials(), { code: 'CLAUDE_BROWSER_SESSION_ENDED' });
+    assert.equal(calls, 2);
+  });
+});
+
+test('uncertain manual preparation retains its first error and cleanup evidence across retries and Close', async t => {
+  let calls = 0;
+  const keychainDiagnostic = { stage: 'host-verify', osStatus: -25307 };
+  const f = await fixture(t, { claudeKeychain: { prepare: async () => {
+    if (++calls > 1) throw Object.assign(new Error('Synthetic original runtime failure'), {
+      code: 'CLAUDE_KEYCHAIN_HOST_CHECK_FAILED', keychainPreparationIncomplete: true, cleanupError: 'Synthetic runtime cleanup is incomplete',
+      keychainDiagnostic,
+    });
+    return { status: 'ready', changed: false };
+  } } });
+  const started = await f.start(), prepare = f.bindings[0].args.prepareCredentials;
+  await assert.rejects(prepare(), { code: 'CLAUDE_KEYCHAIN_HOST_CHECK_FAILED' });
+  await assert.rejects(prepare(), { code: 'CLAUDE_KEYCHAIN_CLEANUP_FAILED', keychainDiagnostic });
+  assert.equal(calls, 2, 'uncertain preparation cannot be retried as renewed authority');
+  await f.service.close({ sessionId: started.sessionId });
+  const session = f.service.sessions.get(started.sessionId);
+  assert.equal(session.errorCode, 'CLAUDE_KEYCHAIN_HOST_CHECK_FAILED');
+  assert.equal(session.cleanupError, 'Synthetic runtime cleanup is incomplete');
+  assert.deepEqual(f.service.metadata(session).keychainDiagnostic, keychainDiagnostic);
+});
+
+test('Keychain startup failures expose only validated stage and OS status across errors, snapshots, and events', async t => {
+  for (const keychainDiagnostic of [{ stage: 'scoped-query', osStatus: -25307 },
+    { stage: '/private/fixture/path', osStatus: -25307 }, { stage: 'verify', osStatus: 0, privateData: 'synthetic-secret' }]) await t.test(JSON.stringify(keychainDiagnostic), async t => {
+    const events = [];
+    const f = await fixture(t, { onEvent: event => events.push(event), claudeKeychain: { prepare: async () => {
+      throw Object.assign(new Error('Synthetic unavailable Keychain'), { code: 'CLAUDE_KEYCHAIN_UNAVAILABLE', keychainDiagnostic });
+    } } });
+    const expected = keychainDiagnostic.stage === 'scoped-query' ? keychainDiagnostic : null;
+    await assert.rejects(f.start(), error => {
+      assert.equal(error.code, 'CLAUDE_KEYCHAIN_UNAVAILABLE');
+      assert.deepEqual(error.keychainDiagnostic, expected ?? undefined); return true;
+    });
+    const session = [...f.service.sessions.values()][0];
+    assert.deepEqual(f.service.metadata(session).keychainDiagnostic, expected);
+    const failure = events.find(event => event.errorCode === 'CLAUDE_KEYCHAIN_UNAVAILABLE');
+    assert.deepEqual(failure.keychainDiagnostic, expected);
+    if (expected) assert.notEqual(failure.keychainDiagnostic, keychainDiagnostic);
+    assert(!JSON.stringify(events).includes('synthetic-secret'));
+    await f.service.close({ sessionId: session.sessionId });
+    assert.deepEqual(f.service.metadata(session).keychainDiagnostic, expected);
+  });
+});
+
+test('manual preparation reports safe diagnostics and clears them after recovery', async t => {
+  let calls = 0; const events = [], keychainDiagnostic = { stage: 'host-query', osStatus: -25308 };
+  const f = await fixture(t, { onEvent: event => events.push(event), claudeKeychain: { prepare: async () => {
+    if (++calls === 2) throw Object.assign(new Error('Synthetic locked Keychain'), { code: 'CLAUDE_KEYCHAIN_LOCKED', keychainDiagnostic });
+    return { status: 'ready', changed: false };
+  } } });
+  const started = await f.start(), session = f.service.sessions.get(started.sessionId), prepare = f.bindings[0].args.prepareCredentials;
+  await assert.rejects(prepare(), { code: 'CLAUDE_KEYCHAIN_LOCKED' });
+  assert.deepEqual(f.service.metadata(session).keychainDiagnostic, keychainDiagnostic);
+  assert.deepEqual(events.at(-1).keychainDiagnostic, keychainDiagnostic);
+  assert.equal(session.error, undefined, 'a clean refusal does not mark the shell as failed');
+  await prepare();
+  assert.equal(f.service.metadata(session).keychainDiagnostic, null);
+  assert.equal(events.at(-1).keychainDiagnostic, null);
 });
 
 test('macOS Keychain source uses the OS account home when the launch HOME is overridden', { skip: process.platform !== 'darwin' }, async t => {

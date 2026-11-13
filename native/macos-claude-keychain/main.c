@@ -33,10 +33,10 @@
 enum mode { QUERY = 1, SELECT = 2 };
 struct request { uint32_t schema, mode; char home[PATH_MAX], selected[PATH_MAX]; };
 struct reply {
-    uint32_t schema; int32_t status; uint32_t present, unlocked, readable, writable;
+    uint32_t schema; int32_t status; uint32_t present, user_present, unlocked, readable, writable;
     uint32_t merged_count, user_count;
     unsigned char merged_digest[CC_SHA256_DIGEST_LENGTH], user_digest[CC_SHA256_DIGEST_LENGTH];
-    char selected[PATH_MAX];
+    char selected[PATH_MAX], user_selected[PATH_MAX];
 };
 struct held { int fd, enforce_acl; struct stat identity; char path[PATH_MAX]; };
 struct tree { struct held dirs[3]; int selector; struct stat selector_identity; int selector_present; };
@@ -169,18 +169,32 @@ static int digest_list(CFArrayRef list,const char *selected,unsigned char digest
     CC_SHA256_Final(digest,&hash);return 0;
 }
 static void metadata(struct reply *reply) {
-    SecKeychainRef key=NULL;reply->status=SecKeychainCopyDefault(&key);
-    if(reply->status||!key){if(key){reply->present=1;CFRelease(key);}if(!reply->status)reply->status=errSecInternalComponent;return;}
-    reply->present=1;SecKeychainStatus flags=0;
-    if(key_path(key,reply->selected)||!key_file(reply->selected))reply->status=errSecParam;
-    else reply->status=SecKeychainGetStatus(key,&flags);
-    CFRelease(key);if(reply->status)return;
+    SecKeychainRef key=NULL,user_key=NULL;
+    OSStatus current_status=SecKeychainCopyDefault(&key);
+    OSStatus user_status=SecKeychainCopyDomainDefault(kSecPreferencesDomainUser,&user_key);
+    reply->present=key!=NULL;reply->user_present=user_key!=NULL;
+    SecKeychainStatus flags=0,user_flags=0;
+    /* Only matching absence permits first-use initialization. A usable current
+     * domain must not hide a missing/different explicit user-domain selection. */
+    if(current_status==errSecNoDefaultKeychain&&!key&&user_status==errSecNoDefaultKeychain&&!user_key)
+        reply->status=errSecNoDefaultKeychain;
+    else if(current_status||!key||user_status||!user_key)
+        reply->status=current_status&&current_status!=errSecNoDefaultKeychain?current_status:
+            user_status&&user_status!=errSecNoDefaultKeychain?user_status:errSecParam;
+    else if(key_path(key,reply->selected)||!key_file(reply->selected)||
+        key_path(user_key,reply->user_selected)||strcmp(reply->selected,reply->user_selected))reply->status=errSecParam;
+    else {
+        reply->status=SecKeychainGetStatus(key,&flags);
+        if(!reply->status)reply->status=SecKeychainGetStatus(user_key,&user_flags);
+    }
+    if(key)CFRelease(key);if(user_key)CFRelease(user_key);if(reply->status)return;
+    flags&=user_flags;
     reply->unlocked=(flags&kSecUnlockStateStatus)!=0;reply->readable=(flags&kSecReadPermStatus)!=0;reply->writable=(flags&kSecWritePermStatus)!=0;
-    CFArrayRef merged=NULL,user=NULL;int contains=0,ignored=0;
+    CFArrayRef merged=NULL,user=NULL;int contains=0,user_contains=0;
     reply->status=SecKeychainCopySearchList(&merged);
     if(!reply->status)reply->status=SecKeychainCopyDomainSearchList(kSecPreferencesDomainUser,&user);
     if(!reply->status&&(digest_list(merged,reply->selected,reply->merged_digest,&reply->merged_count,&contains)||
-        digest_list(user,reply->selected,reply->user_digest,&reply->user_count,&ignored)||!contains))reply->status=errSecParam;
+        digest_list(user,reply->selected,reply->user_digest,&reply->user_count,&user_contains)||!contains||!user_contains))reply->status=errSecParam;
     if(merged)CFRelease(merged);if(user)CFRelease(user);
 }
 static int transfer(int fd,void *data,size_t length,int writing,int64_t until) {
@@ -250,7 +264,8 @@ static int run_worker(const char *self,enum mode mode,const char *home,const cha
         if(waited<0&&errno!=EINTR)goto done;if(milliseconds()>=until)goto done;
         struct timespec pause={0,1000000};nanosleep(&pause,NULL);}
     unsigned char extra;ssize_t n=read(output[0],&extra,1);
-    if(n!=0||!WIFEXITED(status)||WEXITSTATUS(status)||reply->schema!=SCHEMA||!memchr(reply->selected,0,PATH_MAX))goto done;
+    if(n!=0||!WIFEXITED(status)||WEXITSTATUS(status)||reply->schema!=SCHEMA||
+        !memchr(reply->selected,0,PATH_MAX)||!memchr(reply->user_selected,0,PATH_MAX))goto done;
     result=0;
 done:
     if(pid>0){kill(pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}}
@@ -258,14 +273,16 @@ done:
     memset(&request,0,sizeof(request));return result;
 }
 static int usable(const struct reply *reply,const char *stage) {
-    if(reply->status==errSecNoDefaultKeychain&&!reply->present)return 0;
-    if(reply->status||!reply->present)return failure("CLAUDE_KEYCHAIN_UNAVAILABLE",stage,reply->status,1);
+    if(reply->status==errSecNoDefaultKeychain&&!reply->present&&!reply->user_present)return 0;
+    if(reply->status||!reply->present||!reply->user_present||strcmp(reply->selected,reply->user_selected))
+        return failure("CLAUDE_KEYCHAIN_UNAVAILABLE",stage,reply->status?reply->status:errSecParam,1);
     if(!reply->unlocked)return failure("CLAUDE_KEYCHAIN_LOCKED",stage,errSecInteractionNotAllowed,1);
     if(!reply->readable||!reply->writable)return failure("CLAUDE_KEYCHAIN_UNAVAILABLE",stage,errSecReadOnly,1);
     return 1;
 }
 static int same_selection(const struct reply *a,const struct reply *b) {
-    return !a->status&&!b->status&&a->present==b->present&&!strcmp(a->selected,b->selected)&&
+    return !a->status&&!b->status&&a->present==b->present&&a->user_present==b->user_present&&
+        !strcmp(a->selected,b->selected)&&!strcmp(a->user_selected,b->user_selected)&&
         a->merged_count==b->merged_count&&a->user_count==b->user_count&&
         !memcmp(a->merged_digest,b->merged_digest,sizeof(a->merged_digest))&&
         !memcmp(a->user_digest,b->user_digest,sizeof(a->user_digest));

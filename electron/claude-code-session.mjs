@@ -9,7 +9,7 @@ const absolute = value => typeof value === 'string' && path.isAbsolute(value) &&
 const policyConflict = () => fail('此境舱的 Claude 设置会覆盖会话网络或目录；请移除冲突后重试。', 'CLAUDE_CODE_SESSION_POLICY_CONFLICT');
 const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`;
 
-function claudeShim({ node, resolver, settingsCheck, config, home, runtime, basePath }, args) {
+function claudeShim({ node, resolver, settingsCheck, credentialCheck, config, home, runtime, basePath }, args) {
   // These options belong to the terminal's binding. Scalar option order and
   // variadic --mcp-config merging are not reliable override prevention.
   const reserved = ['--mcp-config', '--strict-mcp-config', '--no-strict-mcp-config', '--settings', '--setting-sources',
@@ -31,6 +31,7 @@ if [ -e ${shellQuote(path.join(home, '.config', 'anthropic'))} ] || [ -L ${shell
 fi
 NODE_OPTIONS= BUN_OPTIONS= ${[node, settingsCheck, '--check', config, '--home', home, '--base-path', basePath].map(shellQuote).join(' ')} || exit 78
 envara_claude=$(NODE_OPTIONS= BUN_OPTIONS= ${[node, resolver, '--resolve', home].map(shellQuote).join(' ')}) || exit 126
+NODE_OPTIONS= BUN_OPTIONS= ${[node, credentialCheck].map(shellQuote).join(' ')} || exit 78
 exec "\${envara_claude}" ${args.map(shellQuote).join(' ')} "$@"
 `;
 }
@@ -137,6 +138,7 @@ export async function prepareClaudeSession({ sessionId, directories, installatio
     const wrapperPath = path.join(binDirectory, 'claude');
     const resolver = path.join(runtime, 'claude-installation-check.mjs');
     const settingsCheck = path.join(runtime, 'claude-code-settings.mjs');
+    const credentialCheck = path.join(runtime, 'claude-credential-preflight.mjs');
     await mkdir(binDirectory, { mode: 0o700 });
     // The shell and Claude's own subprocesses resolve the same wrapper, even
     // after Claude reapplies its --settings env block. Never modify host PATH.
@@ -160,7 +162,8 @@ export async function prepareClaudeSession({ sessionId, directories, installatio
     const args = ['--no-chrome', '--mcp-config', mcp, '--setting-sources', 'user,project,local', '--settings', settings];
     await writeFile(resolver, await readFile(new URL('./claude-code-installation.mjs', import.meta.url)), { mode: 0o600, flag: 'wx' });
     await writeFile(settingsCheck, await readFile(new URL('./claude-code-settings.mjs', import.meta.url)), { mode: 0o600, flag: 'wx' });
-    await writeFile(wrapperPath, claudeShim({ node, resolver, settingsCheck, config: directories.claude, home: directories.home, runtime, basePath: environment.PATH ?? '' }, args), { mode: 0o700, flag: 'wx' });
+    await writeFile(credentialCheck, await readFile(new URL('./claude-credential-preflight.mjs', import.meta.url)), { mode: 0o600, flag: 'wx' });
+    await writeFile(wrapperPath, claudeShim({ node, resolver, settingsCheck, credentialCheck, config: directories.claude, home: directories.home, runtime, basePath: environment.PATH ?? '' }, args), { mode: 0o700, flag: 'wx' });
     return { executable: selected, installation, args, environment: policy.environment, binDirectory, wrapperPath, cleanup };
   } catch (error) {
     try { await cleanup(); }

@@ -199,6 +199,7 @@ button:is(.terminal-icon-button, .terminal-text-button, .terminal-empty-start, .
 .terminal-network-description > svg { flex: none; }
 .terminal-network-description > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .terminal-footer.has-error .terminal-network-description { display: block; white-space: normal; overflow-wrap: anywhere; color: var(--danger); }
+.terminal-keychain-notice { white-space: normal; overflow-wrap: anywhere; color: var(--warning); }
 .terminal-footer .terminal-session-state { font-variant-numeric: tabular-nums; }
 .terminal-new-session { top: 48px; bottom: auto; max-height: calc(100% - 58px); }
 .app-shell.is-desktop .terminal-dock.is-expanded .terminal-new-session { top: 80px; max-height: calc(100% - 90px); }
@@ -210,3 +211,5 @@ button:is(.terminal-icon-button, .terminal-text-button, .terminal-empty-start, .
   .terminal-footer { gap: 7px; }
   .terminal-view-notice { max-width: 52%; overflow: hidden; text-overflow: ellipsis; }
 }
+
+.terminal-keychain-diagnostic { display: block; font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }

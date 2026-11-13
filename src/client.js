@@ -1,3 +1,4 @@
+import { sanitizeClaudeKeychainDiagnostic } from '../shared/claude-keychain-diagnostic.mjs';
 import { isInterfaceLanguage } from '../shared/interface-languages.mjs';
 import { isAppearancePreference, workspaceAppearance } from '../shared/appearance.mjs';
 import { parseGoogleMapsLocation } from '../shared/network-location.mjs';
@@ -123,6 +124,8 @@ export const api = desktop ? {
     catch (failure) {
       const error = new Error(typeof failure?.message === 'string' ? failure.message : '操作未完成，请重试。');
       if (typeof failure?.code === 'string') error.code = failure.code;
+      const keychainDiagnostic = sanitizeClaudeKeychainDiagnostic(failure?.keychainDiagnostic);
+      if (keychainDiagnostic) error.keychainDiagnostic = keychainDiagnostic;
       throw error;
     }
   },

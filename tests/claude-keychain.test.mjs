@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { chmod, link, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { ClaudeKeychainManager, inspectClaudeKeychainResource, parseClaudeKeychainReply } from '../electron/claude-keychain.mjs';
+import { ClaudeKeychainManager, inspectClaudeKeychainResource, parseClaudeKeychainReply, sanitizeClaudeKeychainDiagnostic } from '../electron/claude-keychain.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const ready = changed => `${JSON.stringify({ schemaVersion: 1, status: 'ready', changed })}\n`;
@@ -84,12 +84,43 @@ test('native failures preserve known categories but discard all child diagnostic
     const code = `CLAUDE_KEYCHAIN_${suffix}`;
     await assert.rejects(f.manager(async () => { throw denied(code); }).prepare(f), error => {
       assert.equal(error.code, code); assert.equal(error.cause, undefined); assert.equal(error.stdout, undefined); assert.equal(error.stderr, undefined);
+      assert.deepEqual(error.keychainDiagnostic, { stage: 'scoped-query', osStatus: -25307 });
       assert(!error.message.includes('fixture')); assert(!error.message.includes('credential')); return true;
     });
   }
   await assert.rejects(f.manager(async () => { throw denied('CLAUDE_KEYCHAIN_UNAVAILABLE', { cleanupCode: 'CLAUDE_KEYCHAIN_CLEANUP_FAILED' }); }).prepare(f), error => {
     assert.equal(error.code, 'CLAUDE_KEYCHAIN_UNAVAILABLE'); assert.match(error.cleanupError, /联系维护者/); return true;
   });
+});
+
+test('only validated native stage and OS status survive as safe diagnostics', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.manager(async () => { throw denied('CLAUDE_KEYCHAIN_UNAVAILABLE', { stage: 'verify', osStatus: null }); }).prepare(f), error => {
+    assert.deepEqual(error.keychainDiagnostic, { stage: 'verify', osStatus: null });
+    assert(!JSON.stringify(error).includes(f.root)); return true;
+  });
+  for (const extra of [{ stage: '/private/fixture/path' }, { osStatus: 'private detail' }, { selected: '/private/fixture/keychain' }]) {
+    await assert.rejects(f.manager(async () => { throw denied('CLAUDE_KEYCHAIN_UNAVAILABLE', extra); }).prepare(f), error => {
+      assert.equal(error.code, 'CLAUDE_KEYCHAIN_PROTOCOL_ERROR');
+      assert.equal(error.keychainDiagnostic, undefined);
+      assert(!JSON.stringify(error).includes('fixture')); return true;
+    });
+  }
+});
+
+test('shared diagnostic sanitizer returns an independent bounded data-only object', () => {
+  const source = Object.freeze({ stage: 'select', osStatus: -25308 });
+  const sanitized = sanitizeClaudeKeychainDiagnostic(source);
+  assert.deepEqual(sanitized, source);assert.notEqual(sanitized, source);
+  for (const osStatus of [null, -2147483648, 2147483647])
+    assert.deepEqual(sanitizeClaudeKeychainDiagnostic({ stage: 'verify', osStatus }), { stage: 'verify', osStatus });
+  for (const value of [null, [], {}, { stage: 'verify' }, { stage: 'unknown', osStatus: 0 },
+    { stage: '/private/path', osStatus: 0 }, { stage: 'verify', osStatus: 0, path: '/private/path' },
+    { stage: 'verify', osStatus: '0' }, { stage: 'verify', osStatus: undefined },
+    ...[NaN, Infinity, 0.5, -2147483649, 2147483648].map(osStatus => ({ stage: 'verify', osStatus })),
+    { stage: 'verify', osStatus: 0, [Symbol('private')]: 'value' },
+    { stage: 'verify', get osStatus() { assert.fail('Must not evaluate diagnostics'); } }])
+    assert.equal(sanitizeClaudeKeychainDiagnostic(value), null);
 });
 
 test('timeouts and execution failures cannot surface a successful reply or private command', async t => {

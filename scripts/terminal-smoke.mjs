@@ -212,6 +212,8 @@ if (!process.versions.electron) {
     process.env.BASH_ENV = path.join(runDir, 'nonexistent-host-shell-hook');
     process.env.ENV = path.join(runDir, 'nonexistent-host-shell-hook');
     service = new TerminalService({
+      // Keychain is outside this fixture; verify-claude-keychain.mjs covers it separately.
+      claudeKeychain: { prepare: async () => ({ status: 'not-required', changed: false }) },
       dataDir: path.join(runDir, 'disposable-app-data'),
       resolveContext: async id => {
         contextResolutions.set(id, (contextResolutions.get(id) ?? 0) + 1);

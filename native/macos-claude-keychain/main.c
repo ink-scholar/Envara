@@ -40,6 +40,15 @@ struct reply {
 };
 struct held { int fd, enforce_acl; struct stat identity; char path[PATH_MAX]; };
 struct tree { struct held dirs[3]; int selector; struct stat selector_identity; int selector_present; };
+/* Security.framework maintains these module-directory cache files even for
+ * metadata queries. This authority is derived from confstr, never request or
+ * environment paths, and does not include Keychains or their preferences. */
+static const char *const mds_names[]={"mds.lock","mdsObject.db","mdsDirectory.db","mdsObject.db_","mdsDirectory.db_"};
+#define MDS_FILE_COUNT (sizeof(mds_names)/sizeof(mds_names[0]))
+struct mds_cache {
+    struct held cache, directory;
+    char cache_path[PATH_MAX], directory_path[PATH_MAX];
+};
 static uid_t owner;
 static int64_t deadline;
 static const char *error_code = "CLAUDE_KEYCHAIN_PREPARATION_FAILED", *error_stage = "arguments";
@@ -88,6 +97,93 @@ static int held_matches(const struct held *held) {
     return held->fd>=0&&!fstat(held->fd,&opened)&&!lstat(held->path,&named)&&
         identity_matches(&opened,&held->identity)&&identity_matches(&named,&held->identity)&&
         !fcntl(held->fd,F_GETPATH,actual)&&!strcmp(actual,held->path)&&(!held->enforce_acl||!no_acl(held->path));
+}
+static void mds_cache_init(struct mds_cache *cache) {
+    memset(cache,0,sizeof(*cache));cache->cache.fd=cache->directory.fd=-1;
+}
+static void mds_cache_release(struct mds_cache *cache) {
+    if(cache->directory.fd>=0)close(cache->directory.fd);
+    if(cache->cache.fd>=0)close(cache->cache.fd);
+    mds_cache_init(cache);
+}
+static int mds_file_path(const struct mds_cache *cache,size_t index,char path[PATH_MAX]) {
+    if(index>=MDS_FILE_COUNT||!cache->directory_path[0])return -1;
+    int n=snprintf(path,PATH_MAX,"%s/%s",cache->directory_path,mds_names[index]);
+    return n<0||n>=PATH_MAX?-1:0;
+}
+/* 0 absent, 1 safe named file, -1 unsafe. Files may be atomically replaced by
+ * Security.framework; pin identities only within this check, not across its
+ * cache refresh. Cache contents and unrelated extended attributes are not
+ * inspected or changed by these checks. */
+static int mds_named_file(const struct mds_cache *cache,size_t index,struct stat *state) {
+    char path[PATH_MAX],actual[PATH_MAX];struct stat named,opened,after;
+    if(cache->directory.fd<0||mds_file_path(cache,index,path)||!held_matches(&cache->directory))return -1;
+    if(fstatat(cache->directory.fd,mds_names[index],&named,AT_SYMLINK_NOFOLLOW))return errno==ENOENT?0:-1;
+    if(!S_ISREG(named.st_mode)||named.st_uid!=owner||named.st_nlink!=1||
+        (named.st_mode&022)||named.st_flags||no_acl(path))return -1;
+    int fd=openat(cache->directory.fd,mds_names[index],O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+    if(fd<0)return -1;
+    int safe=!fstat(fd,&opened)&&identity_matches(&named,&opened)&&opened.st_nlink==1&&
+        !fcntl(fd,F_GETPATH,actual)&&!strcmp(actual,path)&&
+        !fstatat(cache->directory.fd,mds_names[index],&after,AT_SYMLINK_NOFOLLOW)&&
+        identity_matches(&opened,&after)&&after.st_nlink==1&&held_matches(&cache->directory);
+    close(fd);if(!safe)return -1;if(state)*state=after;return 1;
+}
+static int mds_cache_matches(const struct mds_cache *cache) {
+    struct stat entry;
+    if(cache->cache.fd<0)return cache->cache_path[0]&&lstat(cache->cache_path,&entry)&&errno==ENOENT;
+    if(!held_matches(&cache->cache))return 0;
+    if(cache->directory.fd<0)return fstatat(cache->cache.fd,"mds",&entry,AT_SYMLINK_NOFOLLOW)&&errno==ENOENT;
+    if(!held_matches(&cache->directory))return 0;
+    for(size_t i=0;i<MDS_FILE_COUNT;i++)if(mds_named_file(cache,i,NULL)<0)return 0;
+    return held_matches(&cache->cache)&&held_matches(&cache->directory);
+}
+static int mds_cache_open(const char *home,struct mds_cache *cache) {
+    mds_cache_init(cache);
+    char supplied[PATH_MAX],canonical[PATH_MAX];struct stat entry;
+    size_t size=confstr(_CS_DARWIN_USER_CACHE_DIR,supplied,sizeof(supplied));
+    if(!size||size>sizeof(supplied)||memchr(supplied,0,size)!=supplied+size-1||
+        !safe_path(supplied)||!safe_path(home))return -1;
+    size_t length=strlen(supplied);while(length>1&&supplied[length-1]=='/')supplied[--length]=0;
+    /* /var is the system alias of /private/var. Literal Seatbelt rules need the
+     * canonical spelling; no additional symlink may redirect this exception. */
+    int n=snprintf(cache->cache_path,sizeof(cache->cache_path),"%s%s",!strncmp(supplied,"/var/",5)?"/private":"",supplied);
+    if(n<0||n>=(int)sizeof(cache->cache_path)||!safe_path(cache->cache_path))return -1;
+    n=snprintf(cache->directory_path,sizeof(cache->directory_path),"%s/mds",cache->cache_path);
+    if(n<0||n>=(int)sizeof(cache->directory_path)||nested(home,cache->directory_path)||nested(cache->directory_path,home))return -1;
+    /* Missing cache directories retain the original read-only system fallback.
+     * Never create, repair, chmod, prune or remove the user's MDS cache here. */
+    if(lstat(cache->cache_path,&entry))return errno==ENOENT?0:-1;
+    if(!realpath(supplied,canonical)||strcmp(canonical,cache->cache_path)||
+        canonical_directory(cache->cache_path,1,&cache->cache))return -1;
+    if(fstatat(cache->cache.fd,"mds",&entry,AT_SYMLINK_NOFOLLOW))return errno==ENOENT?0:-1;
+    if(canonical_directory(cache->directory_path,1,&cache->directory))return -1;
+    return mds_cache_matches(cache)?0:-1;
+}
+static int mds_selection_safe(const struct mds_cache *cache,const char *path) {
+    if(!cache||cache->directory.fd<0)return 1;
+    struct stat selected,cached;
+    if(!safe_path(path)||nested(cache->directory_path,path)||nested(path,cache->directory_path)||lstat(path,&selected))return 0;
+    for(size_t i=0;i<MDS_FILE_COUNT;i++){
+        int present=mds_named_file(cache,i,&cached);if(present<0)return 0;
+        if(present&&selected.st_dev==cached.st_dev&&selected.st_ino==cached.st_ino)return 0;
+    }
+    return 1;
+}
+static int worker_profile(char *out,size_t capacity,enum mode mode,const char *home,const char *mds_directory) {
+    if(!out||!capacity||(mode!=QUERY&&mode!=SELECT)||!safe_path(home)||
+        (mds_directory&&(!safe_path(mds_directory)||nested(home,mds_directory)||nested(mds_directory,home))))return -1;
+    int n=snprintf(out,capacity,"(version 1)(allow default)(deny network*)(deny file-write*)");
+    if(n<0||(size_t)n>=capacity)return -1;size_t used=(size_t)n;
+    if(mds_directory)for(size_t i=0;i<MDS_FILE_COUNT;i++){
+        n=snprintf(out+used,capacity-used,"(allow %s (literal \"%s/%s\"))",i?"file-write*":"file-write-data file-write-create",mds_directory,mds_names[i]);
+        if(n<0||(size_t)n>=capacity-used)return -1;used+=(size_t)n;
+    }
+    if(mode==SELECT){
+        n=snprintf(out+used,capacity-used,"(allow file-write* (literal \"%s/Library/Preferences/" SELECTOR "\"))",home);
+        if(n<0||(size_t)n>=capacity-used)return -1;
+    }
+    return 0;
 }
 static void tree_init(struct tree *tree) {
     memset(tree,0,sizeof(*tree));for(int i=0;i<3;i++)tree->dirs[i].fd=-1;tree->selector=-1;
@@ -168,7 +264,7 @@ static int digest_list(CFArrayRef list,const char *selected,unsigned char digest
     }
     CC_SHA256_Final(digest,&hash);return 0;
 }
-static void metadata(struct reply *reply) {
+static void metadata(struct reply *reply,const struct mds_cache *cache) {
     SecKeychainRef key=NULL,user_key=NULL;
     OSStatus current_status=SecKeychainCopyDefault(&key);
     OSStatus user_status=SecKeychainCopyDomainDefault(kSecPreferencesDomainUser,&user_key);
@@ -181,7 +277,7 @@ static void metadata(struct reply *reply) {
     else if(current_status||!key||user_status||!user_key)
         reply->status=current_status&&current_status!=errSecNoDefaultKeychain?current_status:
             user_status&&user_status!=errSecNoDefaultKeychain?user_status:errSecParam;
-    else if(key_path(key,reply->selected)||!key_file(reply->selected)||
+    else if(key_path(key,reply->selected)||!key_file(reply->selected)||!mds_selection_safe(cache,reply->selected)||
         key_path(user_key,reply->user_selected)||strcmp(reply->selected,reply->user_selected))reply->status=errSecParam;
     else {
         reply->status=SecKeychainGetStatus(key,&flags);
@@ -227,21 +323,23 @@ static int worker(void) {
         for(size_t i=17;i<49;i++)if(!strchr("0123456789abcdef",name[i]))return 2;
     }
     struct held held={.fd=-1};if(canonical_directory(home,request.mode==SELECT,&held))return 2;
-    char profile[PATH_MAX+256];int n=snprintf(profile,sizeof(profile),"(version 1)(allow default)(deny network*)(deny file-write*)");
-    if(request.mode==SELECT)n=snprintf(profile,sizeof(profile),"(version 1)(allow default)(deny network*)(deny file-write*)(allow file-write* (literal \"%s/Library/Preferences/" SELECTOR "\"))",home);
+    struct mds_cache cache;mds_cache_init(&cache);
+    if(mds_cache_open(home,&cache)){mds_cache_release(&cache);close(held.fd);return 2;}
+    char profile[PATH_MAX*(MDS_FILE_COUNT+1)+1024];
     char *sandbox_error=NULL;
-    if(n<0||n>=(int)sizeof(profile)||sandbox_init(profile,0,&sandbox_error)){if(sandbox_error)sandbox_free_error(sandbox_error);close(held.fd);return 2;}
+    if(worker_profile(profile,sizeof(profile),request.mode,home,cache.directory.fd>=0?cache.directory_path:NULL)||sandbox_init(profile,0,&sandbox_error)){
+        if(sandbox_error)sandbox_free_error(sandbox_error);mds_cache_release(&cache);close(held.fd);return 2;}
     if(sandbox_error)sandbox_free_error(sandbox_error);
     reply.status=SecKeychainSetUserInteractionAllowed(false);
     if(!reply.status&&request.mode==SELECT){
-        if(!key_file(request.selected))reply.status=errSecParam;
+        if(!key_file(request.selected)||!mds_selection_safe(&cache,request.selected))reply.status=errSecParam;
         else {SecKeychainRef key=NULL;reply.status=SecKeychainOpen(request.selected,&key);
             if(!reply.status&&key)reply.status=SecKeychainSetDefault(key);
             else if(!reply.status)reply.status=errSecInternalComponent;
             if(key)CFRelease(key);}
-    }else if(!reply.status)metadata(&reply);
-    if(!held_matches(&held))reply.status=errSecParam;
-    close(held.fd);int result=transfer(1,&reply,sizeof(reply),1,until);memset(&request,0,sizeof(request));memset(&reply,0,sizeof(reply));return result?2:0;
+    }else if(!reply.status)metadata(&reply,&cache);
+    if(!held_matches(&held)||!mds_cache_matches(&cache))reply.status=errSecParam;
+    mds_cache_release(&cache);close(held.fd);int result=transfer(1,&reply,sizeof(reply),1,until);memset(&request,0,sizeof(request));memset(&reply,0,sizeof(reply));return result?2:0;
 }
 static int run_worker(const char *self,enum mode mode,const char *home,const char *selected,struct reply *reply) {
     struct request request;memset(&request,0,sizeof(request));request.schema=SCHEMA;request.mode=mode;

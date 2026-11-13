@@ -137,8 +137,8 @@ int main(int argc,char **argv) {
     if(!fixture_selected||!fixture_user||!fixture_other)return 2;
     int compare=!strcmp(fixture_mode,"user-list-change");
     if(compare)fixture_mode="ready";
-    struct reply reply={0};metadata(&reply);int available=usable(&reply,"scoped-query"),same=-1;
-    if(compare){struct reply after={0};fixture_mode="user-extra";fixture_status_calls=0;metadata(&after);
+    struct reply reply={0};metadata(&reply,NULL);int available=usable(&reply,"scoped-query"),same=-1;
+    if(compare){struct reply after={0};fixture_mode="user-extra";fixture_status_calls=0;metadata(&after,NULL);
         same=same_selection(&reply,&after);if(usable(&after,"host-verify")!=1)return 2;}
     printf("{\\"osStatus\\":%d,\\"available\\":%d,\\"code\\":\\"%s\\",\\"userCount\\":%u,\\"sameSelection\\":%d}\\n",
         (int)reply.status,available,available<0?error_code:"",reply.user_count,same);

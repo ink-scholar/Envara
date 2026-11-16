@@ -1,4 +1,4 @@
-# Envara 0.5.25 架构
+# Envara 架构
 
 Envara 是本机单用户桌面工作区，组合浏览器环境、终端和附加软件。当前发布目标为 **macOS Apple Silicon（arm64）**；其他平台的构建入口不代表已经完成实机验收。功能范围见[能力矩阵](capability-matrix.md)。
 
@@ -37,6 +37,14 @@ flowchart LR
 | [导出格式](../electron/environment-export.mjs)、[数据恢复](../electron/environment-transfer.mjs)、[导入生命周期](../electron/environment-import-lifecycle.mjs) | 加密、范围校验、原子提交与可重试恢复 |
 | [固定 BrowseForge 源码](../third_party/browseforge/ENVARA_UPSTREAM.md) | Go 浏览器后端与 Envara 接入补丁 |
 | [macOS PF](../native/macos-pf-routing/gui-contract.md)、[Windows 路由](../native/windows-app-routing/README.md) | 各平台的原生协议、信任输入与验收边界 |
+
+## 界面与桌面编排
+
+`src/App.jsx` 保留工作区状态、异步操作和页面切换；导航、表单、导入导出对话框与浏览器详情分别由独立组件呈现。`src/TerminalPane.jsx` 保留会话选择和并发状态，xterm 实例、会话选择器与菜单各自有明确的组件边界。通用语言处理留在 `src/i18n.mjs`，基础文案保存在 `src/locales/`，功能文案按模块合并。
+
+主进程通过 `desktop-workspace-tools.mjs` 调度诊断、档案关联、站点资料、缓存维护和运行核验，通过 `desktop-application-update-controller.mjs` 衔接更新状态、严格退出与启动恢复。统一 IPC 仍负责窗口来源、方法白名单和环境数据锁；控制器不增加渲染进程权限。更新下载、归档检查、原生替换和启动门各自保留验证职责。
+
+终端的启动环境和浏览器的档案构造由纯配置模块生成，服务层继续拥有进程、路由和异步生命周期。REST 与 MCP 共用 `internal/profilepolicy` 的代理地域规则，各自保留请求解析和响应协议。
 
 ## 共享配置与路由
 

@@ -67,11 +67,11 @@ test('the three pieces of copy are complete in all nine languages and the real c
 
 test('the dock passes only the selected live session, never chooser values or profile-level defaults', async () => {
   const source = await readFile(new URL('../src/TerminalPane.jsx', import.meta.url), 'utf8');
-  assert.match(source, /<TerminalDeviceIdentifierDetails session=\{selectedSession\} t=\{t\} inline \/>/);
-  assert.equal(source.match(/<TerminalDeviceIdentifierDetails/g)?.length, 1);
-  const chooserStart = source.indexOf('{newSession && (() => {');
-  const chooserEnd = source.indexOf('})()}', chooserStart);
-  assert.ok(chooserStart >= 0 && chooserEnd > chooserStart, 'the actual chooser block must be inspected');
-  const chooser = source.slice(chooserStart, chooserEnd);
+  const context = await readFile(new URL('../src/terminal-session-context.jsx', import.meta.url), 'utf8');
+  const chooser = await readFile(new URL('../src/terminal-session-chooser.jsx', import.meta.url), 'utf8');
+  assert.match(source, /<TerminalSessionContext[^>]*selectedSession=\{selectedSession\}/);
+  assert.match(source, /<TerminalSessionChooser /);
+  assert.match(context, /<TerminalDeviceIdentifierDetails session=\{selectedSession\} t=\{t\} inline \/>/);
+  assert.equal((source + context + chooser).match(/<TerminalDeviceIdentifierDetails/g)?.length, 1);
   assert.doesNotMatch(chooser, /deviceIdentifierRestrictions|已限制序列号/);
 });

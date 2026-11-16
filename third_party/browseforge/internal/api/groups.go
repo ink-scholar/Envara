@@ -7,7 +7,7 @@ import (
 
 	"browseforge/internal/groups"
 	"browseforge/internal/profile"
-	"browseforge/internal/runtime"
+	"browseforge/internal/profilepolicy"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -71,17 +71,7 @@ func (h *handler) upsertGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) validateGroupProxyRegion(groupName string, proxy *profile.ProxyConfig) error {
-	if proxy == nil || h.store == nil || h.mgr == nil {
-		return nil
-	}
-	for _, p := range h.store.List(groupName, "") {
-		draft := *p
-		desc, err := h.mgr.RuntimeRegistry().ApplyProfileDefaults(&draft)
-		if err == nil && desc.ID == runtime.BrowseForgeChromium {
-			return validateBrowseForgeProxyRegion(desc.ID, proxy)
-		}
-	}
-	return nil
+	return profilepolicy.ValidateGroupProxyRegion(groupName, proxy, h.store, h.mgr)
 }
 
 func (h *handler) clearGroupProxy(w http.ResponseWriter, r *http.Request) {
@@ -171,16 +161,5 @@ func (h *handler) groupResponse(g *groups.Group) map[string]any {
 }
 
 func (h *handler) activeSessionsForGroup(groupName string) int {
-	groupName = strings.TrimSpace(groupName)
-	if h.mgr == nil || h.store == nil || groupName == "" {
-		return 0
-	}
-	count := 0
-	for _, sess := range h.mgr.ListSessions() {
-		p, err := h.store.Get(sess.ProfileID)
-		if err == nil && strings.TrimSpace(p.Group) == groupName {
-			count++
-		}
-	}
-	return count
+	return profilepolicy.ActiveSessionsForGroup(groupName, h.store, h.mgr)
 }

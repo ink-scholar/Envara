@@ -46,6 +46,8 @@ import { parseGoogleMapsLocation } from '../shared/network-location.mjs';
 import { createWorkspaceWindowController, createOwnedQuitController } from './desktop-lifecycle.mjs';
 import { createStartupDiagnostics } from './startup-diagnostics.mjs';
 import { createRuntimeDiagnostics } from './runtime-diagnostics.mjs';
+import { createDesktopWorkspaceTools } from './desktop-workspace-tools.mjs';
+import { createDesktopApplicationUpdateController } from './desktop-application-update-controller.mjs';
 import { createDesktopStartup } from './desktop-startup.mjs';
 import { registerDesktopIPC } from './desktop-ipc.mjs';
 import { shutdownDesktopServices } from './desktop-services.mjs';
@@ -196,8 +198,35 @@ async function openOutsideEnvironment(url) {
   if (status?.enabled) return shellOpen(url, status.previous && status.previous !== LINK_ROUTER_BUNDLE_ID ? status.previous : 'com.apple.Safari');
   return shellOpen(url);
 }
-const shutdownOwnedServices = () => shutdownDesktopServices({ applications, diagnostics: notionDiagnostics,
-  terminal, terminalBrowserBroker, linkChannel, routerChannel, service, sidecar, proxyCore, networkRecovery, runtimeDiagnostics });
+const workspaceTools = createDesktopWorkspaceTools({
+  dataDir: app.getPath('userData'), appVersion: app.getVersion(), platform: process.platform, arch: process.arch,
+  getService: () => service, getTerminal: () => terminal, getTerminalController: () => terminalController,
+  getApplications: () => applications, transferLock: environmentTransferLock, fullWorkspaceSnapshot,
+  isClosing: () => quitting, showSaveDialog: (caller, options) => dialog.showSaveDialog(caller, options),
+  readStartup: () => startupDiagnostics?.snapshot(), readRuntime: () => runtimeDiagnostics?.snapshot(),
+  readRecovery: () => networkRecovery?.snapshot(), getNotionDiagnostics: () => notionDiagnostics,
+});
+const applicationUpdates = createDesktopApplicationUpdateController({
+  currentVersion: app.getVersion(), platform: process.platform, arch: process.arch, packaged: app.isPackaged,
+  dataDir: app.getPath('userData'), executablePath: process.execPath,
+  helperDirectory: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'updater', `darwin-${process.arch}`),
+  // App updates use system network settings without account cookies or the
+  // selected environment's route or credentials.
+  fetch: (url, options) => net.fetch(url, { ...options, credentials: 'omit', cache: 'no-store' }),
+  getResources: () => ({ service, terminal, applications, transferLock: environmentTransferLock, sidecar,
+    cacheMaintenance: workspaceTools.cacheMaintenance, terminalController, terminalBrowserBroker,
+    workCombinations: workspaceTools.workCombinations, pendingImports, notionTrialReserved,
+    extraBusy: workspaceTools.supportExportPending }),
+  isClosing: () => quitting, beginClosing: () => { quitting = true; requestEpoch++; },
+  restoreOpen: () => { quitting = false; }, shutdownStrict: () => shutdownOwnedServices({ strict: true }),
+  quitApplication: () => app.quit(), exitStartup: code => app.exit(code), relaunchStartup: () => app.relaunch(),
+});
+const shutdownOwnedServices = async ({ strict = false } = {}) => {
+  await applicationUpdates.close();
+  await workspaceTools.close();
+  return shutdownDesktopServices({ applications, diagnostics: notionDiagnostics,
+    terminal, terminalBrowserBroker, linkChannel, routerChannel, service, sidecar, proxyCore, networkRecovery, runtimeDiagnostics, strict });
+};
 
 async function publish() {
   if (desktopStartup.phase !== 'ready' || quitting || !service || !views.size) return;
@@ -215,10 +244,15 @@ const execFileAsync = promisify(execFile);
 const allowedMethods = new Set([
   'snapshot', 'createProfile', 'updateProfile', 'cloneProfile', 'deleteProfile', 'clearProfile',
   'startProfile', 'stopProfile', 'focusProfile', 'bulkProfiles',
-  'saveProxy', 'deleteProxy', 'checkProxy', 'saveGroup', 'deleteGroup', 'clearGroupProxy',
+  'saveProxy', 'deleteProxy', 'checkProxy', 'retryNetwork', 'saveGroup', 'deleteGroup', 'clearGroupProxy',
   'saveSettings', 'installEngine', 'importProfiles', 'cancelImport', 'exportProfiles',
   'openDataDirectory', 'openDocumentation', 'previewLegacyMigration', 'migrateLegacy',
   'exportAutomationConfig', 'openTerminalWindow', ...TERMINAL_METHODS,
+  'exportSupportDiagnostics', 'componentVersions', 'listBrowserSiteData', 'clearBrowserSiteCookies',
+  'listWorkCombinations', 'saveWorkCombination', 'deleteWorkCombination', 'openWorkCombination',
+  'cacheMaintenanceInventory', 'quarantineBrowserCaches', 'restoreBrowserCaches', 'purgeBrowserCacheBatch',
+  'runtimeVerificationSnapshot', 'checkRuntimeVerification',
+  'applicationUpdateStatus', 'checkApplicationUpdate', 'downloadApplicationUpdate', 'cancelApplicationUpdate', 'installApplicationUpdate',
 ]);
 const applicationMethods = new Set(['saveApplication', 'startApplication', 'stopApplication', 'deleteApplication',
   'getApplicationRoutingStatus', 'setupApplicationRouting', 'setApplicationLinkBrowser']);
@@ -352,9 +386,16 @@ async function signInDataSnapshot() {
   return { items, totalBytes: items.reduce((sum, item) => sum + item.bytes, 0) };
 }
 async function handleCall(method, args = {}, caller = window) {
-  if (quitting) throw Object.assign(new Error('应用正在退出。'), { code: 'APP_CLOSING' });
+  if (quitting && !(method === 'applicationUpdateStatus' && applicationUpdates.active)) throw Object.assign(new Error('应用正在退出。'), { code: 'APP_CLOSING' });
   if (!allowedMethods.has(method)) throw new Error('不支持的操作');
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('操作参数无效。');
+  if (applicationUpdates.handles(method)) return applicationUpdates.call(method, args);
+  if (workspaceTools.handles(method)) return workspaceTools.call(method, args, caller);
+  if (method === 'retryNetwork') {
+    if (!networkRecovery) throw Object.assign(new Error('网络恢复暂不可用。'), { code: 'NETWORK_RECOVERY_UNAVAILABLE' });
+    networkRecovery.retryNow(args);
+    return service.snapshot();
+  }
   if (method === 'applicationStorage') return applicationStorageCandidates();
   if (method === 'reclaimApplicationStorage') {
     const confirmed = new Set(Array.isArray(args.ids) ? args.ids.filter(id => typeof id === 'string') : []);
@@ -612,6 +653,7 @@ async function handleCall(method, args = {}, caller = window) {
   }
   const result = await protectApplicationMutation(method, args, () => terminalController ? terminalController.protectMutation(method, args, () => service.call(method, args)) : service.call(method, args));
   return finishEnvironmentDeletion({ method, args, result, applications, eraseData: eraseAttachedApplicationData,
+    removeCombinations: terminal ? async profileId => (await workspaceTools.getCombinations()).removeProfile(profileId) : undefined,
     releaseImport: profileId => releaseDeletedEnvironmentImportProfile({ imports: pendingImports, profileId }) });
 }
 
@@ -725,7 +767,10 @@ const ownedQuit = createOwnedQuitController({
     dialog.showErrorBox('附加软件清理未确认', '网络会话仍保留。请先停止附加软件并完成清理，再退出境舱。');
   },
 });
-app.on('before-quit', event => { void ownedQuit.handle(event).catch(error => console.error('Unable to complete shutdown:', error.message)); });
+app.on('before-quit', event => {
+  if (applicationUpdates.quitAuthorized) return;
+  void ownedQuit.handle(event).catch(error => console.error('Unable to complete shutdown:', error.message));
+});
 async function initializeDesktopServices({ checkOpen }) {
   const initializeStep = async (name, operation) => {
     checkOpen();
@@ -734,6 +779,7 @@ async function initializeDesktopServices({ checkOpen }) {
     return value;
   };
   const dataDir = app.getPath('userData');
+  if (!await applicationUpdates.beforeStartup({ checkOpen, step: initializeStep })) return;
   await initializeStep('data-directory', () => mkdir(dataDir, { recursive: true, mode: 0o700 }));
   signInNames = new SignInDataNames({ dataDir });
   if (isSmoke || process.env.ENVARA_BACKEND === 'legacy') {
@@ -755,6 +801,7 @@ async function initializeDesktopServices({ checkOpen }) {
     await initializeStep('sidecar-initialize', () => sidecar.initialize());
     service = new BrowseForgeService(dataDir, sidecar.client, { platform: process.platform, appVersion: app.getVersion(), backend: 'BrowseForge (Envara desktop)', upstreamVersion: '2.1.15', localApi: sidecar.baseUrl }, publish, {
       profilesDir: path.join(sidecar.baseDir, 'profiles'), getEngineStates: () => sidecar.getEngineStates(), proxyCore, diagnostics: runtimeDiagnostics,
+      networkRecoverySnapshot: () => networkRecovery?.snapshot(),
       ...(isWorkspaceSmoke ? {
         networkProbe: new ProxyNetworkProbe({ transport: async () => ({ success: true, ip: '8.8.8.8', country: 'Philippines', country_code: 'PH', city: 'Manila', latitude: 14.6, longitude: 121, timezone: { id: 'Asia/Manila' } }) }),
         addressGeocoder: { search: async () => ({ source: 'Photon', attribution: '© OpenStreetMap contributors', candidates: [{ id: 'owned-place-fixture', label: 'Synthetic public landmark, Manila', latitude: 14.58, longitude: 120.98 }] }) },
@@ -863,7 +910,7 @@ async function initializeDesktopServices({ checkOpen }) {
     await initializeStep('applications-store', () => applications.ready);
     await initializeStep('application-routing-status', () => applications.getApplicationRoutingStatus());
     networkRecovery = createNetworkRecoveryMonitor({ recover: options => service.recoverNetwork(options),
-      isOnline: () => net.isOnline(), powerMonitor });
+      isOnline: () => net.isOnline(), powerMonitor, onChange: publish });
   }
 }
 
@@ -881,7 +928,7 @@ function reportStartupFailure(error) {
 if (ownsLock) void startupStep('electron-ready', () => app.whenReady()).then(() => {
   if (quitting) return;
   registerDesktopIPC({ ipcMain, views, startup: desktopStartup,
-    lifecycle: () => ({ quitting, requestEpoch }), services: () => ({ applications, terminal }),
+    lifecycle: () => ({ quitting, requestEpoch, applicationUpdateActive: applicationUpdates.active }), services: () => ({ applications, terminal }),
     transferLock: environmentTransferLock, handleCall, fullWorkspaceSnapshot, diagnostics: runtimeDiagnostics,
     onReady: () => startupDiagnostics?.mark('ipc-ready') });
   Menu.setApplicationMenu(Menu.buildFromTemplate([

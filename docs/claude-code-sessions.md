@@ -39,6 +39,8 @@ Bounded local diagnostic records contain fixed stage names, durations, byte coun
 
 Named profiles use separate Claude configuration directories within one environment. Profiles share that environment's program but retain separate configuration/history storage. The default profile retains its existing directory. Duplication preserves the selected profile and creates an idle shell; it neither replays commands nor clones live process state.
 
+The current source shows the bound login profile in session settings and in the tab's tooltip, including after the terminal has been renamed. Profile management lists its active terminals within the same environment; selecting one switches to that existing session. These labels describe saved bindings, not authenticated account status. An in-use profile remains protected from renaming or deletion. Viewing or switching these associations does not read credentials, change profile directories, or start another process.
+
 Each selected profile pins both `CLAUDE_CONFIG_DIR` and `ANTHROPIC_CONFIG_DIR`; the latter is an owned subdirectory of the former. This also separates newer Console profile files that `CLAUDE_CONFIG_DIR` alone does not scope. An old environment-wide `HOME/.config/anthropic` directory is preserved without assigning it to a named profile or copying its credentials. If it exists, the session asks the user to sign in again within the selected profile.
 
 ### macOS Keychain compatibility
@@ -142,3 +144,7 @@ Terminal and CLI processes receive the verified native locale and timezone. The 
 Before each manual `claude` invocation, Envara checks the selected profile and applicable project/local settings for conflicting authentication/provider or routing inputs. Conflicts are refused without printing their values or rewriting those files. The official CLI still handles project trust and permission prompts. These checks do not enforce every organization policy or later settings reload, and third-party MCP service connectivity requires its own verification.
 
 [Controlled acceptance](../scripts/verify-claude-terminal.mjs) exercises real PTYs, the official program, authenticated local fixture routes, selected-browser tools and cleanup. Such fixtures do not establish real account login, credential refresh, inference, or a model deciding to invoke a tool. These account-dependent steps require separate acceptance. Browser fonts, GPU and website language have their own [device boundaries](browser-device-profiles.md).
+
+## 终端工作区工具
+
+终端搜索、置顶排序、附件粘贴、当前档案管理与工作组合的使用方式和支持范围见[工作区管理与维护](workspace-tools.md)。这些操作保留既有登录资料；新建或复制终端不回放命令。

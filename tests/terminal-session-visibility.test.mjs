@@ -3,16 +3,17 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { liveSessions } from '../src/terminal-session-status.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const pane = await readFile(path.join(root, 'src/TerminalPane.jsx'), 'utf8');
-
-/** The session list the pane shows is one expression; this reads it back so the
- *  rule is checked rather than assumed. */
-const visibleRule = source => /\(sessions \?\? \[\]\)\.filter\(session => activeStatuses\.has\(session\.status\)\)/.test(source);
+const chooser = await readFile(path.join(root, 'src/terminal-session-chooser.jsx'), 'utf8');
 
 test('an ended terminal session is not offered as a tab or an active cross-environment view', () => {
-  assert.ok(visibleRule(pane), 'the tab list is built from live sessions only');
+  const sessions = ['starting', 'running', 'closing', 'exited', 'closed', 'error', 'unknown'].map(status => ({ status }));
+  assert.deepEqual(liveSessions(sessions), sessions.slice(0, 3), 'the tab list is built from live sessions only');
+  assert.deepEqual(liveSessions(undefined), []);
+  assert.match(pane, /import \{ activeStatuses, liveSessions, statusLabels \} from '\.\/terminal-session-status\.mjs'/);
   // Every place that lists sessions for the user goes through that filter.
   for (const [name, pattern] of [
     ['selected environment tabs', /const sessions = liveSessions\(selectedMetadata\?\.sessions\);/],
@@ -33,7 +34,8 @@ test('a new terminal is three choices: network, browser and folder', () => {
   // The network list is built from the environments' nodes, and the browser
   // list ends with the system browser, said to leave the environment.
   assert.match(pane, /const networks = terminalNetworks\(profiles\);/);
-  assert.match(pane, /<option value=\{SYSTEM_BROWSER\}>\{`\$\{t\('系统默认浏览器'\)\} · \$\{t\('不经过境舱网络'\)\}`\}<\/option>/);
+  assert.match(pane, /<TerminalSessionChooser[\s\S]*?networks=\{networks\}/);
+  assert.match(chooser, /<option value=\{SYSTEM_BROWSER\}>\{`\$\{t\('系统默认浏览器'\)\} · \$\{t\('不经过境舱网络'\)\}`\}<\/option>/);
   // The folder is picked in the native dialog and only its token travels.
   assert.match(pane, /api\.call\('pickTerminalDirectory', \{ id: host\.id \}\)/);
   assert.match(pane, /directoryToken: newSession\.directory\?\.token \?\? null/);

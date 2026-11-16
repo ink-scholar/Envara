@@ -46,7 +46,7 @@ window.savedApi = async (method, args) => {
   const snapshot = id => clone({ profiles: state.snapshot.profiles.filter(item => !id || item.profileId === id) });
   if (method === 'terminalSnapshot') return snapshot(args.id);
   if (method === 'resizeTerminal') return {};
-  if (!['reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal'].includes(method))
+  if (!['reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal', 'setSavedTerminalPinned', 'moveSavedTerminal'].includes(method))
     throw Object.assign(new Error('Unexpected fixture call: ' + method), { code: 'SAVED_UI_UNEXPECTED_CALL' });
   if (state.deferMethod === method) await new Promise(resolve => { window.savedFinishOperation = resolve; });
   if (state.failure && (!state.failure.method || state.failure.method === method))
@@ -68,6 +68,16 @@ window.savedApi = async (method, args) => {
   if (method === 'renameSavedTerminal') {
     saved.name = args.name;
     for (const item of host.sessions) if (item.savedTerminalId === saved.id) item.savedTerminalName = args.name;
+  } else if (method === 'setSavedTerminalPinned') {
+    if (typeof args.pinned !== 'boolean') throw new Error('Invalid fixture pin');
+    saved.pinned = args.pinned;
+  } else if (method === 'moveSavedTerminal') {
+    const group = host.savedTerminals.filter(item => (item.pinned === true) === (saved.pinned === true));
+    const neighbor = group[group.indexOf(saved) + (args.direction === 'up' ? -1 : 1)];
+    if (neighbor) {
+      const a = host.savedTerminals.indexOf(saved), b = host.savedTerminals.indexOf(neighbor);
+      [host.savedTerminals[a], host.savedTerminals[b]] = [host.savedTerminals[b], host.savedTerminals[a]];
+    }
   } else {
     host.savedTerminals = host.savedTerminals.filter(item => item.id !== saved.id);
     for (const item of host.sessions) if (item.savedTerminalId === saved.id) { item.savedTerminalId = null; item.savedTerminalName = null; }
@@ -177,13 +187,15 @@ test('opening a running saved entry selects its exact session ahead of a newer u
 test('same-name live tabs are numbered within their environment and the saved entry opens its latest PTY', { skip: noDisplay }, async () => {
   const first = sessionFor(entry, 'saved_ui_first_same_name');
   const latest = { ...sessionFor(entry, 'saved_ui_latest_same_name'), startedAt: '2026-01-02T00:00:00.000Z' };
-  const other = { ...entry, profileId: secondProfileId, browserProfileId: secondProfileId };
+  const other = { ...entry, profileId: secondProfileId, browserProfileId: secondProfileId, claudeAccountName: 'Other environment login profile' };
   const elsewhere = sessionFor(other, 'saved_ui_other_environment_same_name');
   await mount({ environments: [profile, secondProfile], snapshot: { profiles: [
     metadata([{ ...entry, sessionId: latest.sessionId, status: 'running', activeSessionCount: 2 }], [first, latest]),
     metadata([{ ...other, sessionId: elsewhere.sessionId, status: 'running', activeSessionCount: 1 }], [elsewhere], secondProfileId),
   ] } });
-  assert.deepEqual(await page.locator('.terminal-session-tab').evaluateAll(tabs => tabs.map(tab => tab.title)), [`${entry.name} · 1`, `${entry.name} · 2`]);
+  assert.deepEqual(await page.locator('.terminal-session-name').allTextContents(), [`${entry.name} · 1`, `${entry.name} · 2`]);
+  assert.deepEqual(await page.locator('.terminal-session-tab').evaluateAll(tabs => tabs.map(tab => tab.title)),
+    [`${entry.name} · 1\n登录档案：${entry.claudeAccountName}`, `${entry.name} · 2\n登录档案：${entry.claudeAccountName}`]);
   assert.equal(await page.locator('.terminal-session-tab').nth(1).getAttribute('aria-selected'), 'true');
   await page.evaluate(() => { window.savedLatestSameNameView = document.querySelectorAll('.terminal-session-view')[1]; });
   await page.locator('.terminal-session-tab').nth(0).click();
@@ -197,7 +209,8 @@ test('same-name live tabs are numbered within their environment and the saved en
   await selectEnvironment(secondProfileId);
   await page.locator('.terminal-session-tab').filter({ hasText: other.name }).waitFor();
   assert.equal(await page.locator('.terminal-session-tab').count(), 1);
-  assert.equal(await page.locator('.terminal-session-tab').getAttribute('title'), other.name, 'another environment does not contribute to duplicate numbering');
+  assert.equal(await page.locator('.terminal-session-name').textContent(), other.name, 'another environment does not contribute to duplicate numbering');
+  assert.equal(await page.locator('.terminal-session-tab').getAttribute('title'), `${other.name}\n登录档案：${other.claudeAccountName}`, 'the tooltip uses the selected environment’s bound profile');
   assert.equal((await methods()).filter(method => method === 'reopenSavedTerminal').length, 1);
   await assertNoFallback();
 });
@@ -409,4 +422,64 @@ test('nine languages keep compact saved-entry names, account names, folders and 
     await assertNoFallback();
   }
   await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1120, 760));
+});
+
+const organizedEntries = () => [
+  { ...entry, id: 'saved_alpha', name: 'Alpha task', cwd: '/synthetic/frontend', pinned: false },
+  { ...shellEntry, id: 'saved_beta', name: 'Beta shell', cwd: '/synthetic/backend', pinned: false },
+  { ...entry, id: 'saved_gamma', name: 'Gamma task', cwd: '/synthetic/review', claudeAccountName: 'Review profile', pinned: false },
+];
+const entryOrder = () => rows().evaluateAll(elements => elements.map(element => element.dataset.entryId));
+
+test('saved-terminal organization searches names, directories and login profiles without spawning or changing the selected terminal', { skip: noDisplay }, async () => {
+  const entries = organizedEntries(), running = sessionFor(entries[0]);
+  await mount({ snapshot: { profiles: [metadata(entries, [running])] } }); await revealEntries();
+  const search = page.getByRole('searchbox', { name: '搜索已保存终端', exact: true });
+  for (const [query, ids] of [['ALPHA', ['saved_alpha']], ['backend', ['saved_beta']], ['Review profile', ['saved_gamma']], ['task synthetic', ['saved_alpha', 'saved_gamma']]]) {
+    await search.fill(query); assert.deepEqual(await entryOrder(), ids);
+    assert.equal(await page.locator('[data-saved-entry-action="up"]:enabled').count(), 0);
+    assert.equal(await page.locator('[data-saved-entry-action="down"]:enabled').count(), 0);
+  }
+  await search.fill('no matching fixture');
+  assert.equal(await rows().count(), 0); assert.equal(await page.getByText('没有匹配的终端。', { exact: true }).count(), 1);
+  await search.fill(''); assert.deepEqual(await entryOrder(), entries.map(item => item.id));
+  assert.equal(await page.locator('.terminal-session-tab').getAttribute('aria-selected'), 'true');
+  assert.deepEqual((await calls()).filter(call => !['terminalSnapshot', 'resizeTerminal'].includes(call.method)), []);
+});
+
+test('saved-terminal organization pins and reorders within groups with keyboard focus and durable backend order', { skip: noDisplay }, async () => {
+  const entries = organizedEntries(), running = sessionFor(entries[0]);
+  await mount({ snapshot: { profiles: [metadata(entries, [running])] } }); await revealEntries();
+  await page.evaluate(() => { window.organizedRunningView = document.querySelector('.terminal-session-view'); });
+  await rowFor('saved_gamma').locator('[data-saved-entry-action="pin"]').click();
+  await page.waitForFunction(() => document.querySelector('.terminal-saved-entry')?.dataset.entryId === 'saved_gamma');
+  await rowFor('saved_beta').locator('[data-saved-entry-action="pin"]').focus(); await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelector('.terminal-saved-entry')?.dataset.entryId === 'saved_beta');
+  assert.deepEqual(await entryOrder(), ['saved_beta', 'saved_gamma', 'saved_alpha']);
+  const move = rowFor('saved_gamma').locator('[data-saved-entry-action="up"]');
+  await move.focus(); await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelector('.terminal-saved-entry')?.dataset.entryId === 'saved_gamma');
+  assert.equal(await rowFor('saved_gamma').locator('[data-saved-entry-action="up"]').isDisabled(), true);
+  await page.waitForFunction(() => document.activeElement?.closest('.terminal-saved-entry')?.dataset.entryId === 'saved_gamma');
+  assert.equal(await page.locator('.terminal-session-view').evaluate(element => element === window.organizedRunningView), true);
+  assert.equal(await page.locator('.terminal-session-tab').getAttribute('aria-selected'), 'true');
+  const snapshot = await page.evaluate(() => window.savedFixture.snapshot);
+  await mount({ snapshot }); await revealEntries();
+  assert.deepEqual(await entryOrder(), ['saved_gamma', 'saved_beta', 'saved_alpha']);
+  assert.equal(await rowFor('saved_gamma').getByRole('button', { name: '取消置顶终端「Gamma task」', exact: true }).count(), 1);
+  await assertNoFallback();
+});
+
+test('saved-terminal organization controls remain bounded and operable in all nine languages', { skip: noDisplay }, async () => {
+  for (const language of languages) {
+    const entries = organizedEntries().map(item => ({ ...item, name: `${item.name} ${'long fixture '.repeat(6)}` }));
+    await mount({ language, standalone: true, snapshot: { profiles: [metadata(entries)] } });
+    const search = page.getByRole('searchbox', { name: translate('搜索已保存终端', language), exact: true });
+    await search.fill('frontend'); assert.equal(await rows().count(), 1);
+    await search.fill('');
+    assert.equal(await page.locator('.terminal-saved-panel').evaluate(element => element.scrollWidth <= element.clientWidth + 1), true, language);
+    await rowFor('saved_gamma').locator('[data-saved-entry-action="pin"]').focus(); await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('.terminal-saved-entry')?.dataset.entryId === 'saved_gamma');
+    assert.equal(await rowFor('saved_gamma').locator('[data-saved-entry-action="pin"]').getAttribute('aria-label'), translate('取消置顶终端「{name}」', language, { name: entries[2].name }));
+  }
 });

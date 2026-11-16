@@ -100,6 +100,8 @@ for (const protocol of ['http', 'https']) test(`real HTTPS egress traverses ${pr
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.scope, 'egress'); assert.equal(result.ip, geo.ip); assert.equal(result.timezone, 'America/New_York');
   assert.equal(tunnel.observations.length, 1); assert.equal(target.hits(), 1);
+  assert.equal(result.diagnostics.attempts[0].source, 'custom');
+  assert.deepEqual(result.diagnostics.attempts[0].stages.map(stage => stage.status), ['passed', 'passed', 'passed', 'passed']);
   assert.equal(JSON.stringify(result).includes('dummy-secret'), false); assert.equal(JSON.stringify(result).includes('alice'), false);
 });
 
@@ -108,6 +110,7 @@ test('proxy authentication rejection never reaches the target or falls back dire
   const result = await target.probe().probe(tunnel.proxy);
   assert.equal(result.ok, false); assert.equal(result.errorCode, 'PROXY_AUTH_FAILED'); assert.equal(result.ip, null);
   assert.equal(target.hits(), 0); assert.equal(tunnel.observations.length, 1);
+  assert.deepEqual(result.diagnostics.attempts[0].stages.map(stage => stage.status), ['passed', 'failed', 'failed', 'unobserved']);
 });
 
 test('SOCKS5 credentials and target hostname use remote DNS with real tunneled TLS', async (t) => {
@@ -128,6 +131,19 @@ test('SOCKS5 credentials and target hostname use remote DNS with real tunneled T
   const result = await target.probe().probe({ protocol: 'socks5', host: 'localhost', port, username: 'alice', password: 'dummy-secret' });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.deepEqual(observations, [{ user: 'alice', password: 'dummy-secret', host: 'localhost' }]); assert.equal(target.hits(), 1);
+  assert.deepEqual(result.diagnostics.attempts[0].stages.map(stage => stage.status), ['passed', 'passed', 'passed', 'passed']);
+});
+
+test('real TLS refusal stays distinct from malformed JSON after a verified HTTPS response', async t => {
+  const rejected = await serverFixture(t);
+  const tlsFailure = await rejected.probe({ tlsOptions: {} }).probe(null);
+  assert.equal(tlsFailure.ok, false); assert.equal(rejected.hits(), 0);
+  assert.deepEqual(tlsFailure.diagnostics.attempts[0].stages.map(stage => stage.status), ['passed', 'failed', 'unobserved', 'unobserved']);
+  const malformed = await serverFixture(t, (_request, response) => response.end('{not-json'));
+  const jsonFailure = await malformed.probe().probe(null);
+  assert.equal(jsonFailure.ok, false); assert.equal(jsonFailure.errorCode, 'INVALID_GEO_RESPONSE');
+  assert.equal(malformed.hits(), 1);
+  assert.deepEqual(jsonFailure.diagnostics.attempts[0].stages.map(stage => stage.status), ['passed', 'passed', 'passed', 'failed']);
 });
 
 test('redirects, invalid geolocation, body overflow and silent servers fail within the deadline', async (t) => {

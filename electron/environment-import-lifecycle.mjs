@@ -4,10 +4,11 @@ const fail = (message, code) => Object.assign(new Error(message), { code });
 const publicFailureCodes = new Set(['IMPORT_TARGET_NOT_EMPTY', 'IMPORT_TARGET_UNSAFE', 'IMPORT_RESTORE_FAILED',
   'IMPORT_TARGET_INVALID', 'EXPORT_FORMAT_INVALID', 'CLAUDE_ACCOUNT_INVALID', 'CLAUDE_ACCOUNT_NAME_EXISTS']);
 
-const dataMutations = new Set(['createProfile', 'updateProfile', 'cloneProfile', 'deleteProfile', 'clearProfile', 'startProfile',
+const dataMutations = new Set(['clearBrowserSiteCookies', 'saveWorkCombination', 'deleteWorkCombination', 'openWorkCombination',
+  'createProfile', 'updateProfile', 'cloneProfile', 'deleteProfile', 'clearProfile', 'startProfile',
   'saveProxy', 'deleteProxy', 'saveGroup', 'deleteGroup', 'clearGroupProxy', 'bulkProfiles', 'migrateLegacy', 'saveSettings', 'installEngine',
   'chooseWorkspaceDirectory', 'setTerminalLinkBrowser', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'createClaudeAccount',
-  'reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal',
+  'reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal', 'setSavedTerminalPinned', 'moveSavedTerminal', 'stageTerminalAttachments', 'commitTerminalAttachments',
   'renameClaudeAccount', 'deleteClaudeAccount', 'saveApplication', 'startApplication', 'runNotionTrial', 'deleteApplication', 'clearApplicationData',
   'deleteSignInData', 'setApplicationLinkBrowser', 'setupApplicationRouting', 'reclaimApplicationStorage',
   'saveTerminalSshConnection', 'setTerminalSshPassword', 'forgetTerminalSshPassword', 'removeTerminalSshConnection']);
@@ -46,12 +47,13 @@ export class DesktopEnvironmentTransferLock {
 /** Derive the affected environment from main-owned metadata, not a second
  * profile id supplied alongside an application/session id by the renderer. */
 export function environmentMutationProfile(method, args = {}, { applications, terminal } = {}) {
+  if (method === 'clearBrowserSiteCookies') return args.profileId ?? null;
   if (['createProfile', 'cloneProfile', 'saveProxy', 'deleteProxy', 'saveGroup', 'deleteGroup', 'clearGroupProxy', 'bulkProfiles',
     'migrateLegacy', 'saveSettings', 'installEngine', 'deleteSignInData', 'reclaimApplicationStorage', 'setupApplicationRouting'].includes(method)) return null;
   if (method === 'saveApplication') return args.application?.profileId ?? null;
   if (['startApplication', 'deleteApplication', 'clearApplicationData', 'setApplicationLinkBrowser', 'runNotionTrial'].includes(method))
     return applications?.applications?.get(method === 'runNotionTrial' ? args.applicationId ?? args.id : args.id)?.profileId ?? null;
-  if (['duplicateTerminal', 'writeTerminal'].includes(method)) return terminal?.sessions?.get(args.sessionId)?.profileId ?? null;
+  if (['duplicateTerminal', 'writeTerminal', 'stageTerminalAttachments', 'cancelTerminalAttachments', 'commitTerminalAttachments'].includes(method)) return terminal?.sessions?.get(args.sessionId)?.profileId ?? null;
   return typeof args.id === 'string' ? args.id : null;
 }
 

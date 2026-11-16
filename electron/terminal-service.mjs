@@ -16,6 +16,7 @@ import { installedProcessLocales, resolveProcessLanguage } from './workspace-con
 import { normalizeSshRoute } from './terminal-ssh-route.mjs';
 import { TerminalProtocol } from './terminal-protocol.mjs';
 import { getTerminalTheme } from '../shared/terminal-theme.mjs';
+import { terminalChildEnvironment, terminalShell } from './terminal-launch-config.mjs';
 
 const require = createRequire(import.meta.url);
 const MAX_SESSIONS = 8;
@@ -439,6 +440,24 @@ export class TerminalService {
       return this.snapshot({ id });
     });
   }
+  async setSavedTerminalPinned({ id, entryId, pinned }) {
+    validId(id);
+    return this.serialized(id, async () => {
+      if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
+      await this.savedTerminals.setPinned(id, entryId, pinned);
+      await this.emitSavedTerminalsChanged(id);
+      return this.snapshot({ id });
+    });
+  }
+  async moveSavedTerminal({ id, entryId, direction }) {
+    validId(id);
+    return this.serialized(id, async () => {
+      if (this.closed) throw codeError('应用正在退出。', 'APP_CLOSING');
+      await this.savedTerminals.move(id, entryId, direction);
+      await this.emitSavedTerminalsChanged(id);
+      return this.snapshot({ id });
+    });
+  }
   async emitSavedTerminalsChanged(id) {
     try { await this.onEvent({ type: 'workspace', profileId: id }); } catch { /* display failure does not undo metadata */ }
   }
@@ -462,7 +481,9 @@ export class TerminalService {
     const entry = await this.savedTerminal(id, entryId);
     return entry.kind === 'claude-code' ? this.reserveClaudeAccountStart(id, entry.claudeAccountId) : () => {};
   }
-  async reopenSavedTerminal({ id, entryId, requestId = null }) {
+  async reopenSavedTerminal(args) { return this.launchSavedTerminal(args, false); }
+  async openSavedTerminalFresh(args) { return this.launchSavedTerminal(args, true); }
+  async launchSavedTerminal({ id, entryId, requestId = null }, fresh) {
     validId(id); if (requestId != null) validId(requestId);
     const selected = await this.savedTerminal(id, entryId);
     const releaseAccount = selected.kind === 'claude-code' ? this.reserveClaudeAccountStart(id, selected.claudeAccountId) : null;
@@ -475,7 +496,7 @@ export class TerminalService {
       if (associated.some(session => session.status !== 'running' || session.cleanupError || session.finishing || session.networkFailure))
         throw codeError('此终端仍在启动或清理，请稍后重试。', 'TERMINAL_ENTRY_BUSY');
       const running = associated.at(-1);
-      if (running) return this.metadata(running);
+      if (running && !fresh) return this.metadata(running);
       const account = entry.kind === 'claude-code' ? await this.claudeAccounts.get(id, entry.claudeAccountId) : null;
       return this.startSession({ id, cwd: entry.cwd, kind: entry.kind, browserProfileId: entry.kind === 'claude-code' ? entry.browserProfileId : null,
         account, requestId, savedEntry: entry });
@@ -737,49 +758,10 @@ export class TerminalService {
   }
   languageFor(locale) { return resolveProcessLanguage(locale, this.availableLocales ?? ['C']); }
   childEnvironment(directories, timezone, proxyEndpoint, privacy = { mode: 'standard' }, linkShim = null, locale = null) {
-    // Build from scratch: host API keys, SSH agent and author variables are
-    // deliberately absent. HOME/TZ here belong only to the new child process.
-    const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
-    const language = this.languageFor(locale);
-    const systemPaths = process.platform === 'win32'
-      ? [path.join(systemRoot, 'System32'), systemRoot, path.join(systemRoot, 'System32/WindowsPowerShell/v1.0'), path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'nodejs'), path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git/cmd'), path.join(this.hostHome, 'AppData/Roaming/npm'), path.join(this.hostHome, 'AppData/Local/Microsoft/WindowsApps')]
-      : ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin', path.join(this.hostHome, '.local/bin')];
-    const environment = {
-      PATH: [...new Set([...(linkShim ? [linkShim.directory] : []), ...this.additionalExecutablePaths, ...systemPaths])].join(path.delimiter),
-      HOME: directories.home, USERPROFILE: directories.home,
-      XDG_CONFIG_HOME: directories.config, XDG_CACHE_HOME: directories.cache, XDG_DATA_HOME: directories.data, XDG_STATE_HOME: directories.state,
-      CLAUDE_CONFIG_DIR: directories.claude, ANTHROPIC_CONFIG_DIR: directories.anthropic,
-      HISTFILE: directories.history, HISTSIZE: '1000', SAVEHIST: '1000',
-      ZDOTDIR: directories.home, NPM_CONFIG_USERCONFIG: path.join(directories.home, '.npmrc'),
-      GIT_CONFIG_GLOBAL: path.join(directories.home, '.gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
-      TMPDIR: directories.temp, TMP: directories.temp, TEMP: directories.temp,
-      TZ: timezone, TERM: 'xterm-256color', COLORTERM: 'truecolor', TERM_PROGRAM: 'Envara',
-      LANG: language.posix, LC_ALL: language.posix,
-      NO_PROXY: 'localhost,127.0.0.1,::1', no_proxy: 'localhost,127.0.0.1,::1',
-    };
-    if (process.platform === 'win32') {
-      for (const key of ['SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT']) if (process.env[key]) environment[key] = process.env[key];
-      const drive = path.parse(directories.home).root;
-      environment.HOMEDRIVE = drive.slice(0, 2); environment.HOMEPATH = directories.home.slice(2);
-    }
-    if (proxyEndpoint) for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) environment[key] = proxyEndpoint;
-    // Node's built-in fetch/http ignore proxy variables unless this is set.
-    if (proxyEndpoint) environment.NODE_USE_ENV_PROXY = '1';
-    // Supported tool opt-outs apply only to this owned shell and its children.
-    if (linkShim) {
-      environment.BROWSER = path.join(linkShim.directory, 'browser');
-      // The open shim reports links over this channel; without these it can only refuse.
-      for (const key of ['ENVARA_LINK_SOCKET', 'ENVARA_LINK_TOKEN']) if (typeof linkShim[key] === 'string' && linkShim[key] && !/[\0\r\n]/.test(linkShim[key])) environment[key] = linkShim[key];
-    }
-    if (privacy?.mode !== 'off') Object.assign(environment, { DO_NOT_TRACK: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' });
-    if (privacy?.mode === 'strict') environment.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
-    return environment;
+    return terminalChildEnvironment({ directories, timezone, proxyEndpoint, privacy, linkShim, language: this.languageFor(locale),
+      hostHome: this.hostHome, additionalExecutablePaths: this.additionalExecutablePaths, platform: process.platform, hostEnvironment: process.env });
   }
-  shell(environment) {
-    if (process.platform === 'win32') return { executable: process.env.ComSpec ?? path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32/cmd.exe'), args: ['/D', '/Q'], environment: { ...environment, PROMPT: 'envara $P$G' } };
-    if (process.platform === 'darwin') return { executable: '/bin/zsh', args: ['-d', '-i'], environment: { ...environment, SHELL: '/bin/zsh', PS1: 'envara %~ %# ' } };
-    return { executable: '/bin/bash', args: ['--noprofile', '--rcfile', path.join(environment.HOME, '.bashrc'), '-i'], environment: { ...environment, SHELL: '/bin/bash', PS1: 'envara \\w \\$ ' } };
-  }
+  shell(environment) { return terminalShell(environment, { platform: process.platform, hostEnvironment: process.env }); }
   async create({ id, columns, rows, fresh = false, directory = null, kind = 'shell', browserProfileId = null, claudeAccountId: accountId = null, claudeInstallSource, requestId = null }) {
     if (!['shell', 'claude-code'].includes(kind)) throw codeError('终端会话类型无效。');
     if (kind === 'claude-code' && (browserProfileId !== id || browserProfileId === 'system')) throw codeError('Claude Code 必须使用创建终端时选定的境舱浏览器。', 'CLAUDE_BROWSER_REQUIRED');

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { terminalNetworks, SYSTEM_BROWSER } from '../src/link-browser.mjs';
 import { CLAUDE_SESSION, sessionNetworks, sessionChoiceHost, changeSessionKind, terminalSessionOptions } from '../src/terminal-session-choice.mjs';
+import { terminalSessionName } from '../src/terminal-account-context.mjs';
 import { translationCatalog, translate } from '../src/i18n.mjs';
 
 const profiles = [
@@ -50,21 +51,28 @@ test('the desktop launch request carries the exact Claude browser, never a rende
 
 test('the terminal chooser wires its tested constraints and keeps ordinary link preferences separate', async () => {
   const pane = await readFile(new URL('../src/TerminalPane.jsx', import.meta.url), 'utf8');
+  const chooser = await readFile(new URL('../src/terminal-session-chooser.jsx', import.meta.url), 'utf8');
   assert.match(pane, /sessionChoiceHost\(networks, choice, activeProfileId\)/);
-  assert.match(pane, /sessionNetworks\(networks, newSession\.kind\)/);
+  assert.match(pane, /<TerminalSessionChooser[\s\S]*?host=\{chooserHost\(newSession\)\}/);
+  assert.match(chooser, /sessionNetworks\(networks, newSession\.kind\)/);
   assert.match(pane, /newSession\.kind !== CLAUDE_SESSION &&/);
   assert.match(pane, /kind: newSession\.kind, browserProfileId: newSession\.browserId/);
   assert.match(pane, /\.\.\.terminalSessionOptions\(kind, browserProfileId, claudeAccountId\)/);
-  assert.match(pane, /\{!claude && <option value=\{SYSTEM_BROWSER\}/);
+  assert.match(chooser, /\{!claude && <option value=\{SYSTEM_BROWSER\}/);
   assert.match(pane, /selectedSession\?\.kind === CLAUDE_SESSION/);
-  assert.match(pane, /session\.kind === CLAUDE_SESSION\s*\? `Claude Code/);
-  assert.match(pane, /className="terminal-claude-settings"><summary>\{t\('会话设置'\)\}/);
-  assert.match(pane, /只复制程序，登录档案仍独立。/);
-  assert.match(pane, /const privacyMode = host\?\.privacy\?\.mode \?\? 'standard'/);
-  assert.match(pane, /privacyMode !== 'off' && <small className="terminal-claude-privacy-note">\{t\('关闭遥测可能影响 Remote Control 等功能。'\)\}/);
-  assert.match(pane, /账号登录；启动前检查 API 配置冲突/);
-  assert.match(pane, /进入终端后运行 claude。/);
-  assert.doesNotMatch(pane, /'启动 Claude Code'/, 'creation opens the prepared terminal, not Claude itself');
+  assert.match(pane, /terminalSessionName\(session, sessions, t\)/);
+  const shell = { sessionId: 'synthetic_shell', kind: 'shell' };
+  const claude = { sessionId: 'synthetic_claude', kind: CLAUDE_SESSION, claudeAccountId: 'synthetic_work', claudeAccountName: 'Synthetic work profile' };
+  const label = (text, values) => translate(text, 'zh-CN', values);
+  assert.equal(terminalSessionName(shell, [shell, claude], label), '会话 1');
+  assert.equal(terminalSessionName(claude, [shell, claude], label), 'Claude Code · Synthetic work profile 2');
+  assert.match(chooser, /className="terminal-claude-settings"><summary>\{t\('会话设置'\)\}/);
+  assert.match(chooser, /只复制程序，登录档案仍独立。/);
+  assert.match(chooser, /const privacyMode = host\?\.privacy\?\.mode \?\? 'standard'/);
+  assert.match(chooser, /privacyMode !== 'off' && <small className="terminal-claude-privacy-note">\{t\('关闭遥测可能影响 Remote Control 等功能。'\)\}/);
+  assert.match(chooser, /账号登录；启动前检查 API 配置冲突/);
+  assert.match(chooser, /进入终端后运行 claude。/);
+  assert.doesNotMatch(pane + chooser, /'启动 Claude Code'/, 'creation opens the prepared terminal, not Claude itself');
   assert.match(pane, /if \(event\.type === 'status' \|\| event\.type === 'exit'\) retainFailure\(event\)/);
   assert.match(pane, /retainFailure\(session\)/);
   assert.match(pane, /dockError && dockErrorCode && <code/);

@@ -60,6 +60,43 @@ test('a successful shell creates a durable entry, clicks reuse only its process,
   for (const secret of ['fixture-secret', 'fixture-command', 'fixture-user', 'fixture-link-token', '127.0.0.1', '45670', 'pid', 'replay']) assert.equal(serialized.includes(secret), false, secret);
 });
 
+test('saved terminal organization persists without changing live sessions or saved launch context', async t => {
+  const f = await fixture(t), first = await f.start();
+  const nextDirectory = path.join(f.root, 'second-project'); await mkdir(nextDirectory);
+  const second = await f.start({ directory: nextDirectory });
+  const original = await f.saved();
+  await f.service.moveSavedTerminal({ id: 'chosen', entryId: second.savedTerminalId, direction: 'up' });
+  assert.deepEqual((await f.saved()).map(entry => entry.id), [second.savedTerminalId, first.savedTerminalId]);
+  await f.service.setSavedTerminalPinned({ id: 'chosen', entryId: first.savedTerminalId, pinned: true });
+  assert.deepEqual((await f.saved()).map(entry => [entry.id, entry.pinned]), [[first.savedTerminalId, true], [second.savedTerminalId, false]]);
+  assert.equal(f.records.length, 2); assert.ok(f.records.every(record => !record.closed && record.writes.length === 0));
+  for (const entry of await f.saved()) {
+    const before = original.find(item => item.id === entry.id);
+    for (const key of ['cwd', 'kind', 'browserProfileId', 'claudeAccountId', 'networkRef']) assert.deepEqual(entry[key], before[key]);
+  }
+  await assert.rejects(f.service.setSavedTerminalPinned({ id: 'other', entryId: first.savedTerminalId, pinned: true }), { code: 'TERMINAL_ENTRY_NOT_FOUND' });
+  await assert.rejects(f.service.moveSavedTerminal({ id: 'chosen', entryId: first.savedTerminalId, direction: 1 }), { code: 'TERMINAL_ENTRY_INVALID' });
+  await f.restart();
+  assert.deepEqual((await f.saved()).map(entry => [entry.id, entry.pinned]), [[first.savedTerminalId, true], [second.savedTerminalId, false]]);
+});
+
+test('fresh saved-terminal launch creates an idle independent process while ordinary reopen retains its existing behavior', async t => {
+  const f = await fixture(t), { account } = await f.service.createClaudeAccount({ id: 'chosen', name: 'Combination login' });
+  const first = await f.start({ kind: 'claude-code', browserProfileId: 'chosen', claudeAccountId: account.id });
+  await f.service.write({ sessionId: first.sessionId, data: 'synthetic old input' });
+  const fresh = await f.service.openSavedTerminalFresh({ id: 'chosen', entryId: first.savedTerminalId, requestId: 'fresh_fixture' });
+  assert.notEqual(fresh.sessionId, first.sessionId);
+  assert.equal(fresh.savedTerminalId, first.savedTerminalId); assert.equal(fresh.claudeAccountId, account.id);
+  assert.equal(fresh.requestId, 'fresh_fixture'); assert.equal(f.records.length, 2);
+  assert.deepEqual(f.records[1].writes, []); assert.equal(f.records[0].closed, false);
+  assert.equal((await f.service.reopenSavedTerminal({ id: 'chosen', entryId: first.savedTerminalId })).sessionId, fresh.sessionId);
+  assert.equal(f.records.length, 2);
+  f.contexts.get('chosen').proxyId = 'changed-node';
+  await assert.rejects(f.service.openSavedTerminalFresh({ id: 'chosen', entryId: first.savedTerminalId }), { code: 'TERMINAL_ENTRY_CONTEXT_CHANGED' });
+  assert.equal(f.records.length, 2, 'fresh launch keeps the saved route guard');
+  assert.equal(f.service.pendingClaudeStarts.size, 0, 'account reservations release on success and refusal');
+});
+
 test('after app restart the entry uses fresh verified context and its own directory without replaying commands', async t => {
   const f = await fixture(t), first = await f.start();
   await f.service.write({ sessionId: first.sessionId, data: 'do-not-replay\r' });

@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { BrowseForgeService } from '../electron/browseforge-service.mjs';
 import { ProxyNetworkProbe } from '../electron/proxy-network.mjs';
+import { createNetworkRecoveryMonitor, initialNetworkRecoveryState } from '../electron/network-recovery.mjs';
 import { languages } from '../shared/interface-languages.mjs';
 import { networkApplicationChoices, chooseApplicationProfile, createdProfileFromSnapshot } from '../src/network-flow-state.mjs';
 import { linkBrowsersFor } from '../src/link-browser.mjs';
@@ -1119,6 +1120,28 @@ test('managed HTTP launch receipts retain the stored marker and never persist ru
     await service.call('startProfile', { id: profile.id });
     assert.ok(service.browserLaunchReceipts.has(profile.id));
     assert.equal((await service.ensureBoundBrowser({ profileId: profile.id, expectedContext: context })).profile_id, profile.id);
+    const probeCount = managed.probes.length, coreCount = managed.calls.length;
+    const persistedBeforeVerification = JSON.stringify(await service.store.read());
+    const authority = await service.captureRuntimeVerificationContext(profile.id, { verifyReceipt: true });
+    assert.equal(authority.available, true);
+    assert.equal(authority.sessionId, client.sessions[0].session_id);
+    assert.equal(authority.instanceId, client.sessions[0].instance_id);
+    assert.equal(managed.probes.length, probeCount, 'runtime verification authority does not probe from main');
+    assert.equal(managed.calls.length, coreCount, 'runtime verification authority does not prepare or replace routes');
+    assert.equal(JSON.stringify(await service.store.read()), persistedBeforeVerification);
+    const cachedNetwork = service.workspaceContexts.get(profile.id).network;
+    const previousIP = cachedNetwork.ip;
+    cachedNetwork.ip = '8.8.8.8';
+    assert.notEqual((await service.captureRuntimeVerificationContext(profile.id)).revision, authority.revision, 'new egress evidence invalidates old runtime observations');
+    cachedNetwork.ip = previousIP;
+    const changedProfile = structuredClone(client.profiles[0]);
+    client.profiles[0].launch_overrides.timezone = 'Europe/Paris';
+    const stale = await service.captureRuntimeVerificationContext(profile.id);
+    assert.equal(stale.available, false);
+    assert.notEqual(stale.revision, authority.revision);
+    client.profiles[0] = changedProfile;
+    const restored = await service.captureRuntimeVerificationContext(profile.id, { verifyReceipt: true });
+    assert.equal(restored.available, true);
     assert.deepEqual(client.profiles[0], protocol === 'anytls' ? { ...before, managed_proxy_required: true } : before);
     assert.equal(launchedProxy.host, '127.0.0.1'); assert.equal(launchedProxy.password, context.proxy.password);
     for (const value of [await service.store.read(), await service.snapshot(), await service.call('exportProfiles'), client.profiles]) {
@@ -1593,7 +1616,7 @@ test('network recovery refreshes existing managed routes and measured egress wit
   const before = JSON.stringify(await service.store.read()), sessions = structuredClone(client.sessions);
   const wire = structuredClone(managed.wires.get(first.id));
   ip = '1.1.1.1';
-  assert.deepEqual(await service.recoverNetwork(), { ok: true });
+  assert.deepEqual(await service.recoverNetwork(), { ok: true, checkedRouteCount: 1 });
   const snapshot = await service.snapshot();
   assert.equal(snapshot.networkRevision, 1);
   assert.equal(snapshot.profiles[0].network.ip, '1.1.1.1');
@@ -1603,6 +1626,63 @@ test('network recovery refreshes existing managed routes and measured egress wit
   assert.deepEqual(client.sessions, sessions); assert.deepEqual(managed.wires.get(first.id), wire);
   assert.equal(JSON.stringify(await service.store.read()), before); assert.equal(recoveries, 1);
   assert.equal(managed.calls.some(item => item.host === 'unused.example.test'), false);
+});
+
+test('workspace recovery state is idle without used routes and manual recovery only rechecks previously used nodes', async t => {
+  let monitor, finish, entered, block = false, probes = 0;
+  const started = new Promise(resolve => { entered = resolve; });
+  const { service, client } = await fixture(t, {
+    networkRecoverySnapshot: () => monitor?.snapshot(),
+    networkProbe: new ProxyNetworkProbe({ transport: async () => {
+      probes++;
+      if (block) { block = false; entered(); await new Promise(resolve => { finish = resolve; }); }
+      return networkGeo;
+    } }),
+  });
+  const changes = [];
+  monitor = createNetworkRecoveryMonitor({ recover: options => service.recoverNetwork(options),
+    interfaces: () => ({}), onChange: state => changes.push(state) });
+  t.after(() => monitor.close());
+  assert.deepEqual((await service.snapshot()).networkRecovery, initialNetworkRecoveryState());
+  await service.call('saveProxy', { proxy: { name: 'unused', protocol: 'http', host: 'unused.example.test', port: 8080 } });
+  const before = JSON.stringify(await service.store.read());
+  monitor.retryNow(); await service.networkRecovery;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(probes, 0);
+  assert.equal((await service.snapshot()).networkRecovery.phase, 'idle');
+  assert.equal(changes.some(state => state.phase === 'recovered'), false);
+  const proxy = (await service.snapshot()).proxies[0];
+  await service.checkProxy({ id: proxy.id }); block = true;
+  monitor.retryNow(); await started;
+  const checking = await service.snapshot();
+  assert.equal(checking.networkRecovery.phase, 'checking');
+  assert.equal(checking.networkRecovery.reason, 'manual');
+  assert.equal(checking.networkRecovery.attempt, 1);
+  monitor.retryNow(); monitor.retryNow();
+  assert.equal(probes, 2);
+  finish(); await service.networkRecovery;
+  await new Promise(resolve => setImmediate(resolve));
+  const completed = await service.snapshot();
+  assert.equal(completed.networkRecovery.phase, 'recovered');
+  assert.ok(completed.networkRecovery.revision > checking.networkRecovery.revision);
+  assert.equal(client.sessions.length, 0);
+  assert.equal(JSON.stringify(await service.store.read()), before);
+  assert.doesNotMatch(JSON.stringify(changes), /unused\.example\.test|password|192\.0\./);
+  await assert.rejects(service.call('retryNetwork'), { code: 'UNKNOWN_METHOD' });
+});
+
+test('an asynchronous workspace snapshot retains the recovery status revision it actually captured', async t => {
+  let state = initialNetworkRecoveryState(), finish, entered, block = false;
+  const started = new Promise(resolve => { entered = resolve; });
+  const { service } = await fixture(t, { networkRecoverySnapshot: () => state,
+    getMetrics: async () => { if (block) { entered(); await new Promise(resolve => { finish = resolve; }); } return {}; },
+  });
+  block = true;
+  const old = service.snapshot(); await started;
+  state.phase = 'waiting'; state.revision = 4; state.attempt = 1; state.reason = 'resume';
+  block = false; finish();
+  assert.deepEqual((await old).networkRecovery, initialNetworkRecoveryState());
+  assert.deepEqual((await service.snapshot()).networkRecovery, state);
 });
 
 test('network recovery rejects pre-change egress completion and later failures remain retryable', async t => {
@@ -1617,11 +1697,11 @@ test('network recovery rejects pre-change egress completion and later failures r
   const proxy = (await service.call('saveProxy', { proxy: { name: 'moving', protocol: 'http', host: 'proxy.example.test', port: 8080 } })).proxies[0];
   pending = true;
   const old = service.checkProxy({ id: proxy.id }); await started;
-  assert.deepEqual(await service.recoverNetwork(), { ok: true });
+  assert.deepEqual(await service.recoverNetwork(), { ok: true, checkedRouteCount: 1 });
   finish(); await assert.rejects(old, { code: 'NETWORK_CHANGED' });
   assert.equal((await service.snapshot()).proxies[0].network.ip, '1.1.1.1');
-  offline = true; assert.deepEqual(await service.recoverNetwork(), { ok: false });
-  offline = false; assert.deepEqual(await service.recoverNetwork(), { ok: true });
+  offline = true; assert.deepEqual(await service.recoverNetwork(), { ok: false, checkedRouteCount: 1 });
+  offline = false; assert.deepEqual(await service.recoverNetwork(), { ok: true, checkedRouteCount: 1 });
   assert.equal((await service.snapshot()).proxies[0].network.ip, '1.1.1.1');
 });
 
@@ -1640,10 +1720,10 @@ test('a failed node retry preserves healthy probes, revision and an independent 
   const saved = await service.call('saveProxy', { proxy: { name: 'failed', protocol: 'socks5', host: 'failed.example.test', port: 8080 } });
   const good = saved.proxies.find(item => item.name === 'healthy'), bad = saved.proxies.find(item => item.name === 'failed');
   await service.checkProxy({ id: good.id }); await service.checkProxy({ id: bad.id }); failed = true;
-  assert.deepEqual(await service.recoverNetwork(), { ok: false });
+  assert.deepEqual(await service.recoverNetwork(), { ok: false, checkedRouteCount: 2 });
   const revision = service.networkRevision, healthyCount = counts.get('healthy.example.test');
   gateNext = true; const manual = service.checkProxy({ id: good.id }); await started;
-  failed = false; assert.deepEqual(await service.recoverNetwork({ retry: true }), { ok: true });
+  failed = false; assert.deepEqual(await service.recoverNetwork({ retry: true }), { ok: true, checkedRouteCount: 1 });
   assert.equal(service.networkRevision, revision);
   finish(); assert.equal((await manual).ok, true);
   assert.equal(counts.get('healthy.example.test'), healthyCount + 1, 'only the manual request contacted healthy proxy');
@@ -1662,7 +1742,7 @@ test('a new network event supersedes a slow offline recovery before its stale pr
   await service.checkProxy({ id: proxy.id }); slow = true;
   const old = service.recoverNetwork(); await started;
   const latest = await service.recoverNetwork();
-  assert.deepEqual(latest, { ok: true }); assert.equal(service.networkRevision, 2);
+  assert.deepEqual(latest, { ok: true, checkedRouteCount: 1 }); assert.equal(service.networkRevision, 2);
   finish(); await assert.rejects(old, { code: 'NETWORK_CHANGED' });
   assert.equal((await service.snapshot()).proxies[0].network.ip, '1.1.1.1');
   assert.equal(service.networkRecoveryFailures.size, 0);
@@ -1725,7 +1805,7 @@ test('a saved node first checked offline is retried after connectivity returns w
   assert.deepEqual([...service.checkedProxyIds], [saved.id]);
   assert.equal(managed.wires.size, 0); assert.equal(service.proxyWires.size, 0); assert.equal(managed.probes.length, 0);
   managed.proxyCore.failure = false;
-  assert.deepEqual(await service.recoverNetwork(), { ok: true });
+  assert.deepEqual(await service.recoverNetwork(), { ok: true, checkedRouteCount: 1 });
   assert.equal(managed.calls.length, 2); assert.equal(managed.calls[1].id, saved.id);
   assert.equal(managed.probes.length, 1); assert.equal(managed.wires.has(saved.id), true);
 });

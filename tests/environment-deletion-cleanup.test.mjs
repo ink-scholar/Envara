@@ -53,3 +53,18 @@ test('successful cleanup releases import custody and unrelated methods remain un
   assert.deepEqual(calls, ['erase:a', 'release:a']);
   assert.equal(workspaceOperationWarning(result), null);
 });
+
+test('only successfully deleted environments lose combination metadata and failures do not repeat deletion', async () => {
+  const cleaned = [], released = [];
+  const snapshot = { profiles: [{ id: 'kept' }], actionResult: { results: [{ id: 'removed', ok: true }, { id: 'kept', ok: false }] } };
+  const result = await finishEnvironmentDeletion({ method: 'bulkProfiles', args: { action: 'delete' }, result: snapshot,
+    eraseData: async () => {}, releaseImport: id => released.push(id), removeCombinations: async id => {
+      cleaned.push(id); throw new Error('private storage detail');
+    } });
+  assert.deepEqual(cleaned, ['removed']);
+  assert.deepEqual(released, ['removed']);
+  assert.equal(result.actionResult, snapshot.actionResult);
+  assert.deepEqual(result.warnings, [{ code: 'WORK_COMBINATION_CLEANUP_INCOMPLETE', profileId: 'removed' }]);
+  assert.doesNotMatch(JSON.stringify(result), /private storage detail/);
+  assert.match(workspaceOperationWarning(result), /环境已删除.*工作组合/);
+});

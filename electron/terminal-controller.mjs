@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { normalizeSshRoute, sameSshRoute } from './terminal-ssh-route.mjs';
+import { TerminalAttachments } from './terminal-attachments.mjs';
 const fail = (message, code = 'TERMINAL_ACTION_FAILED') => Object.assign(new Error(message), { code });
 const identifier = (value) => {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(value)) throw fail('无效的环境标识。', 'VALIDATION_ERROR');
@@ -7,6 +8,7 @@ const identifier = (value) => {
 };
 
 export const TERMINAL_METHODS = new Set(['terminalSnapshot', 'renameSavedTerminal', 'removeSavedTerminal', 'reopenSavedTerminal', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'openTerminal', 'duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'setTerminalLinkBrowser', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'deleteClaudeAccount', 'claudeInstallationStatus', 'listTerminalSshConnections', 'prepareTerminalSshIdentity', 'prepareTerminalSshPassword', 'setTerminalSshPassword', 'forgetTerminalSshPassword', 'saveTerminalSshConnection', 'removeTerminalSshConnection']);
+for (const method of ['setSavedTerminalPinned', 'moveSavedTerminal', 'stageTerminalAttachments', 'commitTerminalAttachments', 'cancelTerminalAttachments']) TERMINAL_METHODS.add(method);
 const PROFILE_CONFIGURATION = new Set(['updateProfile', 'deleteProfile']);
 const PROXY_CONFIGURATION = new Set(['saveProxy', 'deleteProxy']);
 const GROUP_CONFIGURATION = new Set(['saveGroup', 'deleteGroup', 'clearGroupProxy']);
@@ -41,20 +43,23 @@ const sshPassword = value => {
 
 /** Serializes directory selection / launch against edits affecting a live PTY. */
 export class TerminalController {
-  constructor({ terminal, service, pickDirectory, pickSSHIdentity }) {
+  constructor({ terminal, service, pickDirectory, pickSSHIdentity, attachments = new TerminalAttachments({ terminal }) }) {
     this.terminal = terminal;
     this.service = service;
     this.pickDirectory = pickDirectory;
     this.pickSSHIdentity = pickSSHIdentity;
+    this.attachments = attachments;
     /* Folders picked in the native dialog for one new terminal. The renderer
      * holds only a token, so a directory always comes from the user's pick. */
     this.pickedDirectories = new Map();
     this.pickedSSHIdentities = new Map();
     this.queue = Promise.resolve();
+    this.pendingCount = 0;
   }
 
   serialize(operation) {
-    const pending = this.queue.then(operation);
+    this.pendingCount++;
+    const pending = this.queue.then(operation).finally(() => { this.pendingCount--; });
     this.queue = pending.catch(() => {});
     return pending;
   }
@@ -231,13 +236,15 @@ export class TerminalController {
   async dispatch(method, args = {}, context = {}) {
     if (!TERMINAL_METHODS.has(method)) throw fail('不支持的终端操作。');
     if (!args || typeof args !== 'object' || Array.isArray(args)) throw fail('终端参数格式无效。', 'VALIDATION_ERROR');
-    if (['renameSavedTerminal', 'removeSavedTerminal', 'reopenSavedTerminal'].includes(method)) {
-      const keys = method === 'renameSavedTerminal' ? ['id', 'entryId', 'name'] : method === 'reopenSavedTerminal' ? ['id', 'entryId', 'requestId'] : ['id', 'entryId'];
+    if (['renameSavedTerminal', 'removeSavedTerminal', 'reopenSavedTerminal', 'setSavedTerminalPinned', 'moveSavedTerminal'].includes(method)) {
+      const keys = method === 'renameSavedTerminal' ? ['id', 'entryId', 'name'] : method === 'reopenSavedTerminal' ? ['id', 'entryId', 'requestId'] : method === 'setSavedTerminalPinned' ? ['id', 'entryId', 'pinned'] : method === 'moveSavedTerminal' ? ['id', 'entryId', 'direction'] : ['id', 'entryId'];
       if (Object.keys(args).some(key => !keys.includes(key)) || typeof args.entryId !== 'string') throw fail('终端参数格式无效。', 'VALIDATION_ERROR');
+      if (method === 'setSavedTerminalPinned' && typeof args.pinned !== 'boolean' || method === 'moveSavedTerminal' && !['up', 'down'].includes(args.direction)) throw fail('终端参数格式无效。', 'VALIDATION_ERROR');
       const release = method === 'reopenSavedTerminal' ? await this.terminal.reserveSavedTerminalStart({ id: args.id, entryId: args.entryId }) : null;
       return this.serialize(async () => {
         await this.profile(args.id);
         return this.terminal[method]({ id: args.id, entryId: args.entryId, ...(method === 'renameSavedTerminal' ? { name: args.name } : {}),
+          ...(method === 'setSavedTerminalPinned' ? { pinned: args.pinned } : {}), ...(method === 'moveSavedTerminal' ? { direction: args.direction } : {}),
           ...(method === 'reopenSavedTerminal' ? { requestId: args.requestId } : {}) });
       }).finally(() => release?.());
     }
@@ -250,6 +257,13 @@ export class TerminalController {
       return this.sshList(args.id);
     }
     if (method === 'writeTerminal') return this.terminal.write(args);
+    if (['stageTerminalAttachments', 'commitTerminalAttachments', 'cancelTerminalAttachments'].includes(method)) {
+      const keys = method === 'stageTerminalAttachments' ? ['sessionId', 'transferId', 'files'] : method === 'commitTerminalAttachments' ? ['sessionId', 'transferId', 'bracketedPaste'] : ['sessionId', 'transferId'];
+      if (Object.keys(args).some(key => !keys.includes(key)) || method === 'commitTerminalAttachments' && typeof args.bracketedPaste !== 'boolean') throw fail('终端参数格式无效。', 'VALIDATION_ERROR');
+      const session = this.terminal.session(args.sessionId);
+      if (method === 'stageTerminalAttachments') { await this.profile(session.profileId); return this.attachments.stage(args, context); }
+      return this.attachments.finish({ ...args, accepted: method === 'commitTerminalAttachments' }, context);
+    }
     if (method === 'resizeTerminal') return this.terminal.resize(args);
     // Installation can await network I/O inside serialize(). Close must reach
     // its AbortController immediately instead of waiting behind that launch.

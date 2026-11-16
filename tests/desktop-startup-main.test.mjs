@@ -9,6 +9,7 @@ import { terminalViewSnapshot } from '../electron/terminal-view.mjs';
 import { registerDesktopIPC } from '../electron/desktop-ipc.mjs';
 import { shutdownDesktopServices } from '../electron/desktop-services.mjs';
 import { createRuntimeDiagnostics } from '../electron/runtime-diagnostics.mjs';
+import { createNetworkRecoveryMonitor } from '../electron/network-recovery.mjs';
 
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const turn = () => new Promise(resolve => setImmediate(resolve));
@@ -60,6 +61,7 @@ function fixture({ initialize = async () => {}, diagnostics = null } = {}) {
     canOpen: () => !context.quitting,
     create: async () => { events.push('window-create'); currentWindow = view; return view; } });
   return { api, startup, events, calls, view, event, views, context, window,
+    invoke: request => handlers.get('envara:call')(event, request),
     emit(value) { for (const callback of listeners.get('envara:snapshot') ?? []) callback({}, value); } };
 }
 
@@ -193,6 +195,7 @@ test('an independent terminal window cannot dispatch workspace actions or anothe
   };
   await f.startup.start();
   await assert.rejects(f.api.call('createProfile'), { message: /此窗口仅支持终端操作/ });
+  await assert.rejects(f.api.call('retryNetwork'), { message: /此窗口仅支持终端操作/ });
   await assert.rejects(f.api.call('openTerminal', { id: 'other-profile' }), { message: /此窗口仅操作当前环境/ });
   await assert.rejects(f.api.call('deleteClaudeAccount', { id: 'other-profile', accountId: 'selected', confirmed: true }), { message: /此窗口仅操作当前环境/ });
   await assert.rejects(f.api.call('closeTerminal', { sessionId: 'other-session' }), { message: /该会话不属于此终端窗口/ });
@@ -204,6 +207,37 @@ test('an independent terminal window cannot dispatch workspace actions or anothe
   f.event.senderFrame = {};
   await assert.rejects(f.api.call('deleteClaudeAccount', { id: 'prof_fixture', accountId: 'selected', confirmed: true }), { message: /不允许的请求来源/ });
   assert.equal(f.calls.length, 2);
+});
+
+test('workspace retry IPC runs the shipped main dispatch without accepting routes or awaiting network completion', async () => {
+  const hold = deferred(); let runs = 0;
+  const monitor = createNetworkRecoveryMonitor({ interfaces: () => ({}),
+    recover: () => { runs++; return hold.promise; } });
+  const f = fixture();
+  const allowed = main.match(/const allowedMethods = new Set\(\[[\s\S]*?\n\]\);/);
+  const handler = main.match(/async function handleCall\([\s\S]*?\n\}/);
+  assert.ok(allowed && handler);
+  const context = { quitting: false, window: {}, TERMINAL_METHODS: new Set(), networkRecovery: monitor,
+    applicationUpdates: { active: false, handles: () => false }, workspaceTools: { handles: () => false },
+    service: { snapshot: async () => ({ ...snapshot(), networkRecovery: monitor.snapshot() }) } };
+  vm.runInNewContext(`${allowed[0]}\n${handler[0]}`, context, { filename: 'main-network-retry-fixture.mjs' });
+  f.context.handleCall = (...args) => context.handleCall(...args);
+  try {
+    await assert.rejects(f.api.call('retryNetwork', {}), { code: 'APP_STARTING' });
+    assert.equal(runs, 0);
+    await f.startup.start();
+    await assert.rejects(f.api.call('retryNetwork', { url: 'https://untrusted.example.test', retry: true }), { code: 'INVALID_NETWORK_RECOVERY_REQUEST' });
+    assert.equal(runs, 0);
+    const first = await f.api.call('retryNetwork', {});
+    assert.equal(first.networkRecovery.phase, 'checking');
+    assert.equal(first.networkRecovery.reason, 'manual');
+    const repeated = await f.api.call('retryNetwork', {});
+    assert.equal(repeated.networkRecovery.revision, first.networkRecovery.revision);
+    assert.equal(runs, 1);
+    f.event.senderFrame = {};
+    await assert.rejects(f.api.call('retryNetwork', {}), { message: /不允许的请求来源/ });
+    assert.equal(runs, 1);
+  } finally { monitor.close(); hold.resolve({ ok: true }); }
 });
 
 test('all SSH connection actions remain inside the independent terminal window environment', async () => {
@@ -304,6 +338,7 @@ test('the actual initialization stage wrapper checks shutdown before creating th
   assert.ok(declaration);
   const context = {
     app: { getPath: () => '/fixture-only' },
+    applicationUpdates: { beforeStartup: async () => true },
     startupStep: async (_name, operation) => operation(),
     mkdir: async () => { events.push('mkdir-start'); await hold.promise; events.push('mkdir-finished'); },
     SignInDataNames: class { constructor() { events.push('next-service'); } },
@@ -405,10 +440,26 @@ test('the existing loading shell remains noninteractive until real settings arri
 test('independent terminal saved-entry operations retain their bound environment scope', async () => {
   const f = fixture(); f.startup.start(); await f.startup.ready;
   f.views.set(f.event.sender, { window: f.view, kind: 'terminal', profileId: 'prof_fixture' });
-  for (const method of ['reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal']) {
+  for (const method of ['reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal', 'setSavedTerminalPinned', 'moveSavedTerminal']) {
     await assert.rejects(f.api.call(method, { id: 'another-profile', entryId: 'savedterm_1234567890abcdef1234567890abcdef' }), { message: /此窗口仅操作当前环境/ });
     assert.equal(f.calls.length, 0);
     await f.api.call(method, { id: 'prof_fixture', entryId: 'savedterm_1234567890abcdef1234567890abcdef' });
+    assert.equal(f.calls.pop().method, method);
+  }
+});
+
+test('independent terminal attachment operations resolve their session inside the bound environment', async () => {
+  const f = fixture(); await f.startup.start();
+  f.views.set(f.event.sender, { window: f.view, kind: 'terminal', profileId: 'prof_fixture' });
+  f.context.terminal.snapshot = async ({ id }) => {
+    assert.equal(id, 'prof_fixture');
+    return { profiles: [{ profileId: id, sessions: [{ sessionId: 'owned-session' }] }] };
+  };
+  for (const method of ['stageTerminalAttachments', 'commitTerminalAttachments', 'cancelTerminalAttachments']) {
+    const refused = await f.invoke({ method, args: { sessionId: 'another-session', id: 'prof_fixture', transferId: 'synthetic-transfer' } });
+    assert.equal(refused.ok, false); assert.match(refused.error.message, /该会话不属于此终端窗口/);
+    assert.equal(f.calls.length, 0);
+    assert.equal((await f.invoke({ method, args: { sessionId: 'owned-session', transferId: 'synthetic-transfer' } })).ok, true);
     assert.equal(f.calls.pop().method, method);
   }
 });

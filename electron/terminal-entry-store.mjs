@@ -12,7 +12,8 @@ const notFound = () => fail('TERMINAL_ENTRY_NOT_FOUND', '此终端记录已不�
 const MAX_BYTES = 1024 * 1024;
 export const TERMINAL_ENTRY_LIMIT = 512;
 const configKeys = ['profileId', 'name', 'kind', 'cwd', 'browserProfileId', 'claudeAccountId', 'networkRef'];
-const entryKeys = ['id', ...configKeys, 'createdAt', 'updatedAt', 'lastOpenedAt'];
+const legacyEntryKeys = ['id', ...configKeys, 'createdAt', 'updatedAt', 'lastOpenedAt'];
+const entryKeys = [...legacyEntryKeys, 'pinned'];
 const exactKeys = (value, allowed) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => allowed.includes(key));
 const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,96}$/.test(value);
 const checkedProfileId = value => { if (!validId(value)) throw invalid(); return value; };
@@ -46,12 +47,13 @@ function configuration(value) {
 }
 const validTime = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
   Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
-function storedEntry(value) {
-  if (!exactKeys(value, entryKeys) || !['createdAt', 'updatedAt', 'lastOpenedAt'].every(key => validTime(value[key])) ||
+function storedEntry(value, version) {
+  if (!exactKeys(value, version === 1 ? legacyEntryKeys : entryKeys) || version === 2 && typeof value.pinned !== 'boolean' ||
+      !['createdAt', 'updatedAt', 'lastOpenedAt'].every(key => validTime(value[key])) ||
       value.updatedAt < value.createdAt || value.lastOpenedAt < value.createdAt || value.lastOpenedAt > value.updatedAt) throw storageInvalid();
   const fields = Object.fromEntries(configKeys.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
   return { id: terminalEntryId(value.id), ...configuration(fields),
-    createdAt: value.createdAt, updatedAt: value.updatedAt, lastOpenedAt: value.lastOpenedAt };
+    createdAt: value.createdAt, updatedAt: value.updatedAt, lastOpenedAt: value.lastOpenedAt, pinned: version === 2 ? value.pinned : false };
 }
 const identity = value => JSON.stringify([value.profileId, value.kind, value.claudeAccountId, value.browserProfileId, value.cwd]);
 const copyEntry = value => ({ ...value, networkRef: { ...value.networkRef } });
@@ -96,11 +98,11 @@ export class TerminalEntryStore {
       const after = await handle.stat();
       if (count > MAX_BYTES || count !== before.size || ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].some(key => before[key] !== after[key])) throw storageInvalid();
       const document = JSON.parse(bytes.toString('utf8', 0, count));
-      if (!exactKeys(document, ['schema', 'version', 'entries']) || document.schema !== 'envara.terminal-entries' || document.version !== 1 ||
+      if (!exactKeys(document, ['schema', 'version', 'entries']) || document.schema !== 'envara.terminal-entries' || ![1, 2].includes(document.version) ||
           !Array.isArray(document.entries) || document.entries.length > TERMINAL_ENTRY_LIMIT) throw storageInvalid();
       const entries = new Map(), identities = new Set();
       for (const item of document.entries) {
-        const entry = storedEntry(item), key = identity(entry);
+        const entry = storedEntry(item, document.version), key = identity(entry);
         if (entries.has(entry.id) || identities.has(key)) throw storageInvalid();
         entries.set(entry.id, entry); identities.add(key);
       }
@@ -111,7 +113,8 @@ export class TerminalEntryStore {
   async list(profileId) {
     if (profileId !== undefined) checkedProfileId(profileId);
     await this.ready;
-    return [...this.entries.values()].filter(entry => profileId === undefined || entry.profileId === profileId).map(copyEntry);
+    const entries = [...this.entries.values()].filter(entry => profileId === undefined || entry.profileId === profileId);
+    return [...entries.filter(entry => entry.pinned), ...entries.filter(entry => !entry.pinned)].map(copyEntry);
   }
   async get(profileId, entryId) {
     checkedProfileId(profileId); terminalEntryId(entryId); await this.ready;
@@ -130,7 +133,7 @@ export class TerminalEntryStore {
     this.queue = task.catch(() => {}); return task;
   }
   async save(entries) {
-    const serialized = JSON.stringify({ schema: 'envara.terminal-entries', version: 1, entries: [...entries.values()] });
+    const serialized = JSON.stringify({ schema: 'envara.terminal-entries', version: 2, entries: [...entries.values()] });
     if (entries.size > TERMINAL_ENTRY_LIMIT || Buffer.byteLength(serialized, 'utf8') > MAX_BYTES) throw storageInvalid();
     await this.checkedRoot(); await this.checkedFile();
     const temporary = `${this.filename}.${randomUUID()}.tmp`;
@@ -152,7 +155,7 @@ export class TerminalEntryStore {
       const now = changedAt(previous);
       if (!previous && entries.size >= TERMINAL_ENTRY_LIMIT) throw fail('TERMINAL_ENTRY_LIMIT', '最多保存 512 个终端入口。');
       const entry = previous ? { ...previous, networkRef: { ...fields.networkRef }, updatedAt: now, lastOpenedAt: now }
-        : { id: `savedterm_${randomUUID().replaceAll('-', '')}`, ...fields, createdAt: now, updatedAt: now, lastOpenedAt: now };
+        : { id: `savedterm_${randomUUID().replaceAll('-', '')}`, ...fields, createdAt: now, updatedAt: now, lastOpenedAt: now, pinned: false };
       entries.set(entry.id, entry); return copyEntry(entry);
     });
   }
@@ -162,6 +165,38 @@ export class TerminalEntryStore {
       const entry = entries.get(entryId);
       if (!entry || entry.profileId !== profileId) throw notFound();
       entry.name = name; entry.updatedAt = changedAt(entry); return copyEntry(entry);
+    });
+  }
+  setPinned(profileId, entryId, pinned) {
+    checkedProfileId(profileId); terminalEntryId(entryId);
+    if (typeof pinned !== 'boolean') throw invalid();
+    return this.mutate(entries => {
+      const entry = entries.get(entryId);
+      if (!entry || entry.profileId !== profileId) throw notFound();
+      if (entry.pinned !== pinned) { entry.pinned = pinned; entry.updatedAt = changedAt(entry); }
+      return copyEntry(entry);
+    });
+  }
+  move(profileId, entryId, direction) {
+    checkedProfileId(profileId); terminalEntryId(entryId);
+    if (!['up', 'down'].includes(direction)) throw invalid();
+    return this.mutate(entries => {
+      const entry = entries.get(entryId);
+      if (!entry || entry.profileId !== profileId) throw notFound();
+      // The stored array is the durable order. Swap only adjacent members of
+      // this environment's pin group, leaving every other group's slots intact.
+      const values = [...entries.values()];
+      const group = values.filter(item => item.profileId === profileId && item.pinned === entry.pinned);
+      const index = group.findIndex(item => item.id === entryId);
+      const neighbor = group[index + (direction === 'up' ? -1 : 1)];
+      if (neighbor) {
+        const currentIndex = values.indexOf(entry), neighborIndex = values.indexOf(neighbor);
+        [values[currentIndex], values[neighborIndex]] = [values[neighborIndex], values[currentIndex]];
+        entries.clear();
+        for (const item of values) entries.set(item.id, item);
+        entry.updatedAt = changedAt(entry);
+      }
+      return copyEntry(entry);
     });
   }
   remove(profileId, entryId) {

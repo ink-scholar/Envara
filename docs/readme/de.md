@@ -45,6 +45,8 @@ Getrennte Umgebungen helfen, Verwechslungen bei Netzwerk- und Kontoeinstellungen
 
 Lade die DMG- oder ZIP-Datei für **macOS Apple Silicon (arm64)** und die SHA-256-Prüfsummen von [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest) herunter. Installationsschritte und Hinweise zur Signatur findest du in der [Anleitung](../user-guide.md).
 
+Ab v1.3 können Sie unter Einstellungen → Anwendungsupdates nach neuen Versionen suchen, sie herunterladen und installieren. Nur die Anwendung wird ersetzt; Umgebungen, Einstellungen und Anmeldedaten bleiben erhalten. Beenden Sie aktive Sitzungen vor der Installation. Bei älteren Versionen muss zunächst einmal eine Version mit integrierter Update-Funktion installiert werden.
+
 1. **Netzwerk wählen.** Füge eine Netzwerkkonfiguration hinzu, prüfe den tatsächlichen Netzausgang und bestätige Region und Zeitzone.
 2. **Umgebung erstellen.** Wähle einen Browser und gib deinem Projekt oder Konto einen eigenen Arbeitsbereich.
 3. **Loslegen.** Öffne den Browser, wähle ein Arbeitsverzeichnis für das Terminal oder binde eine unterstützte Desktop-App ein.

@@ -21,10 +21,14 @@ import (
 	"browseforge/internal/groups"
 	"browseforge/internal/humanize"
 	"browseforge/internal/profile"
+	"browseforge/internal/profilepolicy"
 	bfruntime "browseforge/internal/runtime"
 )
 
 func NewRouter(cfg *config.Config, store *profile.Store, mgr *browser.Manager, fpPool *fingerprint.Pool, groupStores ...*groups.Store) (*chi.Mux, error) {
+	if store != nil && mgr != nil {
+		store.SetMutationGuard(mgr.ReserveProfileMutation)
+	}
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
@@ -53,6 +57,7 @@ func NewRouter(cfg *config.Config, store *profile.Store, mgr *browser.Manager, f
 
 	r.Group(func(r chi.Router) {
 		r.Use(h.authMiddleware)
+		r.Use(h.updateAdmissionMiddleware)
 
 		r.Post("/api/profiles", h.createProfile)
 		r.Get("/api/runtimes", h.listRuntimes)
@@ -71,6 +76,10 @@ func NewRouter(cfg *config.Config, store *profile.Store, mgr *browser.Manager, f
 		r.Delete("/api/groups/{name}/proxy", h.clearGroupProxy)
 
 		r.Post("/api/sessions", h.createSession)
+		r.Post("/api/maintenance/acquire", h.acquireProfileMaintenance)
+		r.Post("/api/maintenance/release", h.releaseProfileMaintenance)
+		r.Post("/api/maintenance/update-acquire", h.acquireUpdateMaintenance)
+		r.Post("/api/maintenance/update-release", h.releaseUpdateMaintenance)
 		r.Get("/api/sessions", h.listSessions)
 		r.Delete("/api/sessions/{id}", h.deleteSession)
 		r.Post("/api/sessions/{id}/focus", h.focusSession)
@@ -86,6 +95,9 @@ func NewRouter(cfg *config.Config, store *profile.Store, mgr *browser.Manager, f
 		r.Post("/api/sessions/{id}/wait", h.waitFor)
 		r.Get("/api/sessions/{id}/cookies", h.getCookies)
 		r.Post("/api/sessions/{id}/cookies", h.setCookies)
+		r.Post("/api/sessions/{id}/site-cookies", h.listSiteCookies)
+		r.Post("/api/sessions/{id}/site-cookies/clear", h.clearSiteCookies)
+		r.Post("/api/sessions/{id}/runtime-verification", h.runtimeVerification)
 
 		r.Get("/api/playwright/endpoint", h.playwrightEndpoint)
 		r.Get("/api/playwright/ws/{id}", h.playwrightWSProxy)
@@ -295,6 +307,10 @@ func (h *handler) updateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	p, err := h.store.Update(chi.URLParam(r, "id"), updates)
 	if err != nil {
+		if browser.ErrorCode(err) == "CACHE_MAINTENANCE_BUSY" {
+			writeMaintenanceError(w, err)
+			return
+		}
 		writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
 		return
 	}
@@ -303,6 +319,10 @@ func (h *handler) updateProfile(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) deleteProfile(w http.ResponseWriter, r *http.Request) {
 	if err := h.store.Delete(chi.URLParam(r, "id")); err != nil {
+		if browser.ErrorCode(err) == "CACHE_MAINTENANCE_BUSY" {
+			writeMaintenanceError(w, err)
+			return
+		}
 		writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
 		return
 	}
@@ -368,35 +388,11 @@ func decodeProxyUpdate(raw any) (*profile.ProxyConfig, error) {
 }
 
 func validateBrowseForgeProxyRegion(runtimeID bfruntime.ID, proxy *profile.ProxyConfig) error {
-	if runtimeID != bfruntime.BrowseForgeChromium || proxy == nil {
-		return nil
-	}
-	normalized, err := browser.NormalizeBrowseForgeProxyRegion(proxy.Region)
-	if err != nil {
-		return err
-	}
-	if normalized == "" {
-		return fmt.Errorf("browseforge-chromium proxy_region is required when a proxy is configured; use a redacted geographic label such as %s", browser.BrowseForgeProxyRegionExamples)
-	}
-	proxy.Region = normalized
-	return nil
+	return profilepolicy.ValidateProxyRegion(runtimeID, proxy)
 }
 
 func (h *handler) validateBrowseForgeProfileProxy(runtimeID bfruntime.ID, p *profile.Profile) error {
-	if runtimeID != bfruntime.BrowseForgeChromium || p == nil {
-		return nil
-	}
-	if p.Proxy != nil {
-		if err := validateBrowseForgeProxyRegion(runtimeID, p.Proxy); err != nil {
-			return err
-		}
-	}
-	effective := h.effectiveProxyForProfile(p)
-	if effective.Proxy == nil || effective.Source == "profile" {
-		return nil
-	}
-	proxy := *effective.Proxy
-	return validateBrowseForgeProxyRegion(runtimeID, &proxy)
+	return profilepolicy.ValidateProfileProxy(runtimeID, p, h.effectiveProxyForProfile)
 }
 
 // --- Helpers ---

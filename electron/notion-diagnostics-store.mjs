@@ -17,6 +17,9 @@ export class NotionDiagnosticsStore {
   }
   async prepare() {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    await this.inspectDirectory();
+  }
+  async inspectDirectory() {
     const info = await lstat(this.directory);
     if (!info.isDirectory() || info.isSymbolicLink() || info.mode & 0o077 ||
         typeof process.getuid === 'function' && info.uid !== process.getuid() ||
@@ -41,12 +44,15 @@ export class NotionDiagnosticsStore {
     this.pending = task;
     return task;
   }
-  async read(id) {
+  read(id) { return this.readRecord(id, true); }
+  readExisting(id) { return this.readRecord(id, false); }
+  async readRecord(id, createDirectory) {
     if (!applicationId(id)) return null;
     await this.pending.catch(() => {});
     let handle;
     try {
-      await this.prepare();
+      if (createDirectory) await this.prepare();
+      else await this.inspectDirectory();
       handle = await open(path.join(this.directory, `${id}.json`), constants.O_RDONLY | constants.O_NOFOLLOW);
       const info = await handle.stat();
       if (!info.isFile() || info.nlink !== 1 || info.mode & 0o077 || info.size > 131072 ||

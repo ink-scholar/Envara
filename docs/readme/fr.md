@@ -45,6 +45,8 @@ L’isolation des environnements aide à limiter les mélanges de configurations
 
 Téléchargez le **DMG ou ZIP pour macOS Apple Silicon (arm64)** et les sommes de contrôle SHA-256 sur [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). Consultez le [guide d’utilisation](../user-guide.md) pour l’installation et les informations sur la signature.
 
+À partir de v1.3, utilisez Paramètres → Mises à jour de l’application pour rechercher, télécharger et installer les versions suivantes. Seule l’application est remplacée ; les environnements, les réglages et les données de connexion sont conservés. Terminez les sessions actives avant l’installation. Les anciennes versions nécessitent une première installation d’une version incluant la mise à jour intégrée.
+
 1. **Choisissez un réseau.** Ajoutez une configuration réseau, vérifiez sa sortie réelle, puis confirmez la région et le fuseau horaire.
 2. **Créez un environnement.** Choisissez un navigateur et donnez à votre projet ou compte son propre espace de travail.
 3. **Commencez à travailler.** Ouvrez le navigateur, choisissez le dossier de travail du terminal ou associez une application de bureau prise en charge.

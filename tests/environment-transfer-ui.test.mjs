@@ -96,17 +96,22 @@ test('pending import cancellation coalesces dismissal and blocks concurrent rest
 });
 
 test('UI connects all dismissal paths to the reservation and three export entries retain distinct scopes', async () => {
-  const source = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const [source, workspaceUI, browserDetail, transferForms] = await Promise.all([
+    readFile(new URL('../src/App.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/workspace-ui.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/BrowserDetail.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/EnvironmentTransferForms.jsx', import.meta.url), 'utf8'),
+  ]);
   const close = source.slice(source.indexOf('const closeModal = useCallback('), source.indexOf('const perform = async'));
   assert.ok(close.indexOf('environmentTransferModalPending(modalRef.current, pendingRef.current)') < close.indexOf('setModal(value =>'));
   assert.match(close, /await cancelEnvironmentImportModal/);
   assert.match(close, /value === current \? null : value/);
   assert.match(source, /pendingRef\.current\.has\(`cancelImport:\$\{args\.importId\}`\)/);
-  const modal = source.slice(source.indexOf('function Modal('), source.indexOf('function Field('));
+  const modal = workspaceUI.slice(workspaceUI.indexOf('function Modal('), workspaceUI.indexOf('function Field('));
   assert.match(modal, /event\.key === "Escape"[\s\S]*?closeRef\.current\(\)/);
   assert.match(modal, /event\.target === event\.currentTarget\) onClose\(\)/);
   assert.match(modal, /label=\{t\("关闭"\)\} onClick=\{onClose\}/);
-  assert.match(source, /disabled=\{!api\.isDesktop \|\| browserExportActive\(profile, pending\) \|\| busy\}/);
+  assert.match(browserDetail, /disabled=\{!api\.isDesktop \|\| browserExportActive\(profile, pending\) \|\| busy\}/);
   assert.match(source, /scope: "browser", profile: selected/);
   const terminalExport = source.match(/<TerminalDock[\s\S]*?\bonExport=\{profileId => \{([\s\S]*?)\}\}\s+onConfigureLinkBrowser=/)?.[1];
   assert.ok(terminalExport, 'the compact terminal menu retains a scoped export callback');
@@ -133,10 +138,12 @@ test('UI connects all dismissal paths to the reservation and three export entrie
   }
   assert.match(source, /exportDisabled=\{!api\.isDesktop \|\| !selected \|\| terminalActive\(selected\.id\)\}/);
   const terminal = await readFile(new URL('../src/TerminalPane.jsx', import.meta.url), 'utf8');
-  assert.match(terminal, /disabled=\{!selectedProfile \|\| exportDisabled \|\| !!pending\}[\s\S]*?onExport\(activeProfileId\)/);
+  assert.match(terminal, /<TerminalSessionContext[^>]*activeProfileId=\{activeProfileId\}[^>]*onExport=\{onExport\} exportDisabled=\{exportDisabled\}/);
+  const terminalContext = await readFile(new URL('../src/terminal-session-context.jsx', import.meta.url), 'utf8');
+  assert.match(terminalContext, /disabled=\{!selectedProfile \|\| exportDisabled \|\| !!pending\}[\s\S]*?onExport\(activeProfileId\)/);
   assert.match(source, /scope: "application", profile, application/);
   assert.match(source, /scope: modal\.scope, password/);
   assert.match(source, /modal\.scope === "terminal" \? \{ accountId \}/);
   assert.match(source, /modal\.scope === "application" \? \{ applicationId: modal\.application\.id \}/);
-  assert.match(source, /importedDataLabel\(session\.scope\)/);
+  assert.match(transferForms, /importedDataLabel\(session\.scope\)/);
 });

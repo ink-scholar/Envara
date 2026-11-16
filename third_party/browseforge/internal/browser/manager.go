@@ -54,6 +54,11 @@ type Manager struct {
 	driverMu                sync.RWMutex
 	sessions                map[string]*Session // sessionID → Session
 	profileLocks            map[string]*sync.Mutex
+	maintenanceProfiles     map[string]string // profile ID -> private lease token
+	maintenanceLeases       map[string][]string
+	updateMaintenanceToken  string
+	updateOperations        int
+	updateCleanupUncertain  bool
 	operations              sync.WaitGroup
 	activeOperations        int
 	closing                 bool
@@ -138,6 +143,9 @@ func (m *Manager) LaunchSession(p *profile.Profile) (*Session, error) {
 		return nil, err
 	}
 	defer release()
+	if m.profileMaintenanceActive(p.ID) {
+		return nil, maintenanceError("CACHE_MAINTENANCE_BUSY")
+	}
 
 	for _, s := range m.ListSessions() {
 		if s.ProfileID != p.ID {
@@ -232,6 +240,10 @@ func (m *Manager) reserveProfile(profileID string) (func(), error) {
 	if m.closing {
 		m.mu.Unlock()
 		return nil, ErrManagerClosing
+	}
+	if m.updateMaintenanceToken != "" {
+		m.mu.Unlock()
+		return nil, maintenanceError("UPDATE_MAINTENANCE_BUSY")
 	}
 	if m.profileLocks == nil {
 		m.profileLocks = make(map[string]*sync.Mutex)
@@ -490,15 +502,25 @@ func (m *Manager) closeSessionResources(s *Session, reason string) {
 	}
 	s.resourcesOnce.Do(func() {
 		s.closed.Store(true)
+		cleanupUncertain := false
 		if s.Context != nil {
 			if err := s.Context.Close(); err != nil {
+				cleanupUncertain = true
 				slog.Warn("session context close failed", "session", s.ID, "reason", reason, "error", err)
 			}
 		}
 		if s.Browser != nil {
 			if err := s.Browser.Close(); err != nil {
+				cleanupUncertain = true
 				slog.Warn("session browser close failed", "session", s.ID, "reason", reason, "error", err)
 			}
+		}
+		if cleanupUncertain {
+			// Removing a session record does not prove its native process exited.
+			// Keep update admission closed until this owned manager exits.
+			m.mu.Lock()
+			m.updateCleanupUncertain = true
+			m.mu.Unlock()
 		}
 		if s.relay != nil {
 			s.relay.Close()
@@ -601,6 +623,9 @@ func (m *Manager) SessionPage(id string) (playwright.Page, error) {
 	if m.closing {
 		return nil, ErrManagerClosing
 	}
+	if m.updateMaintenanceToken != "" {
+		return nil, maintenanceError("UPDATE_MAINTENANCE_BUSY")
+	}
 	session, ok := m.sessions[id]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrSessionNotFound, id)
@@ -634,6 +659,9 @@ func (m *Manager) SetSessionPage(id string, page playwright.Page) error {
 	defer m.mu.Unlock()
 	if m.closing {
 		return ErrManagerClosing
+	}
+	if m.updateMaintenanceToken != "" {
+		return maintenanceError("UPDATE_MAINTENANCE_BUSY")
 	}
 	session, ok := m.sessions[id]
 	if !ok {

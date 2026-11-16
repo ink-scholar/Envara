@@ -45,6 +45,8 @@ Environment isolation helps reduce network and account configuration mix-ups; it
 
 Download the **macOS Apple Silicon (arm64)** DMG or ZIP and SHA-256 checksums from [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). See the [user guide](../user-guide.md) for installation steps and signing information.
 
+Starting with v1.3, use Settings → Application updates to check, download and install later versions. Updates replace only the application and preserve environments, settings and sign-in data; end running sessions before installing. Older versions need one initial installation of a release that includes the updater.
+
 1. **Choose a network.** Add a network configuration, check its actual egress, then confirm the region and timezone.
 2. **Create an environment.** Choose a browser and give your project or account its own workspace.
 3. **Start working.** Open the browser, choose a terminal working directory or attach a supported desktop app.

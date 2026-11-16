@@ -1,10 +1,11 @@
-import { createHash, randomInt, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { access, cp, lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { EnvaraStore } from './store.mjs';
 import { ProxyNetworkProbe, proxyFingerprint } from './proxy-network.mjs';
+import { initialNetworkRecoveryState } from './network-recovery.mjs';
 import { AddressGeocoder, addressQuery } from './address-geocoder.mjs';
 import { normalizePrivacy } from './privacy-policy.mjs';
 import { localeForCountry } from './workspace-context.mjs';
@@ -14,7 +15,8 @@ import { browseForgeRegionFor } from '../shared/engine-choice.mjs';
 import { assertHttpProxyUsername } from '../shared/proxy-auth.mjs';
 import { assertNetworkLocationMatchesEgress, confirmNetworkLocation, networkLocationGeolocation, normalizeNetworkLocation, recommendNetworkLocation } from '../shared/network-location.mjs';
 import { browserContextSignature } from './terminal-browser-broker.mjs';
-import { PROVIDER_DEFAULT_DEVICE_PROFILE_ID, applyBrowserDeviceProfile, deviceProfileFingerprint, deviceProfileReplacedFields, getBrowserDeviceProfile, validateBrowserDeviceProfileIdentity, validateBrowserDeviceProfileInput } from '../shared/browser-device-profile.mjs';
+import { PROVIDER_DEFAULT_DEVICE_PROFILE_ID, validateBrowserDeviceProfileInput } from '../shared/browser-device-profile.mjs';
+import { PROFILE_KEYS, error, object, text, number, fingerprintConfig, deviceProfileInput, normalizeBrowseForgeProfile } from './browseforge-profile-config.mjs';
 
 /** A link an environment's browser will load: web only, never credentials. */
 function linkURL(value) {
@@ -24,7 +26,6 @@ function linkURL(value) {
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw error('链接仅支持不含凭据的网页地址。', 'LINK_INVALID');
   return url.href;
 }
-const PROFILE_KEYS = new Set(['name', 'group', 'notes', 'engine', 'platform', 'seed', 'locale', 'timezone', 'width', 'height', 'startUrl', 'proxyId', 'tags', 'fingerprint', 'fingerprintGeneration', 'privacy', 'deviceProfileId']);
 const BOUND_BROWSER_ARGUMENTS = Object.freeze({ form_fill: ['fields'], press_key: ['key'], select_option: ['selector', 'values', 'timeout'], check: ['selector', 'checked', 'timeout'], list_tabs: [], new_tab: ['url'], switch_tab: ['index'], close_tab: ['index'] });
 function browserProfileSignature(profile) {
   const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
@@ -62,34 +63,7 @@ const now = () => new Date().toISOString();
 const unwrap = (response) => response?.data;
 const array = (response) => Array.isArray(unwrap(response)) ? unwrap(response) : [];
 const encoded = (value) => encodeURIComponent(identifier(value));
-function error(message, code = 'VALIDATION_ERROR') { return Object.assign(new Error(message), { code }); }
 function identifier(value) { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(value)) throw error('无效的环境标识。'); return value; }
-function object(value, label) { if (!value || typeof value !== 'object' || Array.isArray(value)) throw error(`${label}必须是对象。`); return value; }
-function fingerprintConfig(value) {
-  object(value, '指纹');
-  const validate = (entry) => {
-    if (entry && typeof entry === 'object') for (const [key, child] of Object.entries(entry)) {
-      if (['__proto__', 'constructor', 'prototype'].includes(key) || /password|username|credential|token|secret/i.test(key)) throw error('指纹配置不能包含凭据或保留字段。');
-      validate(child);
-    }
-    else if (entry != null && !['string', 'number', 'boolean'].includes(typeof entry)) throw error('指纹配置必须是 JSON 数据。');
-  };
-  if (JSON.stringify(value).length > 200000) throw error('指纹配置过大。');
-  validate(value);
-  return structuredClone(value);
-}
-function fingerprintGenerationConfig(value, provider) {
-  if (value == null) return null;
-  object(value, '指纹生成记录');
-  if (Object.keys(value).some(key => !['provider', 'version', 'tuple_id', 'generated_fields'].includes(key)) || value.provider !== provider || value.version !== 1 || typeof value.tuple_id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(value.tuple_id)) throw error('指纹生成记录无效。');
-  return { provider, version: 1, tuple_id: value.tuple_id, generated_fields: fingerprintConfig(value.generated_fields) };
-}
-function text(value, label, maximum = 100, optional = false) {
-  if (optional && value == null) return '';
-  if (typeof value !== 'string' || value.includes('\0') || value.length > maximum || (!optional && !value.trim())) throw error(`${label}格式无效。`);
-  return value.trim();
-}
-function number(value, label, minimum, maximum) { if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw error(`${label}必须为 ${minimum} 至 ${maximum} 的整数。`); return value; }
 function proxyConfig(input) {
   object(input, '网络出口');
   const protocol = input.protocol ?? input.type;
@@ -281,6 +255,7 @@ export class BrowseForgeService {
   async snapshot() {
     await this.ready;
     const networkRevision = this.networkRevision;
+    const networkRecovery = structuredClone(this.options.networkRecoverySnapshot?.() ?? initialNetworkRecoveryState());
     const trace = (stage, operation) => this.options.diagnostics ? this.options.diagnostics.step(stage, operation) : operation();
     const [workspace, remote] = await Promise.all([trace('snapshot.store', () => this.store.read()), trace('snapshot.remote', () => this.remote())]);
     const proxies = this.proxies(workspace, remote);
@@ -322,7 +297,7 @@ export class BrowseForgeService {
     catch (value) { legacyMigration = { available: false, count: 0, migrated: 0, error: value.message }; }
     const connection = await trace('snapshot.connection', () => this.options.getConnectionInfo?.()) ?? {};
     const publicConnection = Object.fromEntries(['apiUrl', 'mcpUrl', 'status', 'version', 'sourceCommit'].filter((key) => Object.hasOwn(connection, key)).map((key) => [key, connection[key]]));
-    return { networkRevision, profiles: profiles.sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '')), proxies, groups: this.groups(workspace, remote.groups).map((group) => ({ ...group, proxyId: group.proxy ? proxies.find((proxy) => proxy.id === group.proxy.id)?.id ?? proxies.find((proxy) => sameProxy(proxy, group.proxy))?.id ?? null : null, proxy: undefined })), engines, engine: engines.find((item) => item.id === remote.defaultEngine) ?? engines[0] ?? {}, settings: { ...workspace.settings, defaultEngine: remote.defaultEngine }, events: workspace.events, legacyMigration, system: this.system, integration: { backup: { configExport: true, browserDataExport: false, credentialExport: false }, mcp: { supported: true, authentication: 'bearer', ...publicConnection } } };
+    return { networkRevision, networkRecovery, profiles: profiles.sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '')), proxies, groups: this.groups(workspace, remote.groups).map((group) => ({ ...group, proxyId: group.proxy ? proxies.find((proxy) => proxy.id === group.proxy.id)?.id ?? proxies.find((proxy) => sameProxy(proxy, group.proxy))?.id ?? null : null, proxy: undefined })), engines, engine: engines.find((item) => item.id === remote.defaultEngine) ?? engines[0] ?? {}, settings: { ...workspace.settings, defaultEngine: remote.defaultEngine }, events: workspace.events, legacyMigration, system: this.system, integration: { backup: { configExport: true, browserDataExport: false, credentialExport: false }, mcp: { supported: true, authentication: 'bearer', ...publicConnection } } };
   }
   find(remote, profileId) { identifier(profileId); const profile = remote.profiles.find((item) => item.id === profileId); if (!profile) throw error('环境不存在。', 'PROFILE_NOT_FOUND'); return profile; }
   async assertStopped(remote, profileId) {
@@ -330,75 +305,10 @@ export class BrowseForgeService {
     const session = remote.sessions.find((item) => item.profile_id === profileId);
     if (session) { if ((await this.health(session)).alive !== false) throw error('请先停止环境。', 'PROFILE_RUNNING'); await this.request('DELETE', `/api/sessions/${encoded(session.session_id)}`); }
   }
-  deviceProfileInput(input, descriptor, { existing } = {}) {
-    object(input, '环境配置');
-    if (Object.hasOwn(input, 'deviceProfileId')) {
-      getBrowserDeviceProfile(input.deviceProfileId);
-      return { ...input };
-    }
-    // A new environment delegates its device defaults to its selected provider.
-    // Existing labels and custom/imported fields stay unchanged; only an explicit
-    // selection applies one of Envara's fixed device specifications.
-    return { ...input, deviceProfileId: existing?.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID };
-  }
+  deviceProfileInput(input, descriptor, { existing } = {}) { return deviceProfileInput(input, descriptor, { existing }); }
   normalize(input, descriptor, workspace, remote, existing = null, { preserveIdentity = false } = {}) {
-    object(input, '环境配置');
-    if (Object.hasOwn(input, 'privacy')) normalizePrivacy(input.privacy);
-    for (const key of Object.keys(input)) if (!PROFILE_KEYS.has(key)) throw error(`不支持的环境字段：${key}`);
-    const name = text(input.name ?? existing?.name, '环境名称');
-    const group = text(input.group ?? existing?.group ?? '', '分组', 100, true);
-    if (!descriptor || !descriptor.platform_supported) throw error('当前平台不支持所选浏览器内核。', 'UNSUPPORTED_ENGINE');
-    const deviceProfile = validateBrowserDeviceProfileInput(input, descriptor, this.system.platform, { requireComplete: preserveIdentity });
-    const previousDeviceProfileId = workspace.profiles.find(item => item.id === existing?.id)?.deviceProfileId ?? PROVIDER_DEFAULT_DEVICE_PROFILE_ID;
-    const applyDeviceProfile = deviceProfile && !preserveIdentity && (!existing || input.deviceProfileId !== previousDeviceProfileId);
-    if (applyDeviceProfile && existing) validateBrowserDeviceProfileIdentity(deviceProfile.id, descriptor, existing, { requireKnownOrigin: true });
-    const payload = { name, group, runtime_id: descriptor.id };
-    let generation = Object.hasOwn(input, 'fingerprintGeneration')
-      ? fingerprintGenerationConfig(input.fingerprintGeneration, descriptor.id)
-      : structuredClone(existing?.fingerprint_generation ?? null);
-    const launchOverrides = { ...(existing?.launch_overrides ?? {}) };
-    if (input.tags != null) { if (!Array.isArray(input.tags) || input.tags.length > 30) throw error('标签格式无效。'); payload.tags = input.tags.map((tag) => text(tag, '标签', 60)); }
-    const platform = deviceProfile?.platform ?? input.platform ?? existing?.identity?.target_os;
-    if (platform != null) { if (!['macos', 'windows', 'linux'].includes(platform)) throw error('指纹平台无效。'); payload.identity = { ...(existing?.identity ?? {}), target_os: platform }; launchOverrides.target_os = platform; }
-    let fingerprint = { ...(existing?.fingerprint ?? {}) };
-    if (input.fingerprint != null) Object.assign(fingerprint, fingerprintConfig(input.fingerprint));
-    // Imports and ordinary edits retain their complete saved identity. Only a
-    // newly selected fixed specification replaces provider-specific geometry.
-    if (applyDeviceProfile) fingerprint = applyBrowserDeviceProfile(fingerprint, deviceProfile.id, descriptor);
-    // Null explicitly restores provider-managed geometry; an omitted field is
-    // an unrelated edit and must retain the user's existing configuration.
-    // A fixed specification continues to own its dimensions even for null.
-    if (!deviceProfile) {
-      if (Object.hasOwn(input, 'width') && input.width === null) {
-        delete fingerprint['screen.width']; delete fingerprint['screen.availWidth'];
-      }
-      if (Object.hasOwn(input, 'height') && input.height === null) {
-        delete fingerprint['screen.height']; delete fingerprint['screen.availHeight'];
-      }
-    }
-    if (input.locale === '') {
-      launchOverrides.locale = '';
-      for (const key of ['navigator.language', 'navigator.languages', 'locale:language', 'locale:region']) delete fingerprint[key];
-    } else if (input.locale != null) { let locale; try { locale = Intl.getCanonicalLocales(input.locale)[0]; } catch { throw error('语言代码无效。'); } if (!locale) throw error('语言代码无效。'); fingerprint['navigator.language'] = locale; fingerprint['navigator.languages'] = [...new Set([locale, locale.split('-')[0]])]; const parts = locale.split('-'); fingerprint['locale:language'] = parts[0]; if (parts[1]) fingerprint['locale:region'] = parts[1]; launchOverrides.locale = locale; }
-    if (input.timezone === '') { launchOverrides.timezone = ''; delete fingerprint.timezone; }
-    else if (input.timezone != null) { try { new Intl.DateTimeFormat('en', { timeZone: input.timezone }); } catch { throw error('时区无效。'); } fingerprint.timezone = input.timezone; launchOverrides.timezone = input.timezone; }
-    if (Object.keys(launchOverrides).length) payload.launch_overrides = launchOverrides;
-    if (input.width != null) fingerprint['screen.width'] = number(input.width, '屏幕宽度', 800, 7680);
-    if (input.height != null) fingerprint['screen.height'] = number(input.height, '屏幕高度', 600, 4320);
-    if (Object.keys(fingerprint).length || existing?.fingerprint != null || input.fingerprint != null) payload.fingerprint = fingerprint;
-    if (generation && existing && !preserveIdentity) {
-      // An explicit selection owns even a value equal to the generated value.
-      // Cloning must keep that choice instead of mistaking it for an automatic one.
-      const owned = new Set(Object.keys(input.fingerprint ?? {}));
-      if (applyDeviceProfile) for (const key of [...Object.keys(deviceProfileFingerprint(deviceProfile.id, descriptor)), ...deviceProfileReplacedFields(descriptor)]) owned.add(key);
-      if (Object.hasOwn(input, 'width') && input.width !== (existing.fingerprint?.['screen.width'] ?? null)) { owned.add('screen.width'); owned.add('screen.availWidth'); }
-      if (Object.hasOwn(input, 'height') && input.height !== (existing.fingerprint?.['screen.height'] ?? null)) { owned.add('screen.height'); owned.add('screen.availHeight'); }
-      for (const key of owned) delete generation.generated_fields[key];
-    }
-    if (existing || Object.hasOwn(input, 'fingerprintGeneration')) payload.fingerprint_generation = generation;
-    if (descriptor.capabilities?.supports_seed_fingerprint) payload.fingerprint_seed = input.seed != null ? number(input.seed, '指纹种子', 1, 4294967295) : existing ? existing.fingerprint_seed ?? 0 : preserveIdentity ? 0 : randomInt(1, 4294967295);
-    else if (input.seed != null) throw error('所选内核使用结构化指纹，不支持种子参数。', 'UNSUPPORTED_CAPABILITY');
-    if (existing && input.seed != null && payload.fingerprint_seed !== existing.fingerprint_seed) throw error('现有环境种子不可修改，请克隆新环境。');
+    const payload = normalizeBrowseForgeProfile(input, descriptor, { hostPlatform: this.system.platform,
+      profiles: workspace.profiles, existing, preserveIdentity });
     let proxy = existing?.proxy ?? null;
     if (Object.hasOwn(input, 'proxyId')) { if (input.proxyId === null || input.proxyId === '') proxy = null; else { const selected = this.proxies(workspace, remote).find((item) => item.id === input.proxyId); if (!selected) throw error('指定代理不存在，不能自动切换为直接连接。', 'PROXY_NOT_FOUND'); proxy = selected.protocol === 'anytls' ? null : upstreamProxy(selected); } payload.proxy = proxy; }
     const effective = this.effectiveProxy({ ...existing, ...payload, proxy }, remote.groups, workspace, Object.hasOwn(input, 'proxyId') ? input.proxyId : undefined);
@@ -587,6 +497,46 @@ export class BrowseForgeService {
     await this.browserSessionIdentity(session, context);
     if ((await this.health(session)).alive !== true) throw error('当前浏览器没有响应，未改用其他浏览器。', 'CLAUDE_BROWSER_UNAVAILABLE');
     return { session_id: session.session_id, profile_id: profileId };
+  }
+  /** Read-only, main-only observation authority. Never starts a route/browser,
+   * probes from main, changes configuration, or publishes credentials. */
+  async captureRuntimeVerificationContext(profileId, { verifyReceipt = false } = {}) {
+    await this.ready;
+    if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
+    const [remote, workspace] = await Promise.all([this.remote(), this.store.read()]);
+    const profile = this.find(remote, profileId);
+    const effective = this.effectiveProxy(profile, remote.groups, workspace);
+    if (effective.proxy && !effective.proxy.id) {
+      const listed = this.proxies(workspace, remote).find(proxy => sameProxy(proxy, effective.proxy));
+      if (listed) effective.proxy = { ...effective.proxy, id: listed.id, protocol: listed.protocol };
+    }
+    const metadata = workspace.profiles.find(item => item.id === profileId) ?? {};
+    const cached = this.workspaceContexts.get(profileId);
+    const current = cached?.signature === this.contextSignature(profile, effective);
+    const session = remote.sessions.find(item => item.profile_id === profileId);
+    const receipt = this.browserLaunchReceipts.get(profileId);
+    const managed = usesManagedProxy(effective.proxy);
+    const wire = managed ? this.proxyWires.get(effective.proxy?.id) : effective.proxy;
+    const ownedRoute = managed ? this.options.proxyCore?.routingIdentity?.(effective.proxy?.id) : null;
+    const context = { ...(current ? cached : {}), id: profileId, proxy: wire, proxyId: effective.proxy?.id ?? null,
+      managedRoute: ownedRoute ? { ...ownedRoute, profileId } : null, privacy: normalizePrivacy(metadata.privacy) };
+    // Hashes remain main-only. A new instance, routing revision or relevant
+    // configuration invalidates old measurements even if values look similar.
+    const revision = createHash('sha256').update(JSON.stringify({ profile: browserProfileSignature(profile),
+      context: this.contextSignature(profile, effective), privacy: context.privacy, networkRevision: this.networkRevision,
+      managedRevision: this.managedProxyRevisions.get(effective.proxy?.id) ?? 0,
+      wire: wire ? proxyFingerprint(wire) : null, instance: session?.instance_id ?? null,
+      receipt: receipt?.signature ?? null, route: ownedRoute, current, networkReady: cached?.network?.ok === true,
+      observation: current ? { locale: cached.locale, timezone: cached.timezone, ip: cached.network?.ok === true ? cached.network.ip : null } : null })).digest('hex');
+    const expected = { locale: current ? cached.locale ?? null : profileGeoField(profile, 'locale'),
+      timezone: current ? cached.timezone ?? null : profileGeoField(profile, 'timezone'),
+      ip: current && cached.network?.ok === true ? cached.network.ip ?? null : null };
+    const candidate = !!(current && cached.network?.ok === true && wire && context.proxyId && session && receipt);
+    if (!verifyReceipt || !candidate) return { profileId, revision, expected, available: candidate };
+    await this.assertBoundBrowserReceipt(profileId, context, remote);
+    const identity = await this.browserSessionIdentity(session, context);
+    return { profileId, revision, expected, available: true, sessionId: session.session_id,
+      instanceId: identity.instance_id, routeDigest: identity.route_digest };
   }
   /** Main-process only. Not part of call()/IPC and never returns Bind endpoints. */
   async ensureBoundBrowser({ profileId, expectedContext }) {
@@ -859,7 +809,7 @@ export class BrowseForgeService {
         }
       }));
       this.assertNetworkRevision(revision); this.changed();
-      return { ok };
+      return { ok, checkedRouteCount: selected.length };
     })();
     this.networkRecovery = operation;
     operation.finally(() => { signal?.removeEventListener('abort', cancel); if (this.networkRecovery === operation) this.networkRecovery = null; }).catch(() => {});
@@ -1132,7 +1082,15 @@ export class BrowseForgeService {
     } catch (value) { const failures = []; for (const item of created) { try { await this.request('DELETE', `/api/profiles/${encoded(item.profile.id)}`); } catch { failures.push(item.profile.id); } } value.message += `；原资料未修改，备份位于 ${backupDir}${failures.length ? `；新环境回滚未完成：${failures.join(', ')}` : ''}`; throw value; }
     return { migratedCount: created.length, backupDir, createdIds: created.map((item) => item.profile.id) };
   }
-  async shutdown() { await this.ready; this.closed = true; this.networkRecoveryAbort?.abort(); this.locationPreviews.clear(); this.networkProbe.close?.(); this.addressGeocoder.close?.(); await this.options.cancelInstall?.(); await Promise.allSettled([this.queue, ...(this.networkRecovery ? [this.networkRecovery] : []), ...this.profileQueues.values(), ...(this.pendingInstall ? [this.pendingInstall] : [])]); try { if (this.options.shutdown) await this.options.shutdown(); else await this.request('POST', '/api/shutdown'); } finally { await this.options.proxyCore?.close?.(); this.proxyWires.clear(); } }
+  async shutdown({ strict = false } = {}) {
+    await this.ready; this.closed = true; this.networkRecoveryAbort?.abort(); this.locationPreviews.clear();
+    this.networkProbe.close?.(); this.addressGeocoder.close?.(); await this.options.cancelInstall?.();
+    await Promise.allSettled([this.queue, ...(this.networkRecovery ? [this.networkRecovery] : []), ...this.profileQueues.values(), ...(this.pendingInstall ? [this.pendingInstall] : [])]);
+    const closeBackend = () => this.options.shutdown ? this.options.shutdown() : this.request('POST', '/api/shutdown');
+    const closeProxy = async () => { await this.options.proxyCore?.close?.(); this.proxyWires.clear(); };
+    if (strict) { await closeBackend(); await closeProxy(); }
+    else { try { await closeBackend(); } finally { await closeProxy(); } }
+  }
 }
 
 export default BrowseForgeService;

@@ -4,10 +4,10 @@ import { terminalViewSnapshot } from './terminal-view.mjs';
 import { environmentMutationProfile } from './environment-import-lifecycle.mjs';
 
 const bootstrapReads = new Set(['snapshot', 'terminalSnapshot']);
-const terminalProfileMethods = new Set(['renameSavedTerminal', 'removeSavedTerminal', 'reopenSavedTerminal', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'setTerminalLinkBrowser',
+const terminalProfileMethods = new Set(['renameSavedTerminal', 'removeSavedTerminal', 'reopenSavedTerminal', 'setSavedTerminalPinned', 'moveSavedTerminal', 'chooseWorkspaceDirectory', 'pickTerminalDirectory', 'setTerminalLinkBrowser',
   'openTerminal', 'openTerminalWindow', 'listClaudeAccounts', 'createClaudeAccount', 'renameClaudeAccount', 'deleteClaudeAccount', 'claudeInstallationStatus',
   'listTerminalSshConnections', 'prepareTerminalSshIdentity', 'prepareTerminalSshPassword', 'setTerminalSshPassword', 'forgetTerminalSshPassword', 'saveTerminalSshConnection', 'removeTerminalSshConnection']);
-const terminalSessionMethods = new Set(['duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal']);
+const terminalSessionMethods = new Set(['duplicateTerminal', 'writeTerminal', 'resizeTerminal', 'closeTerminal', 'stageTerminalAttachments', 'cancelTerminalAttachments', 'commitTerminalAttachments']);
 
 async function assertTerminalScope(source, request, terminal) {
   if (request.method === 'terminalSnapshot') request.args = { ...request.args, id: source.profileId };
@@ -34,7 +34,9 @@ export function registerDesktopIPC({ ipcMain, views, startup, lifecycle, service
         if (!source || source !== views.get(event.sender) || source.window.isDestroyed() || event.sender.isDestroyed() || event.senderFrame !== event.sender.mainFrame)
           throw new Error('不允许的请求来源');
         const { quitting, requestEpoch } = lifecycle();
-        if (quitting || sourceEpoch !== requestEpoch) throw Object.assign(new Error('应用正在退出。'), { code: 'APP_CLOSING' });
+        const updateStatusRead = source.kind !== 'terminal' && request?.method === 'applicationUpdateStatus'
+          && lifecycle().applicationUpdateActive === true;
+        if (!updateStatusRead && (quitting || sourceEpoch !== requestEpoch)) throw Object.assign(new Error('应用正在退出。'), { code: 'APP_CLOSING' });
       };
       assertSource();
       if (!request || typeof request.method !== 'string') throw new Error('无效请求');

@@ -1,6 +1,6 @@
 {
   "name": "envara",
-  "version": "1.2.3",
+  "version": "1.3.0",
   "description": "Envara 境舱 — an open-source desktop workspace for browsers, terminals and supported desktop applications",
   "author": "ink-scholar",
   "license": "MIT",
@@ -39,6 +39,7 @@
     "test:workspace": "node scripts/workspace-smoke.mjs",
     "test:claude:mcp": "node scripts/verify-claude-mcp.mjs",
     "claude:keychain:prepare": "node scripts/build-macos-claude-keychain.mjs",
+    "updater:prepare": "node scripts/build-macos-updater.mjs",
     "test:claude:keychain": "node scripts/verify-claude-keychain.mjs",
     "test:privacy:sidecar": "node scripts/privacy-sidecar-smoke.mjs",
     "test:package:resources": "node scripts/verify-package-resources.mjs",
@@ -49,19 +50,20 @@
   "dependencies": {
     "@xterm/headless": "6.0.0",
     "cloakbrowser": "0.5.12",
-    "playwright-core": "1.60.0",
-    "node-pty": "1.1.0",
-    "socks": "2.8.10",
     "https-proxy-agent": "9.1.0",
+    "ipaddr.js": "2.5.0",
+    "node-pty": "1.1.0",
+    "playwright-core": "1.60.0",
+    "socks": "2.8.10",
     "socks-proxy-agent": "10.1.0",
-    "ipaddr.js": "2.5.0"
+    "unzipper": "0.12.5"
   },
   "devDependencies": {
     "@electron/rebuild": "4.2.1",
     "@phosphor-icons/react": "2.1.10",
-    "@xterm/xterm": "6.0.0",
-    "@xterm/addon-fit": "0.11.0",
     "@vitejs/plugin-react": "5.0.4",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
     "electron": "44.6.0",
     "electron-builder": "26.15.3",
     "react": "19.2.0",
@@ -111,9 +113,16 @@
       },
       "extraResources": [
         {
+          "from": "build/updater",
+          "to": "updater",
+          "filter": ["darwin-${arch}/**/*"]
+        },
+        {
           "from": "build/claude-keychain",
           "to": "claude-keychain",
-          "filter": ["darwin-${arch}/**/*"]
+          "filter": [
+            "darwin-${arch}/**/*"
+          ]
         },
         {
           "from": "build/app-routing",

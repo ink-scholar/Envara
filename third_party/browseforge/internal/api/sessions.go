@@ -68,7 +68,11 @@ func writeSessionLaunchError(w http.ResponseWriter, err error) {
 	if c := browserErrorCode(err); c != "" {
 		code = c
 	}
-	writeError(w, 500, code, err.Error())
+	status := http.StatusInternalServerError
+	if code == "CACHE_MAINTENANCE_BUSY" {
+		status = http.StatusConflict
+	}
+	writeError(w, status, code, err.Error())
 }
 
 type browserErrorCoder interface {

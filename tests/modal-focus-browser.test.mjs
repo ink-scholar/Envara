@@ -3,20 +3,19 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 import { translate } from '../src/i18n.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const appFile = fileURLToPath(new URL('../src/App.jsx', import.meta.url));
 // Explicitly opt into an automation-owned Chromium, never a personal profile.
 // The fixture runs entirely in memory and refuses all network requests.
 const browserPath = process.env.ENVARA_UI_TEST_BROWSER;
 const fixtureSource = `
 import React, { useEffect, useLayoutEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Modal } from './src/App.jsx';
+import { Modal } from './src/workspace-ui.jsx';
 import { I18nProvider, useI18n } from './src/i18n.jsx';
 
 const listeners = new Set();
@@ -67,12 +66,6 @@ async function bundleFixture() {
   const result = await build({ stdin: { contents: fixtureSource, resolveDir: root, loader: 'jsx' },
     bundle: true, write: false, platform: 'browser', format: 'iife', loader: { '.css': 'empty' },
     define: { 'process.env.NODE_ENV': '"test"', 'import.meta.env.BASE_URL': '"/"' },
-    plugins: [{ name: 'expose-actual-modal-for-test', setup(builder) {
-      builder.onLoad({ filter: /[/\\]src[/\\]App\.jsx$/ }, async args => {
-        assert.equal(args.path, appFile);
-        return { contents: `${await readFile(args.path, 'utf8')}\nexport { Modal };`, loader: 'jsx' };
-      });
-    } }],
   });
   return result.outputFiles[0].text;
 }

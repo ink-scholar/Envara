@@ -55,9 +55,29 @@ type ProxyConfig struct {
 }
 
 type Store struct {
-	dir      string
-	mu       sync.RWMutex
-	profiles map[string]*Profile
+	dir           string
+	mu            sync.RWMutex
+	profiles      map[string]*Profile
+	guardMu       sync.RWMutex
+	mutationGuard func(string) (func(), error)
+}
+
+// SetMutationGuard binds this store to its browser manager's per-profile lock.
+// Standalone tools that have no manager keep the existing local-store behavior.
+func (s *Store) SetMutationGuard(guard func(string) (func(), error)) {
+	s.guardMu.Lock()
+	defer s.guardMu.Unlock()
+	s.mutationGuard = guard
+}
+
+func (s *Store) reserveMutation(id string) (func(), error) {
+	s.guardMu.RLock()
+	guard := s.mutationGuard
+	s.guardMu.RUnlock()
+	if guard == nil {
+		return func() {}, nil
+	}
+	return guard(id)
 }
 
 func NewStore(dir string) (*Store, error) {
@@ -104,9 +124,6 @@ func (s *Store) CreatePreservingIdentity(p *Profile) error {
 }
 
 func (s *Store) create(p *Profile, preserveIdentity bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if p.ID == "" {
 		id, err := generateID()
 		if err != nil {
@@ -114,6 +131,13 @@ func (s *Store) create(p *Profile, preserveIdentity bool) error {
 		}
 		p.ID = id
 	}
+	release, err := s.reserveMutation(p.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := validateV2Profile(p, "new profile"); err != nil {
 		return err
 	}
@@ -184,6 +208,11 @@ func (s *Store) List(group, tag string) []*Profile {
 }
 
 func (s *Store) Update(id string, updates map[string]any) (*Profile, error) {
+	release, err := s.reserveMutation(id)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.profiles[id]
@@ -210,6 +239,9 @@ func (s *Store) Update(id string, updates map[string]any) (*Profile, error) {
 	if err := json.Unmarshal(merged, &candidate); err != nil {
 		return nil, err
 	}
+	if candidate.ID != p.ID || candidate.ProfileDir != p.ProfileDir {
+		return nil, fmt.Errorf("profile storage identity cannot be changed")
+	}
 	if err := validateV2Profile(&candidate, "updated profile"); err != nil {
 		return nil, err
 	}
@@ -228,6 +260,11 @@ func (s *Store) Update(id string, updates map[string]any) (*Profile, error) {
 }
 
 func (s *Store) Delete(id string) error {
+	release, err := s.reserveMutation(id)
+	if err != nil {
+		return err
+	}
+	defer release()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.profiles[id]

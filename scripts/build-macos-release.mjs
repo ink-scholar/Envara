@@ -465,7 +465,7 @@ async function signCandidate(app, identity, run, evidence, binding) {
   return after;
 }
 
-const preparation = ['native:prepare', 'claude:keychain:prepare', 'backend:prepare', 'proxy:prepare', 'routing:build:mac',
+const preparation = ['native:prepare', 'claude:keychain:prepare', 'updater:prepare', 'backend:prepare', 'proxy:prepare', 'routing:build:mac',
   'routing:build:mac:local', 'routing:build:mac:acceptance', 'routing:build:mac:pf',
   'routing:prepare:mac:package', 'routing:build:mac:link-router', 'build'];
 

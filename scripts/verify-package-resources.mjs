@@ -24,6 +24,7 @@ import { inspectElectronLicenseResources } from './electron-license-resources.mj
 import { parsePFPackageCandidate } from './macos-pf-package-contract.mjs';
 import { inspectClaudeKeychainResource } from '../electron/claude-keychain.mjs';
 import { checkClaudeKeychainResources } from './build-macos-claude-keychain.mjs';
+import { checkMacUpdaterResources } from './build-macos-updater.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const posix = value => value.split(path.sep).join('/');
@@ -390,6 +391,12 @@ async function verify(options) {
       await checkClaudeKeychainResources(path.join(resourcesDir, `darwin-${target.arch}`), target.arch);
       report.claudeKeychain = { architecture: target.arch, sha256: inspected.manifest.sha256, executed: false };
       report.checks.push('Claude Keychain helper bytes, platform, architecture and source/builder digests verified without reading credentials or preparing a HOME');
+    });
+    await check('resources/updater/source-and-runtime', async () => {
+      if (target.platform !== 'darwin') return;
+      const manifest = await checkMacUpdaterResources(path.join(target.resources, 'updater', `darwin-${target.arch}`), target.arch);
+      report.updater = { architecture: target.arch, sha256: manifest.sha256, executed: false };
+      report.checks.push('Application updater helper bytes and source/builder digests verified without installing an update');
     });
     await check('resources/app-routing/macos-pf-manifest', async () => {
       if (target.platform !== 'darwin') return;

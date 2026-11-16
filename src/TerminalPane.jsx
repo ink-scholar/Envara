@@ -1,33 +1,24 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import { TerminalWindow, FolderOpen, Plus, X, CaretDown, ArrowsOutSimple, ArrowsInSimple, ArrowSquareOut, Copy, DotsThree, ArrowsClockwise, PencilSimple, Trash, SlidersHorizontal, BookmarksSimple, GlobeHemisphereWest, DownloadSimple, Browsers } from '@phosphor-icons/react';
+import { TerminalWindow, Plus, X, CaretDown, ArrowsOutSimple, ArrowsInSimple, ArrowSquareOut, Copy, DotsThree, GlobeHemisphereWest } from '@phosphor-icons/react';
 import { api } from './client.js';
 import { TerminalToolbarHint } from './TerminalToolbarHint.jsx';
 import { useI18n } from './i18n.jsx';
-import { useAppearance } from './appearance.jsx';
-import { getTerminalTheme, terminalFontFamily } from './terminal-theme.mjs';
-import { attachTerminalKeyboard } from './terminal-keyboard.mjs';
-import { attachTerminalComposition } from './terminal-composition.mjs';
-import { attachTerminalProtocol } from './terminal-protocol.mjs';
 import { SYSTEM_BROWSER, terminalNetworks } from './link-browser.mjs';
-import { CLAUDE_SESSION, sessionNetworks, sessionChoiceHost, changeSessionKind, terminalSessionOptions } from './terminal-session-choice.mjs';
+import { CLAUDE_SESSION, sessionChoiceHost, terminalSessionOptions } from './terminal-session-choice.mjs';
 import { TerminalErrorNotices } from './terminal-error-notices.mjs';
-import { TerminalStreamStore, splitTerminalInput, terminalHeightForPointer, terminalHeightForKey } from './terminal-state.mjs';
-import { terminalTimezonePresentation } from './network-flow-state.mjs';
-import { NEW_CLAUDE_ACCOUNT, validClaudeAccountChoice, claudeAccountLabel, reconcileClaudeAccountChoice, claudeSessionForRequest, claudeInstallPresentation, claudeErrorMessage, validClaudeInstallationChoice, claudeInstallationOptions } from './claude-account-choice.mjs';
-import { TerminalDeviceIdentifierDetails } from './terminal-device-identifiers.mjs';
+import { TerminalStreamStore, terminalHeightForPointer, terminalHeightForKey } from './terminal-state.mjs';
+import { NEW_CLAUDE_ACCOUNT, validClaudeAccountChoice, reconcileClaudeAccountChoice, claudeErrorMessage, validClaudeInstallationChoice, claudeInstallationOptions } from './claude-account-choice.mjs';
 import { TerminalKeychainNotice, terminalKeychainDiagnosticText } from './terminal-keychain-notice.mjs';
 import { reconcileTerminalProfile } from './terminal-profile-selection.mjs';
 import { invalidatePickedTerminalDirectory, terminalDirectoryChoice } from './terminal-directory-choice.mjs';
-import '@xterm/xterm/css/xterm.css';
+import { terminalAccountName, terminalSessionName, terminalsForAccount } from './terminal-account-context.mjs';
+import { TerminalSession } from './terminal-session-view.jsx';
+import { TerminalSavedMenu } from './terminal-saved-menu.jsx';
+import { TerminalSessionContext } from './terminal-session-context.jsx';
+import { TerminalSessionChooser } from './terminal-session-chooser.jsx';
+import { activeStatuses, liveSessions, statusLabels } from './terminal-session-status.mjs';
 import './terminal.css';
 
-const activeStatuses = new Set(['starting', 'running', 'closing']);
-/* A tab is a terminal you can use. Ended sessions stay in the snapshot for
- * their output, but they are not offered as if they were still open. */
-const liveSessions = sessions => (sessions ?? []).filter(session => activeStatuses.has(session.status));
-const statusLabels = { starting: '启动中', running: '运行中', closing: '关闭中', exited: '已退出', closed: '已关闭', error: '启动失败' };
 const savedTerminalErrors = {
   TERMINAL_ENTRY_INVALID: '保存的终端配置无效。',
   TERMINAL_ENTRY_NOT_FOUND: '已保存终端已不存在。',
@@ -40,148 +31,6 @@ const savedTerminalErrors = {
   TERMINAL_ENTRY_DIRECTORY_UNAVAILABLE: '此终端的工作目录已改变，请重新选择。',
   CLAUDE_ACCOUNT_NOT_FOUND: '此 Claude 登录档案已不存在，请重新选择。',
 };
-const timezoneSources = { proxy: '代理出口检测', 'proxy-egress': '代理出口检测', 'saved-configuration': '已保存配置', direct: '直连出口检测', manual: '手动设置', local: '本机时区回退', unknown: '来源未确认' };
-const bounds = (value, low, high) => Math.max(low, Math.min(high, value));
-
-function TerminalSession({ session, active, visible, autoFocus, focusRequest, preserveTabFocusRef, register, onError, screenReaderMode }) {
-  const { t } = useI18n();
-  const { effective } = useAppearance();
-  const themeRef = useRef(effective);
-  themeRef.current = effective;
-  const screenReaderRef = useRef(screenReaderMode === true);
-  screenReaderRef.current = screenReaderMode === true;
-  const translationRef = useRef(t);
-  translationRef.current = t;
-  const containerRef = useRef(null);
-  const controlRef = useRef(null);
-  const sessionRef = useRef(session);
-  const visibleRef = useRef(active && visible);
-  sessionRef.current = session;
-  visibleRef.current = active && visible;
-
-  useEffect(() => {
-    let disposed = false, inputTimer = null, fitTimer = null, input = '', sending = false;
-    let lastSize = `${session.columns || 100}:${session.rows || 12}`;
-    let resizeQueue = Promise.resolve();
-    const terminal = new Terminal({
-      cols: bounds(session.columns || 100, 20, 400), rows: bounds(session.rows || 12, 5, 150),
-      cursorBlink: true, fontSize: 13, lineHeight: 1.1, scrollback: 3000, screenReaderMode: screenReaderRef.current,
-      fontFamily: terminalFontFamily,
-      disableStdin: session.status !== 'running' || !visibleRef.current,
-      theme: getTerminalTheme(themeRef.current),
-      linkHandler: { activate: event => event.preventDefault(), allowNonHttpProtocols: false },
-    });
-    const fit = new FitAddon();
-    terminal.loadAddon(fit);
-    terminal.open(containerRef.current);
-    const detachKeyboard = attachTerminalKeyboard(terminal);
-    const detachComposition = attachTerminalComposition(terminal);
-    const protocol = attachTerminalProtocol(terminal);
-    terminal.textarea?.setAttribute('aria-label', translationRef.current('环境终端输入'));
-
-    // Serialize xterm writes so a replay repair cannot reset queued live output.
-    const output = [];
-    let writing = false;
-    const pumpOutput = () => {
-      if (writing || disposed || !output.length) return;
-      const item = output.shift();
-      if (item.reset) terminal.reset();
-      writing = true;
-      terminal.write(item.data, () => { writing = false; pumpOutput(); });
-    };
-    const receive = item => { if (!disposed) { output.push(item); pumpOutput(); } };
-    const unregister = register(session.sessionId, receive);
-
-    const flushInput = async () => {
-      inputTimer = null;
-      if (sending || disposed) return;
-      sending = true;
-      try {
-        while (input && !disposed && sessionRef.current.status === 'running') {
-          const chunks = splitTerminalInput(input);
-          input = '';
-          for (const data of chunks) {
-            if (disposed || sessionRef.current.status !== 'running') break;
-            await api.call('writeTerminal', { sessionId: session.sessionId, data });
-          }
-        }
-      } catch (error) { input = ''; if (!disposed) onError(error.message || '终端输入未发送，请重试。'); }
-      finally { sending = false; }
-    };
-    const inputSubscription = terminal.onData(data => {
-      if (disposed || protocol.isResponse(data) || !visibleRef.current || sessionRef.current.status !== 'running') return;
-      input += data;
-      if (!inputTimer && !sending) inputTimer = setTimeout(() => { void flushInput(); }, 12);
-    });
-    const fitTerminal = () => {
-      fitTimer = null;
-      if (disposed || !visibleRef.current || !containerRef.current?.clientWidth || !containerRef.current?.clientHeight) return;
-      fit.fit();
-      const columns = bounds(terminal.cols, 20, 400), rows = bounds(terminal.rows, 5, 150);
-      if (columns !== terminal.cols || rows !== terminal.rows) terminal.resize(columns, rows);
-      const size = `${columns}:${rows}`;
-      if (sessionRef.current.status !== 'running' || !document.hasFocus() || size === lastSize) return;
-      lastSize = size;
-      resizeQueue = resizeQueue.then(async () => {
-        if (disposed || !visibleRef.current || !document.hasFocus() || sessionRef.current.status !== 'running') return;
-        await api.call('resizeTerminal', { sessionId: session.sessionId, columns, rows });
-      }).catch(error => { lastSize = ''; if (!disposed && sessionRef.current.status === 'running') onError(error.message || '终端尺寸未更新。'); });
-    };
-    const scheduleFit = () => { if (!fitTimer && !disposed) fitTimer = setTimeout(fitTerminal, 80); };
-    const focusWindow = () => { lastSize = ''; scheduleFit(); };
-    const observer = new ResizeObserver(scheduleFit);
-    observer.observe(containerRef.current);
-    window.addEventListener('focus', focusWindow);
-    controlRef.current = { terminal, scheduleFit };
-    scheduleFit();
-    return () => {
-      disposed = true;
-      clearTimeout(inputTimer); clearTimeout(fitTimer);
-      input = ''; output.length = 0;
-      window.removeEventListener('focus', focusWindow);
-      observer.disconnect(); inputSubscription.dispose(); unregister(); detachKeyboard(); detachComposition(); protocol.dispose();
-      controlRef.current = null; terminal.dispose();
-    };
-  }, [session.sessionId, register, onError]);
-
-  // Recolour the existing renderer. Its buffer, subscriptions and PTY stay intact.
-  useEffect(() => {
-    const terminal = controlRef.current?.terminal;
-    if (terminal) terminal.options.theme = getTerminalTheme(effective);
-  }, [effective]);
-
-  // xterm's input-only IME path is disabled in screen reader mode. Enable that
-  // mode only when requested by the OS, without replacing the live terminal.
-  useEffect(() => {
-    const terminal = controlRef.current?.terminal;
-    if (terminal) terminal.options.screenReaderMode = screenReaderMode === true;
-  }, [screenReaderMode]);
-
-  useEffect(() => {
-    controlRef.current?.terminal.textarea?.setAttribute('aria-label', t('环境终端输入'));
-  }, [t]);
-
-  useEffect(() => {
-    const control = controlRef.current;
-    if (!control) return;
-    control.terminal.options.disableStdin = session.status !== 'running' || !active || !visible;
-    if (active && visible) {
-      control.scheduleFit();
-      if (!autoFocus) return;
-      const frame = requestAnimationFrame(() => {
-        const focused = document.activeElement;
-        if (focused?.closest('.terminal-window-view-tabs')) return;
-        if (!(preserveTabFocusRef.current && focused?.closest('[role="tablist"], .terminal-toolbar summary'))) control.terminal.focus();
-      });
-      return () => cancelAnimationFrame(frame);
-    }
-    control.terminal.blur();
-  }, [active, visible, autoFocus, focusRequest, session.status]);
-
-  return <div className={`terminal-session-view ${active ? 'is-selected' : ''}`} hidden={!active} aria-hidden={!active}>
-    <div className="terminal-xterm-host" ref={containerRef} aria-label={t('环境终端')} onPointerDown={event => { if (event.button === 0) controlRef.current?.terminal.focus(); }} />
-  </div>;
-}
 
 export function TerminalDock({ profiles = [], visible = true, onHide, openRequest = null, onError, onProfilesChange, onSelectProfile, standalone = false, workspace = false, selectedProfileId = null, refreshKey = 0, expanded = false, onToggleExpanded, onHeightChange, onResizeStart, minHeight = 320, maxHeight, screenReaderMode = false, onExport, onConfigureLinkBrowser, exportDisabled = false }) {
   const { t } = useI18n();
@@ -197,6 +46,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
   const dockRef = useRef(null), dragRef = useRef(null), dragFrameRef = useRef(null);
   const sessionTabsRef = useRef(null), selectedSessionTabRef = useRef(null);
   const preserveTabFocusRef = useRef(false);
+  const selectionRevisionRef = useRef(0);
   const mountedRef = useRef(false), refreshRef = useRef(null), refreshFunctionRef = useRef(null);
   const refreshTimerRef = useRef(null), queuedRefreshRef = useRef(false), publishFrameRef = useRef(null);
   const handledRequestRef = useRef(null), openingRef = useRef(new Map());
@@ -204,6 +54,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
   const [activeProfileId, setActiveProfileId] = useState(selectedProfileId || profiles[0]?.id || null);
   const previousSelectedProfileRef = useRef(selectedProfileId);
   const selectProfile = useCallback(profileId => {
+    selectionRevisionRef.current++;
     setActiveProfileId(profileId);
     callbacksRef.current.onSelectProfile?.(profileId);
   }, []);
@@ -211,8 +62,10 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
   const [newSession, setNewSession] = useState(null);
   const [contextOpen, setContextOpen] = useState(false);
   const [savedEntriesOpen, setSavedEntriesOpen] = useState({});
+  const [savedQueries, setSavedQueries] = useState({});
   const [savedEntryEditor, setSavedEntryEditor] = useState(null);
   const savedEntryActionRef = useRef(null), savedEntryScopeRef = useRef({ profileId: activeProfileId });
+  const savedEntryFocusRef = useRef(null);
   if (savedEntryScopeRef.current.profileId !== activeProfileId) savedEntryScopeRef.current = { profileId: activeProfileId };
   const [claudeAccounts, setClaudeAccounts] = useState({ profileId: null, status: 'idle', items: [] });
   const [claudeInstallation, setClaudeInstallation] = useState({ profileId: null, status: 'idle', installed: false });
@@ -226,6 +79,11 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
   activeSessionsRef.current = activeSessions;
   const [pending, setPending] = useState('');
   const [focusVersion, setFocusVersion] = useState(0);
+  const selectSession = useCallback((profileId, sessionId) => {
+    selectionRevisionRef.current++;
+    setActiveSessions(value => ({ ...value, [profileId]: sessionId }));
+    setFocusVersion(value => value + 1);
+  }, []);
   const [dockError, setDockError] = useState('');
   const [dockErrorCode, setDockErrorCode] = useState('');
   const [dockKeychainDiagnostic, setDockKeychainDiagnostic] = useState('');
@@ -316,7 +174,13 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
         if (!mountedRef.current) return;
         if (scopeRef.current.standalone && !scopeRef.current.profileIds.has(event.profileId)) return;
         const result = storeRef.current.applyEvent(event);
-        if (event.status === 'starting' && event.requestId && openingRequestsRef.current.get(event.profileId) === event.requestId) setActiveSessions(value => ({ ...value, [event.profileId]: event.sessionId }));
+        const opening = openingRequestsRef.current.get(event.profileId);
+        if (event.status === 'starting' && event.requestId && opening?.requestId === event.requestId && !opening.selected) {
+          // Installation progress repeats "starting". Only its first event may
+          // select a new tab, and never after a newer explicit user choice.
+          opening.selected = true;
+          if (opening.selectionRevision === selectionRevisionRef.current) setActiveSessions(value => ({ ...value, [event.profileId]: event.sessionId }));
+        }
         if (event.type === 'status' || event.type === 'exit') retainFailure(event);
         writeOutputs(result.writes);
         if (event.type !== 'data') publish();
@@ -339,12 +203,12 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
   }, [selectedProfileId, profileIds]);
   useEffect(() => { if (desktopAvailable) void refresh(); }, [desktopAvailable, refresh, activeProfileId, refreshKey]);
 
-  const acceptSession = useCallback(session => {
+  const acceptSession = useCallback((session, { select = true } = {}) => {
     if (!session?.sessionId || !session.profileId) return;
     const profile = storeRef.current.snapshot().profiles.find(item => item.profileId === session.profileId) ?? { profileId: session.profileId };
     const result = storeRef.current.applySnapshot({ profiles: [{ ...profile, sessions: [session] }] });
     writeOutputs(result.writes); publish();
-    setActiveSessions(value => ({ ...value, [session.profileId]: session.sessionId }));
+    if (select) setActiveSessions(value => ({ ...value, [session.profileId]: session.sessionId }));
   }, [publish, writeOutputs]);
 
   /* A new terminal is three choices: the network it leaves through, the
@@ -354,7 +218,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
   const directoryFor = profileId => terminalState.profiles.find(profile => profile.profileId === profileId) ?? null;
   const networks = terminalNetworks(profiles);
   const defaultBrowser = network => network?.profiles.find(profile => profile.id === activeProfileId)?.id ?? network?.profiles[0]?.id ?? null;
-  const chooserHost = choice => sessionChoiceHost(networks, choice, activeProfileId);
+  const chooserHost = choice => choice?.manageAccount ? profiles.find(profile => profile.id === choice.profileId) ?? null : sessionChoiceHost(networks, choice, activeProfileId);
   const accountProfileId = newSession?.kind === CLAUDE_SESSION ? chooserHost(newSession)?.id ?? null : null;
   const accountSessionState = terminalState.profiles.find(profile => profile.profileId === accountProfileId)?.sessions
     ?.filter(session => session.kind === CLAUDE_SESSION).map(session => `${session.sessionId}:${session.status}`).join('|') ?? '';
@@ -362,15 +226,15 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
     let cancelled = false;
     const changedProfile = accountsProfileRef.current !== accountProfileId;
     accountsProfileRef.current = accountProfileId;
-    if (changedProfile) setAccountEditor(null);
+    if (changedProfile) setAccountEditor(value => value?.profileId === accountProfileId ? value : null);
     if (!accountProfileId || !desktopAvailable) { setClaudeAccounts({ profileId: null, status: 'idle', items: [] }); return; }
     setClaudeAccounts(value => ({ profileId: accountProfileId, status: 'loading', items: changedProfile ? [] : value.items }));
-    if (changedProfile) setNewSession(value => value ? { ...value, accountId: 'default', accountName: '', error: '' } : value);
+    if (changedProfile) setNewSession(value => value && !value.manageAccount ? { ...value, accountId: 'default', accountName: '', error: '' } : value);
     api.call('listClaudeAccounts', { id: accountProfileId }).then(result => {
       if (cancelled || !mountedRef.current) return;
       if (!Array.isArray(result?.accounts)) throw new Error('无法读取登录档案，请重试。');
       setClaudeAccounts({ profileId: accountProfileId, status: 'ready', items: result.accounts });
-      setNewSession(value => value?.kind === CLAUDE_SESSION && value.browserId === accountProfileId
+      setNewSession(value => !value?.manageAccount && value?.kind === CLAUDE_SESSION && value.browserId === accountProfileId
         ? { ...value, accountId: reconcileClaudeAccountChoice(result.accounts, value.accountId) } : value);
     }).catch(error => {
       if (!cancelled && mountedRef.current) setClaudeAccounts({ profileId: accountProfileId, status: 'error', items: [], error: error.message || '无法读取登录档案，请重试。' });
@@ -379,7 +243,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
   }, [accountProfileId, desktopAvailable, accountsReload, accountSessionState]);
   useEffect(() => {
     let cancelled = false;
-    if (!accountProfileId || !desktopAvailable) { setClaudeInstallation({ profileId: null, status: 'idle', installed: false }); return; }
+    if (!accountProfileId || !desktopAvailable || newSession?.manageAccount) { setClaudeInstallation({ profileId: null, status: 'idle', installed: false }); return; }
     setClaudeInstallation({ profileId: accountProfileId, status: 'loading', installed: false });
     setNewSession(value => value ? { ...value, installSource: 'download' } : value);
     api.call('claudeInstallationStatus', { id: accountProfileId }).then(result => {
@@ -391,7 +255,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
       if (!cancelled && mountedRef.current) setClaudeInstallation({ profileId: accountProfileId, status: 'error', installed: false, error: claudeErrorMessage(error.message) || '无法读取 Claude 安装状态，请重试。' });
     });
     return () => { cancelled = true; };
-  }, [accountProfileId, desktopAvailable, installationReload]);
+  }, [accountProfileId, desktopAvailable, installationReload, newSession?.manageAccount]);
   const openNewSessionChooser = () => {
     const current = profiles.find(profile => profile.id === activeProfileId) ?? profiles[0];
     const network = networks.find(item => item.profiles.some(profile => profile.id === current?.id)) ?? networks[0];
@@ -451,7 +315,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
   };
   const confirmNewSession = async () => {
     const host = chooserHost(newSession);
-    if (!host || pending || accountMutationRef.current || accountEditor || !terminalDirectoryChoice(newSession).ready) return;
+    if (!host || newSession?.manageAccount || pending || accountMutationRef.current || accountEditor || !terminalDirectoryChoice(newSession).ready) return;
     let claudeAccountId;
     if (newSession.kind === CLAUDE_SESSION) {
       if (!validClaudeAccountChoice(claudeAccounts, host.id, newSession) || !validClaudeInstallationChoice(claudeInstallation, host.id, newSession.installSource)) return;
@@ -476,9 +340,10 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
   const openForProfile = useCallback((profileId, { forceNew = false, directoryToken = null, kind = 'shell', browserProfileId = null, claudeAccountId, requestId, claudeInstallSource } = {}) => {
     if (!desktopAvailable || !profileId) return Promise.resolve();
     if (openingRef.current.has(profileId)) return openingRef.current.get(profileId);
-    if (requestId) openingRequestsRef.current.set(profileId, requestId);
     const operation = (async () => {
       selectProfile(profileId); setFocusVersion(value => value + 1); setPending(`open:${profileId}`); clearFailure();
+      const selectionRevision = selectionRevisionRef.current;
+      if (requestId) openingRequestsRef.current.set(profileId, { requestId, selectionRevision, selected: false });
       try {
         await refresh();
         if (!mountedRef.current) return;
@@ -487,7 +352,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
         const session = forceNew
           ? await api.call('openTerminal', { id: profileId, columns: 100, rows: 12, fresh: true, ...terminalSessionOptions(kind, browserProfileId, claudeAccountId), ...(claudeInstallSource ? { claudeInstallSource } : {}), ...(requestId ? { requestId } : {}), ...(directoryToken ? { directoryToken } : {}) })
           : source ? await api.call('duplicateTerminal', { sessionId: source.sessionId }) : await api.call('openTerminal', { id: profileId, columns: 100, rows: 12 });
-        if (!session?.canceled && mountedRef.current) { acceptSession(session); await refresh(); }
+        if (!session?.canceled && mountedRef.current) { acceptSession(session, { select: selectionRevision === selectionRevisionRef.current }); await refresh(); }
         return true;
       } catch (error) {
         if (requestId) setNewSession(value => value?.requestId === requestId ? { ...invalidatePickedTerminalDirectory(value), requestId: null, error: claudeErrorMessage(error.message, error.code) || '终端无法启动。', keychainDiagnostic: terminalKeychainDiagnosticText(error.keychainDiagnostic) } : value);
@@ -570,16 +435,25 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
     if (cancellingStart) setCancellingSessionId(session.sessionId);
     else setPending(`close:${session.sessionId}`);
     if (currentFailureRef.current?.sessionId !== session.sessionId) clearFailure();
-    try { acceptSession(await api.call('closeTerminal', { sessionId: session.sessionId })); await refresh(); }
+    try { acceptSession(await api.call('closeTerminal', { sessionId: session.sessionId }), { select: false }); await refresh(); }
     catch (error) { if (currentFailureRef.current?.sessionId !== session.sessionId) reportError(error.message || '终端会话尚未关闭。'); await refresh(); }
     finally { if (mountedRef.current) { if (!cancellingStart) setPending(''); setCancellingSessionId(null); } }
   };
   const duplicateSession = async session => {
     if (!desktopAvailable || !session || session.status !== 'running' || pending) return;
+    const selectionRevision = selectionRevisionRef.current;
+    // A snapshot may be showing the last tab without an explicit selection.
+    // Keep that source stable while the new session joins the snapshot.
+    setActiveSessions(value => ({ ...value, [session.profileId]: session.sessionId }));
     setPending(`duplicate:${session.sessionId}`); clearFailure();
     try {
       const created = await api.call('duplicateTerminal', { sessionId: session.sessionId });
-      if (!created?.canceled && mountedRef.current) { acceptSession(created); setFocusVersion(value => value + 1); await refresh(); }
+      if (!created?.canceled && mountedRef.current) {
+        const select = selectionRevision === selectionRevisionRef.current;
+        acceptSession(created, { select });
+        if (select) setFocusVersion(value => value + 1);
+        await refresh();
+      }
     } catch (error) { reportError(claudeErrorMessage(error.message, error.code) || '无法复制终端会话。', error.code, error.keychainDiagnostic); }
     finally { if (mountedRef.current) setPending(''); }
   };
@@ -587,7 +461,10 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
     const profileId = activeProfileId;
     if (!desktopAvailable || !profileId || !entry?.id || pending || savedEntryActionRef.current) return;
     const scope = savedEntryScopeRef.current;
+    const selectionRevision = selectionRevisionRef.current;
     const operation = { profileId, entryId: entry.id };
+    const organization = ['pin', 'up', 'down'].includes(action);
+    const trigger = organization ? document.activeElement : null;
     const inCurrentScope = () => mountedRef.current && savedEntryScopeRef.current === scope && scopeRef.current.profileIds.has(profileId);
     savedEntryActionRef.current = operation;
     setPending(`saved-${action}:${entry.id}`); clearFailure();
@@ -596,10 +473,15 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
       if (action === 'open') {
         const session = await api.call('reopenSavedTerminal', { ...args, requestId: crypto.randomUUID() });
         if (inCurrentScope() && !session?.canceled) {
-          acceptSession(session); setNewSession(null); setContextOpen(false);
+          const select = selectionRevision === selectionRevisionRef.current;
+          acceptSession(session, { select }); setNewSession(null); setContextOpen(false);
           setSavedEntriesOpen(value => ({ ...value, [profileId]: false }));
-          setFocusVersion(value => value + 1);
+          if (select) setFocusVersion(value => value + 1);
         }
+      } else if (action === 'pin') {
+        await api.call('setSavedTerminalPinned', { ...args, pinned: entry.pinned !== true });
+      } else if (action === 'up' || action === 'down') {
+        await api.call('moveSavedTerminal', { ...args, direction: action });
       } else {
         await api.call(action === 'rename' ? 'renameSavedTerminal' : 'removeSavedTerminal', { ...args, ...(action === 'rename' ? { name: name.trim() } : {}) });
       }
@@ -610,11 +492,26 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
     } finally {
       if (savedEntryActionRef.current === operation) {
         savedEntryActionRef.current = null;
+        if (organization && inCurrentScope()) savedEntryFocusRef.current = { scope, entryId: entry.id, action, trigger };
         if (mountedRef.current) setPending('');
       }
     }
   };
-  useEffect(() => { setSavedEntryEditor(null); }, [activeProfileId]);
+  useLayoutEffect(() => {
+    // Snapshot publication is frame-batched. Restore focus only after its
+    // reordered rows and newly disabled edge buttons have reached the DOM.
+    if (pending || publishFrameRef.current != null || !savedEntryFocusRef.current) return;
+    const { scope, entryId, action, trigger } = savedEntryFocusRef.current;
+    savedEntryFocusRef.current = null;
+    if (scope !== savedEntryScopeRef.current || (document.activeElement !== document.body && document.activeElement !== trigger)) return;
+    const row = [...(dockRef.current?.querySelectorAll('.terminal-saved-terminals[open] [data-entry-id]') ?? [])].find(element => element.dataset.entryId === entryId);
+    const target = row?.querySelector(`[data-saved-entry-action="${action}"]:not(:disabled)`) ?? row?.querySelector('.terminal-saved-open:not(:disabled)');
+    target?.focus();
+  }, [pending, terminalState, activeProfileId]);
+  useEffect(() => {
+    setSavedEntryEditor(null);
+    setNewSession(value => value?.manageAccount && value.profileId !== activeProfileId ? null : value);
+  }, [activeProfileId]);
   const openWindow = async (profileId, sessionId) => {
     if (!desktopAvailable || !profileId || pending || standalone) return;
     setPending('window'); clearFailure();
@@ -625,32 +522,31 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
 
   const selectedProfile = profiles.find(profile => profile.id === activeProfileId);
   const selectedMetadata = terminalState.profiles.find(profile => profile.profileId === activeProfileId);
-  const savedEntries = selectedMetadata?.savedTerminals ?? [];
+  const savedEntries = [...(selectedMetadata?.savedTerminals ?? [])].sort((a, b) => Number(b.pinned === true) - Number(a.pinned === true));
+  const savedQuery = savedQueries[activeProfileId] ?? '';
   const entryEditor = savedEntryEditor?.profileId === activeProfileId ? savedEntryEditor : null;
   const sessions = liveSessions(selectedMetadata?.sessions);
   const selectedSession = sessions.find(session => session.sessionId === activeSessions[activeProfileId]) ?? sessions.at(-1) ?? null;
+  const manageCurrentAccount = () => {
+    if (!selectedSession?.claudeAccountId || selectedSession.kind !== CLAUDE_SESSION || pending) return;
+    const name = terminalAccountName(selectedSession, t);
+    setContextOpen(false); setSavedEntryEditor(null); setSavedEntriesOpen(value => ({ ...value, [activeProfileId]: false }));
+    setNewSession({ kind: CLAUDE_SESSION, manageAccount: true, profileId: activeProfileId, browserId: activeProfileId, accountId: selectedSession.claudeAccountId, error: '' });
+    setAccountEditor({ profileId: activeProfileId, id: selectedSession.claudeAccountId, name: selectedSession.claudeAccountName || '', originalName: name, confirmDelete: false, error: '' });
+  };
+  const focusAccountSession = (profileId, accountId, session) => {
+    if (pending || !terminalsForAccount(storeRef.current.snapshot().profiles, profileId, accountId).some(item => item.sessionId === session.sessionId)) return;
+    setAccountEditor(null); setNewSession(null); setContextOpen(false); setSavedEntryEditor(null);
+    setSavedEntriesOpen(value => ({ ...value, [profileId]: false }));
+    selectProfile(profileId); selectSession(profileId, session.sessionId);
+  };
   const savedMenuOpen = savedEntriesOpen[activeProfileId] ?? (!loading && !selectedSession && savedEntries.length > 0);
   const canCloseSelected = selectedSession && activeStatuses.has(selectedSession.status) && !cancellingSessionId && (!pending || (selectedSession.status === 'starting' && pending.startsWith('open:')));
-  const sessionName = (session, index) => {
-    if (session.savedTerminalName) {
-      const namedSessions = sessions.filter(item => item.savedTerminalName === session.savedTerminalName);
-      return namedSessions.length > 1 ? `${session.savedTerminalName} · ${namedSessions.findIndex(item => item.sessionId === session.sessionId) + 1}` : session.savedTerminalName;
-    }
-    return session.kind === CLAUDE_SESSION
-      ? `Claude Code${session.claudeAccountId && session.claudeAccountId !== 'default' ? ` · ${session.claudeAccountName || session.claudeAccountId}` : ''} ${index + 1}`
-      : t('会话 {index}', { index: index + 1 });
-  };
+  const sessionName = session => terminalSessionName(session, sessions, t);
+  const sessionTitle = session => [sessionName(session), session.kind === CLAUDE_SESSION
+    ? t('登录档案：{name}', { name: terminalAccountName(session, t) }) : null].filter(Boolean).join('\n');
   const sessionUnavailable = Boolean(activeSessions[activeProfileId] && !selectedSession && !loading);
   const hasLiveSession = sessions.length > 0;
-  const sessionDirectory = selectedSession?.cwd || selectedMetadata?.cwd || null;
-  const { timezone, source: timezoneSource } = terminalTimezonePresentation({ profile: selectedProfile, metadata: selectedMetadata, session: selectedSession, hasLiveSession });
-  const timezoneLabel = timezone ? `${timezone} · ${t(timezoneSources[timezoneSource] || '来源未确认')}` : t('时区待确认');
-  const sessionLanguage = selectedSession?.language ?? selectedMetadata?.language;
-  const languageLabel = sessionLanguage?.effective
-    ? sessionLanguage.fallback
-      ? t('{requested} → {effective}（系统未提供所选语言）', { requested: sessionLanguage.requested, effective: sessionLanguage.effective })
-      : `${t('有效语言')} · ${sessionLanguage.effective}`
-    : '';
   /* The selected terminal's own route first: which network it leaves through,
    * and whether direct public connections are fenced. */
   const shownNetwork = selectedSession?.network ?? selectedMetadata?.network ?? null;
@@ -731,65 +627,27 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
         {!profiles.length && <option value="">{t('环境终端')}</option>}
         {profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
       </select></div>}
-      <div className="terminal-session-tabs" ref={sessionTabsRef} role="tablist" aria-label={t('终端会话')}>{sessions.map((session, index) => <button key={session.sessionId} ref={session.sessionId === selectedSession?.sessionId ? selectedSessionTabRef : undefined} className={`terminal-session-tab ${session.sessionId === selectedSession?.sessionId ? 'is-active' : ''}`} title={sessionName(session, index)} role="tab" aria-selected={session.sessionId === selectedSession?.sessionId} tabIndex={session.sessionId === selectedSession?.sessionId || (!selectedSession && index === 0) ? 0 : -1} onKeyDown={event => navigateTabs(event, sessions, index, target => setActiveSessions(value => ({ ...value, [activeProfileId]: target.sessionId })))} onClick={() => setActiveSessions(value => ({ ...value, [activeProfileId]: session.sessionId }))}><span className={`terminal-tab-dot ${session.status === 'running' ? 'is-running' : ''}`} /><span className="terminal-session-name">{sessionName(session, index)}</span>{session.status !== 'running' && <small>{t(statusLabels[session.status] || session.status)}</small>}</button>)}</div>
+      <div className="terminal-session-tabs" ref={sessionTabsRef} role="tablist" aria-label={t('终端会话')}>{sessions.map((session, index) => <button key={session.sessionId} ref={session.sessionId === selectedSession?.sessionId ? selectedSessionTabRef : undefined} className={`terminal-session-tab ${session.sessionId === selectedSession?.sessionId ? 'is-active' : ''}`} title={sessionTitle(session)} role="tab" aria-selected={session.sessionId === selectedSession?.sessionId} tabIndex={session.sessionId === selectedSession?.sessionId || (!selectedSession && index === 0) ? 0 : -1} onKeyDown={event => navigateTabs(event, sessions, index, target => selectSession(activeProfileId, target.sessionId))} onClick={() => selectSession(activeProfileId, session.sessionId)}><span className={`terminal-tab-dot ${session.status === 'running' ? 'is-running' : ''}`} /><span className="terminal-session-name">{sessionName(session, index)}</span>{session.status !== 'running' && <small>{t(statusLabels[session.status] || session.status)}</small>}</button>)}</div>
       <div className="terminal-toolbar-actions">
-      {selectedProfile && <details className="terminal-saved-terminals" open={savedMenuOpen}>
-        <TerminalToolbarHint enabled={shown} label={t('已保存终端')} description={t('新建后自动保存终端入口，可在此重开或重命名。')}><summary aria-label={t('已保存终端')} title={t('已保存终端')} onClick={event => {
-          event.preventDefault();
-          const open = !savedMenuOpen;
-          if (open) { setContextOpen(false); setNewSession(null); }
-          setSavedEntriesOpen(value => ({ ...value, [activeProfileId]: open }));
-          if (!open) setSavedEntryEditor(null);
-        }}><BookmarksSimple size={17} /></summary></TerminalToolbarHint>
-        <div className="terminal-saved-panel"><div className="terminal-menu-heading"><strong>{t('已保存终端')}</strong><small>{savedEntries.length}</small></div>
-        <p className="terminal-saved-note">{t('新建后自动保存终端入口，可在此重开或重命名。')}</p>
-        <div className="terminal-saved-list">
-          {!savedEntries.length && <p className="terminal-saved-empty">{t('新建会话后会自动保存在这里。')}</p>}
-          {savedEntries.map(entry => {
-            const editor = entryEditor?.entryId === entry.id ? entryEditor : null;
-            const accountName = entry.kind === CLAUDE_SESSION ? entry.claudeAccountName || t('登录档案不可用') : null;
-            const accountLabel = accountName && claudeAccountLabel({ default: entry.claudeAccountId === 'default', name: accountName }, t);
-            const busy = entry.status === 'starting' || entry.status === 'closing';
-            return <div className="terminal-saved-entry" data-entry-id={entry.id} key={entry.id}>
-              <div className="terminal-saved-row">
-                <button className="terminal-saved-open" disabled={!desktopAvailable || !!pending || busy} aria-label={t('打开终端「{name}」', { name: entry.name })} title={entry.name} onClick={() => void actOnSavedEntry(entry, 'open')}>
-                  <span className="terminal-saved-heading"><strong>{entry.name}</strong>{activeStatuses.has(entry.status) && <small><span className={`terminal-tab-dot ${entry.status === 'running' ? 'is-running' : ''}`} />{t(statusLabels[entry.status])}</small>}</span>
-                  <span className="terminal-saved-context"><span className="terminal-saved-account" title={accountLabel || t('普通终端')}>{entry.kind === CLAUDE_SESSION ? `Claude Code · ${accountLabel}` : t('普通终端')}</span><span className="terminal-saved-directory" title={entry.cwd}><FolderOpen size={12} /><span>{entry.cwd}</span></span></span>
-                </button>
-                <div className="terminal-saved-actions">
-                  <button className="terminal-icon-button terminal-saved-rename" disabled={!desktopAvailable || !!pending} aria-label={t('重命名终端「{name}」', { name: entry.name })} title={t('重命名终端「{name}」', { name: entry.name })} onClick={() => setSavedEntryEditor({ profileId: activeProfileId, entryId: entry.id, mode: 'rename', name: entry.name })}><PencilSimple size={14} /></button>
-                  <button className="terminal-icon-button terminal-saved-remove" disabled={!desktopAvailable || !!pending} aria-label={t('移除终端入口「{name}」', { name: entry.name })} title={t('移除终端入口「{name}」', { name: entry.name })} onClick={() => setSavedEntryEditor({ profileId: activeProfileId, entryId: entry.id, mode: 'remove' })}><Trash size={14} /></button>
-                </div>
-              </div>
-              {editor?.mode === 'rename' && <form className="terminal-saved-editor" onSubmit={event => { event.preventDefault(); if (editor.name.trim()) void actOnSavedEntry(entry, 'rename', editor.name); }}>
-                <label>{t('终端名称')}<input autoFocus value={editor.name} maxLength={80} disabled={!!pending} onChange={event => setSavedEntryEditor({ ...editor, name: event.target.value })} onKeyDown={event => { if (event.key === 'Escape' && !pending) { event.preventDefault(); setSavedEntryEditor(null); } }} /></label>
-                <div className="terminal-saved-editor-actions"><button type="button" className="terminal-text-button" disabled={!!pending} onClick={() => setSavedEntryEditor(null)}>{t('取消')}</button><button type="submit" className="terminal-text-button" disabled={!!pending || !editor.name.trim()}>{t('保存')}</button></div>
-              </form>}
-              {editor?.mode === 'remove' && <div className="terminal-saved-editor"><p>{t('仅移除此入口，登录资料和终端数据会保留。')}</p><div className="terminal-saved-editor-actions"><button className="terminal-text-button" disabled={!!pending} onClick={() => setSavedEntryEditor(null)}>{t('取消')}</button><button className="terminal-text-button terminal-saved-remove" disabled={!!pending} onClick={() => void actOnSavedEntry(entry, 'remove')}>{t('移除入口')}</button></div></div>}
-            </div>;
-          })}
-        </div></div>
-      </details>}
+        <TerminalToolbarHint enabled={shown} label={t('复制会话')} description={t('使用相同登录档案和环境配置，新建独立终端。')}><button type="button" className="terminal-text-button terminal-duplicate-session" disabled={!desktopAvailable || selectedSession?.status !== 'running' || !!pending} aria-label={t('复制会话')} aria-busy={pending.startsWith('duplicate:') || undefined} onClick={() => { setContextOpen(false); setSavedEntriesOpen(value => ({ ...value, [activeProfileId]: false })); setSavedEntryEditor(null); setNewSession(null); void duplicateSession(selectedSession); }}><Copy size={16} /><span>{t(pending.startsWith('duplicate:') ? '复制中…' : '复制会话')}</span></button></TerminalToolbarHint>
+        {selectedProfile && <TerminalSavedMenu t={t} shown={shown} savedMenuOpen={savedMenuOpen}
+          savedEntries={savedEntries} savedQuery={savedQuery} entryEditor={entryEditor} activeProfileId={activeProfileId}
+          desktopAvailable={desktopAvailable} pending={pending} setSavedEntryEditor={setSavedEntryEditor} actOnSavedEntry={actOnSavedEntry}
+          onQueryChange={query => setSavedQueries(value => ({ ...value, [activeProfileId]: query }))}
+          onToggle={event => {
+            event.preventDefault();
+            const open = !savedMenuOpen;
+            if (open) { setContextOpen(false); setNewSession(null); }
+            setSavedEntriesOpen(value => ({ ...value, [activeProfileId]: open }));
+            if (!open) setSavedEntryEditor(null);
+          }} />}
         <TerminalToolbarHint enabled={shown} label={t('新建会话')} description={t('选择网络、浏览器和工作目录。')}><button className="terminal-icon-button" disabled={!desktopAvailable || !selectedProfile || !!pending} onClick={openNewSessionChooser} aria-label={t('新建会话')} title={t('新建会话')}><Plus size={17} /></button></TerminalToolbarHint>
-        <details className="terminal-context-menu" open={contextOpen}>
-          <TerminalToolbarHint enabled={shown} label={t('会话设置')} description={t('查看工作目录、网络和会话选项。')}><summary aria-label={t('会话设置')} title={t('会话设置')} onClick={event => { event.preventDefault(); setContextOpen(value => !value); setSavedEntriesOpen(value => ({ ...value, [activeProfileId]: false })); setSavedEntryEditor(null); setNewSession(null); }}><SlidersHorizontal size={17} /></summary></TerminalToolbarHint>
-          <div className="terminal-context-panel">
-            <div className="terminal-menu-heading"><strong>{t('会话设置')}</strong></div>
-            <dl className="terminal-context-values">
-              <div><dt>{t('工作目录')}</dt><dd className="terminal-directory"><FolderOpen size={14} /><span title={sessionDirectory || t('尚未选择工作目录')}>{sessionDirectory || t('尚未选择工作目录')}</span></dd></div>
-              <div><dt>{t('网络出口')}</dt><dd>{networkDescription}</dd></div>
-              <div><dt>{t('时区')}</dt><dd className={timezoneSource === 'local' ? 'is-fallback' : ''}>{timezoneLabel}</dd></div>
-              {languageLabel && <div><dt>{t('有效语言')}</dt><dd className={sessionLanguage.fallback ? 'is-fallback' : ''}>{languageLabel}</dd></div>}
-              {selectedSession?.kind === CLAUDE_SESSION && <div><dt>{t('浏览器')}</dt><dd>{selectedSession.browserName || selectedSession.browserProfileId}</dd></div>}
-            </dl>
-            <TerminalDeviceIdentifierDetails session={selectedSession} t={t} inline />
-            <div className="terminal-context-actions">
-              {selectedSession && <button className="terminal-text-button terminal-duplicate-session" disabled={!desktopAvailable || selectedSession.status !== 'running' || !!pending} onClick={() => { setContextOpen(false); void duplicateSession(selectedSession); }} title={t('创建新进程，共享环境工具配置与历史；不复制正在运行的命令')}><Copy size={14} />{t(pending.startsWith('duplicate:') ? '复制中…' : '复制会话')}</button>}
-              {onConfigureLinkBrowser && <button className="terminal-text-button" disabled={!selectedProfile || !!pending} onClick={() => { setContextOpen(false); onConfigureLinkBrowser(activeProfileId); }}><Browsers size={14} />{t('链接浏览器')}</button>}
-              {onExport && <button className="terminal-text-button" disabled={!selectedProfile || exportDisabled || !!pending} onClick={() => { setContextOpen(false); onExport(activeProfileId); }}><DownloadSimple size={14} />{t('导出终端')}</button>}
-            </div>
-          </div>
-        </details>
+        <TerminalSessionContext t={t} shown={shown} contextOpen={contextOpen} selectedSession={selectedSession}
+          selectedProfile={selectedProfile} selectedMetadata={selectedMetadata} activeProfileId={activeProfileId}
+          hasLiveSession={hasLiveSession} networkDescription={networkDescription} pending={pending}
+          manageCurrentAccount={manageCurrentAccount} onConfigureLinkBrowser={onConfigureLinkBrowser} onExport={onExport} exportDisabled={exportDisabled}
+          onDismiss={() => setContextOpen(false)}
+          onToggle={event => { event.preventDefault(); setContextOpen(value => !value); setSavedEntriesOpen(value => ({ ...value, [activeProfileId]: false })); setSavedEntryEditor(null); setNewSession(null); }} />
         {!standalone && <>
           <TerminalToolbarHint enabled={shown} label={t('独立终端窗口')} description={t('在独立窗口中查看此环境的终端')}><button className="terminal-icon-button" disabled={!desktopAvailable || !selectedProfile || !!pending} onClick={() => void openWindow(activeProfileId, selectedSession?.sessionId)} aria-label={t('独立终端窗口')} title={t('在独立窗口中查看此环境的终端')}><ArrowSquareOut size={17} /></button></TerminalToolbarHint>
           {!workspace && <TerminalToolbarHint enabled={shown} label={t(expanded ? '还原终端大小' : '放大终端')}><button className="terminal-icon-button" disabled={!onToggleExpanded} onClick={onToggleExpanded} aria-label={t(expanded ? '还原终端大小' : '放大终端')} title={t(expanded ? '还原终端大小' : '放大终端')}>{expanded ? <ArrowsInSimple size={17} /> : <ArrowsOutSimple size={17} />}</button></TerminalToolbarHint>}
@@ -803,62 +661,13 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
         {allSessions.map(session => <TerminalSession key={session.sessionId} session={session} active={session.sessionId === selectedSession?.sessionId && session.profileId === activeProfileId} visible={shown} autoFocus={!contextOpen && !savedMenuOpen && !entryEditor && !newSession} focusRequest={`${openRequest?.profileId === session.profileId ? `${openRequest.nonce}:${openRequest.sessionId || ''}` : ''}:${focusVersion}`} preserveTabFocusRef={preserveTabFocusRef} register={register} onError={reportError} screenReaderMode={screenReaderMode} />)}
         {!selectedSession && <div className="terminal-empty"><TerminalWindow size={25} /><div><strong>{t(!desktopAvailable ? '真实终端需使用桌面应用' : !selectedProfile ? '先创建一个环境' : loading ? '正在读取终端会话…' : sessionUnavailable ? '该会话已不可用' : '打开此环境的终端')}</strong>{(!desktopAvailable || sessionUnavailable) && <p>{t(!desktopAvailable ? '网页预览不连接本机 Shell。' : '可选择其他会话或新建会话。')}</p>}</div>{desktopAvailable && selectedProfile && <button className="terminal-empty-start" disabled={!!pending || loading} onClick={openNewSessionChooser}>{t(pending.startsWith('open:') ? '启动中…' : sessionUnavailable ? '新建会话' : '打开终端')}</button>}</div>}
       </div>
-      {newSession && (() => {
-        const claude = newSession.kind === CLAUDE_SESSION;
-        const availableNetworks = sessionNetworks(networks, newSession.kind);
-        const network = availableNetworks.find(item => item.id === newSession.networkId);
-        const host = chooserHost(newSession);
-        const directory = terminalDirectoryChoice(newSession, directoryFor(host?.id)?.cwd);
-        const folder = directory.path;
-        const egress = network?.egress;
-        const privacyMode = host?.privacy?.mode ?? 'standard';
-        const startingSession = claudeSessionForRequest(terminalState.profiles, host?.id, newSession.requestId);
-        const installation = claudeInstallPresentation(startingSession?.claudeInstall);
-        const accountLoading = claudeAccounts.profileId !== host?.id || claudeAccounts.status === 'loading';
-        const selectedAccount = claudeAccounts.items.find(account => account.id === newSession.accountId);
-        const editorAccount = accountEditor && claudeAccounts.items.find(account => account.id === accountEditor.id);
-        const editingAccount = accountEditor?.profileId === host?.id ? accountEditor : null;
-        const installationLoading = claudeInstallation.profileId !== host?.id || claudeInstallation.status === 'loading';
-        const opening = pending.startsWith('open:');
-        const cancelCreation = () => { if (opening && startingSession?.status === 'starting') void closeSession(startingSession); else if (!pending) setNewSession(null); };
-        return <div className="terminal-new-session" role="dialog" aria-modal="false" aria-label={t('新建终端')}>
-          <div className="terminal-new-session-head"><strong>{t('新建终端')}</strong><button className="terminal-icon-button" aria-label={t(opening && claude ? '取消安装' : '取消')} disabled={!!pending && (!startingSession || !!cancellingSessionId)} onClick={cancelCreation}><X size={14} /></button></div>
-          <div className="terminal-session-kind" role="group" aria-label={t('会话类型')}><button disabled={!!pending} aria-pressed={!claude} onClick={() => setNewSession(changeSessionKind(networks, newSession, 'shell', activeProfileId))}>{t('普通终端')}</button><button disabled={!!pending} aria-pressed={claude} onClick={() => setNewSession(changeSessionKind(networks, newSession, CLAUDE_SESSION, activeProfileId))}>Claude Code</button></div>
-          {claude && <p className="terminal-claude-note"><strong>{t('进入终端后运行 claude。')}</strong></p>}
-          {claude && !availableNetworks.length && <div className="terminal-new-session-error">{t('先添加网络出口，并为它创建一个境舱浏览器。')}</div>}
-          <label><span>{t('网络出口')}</span><select value={network?.id || ''} disabled={!!pending || !availableNetworks.length} onChange={event => { const next = availableNetworks.find(item => item.id === event.target.value); if (next) setNewSession({ ...newSession, networkId: next.id, browserId: defaultBrowser(next), error: '' }); }}>{availableNetworks.map(item => <option key={item.id} value={item.id}>{item.name || t('本机网络')}</option>)}</select>
-            <small className="terminal-new-session-egress">{egress?.ip ? [egress.ip, egress.country || egress.countryCode, egress.timezone].filter(Boolean).join(' · ') : t('出口待识别')}</small></label>
-          <label><span>{t('浏览器')}</span><select value={newSession.browserId || ''} disabled={!!pending || !network} onChange={event => setNewSession({ ...newSession, browserId: event.target.value, error: '' })}>{(network?.profiles ?? []).map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}{!claude && <option value={SYSTEM_BROWSER}>{`${t('系统默认浏览器')} · ${t('不经过境舱网络')}`}</option>}</select></label>
-          {claude && !claudeInstallation.installed && <div className="terminal-account-field terminal-install-source">{installationLoading ? <small role="status">{t('正在检查 Claude 安装…')}</small> : claudeInstallation.status === 'error' ? <div className="terminal-account-error" role="status"><span>{t(claudeInstallation.error)}</span><button className="terminal-text-button" onClick={() => setInstallationReload(value => value + 1)}>{t('重试')}</button></div> : <label><span>{t('Claude 安装')}</span><select value={newSession.installSource || 'download'} disabled={!!pending} onChange={event => setNewSession(value => ({ ...value, installSource: event.target.value, error: '' }))}><option value="download">{t('下载（推荐）')}</option><option value="local">{t('复制本机程序')}</option></select></label>}{!installationLoading && claudeInstallation.status === 'ready' && newSession.installSource === 'local' && <small>{t('只复制程序，登录档案仍独立。')}</small>}</div>}
-          {claude && <div className="terminal-account-field">
-            <label><span>{t('登录档案')}</span><select aria-label={t('登录档案')} value={newSession.accountId || 'default'} disabled={!!pending || accountLoading || claudeAccounts.status !== 'ready'} onChange={event => { setAccountEditor(null); setNewSession(value => ({ ...value, accountId: event.target.value, accountName: '', error: '' })); }}>{accountLoading ? <option value={newSession.accountId || 'default'}>{t('正在读取登录档案…')}</option> : <>{claudeAccounts.items.map(account => <option key={account.id} value={account.id}>{claudeAccountLabel(account, t)}</option>)}<option value={NEW_CLAUDE_ACCOUNT}>{t('新建登录档案…')}</option></>}</select></label>
-            {newSession.accountId === NEW_CLAUDE_ACCOUNT && <><input aria-label={t('档案名称')} maxLength={80} value={newSession.accountName || ''} disabled={!!pending} onChange={event => setNewSession(value => ({ ...value, accountName: event.target.value, error: '' }))} placeholder={t('例如：工作账号')} /><button className="terminal-text-button terminal-account-manage" disabled={!!pending || !newSession.accountName?.trim()} onClick={() => void createChosenAccount()}>{t(pending.startsWith('account:') ? '正在创建档案…' : '创建档案')}</button></>}
-            {selectedAccount && !editingAccount && <button className="terminal-text-button terminal-account-manage" disabled={!!pending || accountLoading} onClick={() => setAccountEditor({ profileId: host.id, id: selectedAccount.id, name: selectedAccount.name, originalName: claudeAccountLabel(selectedAccount, t), confirmDelete: false, error: '' })}>{t('管理档案')}</button>}
-            {editingAccount && <div className="terminal-account-editor" role="group" aria-label={t('管理档案')}>
-              {editingAccount.cleanupPending ? <><p role="status">{t('档案已移除，剩余资料尚未清理完成。请重试清理。')}</p><div className="terminal-account-actions"><button className="terminal-text-button" disabled={!!pending} onClick={() => void mutateAccount('delete')}>{t('重试清理')}</button><button className="terminal-text-button" disabled={!!pending} onClick={() => setAccountEditor(null)}>{t('完成')}</button></div></> : editingAccount.confirmDelete ? <>
-                <strong>{t('删除「{name}」？', { name: editingAccount.originalName })}</strong><p>{t('这会删除此档案的登录信息、Claude 配置与会话历史。其他档案和共享终端配置会保留。')}</p>
-                <div className="terminal-account-actions"><button className="terminal-text-button" disabled={!!pending} onClick={() => setAccountEditor(value => ({ ...value, confirmDelete: false, error: '' }))}>{t('取消')}</button><button className="terminal-text-button terminal-account-delete" disabled={!!pending || accountLoading || !editorAccount || editorAccount.inUse} onClick={() => void mutateAccount('delete')}>{t('确认删除档案')}</button></div>
-              </> : <><label><span>{t('档案名称')}</span><input aria-label={t('修改档案名称')} maxLength={80} value={editingAccount.name} disabled={!!pending || editorAccount?.inUse} onChange={event => setAccountEditor(value => ({ ...value, name: event.target.value, error: '' }))} /></label>
-                {editorAccount?.inUse && <p>{t('请先关闭使用此登录档案的 Claude 终端，再管理档案。')}</p>}
-                {editorAccount?.default && <p>{t('默认登录档案不能删除，可以重命名。')}</p>}
-                <div className="terminal-account-actions"><button className="terminal-text-button terminal-account-delete" disabled={!!pending || accountLoading || !editorAccount || editorAccount.default || editorAccount.inUse} onClick={() => setAccountEditor(value => ({ ...value, confirmDelete: true, error: '' }))}>{t('删除档案')}</button><button className="terminal-text-button" disabled={!!pending} onClick={() => setAccountEditor(null)}>{t('取消')}</button><button className="terminal-text-button" disabled={!!pending || accountLoading || !editorAccount || editorAccount.inUse || !editingAccount.name.trim() || editingAccount.name.trim() === editorAccount.name} onClick={() => void mutateAccount('rename')}>{t('保存名称')}</button></div>
-              </>}
-              {editingAccount.error && <div className="terminal-account-error" role="status">{t(editingAccount.error)}</div>}
-            </div>}
-            {claudeAccounts.status === 'error' && <div className="terminal-account-error" role="status"><span>{t(claudeAccounts.error)}</span><button className="terminal-text-button" onClick={() => setAccountsReload(value => value + 1)}>{t('重试')}</button></div>}
-          </div>}
-          <div className="terminal-new-session-field"><span>{t('工作目录')}</span><div className="terminal-new-session-directory"><FolderOpen size={14} /><span title={folder || ''}>{folder || t('尚未选择工作目录')}</span><button className="terminal-text-button" disabled={!!pending || !host} onClick={() => void chooseNewSessionDirectory()}>{t(pending.startsWith('directory:') ? '选择中…' : folder ? '更换目录' : '选择目录')}</button></div></div>
-          {claude && <details className="terminal-claude-settings"><summary>{t('会话设置')}</summary><dl>
-            <div><dt>{t('登录方式')}</dt><dd>{t('账号登录；启动前检查 API 配置冲突')}</dd></div>
-            <div><dt>{t('配置与历史')}</dt><dd>{t('境舱独立保存')}</dd></div>
-            <div><dt>{t('网络与浏览器')}</dt><dd>{t('固定绑定；网络组件退出时结束会话')}</dd></div>
-            <div><dt>{t('官方隐私设置')}</dt><dd>{t({ off: '停用', standard: '标准', strict: '严格' }[privacyMode] ?? '标准')}<small>{t({ off: '不额外关闭遥测与错误上报。', standard: '关闭遥测与错误上报。', strict: '同时关闭非必要网络请求。' }[privacyMode] ?? '关闭遥测与错误上报。')}</small>{privacyMode !== 'off' && <small className="terminal-claude-privacy-note">{t('关闭遥测可能影响 Remote Control 等功能。')}</small>}</dd></div>
-          </dl><p>{t('内置浏览器工具绑定所选浏览器；支持此境舱的自定义 MCP。会话内关闭自动更新。')}</p></details>}
-          {newSession.error && <div className="terminal-new-session-error">{t(newSession.error)}{newSession.keychainDiagnostic && <code className="terminal-keychain-diagnostic">{newSession.keychainDiagnostic}</code>}</div>}
-          {opening && <div className="terminal-install-progress" role="status"><div><ArrowsClockwise className="spin" size={14} /><span>{t(installation?.label || '准备中…')}</span>{installation?.percent != null && <strong>{installation.percent}%</strong>}</div>{installation?.percent != null && <progress max="100" value={installation.percent} />}</div>}
-          <div className="terminal-new-session-actions"><button className="terminal-text-button" disabled={!!pending && (!startingSession || !!cancellingSessionId)} onClick={cancelCreation}>{t(cancellingSessionId ? '关闭中…' : opening && claude ? '取消安装' : '取消')}</button><button className="terminal-text-button terminal-start-button" aria-busy={!!pending || undefined} disabled={!!pending || !!editingAccount || !host || !directory.ready || (claude && (!validClaudeAccountChoice(claudeAccounts, host.id, newSession) || !validClaudeInstallationChoice(claudeInstallation, host.id, newSession.installSource)))} onClick={() => void confirmNewSession()}>{t(pending.startsWith('account:') ? '正在创建档案…' : opening ? '启动中…' : newSession.error ? '重试' : '打开终端')}</button></div>
-        </div>;
-      })()}
+      {newSession && <TerminalSessionChooser t={t} newSession={newSession} setNewSession={setNewSession}
+        networks={networks} activeProfileId={activeProfileId} host={chooserHost(newSession)} directoryFor={directoryFor} defaultBrowser={defaultBrowser}
+        terminalProfiles={terminalState.profiles} claudeAccounts={claudeAccounts} claudeInstallation={claudeInstallation}
+        accountEditor={accountEditor} setAccountEditor={setAccountEditor} pending={pending} cancellingSessionId={cancellingSessionId}
+        setAccountsReload={setAccountsReload} setInstallationReload={setInstallationReload} createChosenAccount={createChosenAccount}
+        mutateAccount={mutateAccount} chooseNewSessionDirectory={chooseNewSessionDirectory} confirmNewSession={confirmNewSession}
+        closeSession={closeSession} onFocusAccountSession={focusAccountSession} />}
       <footer className={`terminal-footer ${dockError ? 'has-error' : ''}`}><div className="terminal-footer-messages" role={dockError ? 'status' : undefined}><span className="terminal-network-description" title={dockError ? t(dockError) : networkDescription}>{dockError ? t(dockError) : <><GlobeHemisphereWest size={12} /><span>{shownNetwork?.routeName || (shownNetwork?.mode === 'direct' ? t('本机网络') : shownNetwork?.mode ? String(shownNetwork.mode).toUpperCase() : t('启动后读取环境网络设置。'))}</span></>}</span>{!dockError && <TerminalKeychainNotice session={selectedSession} t={t} />}{dockError && dockCleanupError && <span className="terminal-cleanup-error" title={t(dockCleanupError)}>{t('清理错误')} · {t(dockCleanupError)}</span>}</div>{dockError && dockErrorCode && <code className="terminal-error-code" title={[dockErrorCode, dockKeychainDiagnostic].filter(Boolean).join(' · ')}>{dockErrorCode}{dockKeychainDiagnostic && <span className="terminal-keychain-diagnostic">{dockKeychainDiagnostic}</span>}</code>}{standalone && <span className="terminal-view-notice">{t('关闭窗口后，会话继续运行。')}</span>}{selectedSession && <span className="terminal-session-state">{t(statusLabels[selectedSession.status] || selectedSession.status)}{selectedSession.exitCode != null && t(' · 退出码 {code}', { code: selectedSession.exitCode })}</span>}</footer>
     </div>
   </section>;

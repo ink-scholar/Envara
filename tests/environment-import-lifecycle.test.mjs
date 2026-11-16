@@ -27,7 +27,10 @@ test('IPC mutation scopes for applications and terminals come from main-owned bi
     terminal: { sessions: new Map([['session_1', { profileId: 'prof_terminal' }]]) } };
   assert.equal(environmentMutationProfile('startApplication', { id: 'app_1', profileId: 'forged' }, owned), 'prof_app');
   assert.equal(environmentMutationProfile('runNotionTrial', { applicationId: 'app_1', id: 'forged' }, owned), 'prof_app');
-  assert.equal(environmentMutationProfile('writeTerminal', { sessionId: 'session_1', id: 'forged' }, owned), 'prof_terminal');
+  for (const method of ['writeTerminal', 'stageTerminalAttachments', 'cancelTerminalAttachments', 'commitTerminalAttachments']) {
+    assert.equal(environmentMutationProfile(method, { sessionId: 'session_1', id: 'forged' }, owned), 'prof_terminal');
+    assert.equal(environmentMutationProfile(method, { sessionId: 'unknown', id: 'forged' }, owned), null);
+  }
   assert.equal(environmentMutationProfile('openTerminal', { id: 'prof_selected' }, owned), 'prof_selected');
   assert.equal(environmentMutationProfile('deleteClaudeAccount', { id: 'prof_selected', profileId: 'forged' }, owned), 'prof_selected');
   assert.equal(environmentMutationProfile('saveProxy', { id: 'prof_selected' }, owned), null);
@@ -49,7 +52,7 @@ test('account deletion excludes a same-environment export or import while other 
 });
 
 test('saved terminal starts and metadata changes exclude transfers in both directions for their environment', async () => {
-  for (const method of ['reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal']) {
+  for (const method of ['reopenSavedTerminal', 'renameSavedTerminal', 'removeSavedTerminal', 'setSavedTerminalPinned', 'moveSavedTerminal']) {
     const lock = new DesktopEnvironmentTransferLock(), copying = deferred();
     const args = { id: 'env_one', entryId: 'savedterm_' + 'a'.repeat(32) };
     assert.equal(isEnvironmentDataMutation(method, args), true);
@@ -317,7 +320,7 @@ test('an active desktop transfer refuses every data mutation while snapshot and 
   const transfer = lock.transfer(async () => { entered.resolve(); await release.promise; return 'export complete'; });
   await entered.promise;
   const refused = ['startProfile', 'clearProfile', 'deleteProfile', 'updateProfile', 'createProfile', 'cloneProfile',
-    'openTerminal', 'duplicateTerminal', 'writeTerminal', 'chooseWorkspaceDirectory', 'setTerminalLinkBrowser',
+    'openTerminal', 'duplicateTerminal', 'writeTerminal', 'stageTerminalAttachments', 'commitTerminalAttachments', 'chooseWorkspaceDirectory', 'setTerminalLinkBrowser',
     'createClaudeAccount', 'renameClaudeAccount', 'startApplication', 'runNotionTrial', 'saveApplication',
     'deleteApplication', 'clearApplicationData', 'deleteSignInData', 'setApplicationLinkBrowser',
     'saveProxy', 'deleteProxy', 'saveGroup', 'clearGroupProxy', 'installEngine', 'reclaimApplicationStorage'];
@@ -326,7 +329,7 @@ test('an active desktop transfer refuses every data mutation while snapshot and 
     await assert.rejects(lock.mutate(method, {}, async () => { throw new Error(`${method} must not execute`); }), { code: 'ENVIRONMENT_TRANSFER_BUSY' });
   }
   await assert.rejects(lock.mutate('bulkProfiles', { action: 'start' }, async () => {}), { code: 'ENVIRONMENT_TRANSFER_BUSY' });
-  for (const method of ['snapshot', 'terminalSnapshot', 'notionTrialSnapshot', 'stopProfile', 'closeTerminal', 'stopApplication', 'stopNotionTrial'])
+  for (const method of ['snapshot', 'terminalSnapshot', 'notionTrialSnapshot', 'stopProfile', 'closeTerminal', 'cancelTerminalAttachments', 'stopApplication', 'stopNotionTrial'])
     assert.equal(await lock.mutate(method, {}, async () => method), method);
   assert.equal(await lock.mutate('bulkProfiles', { action: 'stop' }, async () => 'stopped'), 'stopped');
   await assert.rejects(lock.transfer(async () => { throw new Error('second transfer must not execute'); }), { code: 'ENVIRONMENT_TRANSFER_BUSY' });

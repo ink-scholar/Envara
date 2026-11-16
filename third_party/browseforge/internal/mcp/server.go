@@ -15,6 +15,7 @@ import (
 	"browseforge/internal/groups"
 	"browseforge/internal/humanize"
 	"browseforge/internal/profile"
+	"browseforge/internal/profilepolicy"
 	bfruntime "browseforge/internal/runtime"
 	"browseforge/internal/workflow"
 
@@ -38,6 +39,9 @@ type Server struct {
 }
 
 func NewServer(store *profile.Store, mgr *browser.Manager, hcfg humanize.Config, sessionPool *SessionPool, token, version string, groupStores ...*groups.Store) *Server {
+	if store != nil && mgr != nil {
+		store.SetMutationGuard(mgr.ReserveProfileMutation)
+	}
 	if version == "" {
 		version = "dev"
 	}
@@ -187,6 +191,16 @@ func (s *Server) handleToolsCall(params json.RawMessage, r *http.Request) (any, 
 	if call.Name == "" {
 		return nil, newError(-32602, "Tool name is required")
 	}
+	// Read-only inventory stays available while an updater owns admission. All
+	// other tools are accounted for until their full operation has returned,
+	// including agent pages and workflows that call Manager methods internally.
+	if s.mgr != nil && !updateReadOnlyTool(call.Name) {
+		release, err := s.mgr.ReserveUpdateOperation()
+		if err != nil {
+			return nil, newError(-32000, err.Error())
+		}
+		defer release()
+	}
 
 	switch call.Name {
 	case "list_runtimes":
@@ -277,6 +291,15 @@ func (s *Server) handleToolsCall(params json.RawMessage, r *http.Request) (any, 
 		return s.toolDoctorProfile(call.Arguments)
 	default:
 		return nil, newError(-32602, "Unknown tool: "+call.Name)
+	}
+}
+
+func updateReadOnlyTool(name string) bool {
+	switch name {
+	case "list_runtimes", "list_proxy_regions", "list_profiles", "list_groups", "get_group", "list_sessions", "list_downloads", "read_download", "doctor_profile":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -594,18 +617,7 @@ func (s *Server) groupResponse(g *groups.Group) map[string]any {
 }
 
 func (s *Server) activeBrowserSessionsForGroup(groupName string) int {
-	groupName = strings.TrimSpace(groupName)
-	if s.mgr == nil || s.store == nil || groupName == "" {
-		return 0
-	}
-	count := 0
-	for _, sess := range s.mgr.ListSessions() {
-		p, err := s.store.Get(sess.ProfileID)
-		if err == nil && strings.TrimSpace(p.Group) == groupName {
-			count++
-		}
-	}
-	return count
+	return profilepolicy.ActiveSessionsForGroup(groupName, s.store, s.mgr)
 }
 
 func parseProxyConfig(raw map[string]any) (*profile.ProxyConfig, error) {
@@ -653,54 +665,24 @@ func hasGroupUpdate(args map[string]any) bool {
 }
 
 func validateBrowseForgeProxyRegion(runtimeID bfruntime.ID, proxy *profile.ProxyConfig) error {
-	if runtimeID != bfruntime.BrowseForgeChromium || proxy == nil {
-		return nil
-	}
-	normalized, err := browser.NormalizeBrowseForgeProxyRegion(proxy.Region)
-	if err != nil {
-		return err
-	}
-	if normalized == "" {
-		return fmt.Errorf("browseforge-chromium proxy_region is required when a proxy is configured; use a redacted geographic label such as %s", browser.BrowseForgeProxyRegionExamples)
-	}
-	proxy.Region = normalized
-	return nil
+	return profilepolicy.ValidateProxyRegion(runtimeID, proxy)
 }
 
 func (s *Server) validateBrowseForgeProfileProxy(runtimeID bfruntime.ID, p *profile.Profile) error {
-	if runtimeID != bfruntime.BrowseForgeChromium || p == nil {
-		return nil
-	}
-	if p.Proxy != nil {
-		if err := validateBrowseForgeProxyRegion(runtimeID, p.Proxy); err != nil {
-			return err
+	return profilepolicy.ValidateProfileProxy(runtimeID, p, func(p *profile.Profile) groups.EffectiveProxy {
+		if s.groupStore != nil {
+			return s.groupStore.EffectiveProxy(p)
 		}
-	}
-	effective := groups.EffectiveProxy{Source: "none"}
-	if s.groupStore != nil {
-		effective = s.groupStore.EffectiveProxy(p)
-	} else if p.Proxy != nil && strings.TrimSpace(p.Proxy.Host) != "" {
-		effective = groups.EffectiveProxy{Proxy: p.Proxy, Source: "profile"}
-	}
-	if effective.Proxy == nil || effective.Source == "profile" {
-		return nil
-	}
-	proxy := *effective.Proxy
-	return validateBrowseForgeProxyRegion(runtimeID, &proxy)
+		// MCP's legacy fallback trims host whitespace; REST's does not.
+		if p.Proxy != nil && strings.TrimSpace(p.Proxy.Host) != "" {
+			return groups.EffectiveProxy{Proxy: p.Proxy, Source: "profile"}
+		}
+		return groups.EffectiveProxy{Source: "none"}
+	})
 }
 
 func (s *Server) validateGroupProxyRegion(groupName string, proxy *profile.ProxyConfig) error {
-	if proxy == nil || s.store == nil || s.mgr == nil {
-		return nil
-	}
-	for _, p := range s.store.List(groupName, "") {
-		draft := *p
-		desc, err := s.mgr.RuntimeRegistry().ApplyProfileDefaults(&draft)
-		if err == nil && desc.ID == bfruntime.BrowseForgeChromium {
-			return validateBrowseForgeProxyRegion(desc.ID, proxy)
-		}
-	}
-	return nil
+	return profilepolicy.ValidateGroupProxyRegion(groupName, proxy, s.store, s.mgr)
 }
 
 func (s *Server) toolOpenBrowser(args map[string]any) (any, *mcpError) {

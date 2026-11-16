@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat, symlink, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, stat, symlink, rm, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { NotionDiagnosticsStore } from '../electron/notion-diagnostics-store.mjs';
@@ -11,6 +11,23 @@ const record = { applicationId: 'app_fixture', runId, environmentId, phase: 'cle
   cleanupFailure: { stage: 'cleanup', code: 'APPLICATION_APP_CLEANUP_UNCONFIRMED' },
   events: [{ sequence: 1, stage: 'failed', code: 'APPLICATION_APP_NATIVE_REFUSED', nativeStage: 'guardian', nativeReason: 'NATIVE_OPERATION_REFUSED', errno: 13 }],
   message: 'private-token-fixture', route: { password: 'private-token-fixture' }, path: '/private/fixture' };
+
+test('support reads do not create absent history directories or change existing records', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'envara-diagnostics-read-fixture-')));
+  try {
+    const store = new NotionDiagnosticsStore(path.join(root, 'history'));
+    assert.equal(await store.readExisting(record.applicationId), null);
+    assert.deepEqual(await readdir(root), []);
+    await store.save(record);
+    const file = path.join(root, 'history', `${record.applicationId}.json`), before = await readFile(file, 'utf8');
+    assert.equal((await store.readExisting(record.applicationId)).phase, record.phase);
+    assert.equal(await store.readExisting('other_fixture'), null);
+    assert.equal(await readFile(file, 'utf8'), before);
+    assert.deepEqual(await readdir(path.join(root, 'history')), [`${record.applicationId}.json`]);
+    await symlink(path.join(root, 'history'), path.join(root, 'linked'));
+    await assert.rejects(new NotionDiagnosticsStore(path.join(root, 'linked')).readExisting(record.applicationId));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test('persisted diagnostic survives restart without private input or routing authority', async () => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'envara-diagnostics-')));

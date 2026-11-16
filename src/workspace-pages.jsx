@@ -264,6 +264,8 @@ export function MonitorWorkspace({
   t,
   language
 }) {
+  const [recordQuery, setRecordQuery] = useState("");
+  const [errorsOnly, setErrorsOnly] = useState(false);
   const browsers = profiles.filter(profile => ["running", "starting"].includes(profile.status));
   const terminals = terminalProfiles.flatMap(profile => (profile.sessions || []).filter(session => ["running", "starting", "closing"].includes(session.status)).map(session => ({
     ...session,
@@ -306,6 +308,10 @@ export function MonitorWorkspace({
       detail: profiles.find(profile => profile.id === application.profileId)?.name
     }))
   }];
+  const normalizedQuery = recordQuery.trim().toLocaleLowerCase();
+  const visibleEvents = [...events].filter(event => (!errorsOnly || event.type === "error") &&
+    (!normalizedQuery || t(event.message).toLocaleLowerCase().includes(normalizedQuery)))
+    .sort((a, b) => new Date(b.time) - new Date(a.time)).slice(0, 80);
   return <div className="monitor-content">
     <div className="monitor-summary">{categories.map(({
         id,
@@ -324,11 +330,12 @@ export function MonitorWorkspace({
             stopping: "停止中",
             closing: "关闭中"
           }[row.status] || row.status)}</span><button className="button" onClick={() => onNavigate(id)}>{t("查看")}</button></div>))}{!browsers.length && !terminals.length && !apps.length && <div className="empty-activity">{t("暂无运行会话")}</div>}</div>
-    {events.length > 0 && <div className="section-heading activity-heading"><h2>{t("运行记录")}</h2></div>}
-    <div className={`activity-list${events.length ? "" : " is-empty"}`}>{events.length ? [...events].sort((a, b) => new Date(b.time) - new Date(a.time)).slice(0, 80).map(event => <div className="activity-row" key={event.id}><span className={`activity-dot ${event.type === "error" ? "failure" : ""}`} /><span className="activity-message">{t(event.message)}</span><time>{new Date(event.time).toLocaleTimeString(localeForInterfaceLanguage(language), {
+    <div className="section-heading activity-heading"><h2>{t("运行记录")}</h2></div>
+    <div className="monitor-record-controls"><input type="search" value={recordQuery} onChange={event => setRecordQuery(event.target.value)} placeholder={t("搜索运行记录")} aria-label={t("搜索运行记录")} /><label><input type="checkbox" checked={errorsOnly} onChange={event => setErrorsOnly(event.target.checked)} />{t("仅显示错误")}</label></div>
+    <div className={`activity-list${visibleEvents.length ? "" : " is-empty"}`}>{visibleEvents.length ? visibleEvents.map(event => <div className="activity-row" key={event.id}><span className={`activity-dot ${event.type === "error" ? "failure" : ""}`} /><span className="activity-message">{t(event.message)}</span><time>{new Date(event.time).toLocaleTimeString(localeForInterfaceLanguage(language), {
             hour: "2-digit",
             minute: "2-digit",
             second: "2-digit"
-          })}</time></div>) : <div className="empty-activity"><Clock size={17} />{t("暂无运行记录")}</div>}</div>
+          })}</time></div>) : <div className="empty-activity"><Clock size={17} />{t(events.length ? "没有匹配的运行记录" : "暂无运行记录")}</div>}</div>
   </div>;
 }

@@ -1,0 +1,21 @@
+.application-updates { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-surface); padding: 16px; margin: 18px 0; min-width: 0; }
+.application-updates:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.application-updates-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
+.application-updates-heading > div { min-width: 0; }
+.application-updates-heading h2 { margin: 0 0 7px; font-size: var(--font-size-md); font-weight: var(--weight-medium); }
+.application-updates p, .application-updates-versions { color: var(--text-muted); font-size: var(--font-size-xs); line-height: 1.6; overflow-wrap: anywhere; }
+.application-updates-heading p { margin: 0; }
+.application-updates-heading > .button { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; }
+.application-updates-versions { display: flex; flex-wrap: wrap; gap: 5px 20px; margin-top: 12px; font-variant-numeric: tabular-nums; }
+.application-updates p.application-updates-error { color: var(--warning); display: flex; gap: 7px; align-items: flex-start; }
+.application-updates-error svg { flex-shrink: 0; margin-top: 2px; }
+.application-update-progress { display: flex; align-items: center; gap: 12px; font-size: var(--font-size-xs); font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.application-update-progress progress { flex: 1; min-width: 0; height: 6px; border: none; border-radius: 4px; accent-color: var(--accent); }
+.application-update-progress progress::-webkit-progress-bar { background: var(--border); border-radius: 4px; }
+.application-update-progress progress::-webkit-progress-value { background: var(--accent); border-radius: 4px; }
+.application-update-confirm { border-top: 1px solid var(--border-soft); margin-top: 14px; padding-top: 14px; }
+.application-update-confirm > strong { font-size: var(--font-size-sm); font-weight: var(--weight-medium); }
+.application-update-confirm > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.application-update-last-result { border-top: 1px solid var(--border-soft); padding-top: 12px; margin-bottom: 0; }
+.application-update-last-result.failed { color: var(--warning); }
+@media (max-width: 700px) { .application-updates-heading { flex-wrap: wrap; } .application-updates-heading > .button { margin-left: auto; } }

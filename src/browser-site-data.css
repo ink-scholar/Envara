@@ -1,0 +1,22 @@
+.browser-site-data { min-width: 0; color: var(--text); }
+.site-data-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.site-data-heading h3 { margin: 0 0 8px; font-size: 15px; }
+.site-data-heading p, .site-data-note { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.site-data-heading p { margin: 0; }
+.site-data-heading .button { flex-shrink: 0; }
+.site-data-notice { font-size: 12px; line-height: 1.6; }
+.site-cookie-search { display: grid; gap: 7px; font-size: 12px; margin: 16px 0; }
+.site-cookie-search input { width: 100%; }
+.site-cookie-list { max-height: 390px; overflow: auto; }
+.site-cookie-list details { border-top: 1px solid var(--border); padding: 10px 0; }
+.site-cookie-list summary { display: flex; gap: 12px; justify-content: space-between; cursor: pointer; font-size: 12px; line-height: 1.5; }
+.site-cookie-list summary span:first-child { overflow-wrap: anywhere; }
+.site-cookie-list summary span:last-child { color: var(--muted); flex-shrink: 0; }
+.site-cookie-list ul { padding: 0; list-style: none; }
+.site-cookie-list li { display: grid; gap: 4px; padding: 9px 12px; margin: 6px 0; background: var(--surface); border: 1px solid var(--border); border-radius: 7px; font-size: 11px; overflow-wrap: anywhere; }
+.site-cookie-list li strong { font-weight: 500; }
+.site-cookie-list li span { color: var(--muted); }
+.site-cookie-actions { margin-top: 12px; font-size: 12px; }
+.site-cookie-confirm p { line-height: 1.6; overflow-wrap: anywhere; }
+.site-cookie-confirm .button { margin: 0 8px 8px 0; }
+.site-cookie-list summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }

@@ -817,12 +817,13 @@ test('a delayed host list from the previous environment cannot replace the selec
 });
 
 test('SSH navigation owns the standalone page and the terminal dock has no embedded SSH entry', async () => {
-  const [application, dock] = await Promise.all([
+  const [application, sidebar, dock] = await Promise.all([
     readFile(new URL('../src/App.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/WorkspaceSidebar.jsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/TerminalPane.jsx', import.meta.url), 'utf8'),
   ]);
   assert.match(application, /import\s*\{\s*SshWorkspace\s*\}\s*from\s*["']\.\/TerminalSshConnections\.jsx["']/);
-  assert.match(application, /id:\s*["']ssh["'],\s*label:\s*["']SSH 连接["']/);
+  assert.match(sidebar, /id:\s*["']ssh["'],\s*label:\s*["']SSH 连接["']/);
   assert.match(application, /page\s*===\s*["']ssh["']\s*&&\s*<SshWorkspace\s+profiles=\{profiles\}\s+selectedId=\{selectedId\}\s+onSelect=\{setSelectedId\}\s+terminalProfiles=\{terminalProfiles\}\s+onOpenTerminal=\{openTerminalWorkspace\}/);
   assert.match(application, /onProfilesChange=\{setTerminalProfiles\}/, 'the dock still publishes active sessions for SSH mutation guards');
   assert.doesNotMatch(dock, /TerminalSshConnections|sshConnectionsOpen|setSshConnectionsOpen/);

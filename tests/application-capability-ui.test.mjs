@@ -106,12 +106,15 @@ test('an unconfirmed cleanup keeps its diagnostic and exposes only cleanup retry
 });
 
 test('file picker, next/save and existing app rows all use the same platform-aware capability gate', async () => {
-  const source = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
-  assert.match(source, /!supportsAttachedApplication\(result, systemPlatform\)/);
-  assert.match(source, /!supportsAttachedApplication\(picked, systemPlatform\)/);
+  const [source, attachForm] = await Promise.all([
+    readFile(new URL('../src/App.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/AttachApplicationForm.jsx', import.meta.url), 'utf8'),
+  ]);
+  assert.match(attachForm, /!supportsAttachedApplication\(result, systemPlatform\)/);
+  assert.match(attachForm, /!supportsAttachedApplication\(picked, systemPlatform\)/);
   assert.match(source, /!supportsAttachedApplication\(application, system\.platform\)/);
-  assert.match(source, /disabled=\{attached \|\| !supported\}/);
-  assert.match(source, /step !== "application" && error/);
+  assert.match(attachForm, /disabled=\{attached \|\| !supported\}/);
+  assert.match(attachForm, /step !== "application" && error/);
   assert.match(source, /删除「\{value1\}」的应用数据？/);
   assert.match(source, /登录信息、设置与本地内容，无法恢复。软件本身和外部项目文件不受影响。/);
 });

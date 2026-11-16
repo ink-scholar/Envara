@@ -23,6 +23,7 @@ node scripts/verify-public-release.mjs
 ```bash
 npm run native:prepare
 npm run claude:keychain:prepare
+npm run updater:prepare
 npm run backend:prepare
 npm run proxy:prepare
 npm run routing:build:mac

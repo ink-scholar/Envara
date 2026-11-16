@@ -445,6 +445,7 @@
   "附加软件需要境舱管理的认证网络入口。": "Les logiciels nécessitent un point d’accès réseau authentifié géré par Envara.",
   "复制": "Copier",
   "复制会话": "Dupliquer la session",
+  "使用相同登录档案和环境配置，新建独立终端。": "Ouvrez un terminal indépendant avec le même profil de connexion et les mêmes paramètres d’environnement.",
   "复制迁移旧环境": "Migrer les anciens environnements",
   "复制选定环境的配置与浏览资料，旧工作区不会被删除。": "Copier les paramètres et les données de navigation sélectionnés. L’ancien espace de travail est conservé.",
   "复制中…": "Duplication…",

@@ -2,6 +2,8 @@
 export function workspaceOperationWarning(result) {
   if (result?.warnings?.some(item => item?.code === 'ENVIRONMENT_APPLICATION_CLEANUP_INCOMPLETE'))
     return '环境已删除，但部分附加软件绑定或应用数据未清理完成。请到「附加软件」检查并清理。';
+  if (result?.warnings?.some(item => item?.code === 'WORK_COMBINATION_CLEANUP_INCOMPLETE'))
+    return '环境已删除，但工作组合记录未能清理。请检查本地存储。';
   return null;
 }
 

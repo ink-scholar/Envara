@@ -1,0 +1,21 @@
+.cache-maintenance { margin-top: 16px; border-top: 1px solid var(--border-soft); padding-top: 14px; }
+.cache-maintenance > summary { cursor: pointer; color: var(--text-secondary); font-weight: 550; }
+.cache-maintenance-content { padding-top: 12px; font-size: var(--font-size-sm); }
+.cache-maintenance-content p { color: var(--text-muted); line-height: 1.6; margin: 0 0 12px; }
+.cache-maintenance-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.cache-maintenance-actions .button { white-space: normal; text-align: start; }
+.cache-maintenance-list { list-style: none; margin: 0 0 16px; padding: 0; border: 1px solid var(--border-soft); border-radius: var(--radius-control); overflow: hidden; }
+.cache-maintenance-list > li { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; padding: 12px; border-bottom: 1px solid var(--border-soft); }
+.cache-maintenance-list > li:last-child { border-bottom: 0; }
+.cache-maintenance-choice { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 160px; cursor: pointer; }
+.cache-maintenance-choice > span { min-width: 0; display: grid; gap: 4px; overflow-wrap: anywhere; }
+.cache-maintenance-choice strong { font-weight: 550; color: var(--text-primary); }
+.cache-maintenance-choice span span, .cache-maintenance-state { color: var(--text-muted); font-size: var(--font-size-xs); }
+.cache-maintenance-size { font-variant-numeric: tabular-nums; color: var(--text-secondary); white-space: nowrap; }
+.cache-maintenance-recovery { margin-top: 20px; }
+.cache-maintenance-recovery h4 { font-size: inherit; font-weight: 550; margin: 0 0 8px; }
+.cache-maintenance-list > .cache-maintenance-batch { display: block; }
+.cache-maintenance-batch-heading { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 12px; color: var(--text-secondary); }
+.cache-maintenance-batch .cache-maintenance-actions { margin-bottom: 0; }
+.cache-maintenance-confirm { border-top: 1px solid var(--border-soft); margin-top: 12px; padding-top: 12px; }
+.cache-maintenance-confirm p:first-child { color: var(--text-primary); }

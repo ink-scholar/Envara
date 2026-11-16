@@ -45,6 +45,8 @@ El aislamiento de entornos ayuda a reducir las mezclas entre configuraciones de 
 
 Descarga el DMG o ZIP para **macOS Apple Silicon (arm64)** y las sumas de verificación SHA-256 desde [GitHub Releases](https://github.com/ink-scholar/Envara/releases/latest). La [guía de uso](../user-guide.md) explica los pasos de instalación y la información sobre la firma.
 
+Desde v1.3, usa Ajustes → Actualizaciones de la aplicación para buscar, descargar e instalar versiones posteriores. Solo se sustituye la aplicación; se conservan los entornos, los ajustes y los datos de inicio de sesión. Finaliza las sesiones activas antes de instalar. Las versiones anteriores requieren instalar una vez una versión que incluya el actualizador.
+
 1. **Elige una red.** Añade una configuración de red, comprueba su salida real y confirma la región y la zona horaria.
 2. **Crea un entorno.** Elige un navegador y dale a tu proyecto o cuenta su propio espacio de trabajo.
 3. **Empieza a trabajar.** Abre el navegador, elige el directorio de trabajo del terminal o vincula una aplicación de escritorio compatible.

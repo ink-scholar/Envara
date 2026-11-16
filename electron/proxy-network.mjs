@@ -5,6 +5,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import ipaddr from 'ipaddr.js';
 import { assertHttpProxyUsername } from '../shared/proxy-auth.mjs';
+import { NETWORK_DIAGNOSTIC_STAGES, networkDiagnosticElapsed, networkDiagnosticSource, sanitizeNetworkDiagnostics } from '../shared/proxy-network-diagnostics.mjs';
 
 // This allowlist belongs to the main process. IPC never accepts a lookup URL.
 export const GEO_ENDPOINTS = Object.freeze([
@@ -98,12 +99,25 @@ export function createProxyAgent(input, timeoutMs, tlsOptions = {}, signal) {
 }
 
 /** No redirects, absolute deadline (including proxy handshake), and bounded JSON. */
-export function requestGeoJSON({ url, agent, timeoutMs, maxBodyBytes, tlsOptions = {}, controller = new AbortController(), headers = {} }) {
+export function requestGeoJSON({ url, agent, timeoutMs, maxBodyBytes, tlsOptions = {}, controller = new AbortController(), headers = {}, onDiagnostic }) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let request;
+    let secure = false, responseRead = false;
+    const observe = (stage, status) => { if (!settled) { try { onDiagnostic?.({ stage, status }); } catch {} } };
+    const observeSecure = socket => {
+      // This is the origin TLS socket, not the HTTP/SOCKS proxy's listener or
+      // CONNECT acknowledgement. No separate DNS/upstream TLS success is inferred.
+      if (!secure && socket?.encrypted === true && socket.authorized === true) {
+        secure = true; observe('https', 'passed');
+      }
+    };
     const finish = (value, result) => {
       if (settled) return;
+      if (value) {
+        if (!secure) observe('https', 'failed');
+        else if (!responseRead) observe('response', 'failed');
+      }
       settled = true;
       clearTimeout(timer);
       if (value) { controller.abort(value); request?.destroy(); reject(value); } else resolve(result);
@@ -112,14 +126,21 @@ export function requestGeoJSON({ url, agent, timeoutMs, maxBodyBytes, tlsOptions
     try {
       request = https.request(url, { method: 'GET', agent, ...tlsOptions, signal: controller.signal,
         headers: { Accept: 'application/json', 'User-Agent': 'Envara/0.2 (egress verification)', ...headers } }, (response) => {
-        if (response.statusCode !== 200) { response.destroy(); finish(failure(response.statusCode === 407 ? 'PROXY_AUTH_FAILED' : 'GEO_HTTP_ERROR')); return; }
+        observeSecure(response.socket);
+        if (response.statusCode !== 200) { observe('response', 'failed'); response.destroy(); finish(failure(response.statusCode === 407 ? 'PROXY_AUTH_FAILED' : 'GEO_HTTP_ERROR')); return; }
         if (Number(response.headers['content-length']) > maxBodyBytes) { response.destroy(); finish(failure('GEO_BODY_TOO_LARGE')); return; }
         const chunks = []; let length = 0;
         response.on('data', (chunk) => { length += chunk.length; if (length > maxBodyBytes) { response.destroy(); finish(failure('GEO_BODY_TOO_LARGE')); } else chunks.push(chunk); });
         response.once('error', () => finish(failure('NETWORK_FAILED')));
         response.once('aborted', () => finish(failure('NETWORK_FAILED')));
-        response.once('end', () => { try { finish(null, JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { finish(failure('INVALID_GEO_RESPONSE')); } });
+        response.once('end', () => {
+          if (settled) return;
+          responseRead = true; observe('response', 'passed');
+          try { finish(null, JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
+          catch { observe('validation', 'failed'); finish(failure('INVALID_GEO_RESPONSE')); }
+        });
       });
+      request.once('socket', socket => { observeSecure(socket); socket.once('secureConnect', () => observeSecure(socket)); });
       request.once('error', (value) => finish(failure(value.code === 'ETIMEDOUT' ? 'NETWORK_TIMEOUT' : /authentication|auth.*failed|Socks5.*authentication/i.test(value.message) ? 'PROXY_AUTH_FAILED' : 'NETWORK_FAILED')));
       request.end();
     } catch { finish(failure('NETWORK_FAILED')); }
@@ -147,7 +168,7 @@ export class ProxyNetworkProbe {
     this.cacheTtlMs = cacheTtlMs; this.nowMs = nowMs; this.tlsOptions = tlsOptions;
     this.cache = new Map(); this.inflight = new Map(); this.controllers = new Set(); this.closed = false; this.networkRevision = 0;
   }
-  peek(proxy) { const entry = this.cache.get(proxyFingerprint(proxy)); return entry ? { ...entry.result, stale: this.nowMs() - entry.timestamp >= this.cacheTtlMs } : null; }
+  peek(proxy) { const entry = this.cache.get(proxyFingerprint(proxy)); return entry ? { ...structuredClone(entry.result), stale: this.nowMs() - entry.timestamp >= this.cacheTtlMs } : null; }
   invalidate(proxy) { const key = proxyFingerprint(proxy); this.cache.delete(key); this.inflight.delete(key); }
   invalidateNetwork() {
     this.networkRevision++;
@@ -178,21 +199,46 @@ export class ProxyNetworkProbe {
   async lookup(proxy) {
     const revision = this.networkRevision;
     const started = this.nowMs(); let code = 'NETWORK_FAILED', source = null;
+    const attempts = [];
+    const diagnostics = () => sanitizeNetworkDiagnostics({ version: 1, attempts });
     for (const endpoint of this.endpoints) {
       if (this.closed || revision !== this.networkRevision) break;
       source = endpoint.source;
+      const attemptStarted = this.nowMs();
+      const attempt = { source: networkDiagnosticSource(endpoint.source), elapsedMs: 0, outcome: 'failure', errorCode: 'NETWORK_FAILED',
+        stages: NETWORK_DIAGNOSTIC_STAGES.map(stage => ({ stage, status: 'unobserved' })) };
+      attempts.push(attempt);
+      let observing = true, configurationReady = false, validating = false;
+      const observe = (stage, status) => { if (observing) attempt.stages.find(item => item.stage === stage).status = status; };
+      const onDiagnostic = event => {
+        if (event && ['https', 'response', 'validation'].includes(event.stage) && ['passed', 'failed'].includes(event.status) &&
+            (event.stage !== 'validation' || event.status === 'failed')) observe(event.stage, event.status);
+      };
+      const finishAttempt = (outcome, errorCode) => {
+        observing = false; attempt.elapsedMs = networkDiagnosticElapsed(this.nowMs() - attemptStarted);
+        attempt.outcome = outcome;
+        if (errorCode) attempt.errorCode = errorCode; else delete attempt.errorCode;
+      };
       let agent; const controller = new AbortController(); this.controllers.add(controller);
       try {
         agent = createProxyAgent(proxy, this.timeoutMs, this.tlsOptions, controller.signal);
-        const data = await this.transport({ url: endpoint.url, agent, timeoutMs: this.timeoutMs, maxBodyBytes: this.maxBodyBytes, tlsOptions: this.tlsOptions, controller });
-        if (revision !== this.networkRevision) break;
+        configurationReady = true; observe('configuration', 'passed');
+        const data = await this.transport({ url: endpoint.url, agent, timeoutMs: this.timeoutMs, maxBodyBytes: this.maxBodyBytes, tlsOptions: this.tlsOptions, controller, onDiagnostic });
+        if (this.closed || revision !== this.networkRevision) { finishAttempt('cancelled', this.closed ? 'APP_CLOSING' : 'NETWORK_CHANGED'); break; }
+        validating = true;
         const geo = parseGeoResponse(data, endpoint, proxy);
-        return { ok: true, scope: 'egress', ...geo, source, checkedAt: new Date(this.nowMs()).toISOString(), latencyMs: Math.max(0, Math.round(this.nowMs() - started)), message: '已通过 HTTPS 验证实际网络出口；位置为 IP 地理估算。' };
-      } catch (value) { code = Object.hasOwn(messages, value.code) ? value.code : 'NETWORK_FAILED'; }
+        observe('validation', 'passed'); finishAttempt('success');
+        return { ok: true, scope: 'egress', ...geo, source, checkedAt: new Date(this.nowMs()).toISOString(), latencyMs: Math.max(0, Math.round(this.nowMs() - started)), message: '已通过 HTTPS 验证实际网络出口；位置为 IP 地理估算。', diagnostics: diagnostics() };
+      } catch (value) {
+        code = Object.hasOwn(messages, value?.code) ? value.code : 'NETWORK_FAILED';
+        if (!configurationReady) observe('configuration', 'failed');
+        else if (validating) observe('validation', 'failed');
+        finishAttempt(this.closed || revision !== this.networkRevision ? 'cancelled' : 'failure', this.closed ? 'APP_CLOSING' : revision !== this.networkRevision ? 'NETWORK_CHANGED' : code);
+      }
       finally { this.controllers.delete(controller); agent?.destroy?.(); }
     }
     return { ok: false, scope: 'egress', ip: null, country: null, countryCode: null, region: null, city: null, timezone: null,
-      source, checkedAt: new Date(this.nowMs()).toISOString(), latencyMs: null, errorCode: code, message: messages[code] };
+      source, checkedAt: new Date(this.nowMs()).toISOString(), latencyMs: null, errorCode: code, message: messages[code], diagnostics: diagnostics() };
   }
 }
 

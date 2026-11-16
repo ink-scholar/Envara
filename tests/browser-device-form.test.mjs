@@ -105,7 +105,7 @@ test('switching supported providers keeps the explicitly chosen draft template a
 });
 
 test('the actual edit form and save payload preserve an automatic platform', async () => {
-  const source = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../src/ProfileForm.jsx', import.meta.url), 'utf8');
   const initializer = source.match(/const \[form, setForm\] = useState\(\(\) => \(([\s\S]*?)\)\);/)?.[1];
   const payload = source.match(/onSave\((\{\s+name: form\.name\.trim\(\),[\s\S]*?)\);\s+\};\s+const field/)?.[1];
   assert.ok(initializer); assert.ok(payload);
@@ -122,7 +122,7 @@ test('the actual edit form and save payload preserve an automatic platform', asy
 });
 
 test('the actual edit form never supplies a replacement seed for an existing identity', async () => {
-  const source = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../src/ProfileForm.jsx', import.meta.url), 'utf8');
   const initializer = source.match(/const \[form, setForm\] = useState\(\(\) => \(([\s\S]*?)\)\);/)?.[1];
   const payload = source.match(/onSave\((\{\s+name: form\.name\.trim\(\),[\s\S]*?)\);\s+\};\s+const field/)?.[1];
   assert.ok(initializer); assert.ok(payload);
@@ -143,11 +143,14 @@ test('the actual edit form never supplies a replacement seed for an existing ide
 });
 
 test('device form wires explicit changes, readonly fixed summaries and persisted metadata', async () => {
-  const pane = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const [pane, profileModel] = await Promise.all([
+    readFile(new URL('../src/ProfileForm.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/workspace-profile.mjs', import.meta.url), 'utf8'),
+  ]);
   assert.match(pane, /initialBrowserDeviceFields\(profile, systemPlatform/);
   assert.match(pane, /selectBrowserDeviceProfile\(value, event\.target\.value\)/);
   assert.match(pane, /deviceProfileId: form\.deviceProfileId/);
-  assert.match(pane, /const profileFields = .*"deviceProfileId"/);
+  assert.match(profileModel, /const profileFields = .*"deviceProfileId"/);
   for (const field of ['platform', 'width', 'height']) assert.ok(pane.includes(`!selectedDevice && field("${field}"`));
   assert.match(pane, /className="browser-device-summary"/);
   assert.match(pane, /BROWSER_DEVICE_PROFILES\.filter\(device => device\.id === defaultBrowserDeviceProfileId\(systemPlatform\) \|\| device\.id === profile\?\.deviceProfileId\)/);
@@ -179,8 +182,9 @@ test('device form wires explicit changes, readonly fixed summaries and persisted
   assert.match(profileForm, /standard: "拦截已知第三方追踪；个别网站可能需要调整防护设置。"/);
   assert.doesNotMatch(profileForm, /不影响登录和网站功能/);
   const terminal = await readFile(new URL('../src/TerminalPane.jsx', import.meta.url), 'utf8');
-  assert.match(terminal, /selectedSession\?\.language \?\? selectedMetadata\?\.language/);
-  const terminalContext = terminal.slice(terminal.indexOf('<details className="terminal-context-menu"'), terminal.indexOf('<TerminalDeviceIdentifierDetails'));
+  assert.match(terminal, /<TerminalSessionContext[^>]*selectedSession=\{selectedSession\}[^>]*selectedMetadata=\{selectedMetadata\}/);
+  const terminalContext = await readFile(new URL('../src/terminal-session-context.jsx', import.meta.url), 'utf8');
+  assert.match(terminalContext, /selectedSession\?\.language \?\? selectedMetadata\?\.language/);
   assert.match(terminalContext, /languageLabel && <div><dt>\{t\('有效语言'\)\}<\/dt><dd className=\{sessionLanguage\.fallback \? 'is-fallback' : ''\}>\{languageLabel\}<\/dd>/);
 });
 

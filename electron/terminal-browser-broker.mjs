@@ -328,8 +328,10 @@ export class TerminalBrowserBroker {
     });
     return session.disposal;
   }
-  async shutdown() {
+  async shutdown({ strict = false } = {}) {
     this.closed = true;
-    await Promise.allSettled([...this.sessions.values()].map(session => this.dispose(session)));
+    const results = await Promise.allSettled([...this.sessions.values()].map(session => this.dispose(session)));
+    const failure = results.find(result => result.status === 'rejected');
+    if (strict && failure) throw failure.reason;
   }
 }

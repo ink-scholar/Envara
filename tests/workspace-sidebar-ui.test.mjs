@@ -22,7 +22,8 @@ before(async () => {
   const output = await build({ stdin: { resolveDir: project, loader: 'jsx', contents: `
 import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { WorkspaceSidebar, useSidebarPreference, WorkspaceApp } from './src/App.jsx';
+import { WorkspaceApp } from './src/App.jsx';
+import { WorkspaceSidebar, useSidebarPreference } from './src/WorkspaceSidebar.jsx';
 import { translate } from './src/i18n.mjs';
 const root = createRoot(document.querySelector('#root'));
 window.fixtureLanguage = 'zh-CN';
@@ -55,7 +56,7 @@ window.mountSidebar();
     define: { 'process.env.NODE_ENV': '"test"', 'import.meta.env.BASE_URL': '"./"' },
     plugins: [{ name: 'isolated-production-sidebar', setup(builder) {
       builder.onLoad({ filter: /[/\\]src[/\\]App\.jsx$/ }, async args => ({
-        contents: `${await readFile(args.path, 'utf8')}\nexport { WorkspaceSidebar, useSidebarPreference, WorkspaceApp };`, loader: 'jsx',
+        contents: `${await readFile(args.path, 'utf8')}\nexport { WorkspaceApp };`, loader: 'jsx',
       }));
       const stubs = {
         './client.js': `
@@ -63,6 +64,7 @@ const profiles = ['a', 'b'].map(id => ({ id: 'env-' + id, name: 'Demo ' + id.toU
 export const api = { isDesktop: true, subscribe: () => () => {}, call: async (method, args) => {
   (window.fixtureCalls ||= []).push({ method, args });
   if (method === 'snapshot') return { profiles, proxies: [], settings: {}, system: { platform: 'darwin' } };
+  if (method === 'listWorkCombinations') return { combinations: [] };
   if (method === 'listClaudeAccounts') return { accounts: [{ id: 'default', name: '默认' }] };
   throw new Error('Unexpected fixture operation: ' + method);
 } };
@@ -272,5 +274,5 @@ test('SSH navigation and environment terminal entries open the full right worksp
   await page.getByRole('button', { name: 'Select Demo A', exact: true }).click();
   await page.getByRole('button', { name: 'Open Demo A terminal', exact: true }).click();
   assert.equal(await page.getByRole('button', { name: 'Fixture export terminal', exact: true }).isDisabled(), true);
-  assert.deepEqual(await page.evaluate(() => [...new Set(window.fixtureCalls.map(call => call.method))]), ['snapshot', 'listClaudeAccounts']);
+  assert.deepEqual(await page.evaluate(() => [...new Set(window.fixtureCalls.map(call => call.method))]), ['snapshot', 'listWorkCombinations', 'listClaudeAccounts']);
 });

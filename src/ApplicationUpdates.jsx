@@ -103,14 +103,15 @@ export function ApplicationUpdates({ call }) {
     else void run(primary === 'download' ? 'downloadApplicationUpdate' : 'checkApplicationUpdate', primary);
   };
   return <section id="application-updates" className="application-updates" tabIndex={-1} aria-labelledby={titleId}>
-    <div className="application-updates-heading"><div><h2 id={titleId}>{t('应用更新')}</h2>
-      <p>{t('更新只替换应用，保留环境、配置和登录资料。')}</p></div>
+    <div className="application-updates-heading"><div><h2 id={titleId}>{t('应用更新')}</h2></div>
       {!busy && !confirmation && !state?.restartRequired && (state?.status !== 'unsupported' || state?.error === 'APP_UPDATE_ASSET_UNAVAILABLE') && <button type="button" className="button" disabled={loading || typeof call !== 'function' || state?.status === 'ready' && !canInstall} onClick={start}><Icon size={16} aria-hidden="true" />{t(primaryText)}</button>}
       {showCancel && <button type="button" className="button" disabled={action === 'cancel'} onClick={() => void run('cancelApplicationUpdate', 'cancel')}>{t('取消下载')}</button>}
     </div>
     <div className="application-updates-versions"><span>{t('当前版本：{version}', { version: state?.currentVersion || '—' })}</span>
       {state?.latestVersion && state.latestVersion !== state.currentVersion && ['available', 'downloading', 'verifying', 'ready', 'installing', 'error'].includes(state.status) && <span>{t('可更新至 {version}', { version: state.latestVersion })}</span>}</div>
-    <p>{t('通过本机网络连接官方发布源。')}</p>
+    <details className="application-update-help"><summary>{t('使用说明')}</summary>
+      <p>{t('更新只替换应用，保留环境、配置和登录资料。')}</p><p>{t('通过本机网络连接官方发布源。')}</p>
+    </details>
     {loading && <p role="status">{t('正在读取更新状态…')}</p>}
     {readError && <p role="alert" className="application-updates-error"><WarningCircle size={16} aria-hidden="true" />{t('无法读取更新状态，请重试。')}</p>}
     {errorText && <p role="alert" className="application-updates-error"><WarningCircle size={16} aria-hidden="true" />{t(errorText)}</p>}

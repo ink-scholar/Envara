@@ -88,6 +88,17 @@ test('permanent deletion needs a separate confirmation, cancellation changes not
   assert.equal(await page.getByText('恢复批次仍占用磁盘。永久删除后无法恢复。', { exact: true }).count(), 1);
 });
 
+test('recovery overwrite guidance appears only when there is a recovery batch', { skip: noDisplay }, async () => {
+  const guidance = page.getByText('恢复时若已有新缓存，将保留新缓存与恢复批次，不会覆盖。', { exact: true });
+  assert.equal(await guidance.count(), 1);
+  await page.evaluate(() => { window.savedBatches = window.inventory.batches; window.inventory = { ...window.inventory, batches: [] }; window.render(); });
+  await page.getByText('没有恢复批次。', { exact: true }).waitFor();
+  assert.equal(await guidance.count(), 0);
+  assert.equal(await page.getByText('恢复批次仍占用磁盘。永久删除后无法恢复。', { exact: true }).count(), 1);
+  await page.evaluate(() => { window.inventory = { ...window.inventory, batches: window.savedBatches }; window.render(); });
+  await guidance.waitFor();
+});
+
 test('pending work disables all actions and checkboxes; unavailable maintenance disables restore', { skip: noDisplay }, async () => {
   await page.evaluate(() => { window.pending = true; window.render(); });
   await page.waitForFunction(() => document.querySelector('[aria-busy="true"]'));

@@ -324,7 +324,23 @@ h1 { margin: 0; color: var(--text-strong); font-size: 26px; line-height: 1.35; f
 .activity-row time { color: var(--text-muted); font-size: var(--font-size-xs); font-variant-numeric: tabular-nums; }
 .empty-activity { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 58px; color: var(--text-muted); font-size: var(--font-size-xs); }
 .activity-list.is-empty { border-style: dashed; background: transparent; }
-.settings-content { max-width: 860px; }
+.settings-content { min-width: 0; }
+.settings-layout { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr)); gap: 28px; align-items: start; }
+.settings-column { display: grid; align-content: start; gap: 24px; min-width: 0; container: settings-column / inline-size; }
+.settings-section { min-width: 0; }
+.settings-section > .section-heading, .settings-column > .component-versions > .section-heading { margin: 0 0 12px; min-height: 36px; }
+.settings-column .application-updates { margin: 0; }
+.settings-column .settings-row { gap: 12px 16px; flex-wrap: wrap; padding: 16px 0; }
+.settings-column .settings-row > div { flex: 1 1 180px; overflow-wrap: anywhere; }
+.settings-column .settings-row > select { max-width: 100%; }
+.settings-column .settings-row .button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: start; }
+.settings-column .settings-switch { flex: none; }
+.settings-help { margin-top: 6px; color: var(--text-muted); font-size: var(--font-size-xs); line-height: 1.6; }
+.settings-help > summary { cursor: pointer; width: fit-content; }
+.settings-help > p { margin: 8px 0 0; }
+.settings-maintenance-card { padding: 0 var(--space-5); }
+.settings-maintenance-card .cache-maintenance { margin: 0; padding: 16px 0; border-top: 0; }
+.settings-maintenance-card .support-diagnostics { border-top: 1px solid var(--border); }
 .section-heading.first { margin-top: 0; }
 .settings-card { background: var(--bg-card); border: 1px solid var(--edge); border-radius: var(--radius); }
 .settings-rows {

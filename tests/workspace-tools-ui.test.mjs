@@ -20,7 +20,7 @@ const snapshot = (language = 'zh-CN', appearance = 'dark') => ({
     network: { ok: true, ip: '203.0.113.9', countryCode: 'JP', timezone: 'Asia/Tokyo', checkedAt: '2026-01-01T00:00:00.000Z' } }],
   engines: [{ id: 'cloakbrowser', displayName: 'CloakBrowser', installed: true, supported: true, enabled: true, version: 'fixture-1', family: 'chromium' }],
   settings: { language, appearance, closeBrowsersOnExit: false, defaultEngine: 'cloakbrowser' },
-  system: { platform: 'darwin', appVersion: '1.2.3', dataDir: '/synthetic/envara', proxyCore: { supported: true, version: 'fixture-core' } },
+  system: { platform: 'darwin', appVersion: '1.3.1', dataDir: '/synthetic/envara', proxyCore: { supported: true, version: 'fixture-core' } },
   applications: [], groups: [{ name: 'Fixture projects', proxyId: 'fixture-route' }],
   events: [{ id: 'event1', type: 'browser', time: '2026-01-01T00:00:01.000Z', message: 'Synthetic launch success' },
     { id: 'event2', type: 'error', time: '2026-01-01T00:00:02.000Z', message: 'Synthetic route failure' },
@@ -54,7 +54,7 @@ async call(method,args={}) { window.calls.push({method,args}); const copy=value=
  switch(method){
  case 'snapshot': return copy(window.fixture);
  case 'terminalSnapshot': return {profiles:copy(window.terminalFixture)};
- case 'linkRouterStatus': return {enabled:false,preference:true,available:false};
+ case 'linkRouterStatus': return {enabled:false,preference:true,available:true};
  case 'saveSettings': Object.assign(window.fixture.settings,args.settings); for(const listener of listeners)listener(copy(window.fixture)); return copy(window.fixture);
  case 'listWorkCombinations': return {combinations:copy(window.combinations)};
  case 'saveWorkCombination': { const combination={id:'workcombo_fixture',profileId:args.id,name:args.name,entryIds:args.entryIds,includeBrowser:args.includeBrowser,createdAt:new Date().toISOString()};window.combinations.push(combination);return {combination:copy(combination)}; }
@@ -65,9 +65,9 @@ async call(method,args={}) { window.calls.push({method,args}); const copy=value=
  case 'runtimeVerificationSnapshot': return {results:[],pending:[]};
  case 'checkRuntimeVerification': return {profileId:args.id,checkedAt:new Date().toISOString(),stale:false,expected:{locale:'ja-JP',timezone:'Asia/Tokyo',ip:'203.0.113.9'},browser:{observed:{locale:'ja-JP',timezone:'Asia/Tokyo',ip:null},checks:{locale:'match',timezone:'match',ip:'unknown'},reason:'partial'},terminal:{sessions:[]}};
  case 'exportSupportDiagnostics': return {canceled:false,exported:true};
- case 'applicationUpdateStatus': return {status:'idle',currentVersion:'1.2.3',latestVersion:null,error:null,canInstall:false};
+ case 'applicationUpdateStatus': return {status:'idle',currentVersion:'1.3.1',latestVersion:null,error:null,canInstall:false};
  case 'componentVersions': return {schema:'envara.component-versions',version:1,checkedAt:new Date().toISOString(),rows:[
- {id:'app',kind:'application',name:'Envara',version:'1.2.3',runningVersion:'1.2.3',status:'running',versionSource:'running-app',support:'supported',impact:'application',sessions:[],sessionsKnown:true,action:'application-update',blocked:false},
+ {id:'app',kind:'application',name:'Envara',version:'1.3.1',runningVersion:'1.3.1',status:'running',versionSource:'running-app',support:'supported',impact:'application',sessions:[],sessionsKnown:true,action:'application-update',blocked:false},
  {id:'cloakbrowser',kind:'browser',name:'CloakBrowser',version:'fixture-1',runningVersion:null,status:'installed',versionSource:'installation-record',support:'supported',impact:'browser',sessions:[{id:'browser_fixture',kind:'browser',name:'Fixture browser',profileName:'Synthetic project workspace'}],sessionsKnown:true,action:'install-engine',blocked:true},
  {id:'proxy',kind:'proxy',name:'Mihomo',version:'fixture-core',runningVersion:null,status:'ready',versionSource:'bundled-package',support:'supported',impact:'bundled',sessions:[],sessionsKnown:true},
  {id:'claude_fixture',kind:'claude',name:'Claude Code',profileId:'${id}',profileName:'Synthetic project workspace',version:null,runningVersion:null,status:'unknown',versionSource:'unknown',support:'unknown',impact:'claude',sessions:[],sessionsKnown:true,action:'terminal',blocked:false}]};
@@ -110,7 +110,7 @@ const nav = (key, language = 'zh-CN') => page.locator('.sidebar').getByRole('but
 async function healthy() { assert.deepEqual(browserErrors, []); assert.deepEqual(await page.evaluate(() => window.unexpected), []); }
 async function noHorizontalOverflow(label) {
   const issues = await page.evaluate(() => {
-    const nodes = [...document.querySelectorAll('.app-shell,.main-panel,.detail-panel,.settings-content,.work-combinations,.component-versions,.cache-maintenance,.runtime-verification')];
+    const nodes = [...document.querySelectorAll('.app-shell,.main-panel,.detail-panel,.settings-content,.settings-column,.settings-row,.settings-row > *, .application-updates,.application-updates-heading,.component-version-card summary,.component-version-card summary > *,.work-combinations,.component-versions,.cache-maintenance,.runtime-verification')];
     return nodes.filter(el => el.getBoundingClientRect().width > 0 && el.scrollWidth > el.clientWidth + 2).map(el => ({ className: el.className, width: el.clientWidth, content: el.scrollWidth }));
   });
   assert.deepEqual(issues, [], label);
@@ -130,6 +130,45 @@ test('workspace saves a work combination and opens its returned session in the t
   const save = await page.evaluate(() => window.calls.find(call => call.method === 'saveWorkCombination'));
   assert.deepEqual(save.args, { id, name: 'Fixture project', entryIds: ['entry_frontend', 'entry_backend'], includeBrowser: true });
   assert.equal(await page.locator('.app-shell.terminal-workspace').count(), 1); await healthy();
+});
+
+test('settings fills the workspace and adapts every language to wide and narrow windows', { skip: noDisplay }, async () => {
+  for (const language of languages) for (const theme of ['dark', 'light']) {
+    const value = snapshot(language, theme);
+    value.system.dataDir = '/synthetic/' + 'long-workspace-directory-'.repeat(8);
+    await page.evaluate(value => window.mountWorkspaceTools(value), value);
+    await nav('设置', language);
+    await page.locator('.component-version-card').first().waitFor();
+    for (const width of [900, 1120, 1500, 2560]) {
+      await page.setViewportSize({ width, height: width === 1120 ? 720 : 940 });
+      for (const collapsed of [false, true]) {
+        const shell = page.locator('.app-shell');
+        if ((await shell.getAttribute('class')).includes('sidebar-collapsed') !== collapsed) await page.locator('.sidebar-toggle').click();
+        await noHorizontalOverflow(`${language} ${theme} ${width} ${collapsed}`);
+        const geometry = await page.evaluate(() => {
+          const main = document.querySelector('.main-panel').getBoundingClientRect();
+          const content = document.querySelector('.settings-content').getBoundingClientRect();
+          const columns = [...document.querySelectorAll('.settings-column')].map(node => {
+            const box = node.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width };
+          });
+          return { main: main.width, content: content.width, columns };
+        });
+        assert.ok(geometry.main - geometry.content < 80, `unused workspace width: ${JSON.stringify(geometry)}`);
+        if (width >= 1500) assert.ok(geometry.columns[1].x > geometry.columns[0].x + geometry.columns[0].width, 'wide settings uses both columns');
+        if (width === 900) assert.equal(geometry.columns[0].x, geometry.columns[1].x, 'narrow settings uses one column');
+        if (language === 'zh-CN' && theme === 'dark' && !collapsed && [1120, 1500, 2560].includes(width)) {
+          const output = path.join(project, 'test-artifacts/settings-responsive'); await mkdir(output, { recursive: true });
+          await page.locator('.main-panel').evaluate(node => { node.scrollTop = 0; });
+          await page.screenshot({ path: path.join(output, `${language}-${theme}-${width}.png`) });
+        }
+      }
+    }
+    assert.equal(await page.locator('.application-update-help').getAttribute('open'), null);
+    await page.locator('.application-update-help > summary').click();
+    assert.equal(await page.getByText(translate('更新只替换应用，保留环境、配置和登录资料。', language), { exact: true }).isVisible(), true);
+    assert.equal(await page.evaluate(() => window.calls.some(call => /^(check|download|install)ApplicationUpdate$/.test(call.method))), false);
+    await healthy();
+  }
 });
 
 test('browser navigation reveals selected-environment cookie controls without background inspection', { skip: noDisplay }, async () => {

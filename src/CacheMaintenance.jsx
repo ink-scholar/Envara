@@ -65,7 +65,7 @@ export function CacheMaintenance({ inventory = null, pending = false, onRefresh,
               </>}
             </li>)}
           </ul>}
-          <p>{t('恢复时若已有新缓存，将保留新缓存与恢复批次，不会覆盖。')}</p>
+          {batches.length > 0 && <p>{t('恢复时若已有新缓存，将保留新缓存与恢复批次，不会覆盖。')}</p>}
         </div>
       </>}
     </div>

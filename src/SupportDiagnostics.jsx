@@ -7,7 +7,7 @@ export function SupportDiagnostics({ onExport, pending = false, disabled = false
   const descriptionId = useId();
   const Icon = pending ? ArrowsClockwise : DownloadSimple;
   return <div className="settings-row support-diagnostics">
-    <div><span id={descriptionId}>{t('仅导出脱敏的运行和网络检查记录，保存到本机。')}</span></div>
+    <div><span id={descriptionId}>{t('脱敏记录，保存到本机。')}</span></div>
     <button type="button" className="button" disabled={pending || disabled || typeof onExport !== 'function'}
       aria-busy={pending || undefined} aria-describedby={descriptionId} onClick={() => onExport()}>
       <Icon size={17} className={pending ? 'spin' : undefined} aria-hidden="true" />

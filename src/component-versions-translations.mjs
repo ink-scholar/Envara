@@ -1,6 +1,7 @@
 // Columns: source, English, Traditional Chinese, Japanese, Korean, Spanish,
 // French, German and Brazilian Portuguese. Simplified Chinese uses the source.
 const messages = [
+  ['组件版本', 'Component versions', '元件版本', 'コンポーネントのバージョン', '구성 요소 버전', 'Versiones de componentes', 'Versions des composants', 'Komponentenversionen', 'Versões dos componentes'],
   ['已安装', 'Installed', '已安裝', 'インストール済み', '설치됨', 'Instalado', 'Installé', 'Installiert', 'Instalado'],
   ['正在更新', 'Updating', '正在更新', '更新中', '업데이트 중', 'Actualizando', 'Mise à jour en cours', 'Wird aktualisiert', 'Atualizando'],
   ['需要检查', 'Needs attention', '需要檢查', '確認が必要', '점검 필요', 'Requiere revisión', 'À vérifier', 'Prüfung erforderlich', 'Requer verificação'],

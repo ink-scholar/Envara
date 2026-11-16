@@ -196,7 +196,7 @@ test('denied localStorage reads and writes preserve interactive navigation witho
 });
 
 test('all nine languages keep icon hit targets and three columns within wide and narrow desktop layouts in both themes', { skip: noDisplay }, async () => {
-  for (const language of Object.keys(languages)) for (const theme of ['light', 'dark']) {
+  for (const language of languages) for (const theme of ['light', 'dark']) {
     await mount({ language, theme });
     assert.deepEqual(await page.locator('.sidebar .nav-item').evaluateAll(items => items.map(item => item.getAttribute('aria-label'))), labels.map(label => translate(label, language)));
     const ssh = page.getByRole('button', { name: translate('SSH 连接', language), exact: true });

@@ -89,7 +89,7 @@ export function WorkCombinations({ profileId, savedTerminals = [], onOpened }) {
   return <details className="work-combinations">
     <summary><Stack size={17} /><span>{t('工作组合')}</span><small>{combinations.length}</small><CaretDown size={15} /></summary>
     <div className="work-combinations-body">
-      <p>{t('一起打开常用终端，可带上此环境的浏览器。')}</p>
+      {!loading && !combinations.length && <p>{t('一起打开常用终端，可带上此环境的浏览器。')}</p>}
       {error && <div className="work-combinations-error" role="alert">{t(error)}{!combinations.length && !pending && <button type="button" className="terminal-text-button" onClick={() => setReload(value => value + 1)}>{t('重试')}</button>}</div>}
       {result && <p role="status">{t(result.status === 'opened' ? '已打开 {count} 个终端。' : result.status === 'partial' ? '已保留 {count} 个已打开终端，请检查后再操作。' : '此次未完成工作组合。', { count: result.sessions.length })}</p>}
       {loading ? <p role="status">{t('正在读取工作组合…')}</p> : !combinations.length && <p>{t('还没有工作组合。')}</p>}

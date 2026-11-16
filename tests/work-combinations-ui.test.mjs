@@ -106,18 +106,23 @@ async function mount(options = {}) {
 const calls = () => page.evaluate(() => window.workCalls);
 
 test('saving and deleting a work combination sends only chosen references and never changes terminal data', { skip: noDisplay }, async () => {
-  await mount(); await page.getByRole('button', { name: '保存工作组合', exact: true }).click();
+  await mount();
+  const introduction = page.getByText('一起打开常用终端，可带上此环境的浏览器。', { exact: true });
+  assert.equal(await introduction.count(), 1);
+  await page.getByRole('button', { name: '保存工作组合', exact: true }).click();
   await page.getByRole('textbox', { name: '组合名称', exact: true }).fill('Morning work');
   await page.locator('.work-combination-choices input').nth(1).check(); await page.locator('.work-combination-choices input').first().check();
   await page.getByRole('checkbox', { name: '同时打开此环境浏览器', exact: true }).check();
   await page.getByRole('button', { name: '保存组合', exact: true }).focus(); await page.keyboard.press('Enter');
   await page.getByRole('button', { name: '打开组合「Morning work」', exact: true }).waitFor();
+  assert.equal(await introduction.count(), 0);
   assert.deepEqual((await calls()).filter(call => call.method === 'saveWorkCombination'), [{ method: 'saveWorkCombination',
     args: { id: 'environment_a', name: 'Morning work', entryIds: [entries[1].id, entries[0].id], includeBrowser: true } }]);
   await page.getByRole('button', { name: '删除组合「Morning work」', exact: true }).click();
   assert.equal((await calls()).some(call => call.method === 'deleteWorkCombination'), false);
   await page.getByRole('button', { name: '确认删除组合', exact: true }).click();
   await page.waitForFunction(() => document.querySelectorAll('.work-combination-row').length === 0);
+  assert.equal(await introduction.count(), 1);
   assert.ok((await calls()).every(call => ['listWorkCombinations', 'saveWorkCombination', 'deleteWorkCombination'].includes(call.method)));
 });
 

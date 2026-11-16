@@ -835,6 +835,9 @@ function WorkspaceApp() {
         {api.isDesktop && <RuntimeVerification profiles={profiles} api={api.call} />}
       </>}
       {page === "settings" && <div className="page-content settings-content">
+        <div className="settings-layout">
+          <div className="settings-column">
+            <section className="settings-section">
         <div className="section-heading first"><h2>{t("偏好设置")}</h2></div>
         <div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("界面外观")}</strong></div><select className="appearance-select" value={appearance} disabled={savingAppearance} onChange={event => void setAppearance(event.target.value).catch(() => setToast({ type: "error", message: t("无法保存外观，请重试。") }))} aria-label={t("界面外观")}><option value="system">{t("跟随系统")}</option><option value="light">{t("浅色")}</option><option value="dark">{t("深色")}</option></select></div><div className="settings-row"><div><strong>{t("界面语言")}</strong></div><select className="language-select" value={language} disabled={savingLanguage} onChange={event => void setLanguage(event.target.value).catch(() => setToast({ type: "error", message: t("无法保存语言，请重试。") }))} aria-label={t("界面语言")}>{languageOptions.map(option => <option key={option.code} value={option.code} lang={option.code}>{option.nativeName}</option>)}</select></div><div className="settings-row"><div><strong>{t("退出时关闭浏览器")}</strong></div><input type="checkbox" className="row-checkbox" aria-label={t("退出时关闭浏览器")} checked={snapshot.settings?.closeBrowsersOnExit !== false} onChange={event => perform("saveSettings", {
               settings: {
@@ -843,8 +846,9 @@ function WorkspaceApp() {
               }
             })} /></div><div className="settings-row"><div><strong>{t("本地数据")}</strong><span className="path-label">{t(system.dataDir)}</span></div><Button icon={FolderOpen} disabled={!api.isDesktop} onClick={() => perform("openDataDirectory")}>{t("打开目录")}</Button></div></div>
         {api.isDesktop && snapshot.legacyMigration?.available && <div className="settings-card settings-rows migration-settings"><div className="settings-row"><div><strong>{t("旧版本工作区")}</strong></div><Button onClick={previewMigration} disabled={pending["previewLegacyMigration:"]}>{t("迁移旧环境")}</Button></div></div>}
-        {api.isDesktop && linkRouter && <><div className="section-heading"><h2>{t("打开链接")}</h2></div><div className="settings-card settings-rows">
-          <div className="settings-row"><div><strong>{t("境舱内打开链接")}</strong><span>{t("境舱及普通终端链接使用所选浏览器；关闭后转到系统浏览器（环境外）。Claude 会话不变。")}</span></div>
+            </section>
+            {api.isDesktop && linkRouter && <section className="settings-section"><div className="section-heading"><h2>{t("打开链接")}</h2></div><div className="settings-card settings-rows">
+          <div className="settings-row"><div><strong>{t("境舱内打开链接")}</strong><details className="settings-help"><summary>{t("使用说明")}</summary><p>{t("境舱及普通终端链接使用所选浏览器；关闭后转到系统浏览器（环境外）。Claude 会话不变。")}</p></details></div>
             <label className="proxy-check-option settings-switch"><input type="checkbox" aria-label={t("境舱内打开链接")} checked={linkRouter.preference !== false} disabled={linkRoutingPending} onChange={async event => { const result = await perform("setLinkRouter", { enabled: event.target.checked }); if (result.ok && result.result) setLinkRouter(result.result); }} /><span>{t(linkRouter.preference !== false ? "已开启" : "已关闭")}</span></label>
           </div>
           {linkRouter.available && <div className="settings-row"><div><strong>{t("附加应用链接接管（可选）")}</strong>
@@ -854,28 +858,39 @@ function WorkspaceApp() {
             {linkRouter.enabled ? <Button disabled={linkRoutingPending} onClick={async () => { const result = await perform("disableSystemLinkRouting"); if (result.ok && result.result) setLinkRouter(result.result); }}>{t("恢复原默认浏览器")}</Button>
               : <Button disabled={linkRoutingPending || linkRouter.preference === false} onClick={async () => { const result = await perform("requestSystemLinkRouting"); if (result.ok && result.result) setLinkRouter(result.result); }}>{t("启用系统链接接管")}</Button>}
           </div>}
-        </div></>}
-        {api.isDesktop && <>
-          <ApplicationUpdates call={api.call} />
-          <div className="settings-card settings-rows"><SupportDiagnostics pending={!!pending["exportSupportDiagnostics:"]} onExport={async () => {
-            const result = await perform("exportSupportDiagnostics", {}, undefined, "exportSupportDiagnostics:", true);
-            if (!result.ok) setToast({ type: "error", message: t("支持诊断导出失败，请重试。") });
-          }} /></div>
-          <ComponentVersions load={() => api.call("componentVersions")} onInstallEngine={id => installRuntime(engines.find(item => item.id === id) || { id })}
+        </div></section>}
+            {api.isDesktop && <ApplicationUpdates call={api.call} />}
+          </div>
+          <div className="settings-column">
+            {api.isDesktop && <>
+              <ComponentVersions load={() => api.call("componentVersions")} onInstallEngine={id => installRuntime(engines.find(item => item.id === id) || { id })}
             onSetupRouting={() => perform("setupApplicationRouting", { activate: true })} onOpenTerminal={openTerminalWorkspace}
             onOpenUpdates={() => { const panel = document.getElementById("application-updates"); panel?.scrollIntoView({ behavior: "smooth", block: "center" }); panel?.focus({ preventScroll: true }); }}
             onOpenProject={() => perform("openDocumentation", { target: "project" })} />
-          <CacheMaintenance inventory={cacheInventory} pending={cacheMaintenancePending}
+              <section className="settings-section settings-maintenance">
+                <div className="section-heading"><h2>{t("高级")}</h2></div>
+                <div className="settings-card settings-maintenance-card">
+                  <CacheMaintenance inventory={cacheInventory} pending={cacheMaintenancePending}
             onRefresh={() => maintainCache("cacheMaintenanceInventory")}
             onQuarantine={args => maintainCache("quarantineBrowserCaches", args)}
             onRestore={args => maintainCache("restoreBrowserCaches", args)}
             onPurge={args => maintainCache("purgeBrowserCacheBatch", args)} />
-        </>}
+                  <SupportDiagnostics pending={!!pending["exportSupportDiagnostics:"]} onExport={async () => {
+            const result = await perform("exportSupportDiagnostics", {}, undefined, "exportSupportDiagnostics:", true);
+            if (!result.ok) setToast({ type: "error", message: t("支持诊断导出失败，请重试。") });
+          }} />
+                </div>
+              </section>
+            </>}
+            <section className="settings-section">
         <div className="section-heading"><h2>{t("关于")}</h2></div><div className="settings-card settings-rows"><div className="settings-row"><div><strong>{t("Envara 境舱")}</strong><span>{t("开源的本地独立工作空间")}</span></div><span className="version-label">{system.appVersion || "—"}</span></div><div className="settings-row"><div><strong>{t("浏览器内核许可")}</strong></div><Button onClick={() => perform("openDocumentation", {
               target: "runtime-license"
             })}>{t("查看许可")}</Button></div><div className="settings-row"><div><strong>GitHub</strong></div><Button icon={ArrowSquareOut} onClick={() => perform("openDocumentation", {
               target: "project"
             })}>{t("项目主页")}</Button></div></div>
+            </section>
+          </div>
+        </div>
       </div>}
     </main>
     {withDetail && <aside className="detail-panel">{page === "browsers" ? <BrowserDetail profile={selected} proxy={selectedProxy} runtime={selectedRuntime} pending={pending} busy={selected && busyProfile(selected.id)} onStart={() => start(selected)} onInstall={() => installRuntime(selectedRuntime)} onFocus={() => perform("focusProfile", {

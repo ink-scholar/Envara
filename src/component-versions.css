@@ -1,8 +1,7 @@
-.component-versions { min-width: 0; }
+.component-versions { min-width: 0; container: component-versions / inline-size; }
 .component-versions-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.component-versions-heading h2 { min-width: 0; overflow-wrap: anywhere; }
 .component-versions-heading .button { display: inline-flex; align-items: center; gap: 6px; flex: none; }
-.component-versions-intro, .component-versions-time, .component-versions-note { color: var(--text-muted); font-size: var(--font-size-xs); line-height: 1.55; margin: 6px 0 12px; }
-.component-versions-time { font-variant-numeric: tabular-nums; }
 .component-version-list { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-surface); overflow: hidden; }
 .component-version-card + .component-version-card { border-top: 1px solid var(--border); }
 .component-version-card > summary { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px; padding: 13px 15px; cursor: pointer; list-style: none; }
@@ -14,8 +13,8 @@
 .component-name strong { font-size: var(--font-size-sm); font-weight: var(--weight-medium); overflow-wrap: anywhere; }
 .component-name small { font-size: var(--font-size-xs); color: var(--text-muted); overflow-wrap: anywhere; }
 .component-name small:empty { display: none; }
-.component-version-value { font: var(--font-size-xs)/1.5 var(--font-mono); color: var(--text-secondary); max-width: 180px; overflow-wrap: anywhere; text-align: right; }
-.component-status { font-size: var(--font-size-xs); color: var(--text-muted); text-align: right; max-width: 150px; }
+.component-version-value { min-width: 0; font: var(--font-size-xs)/1.5 var(--font-mono); color: var(--text-secondary); max-width: 180px; overflow-wrap: anywhere; text-align: right; }
+.component-status { min-width: 0; font-size: var(--font-size-xs); color: var(--text-muted); text-align: right; max-width: 150px; overflow-wrap: anywhere; }
 .component-status.updating { color: var(--accent-text); }
 .component-status.needs-attention, .component-status.unavailable { color: var(--warning); }
 .component-version-detail { padding: 0 15px 15px 42px; }
@@ -30,14 +29,16 @@
 .component-session-impact li { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
 .component-session-impact small { color: var(--text-muted); font-size: inherit; }
 .component-version-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.component-version-actions .button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .component-version-actions:empty { display: none; }
 .component-versions-error { display: flex; align-items: flex-start; gap: 7px; color: var(--warning); font-size: var(--font-size-xs); line-height: 1.55; }
 .component-versions-error svg { flex: none; margin-top: 2px; }
-@media (max-width: 700px) {
-  .component-version-card > summary { grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px 9px; padding: 12px; }
-  .component-version-value { grid-column: 2; text-align: left; }
-  .component-status { grid-column: 3; grid-row: 1; }
-  .component-version-card > summary > svg:last-child { grid-column: 3; grid-row: 2; justify-self: end; }
+@container component-versions (max-width: 560px) {
+  .component-version-card > summary { grid-template-columns: 17px minmax(0, 1fr) minmax(0, 1fr) 15px; gap: 6px 9px; padding: 12px; }
+  .component-name { grid-column: 2 / 4; grid-row: 1; }
+  .component-version-value { grid-column: 2; grid-row: 2; max-width: none; text-align: left; }
+  .component-status { grid-column: 3; grid-row: 2; max-width: none; }
+  .component-version-card > summary > svg:last-child { grid-column: 4; grid-row: 1; justify-self: end; }
   .component-version-detail { padding: 0 12px 12px; }
   .component-version-fields { grid-template-columns: minmax(0, 1fr); gap: 10px; }
 }

@@ -1,11 +1,11 @@
-.application-updates { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-surface); padding: 16px; margin: 18px 0; min-width: 0; }
+.application-updates { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-surface); padding: 16px; margin: 18px 0; min-width: 0; container: application-update / inline-size; }
 .application-updates:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
-.application-updates-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
+.application-updates-heading { display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap; }
 .application-updates-heading > div { min-width: 0; }
-.application-updates-heading h2 { margin: 0 0 7px; font-size: var(--font-size-md); font-weight: var(--weight-medium); }
+.application-updates-heading h2 { margin: 0; font-size: var(--font-size-md); font-weight: var(--weight-medium); }
 .application-updates p, .application-updates-versions { color: var(--text-muted); font-size: var(--font-size-xs); line-height: 1.6; overflow-wrap: anywhere; }
 .application-updates-heading p { margin: 0; }
-.application-updates-heading > .button { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; }
+.application-updates-heading > .button { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .application-updates-versions { display: flex; flex-wrap: wrap; gap: 5px 20px; margin-top: 12px; font-variant-numeric: tabular-nums; }
 .application-updates p.application-updates-error { color: var(--warning); display: flex; gap: 7px; align-items: flex-start; }
 .application-updates-error svg { flex-shrink: 0; margin-top: 2px; }
@@ -18,4 +18,8 @@
 .application-update-confirm > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .application-update-last-result { border-top: 1px solid var(--border-soft); padding-top: 12px; margin-bottom: 0; }
 .application-update-last-result.failed { color: var(--warning); }
-@media (max-width: 700px) { .application-updates-heading { flex-wrap: wrap; } .application-updates-heading > .button { margin-left: auto; } }
+@container application-update (max-width: 420px) { .application-updates-heading > .button { margin-left: auto; } }
+.application-update-help { color: var(--text-muted); font-size: var(--font-size-xs); line-height: 1.6; margin-top: 8px; }
+.application-update-help > summary { cursor: pointer; width: fit-content; }
+.application-update-help p { margin: 6px 0 0; }
+.application-update-confirm .button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }

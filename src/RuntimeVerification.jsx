@@ -49,8 +49,7 @@ export function RuntimeVerification({ profiles = [], api }) {
     finally { localChecks.current.delete(profileId); if (generation.current === current) { ++readRevision.current; setPending(false); } }
   }
   return <section className="runtime-verification" aria-labelledby="runtime-verification-title">
-    <div className="runtime-verification-heading"><div><h3 id="runtime-verification-title">{t('运行实测核验')}</h3>
-      <p>{t('手动核对浏览器实际语言、时区和出口；不修改环境。')}</p></div>
+    <div className="runtime-verification-heading"><h3 id="runtime-verification-title">{t('运行实测核验')}</h3>
       <button type="button" className="button" onClick={check} disabled={!profileId || pending || typeof api !== 'function'}>
         <ArrowsClockwise size={15} className={pending ? 'spin' : ''} aria-hidden="true" />{t(pending ? '正在核验…' : '核验当前运行状态')}
       </button>
@@ -59,10 +58,12 @@ export function RuntimeVerification({ profiles = [], api }) {
       {!profiles.length && <option value="">{t('暂无环境')}</option>}
       {profiles.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}
     </select></label>
-    <p className="runtime-verification-note">{t('仅检查已有可信线路的运行中浏览器。点击核验时，通过该浏览器访问 ipwho.is；不发送站点登录数据。')}</p>
+    <details className="runtime-verification-instructions"><summary>{t('使用说明')}</summary>
+      <p className="runtime-verification-note">{t('仅检查已有可信线路的运行中浏览器。点击核验时，通过该浏览器访问 ipwho.is；不发送站点登录数据。')}</p>
+    </details>
     {error && <p role="alert" className="runtime-verification-warning">{t('无法完成运行核验，请重试。')}</p>}
     {!result && !pending && <p className="runtime-verification-note">{t('尚无实测结果。')}</p>}
-    {pending && <p role="status" className="runtime-verification-note">{t('正在核验…')}</p>}
+    {pending && <p role="status" className="sr-only">{t('正在核验…')}</p>}
     {result && <>
       <div className="runtime-verification-time"><span>{t('测量时间：{time}', { time: new Date(result.checkedAt).toLocaleString(language) })}</span>
         {result.stale && <strong>{t('结果已过期，请重新核验。')}</strong>}</div>

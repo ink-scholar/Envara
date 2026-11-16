@@ -64,12 +64,11 @@ export function ComponentVersions({ load, onInstallEngine, onSetupRouting, onOpe
   };
   const time = data?.checkedAt && Number.isFinite(Date.parse(data.checkedAt))
     ? new Intl.DateTimeFormat(language, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(data.checkedAt)) : null;
-  return <section className="component-versions" aria-label={t('组件版本与更新影响')}>
-    <div className="section-heading component-versions-heading"><h2>{t('组件版本与更新影响')}</h2>
-      <button type="button" className="button" onClick={() => void refresh()} disabled={loading || !!pending} aria-busy={loading || undefined}>
+  return <section className="component-versions" aria-label={t('组件版本')}>
+    <div className="section-heading component-versions-heading"><h2>{t('组件版本')}</h2>
+      <button type="button" className="button" onClick={() => void refresh()} disabled={loading || !!pending} aria-busy={loading || undefined}
+        title={time ? t('读取时间：{time}', { time }) : undefined}>
         <ArrowsClockwise size={15} className={loading ? 'spin' : ''} aria-hidden="true" />{t('刷新')}</button></div>
-    <p className="component-versions-intro">{t('只读取本机记录，不会下载、升级或启动程序。')}</p>
-    {time && <p className="component-versions-time">{t('读取时间：{time}', { time })}</p>}
     {error && <p className="component-versions-error" role="alert"><WarningCircle size={16} aria-hidden="true" />{t(error)}</p>}
     {!data && loading && <p role="status">{t('正在读取组件状态…')}</p>}
     {data && <div className="component-version-list">{data.rows.map(row => <details key={row.id} className="component-version-card">
@@ -95,6 +94,5 @@ export function ComponentVersions({ load, onInstallEngine, onSetupRouting, onOpe
         <div className="component-version-actions">{action(row)}</div>
       </div>
     </details>)}</div>}
-    <p className="component-versions-note">{t('版本记录与平台声明不代表完整功能验收；未观测项保持未知。')}</p>
   </section>;
 }

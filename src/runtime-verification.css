@@ -1,10 +1,14 @@
-.runtime-verification { margin-top: 20px; padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-.runtime-verification-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-.runtime-verification-heading h3 { margin: 0 0 6px; font-size: 14px; }
-.runtime-verification-heading p, .runtime-verification-note { margin: 8px 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
-.runtime-verification-heading .button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0; white-space: normal; }
+.runtime-verification { container: runtime-verification / inline-size; min-width: 0; margin-top: 20px; padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.runtime-verification-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.runtime-verification-heading h3 { min-width: 0; margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+.runtime-verification-note { margin: 8px 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.runtime-verification-heading .button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .runtime-verification-select { display: flex; align-items: center; gap: 12px; margin: 14px 0 10px; font-size: 12px; }
-.runtime-verification-select select { min-width: 150px; max-width: 100%; padding: 7px 10px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+.runtime-verification-select > span { flex-shrink: 0; }
+.runtime-verification-select select { min-width: 0; flex: 1; max-width: 100%; padding: 7px 10px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+.runtime-verification-instructions { font-size: 12px; }
+.runtime-verification-instructions summary { width: fit-content; max-width: 100%; cursor: pointer; padding: 4px 0; color: var(--muted); }
+.runtime-verification-instructions summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 .runtime-verification-time { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 14px 0 10px; color: var(--muted); font-size: 11px; }
 .runtime-verification-time strong, .runtime-verification-warning, .runtime-verification-check.mismatch { color: var(--warning, #b58135); }
 .runtime-verification-table-wrap { overflow-x: auto; }
@@ -17,4 +21,4 @@
 .runtime-verification-terminal { margin-top: 14px; font-size: 12px; }
 .runtime-verification-terminal summary { cursor: pointer; padding: 4px 0; }
 .runtime-verification-session { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 8px 0; color: var(--muted); }
-@media (max-width: 760px) { .runtime-verification-heading { flex-direction: column; } .runtime-verification { padding: 14px; } .runtime-verification-heading .button { align-self: flex-start; } }
+@container runtime-verification (max-width: 520px) { .runtime-verification-heading { align-items: flex-start; flex-direction: column; gap: 10px; } }

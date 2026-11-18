@@ -8,6 +8,7 @@ import { build } from 'esbuild';
 import { _electron } from 'playwright-core';
 import electron from 'electron';
 import { languages, translate } from '../src/i18n.mjs';
+import { componentVersionSnapshot } from '../shared/component-versions.mjs';
 
 const noDisplay = process.platform === 'linux' && !process.env.DISPLAY;
 const project = fileURLToPath(new URL('../', import.meta.url));
@@ -26,6 +27,11 @@ const snapshot = (language = 'zh-CN', appearance = 'dark') => ({
     { id: 'event2', type: 'error', time: '2026-01-01T00:00:02.000Z', message: 'Synthetic route failure' },
     { id: 'event3', type: 'error', time: '2026-01-01T00:00:03.000Z', message: 'Synthetic attachment failure' }],
 });
+const pfComponents = ({ installation = { status: 'installed', version: '1' }, platform = 'darwin', arch = 'arm64' } = {}) => componentVersionSnapshot({
+  snapshot: { ...snapshot(), applicationRouting: { backend: 'pf-utun', installed: true, ready: false,
+    component: { name: 'Envara · PF', version: '1', available: true, verified: true }, verification: { version: 'pf/1' } } },
+  pfInstallation: installation, platform, arch, terminals: { profiles: [] }, checkedAt: '2026-11-18T12:00:00.000Z',
+});
 let directory, desktop, page;
 const browserErrors = [];
 before(async () => {
@@ -37,7 +43,7 @@ import { WorkspaceApp } from './src/App.jsx'; import { I18nProvider } from './sr
 import { api } from './src/client.js';
 const root=createRoot(document.querySelector('#root')); let version=0;
 window.mountWorkspaceTools = value => {
-  window.fixture=value; window.calls=[]; window.unexpected=[]; window.combinations=[]; window.cacheMoved=false; window.cachePurged=false; window.inventoryRevision=0;
+  window.fixture=value; window.componentReport=value.componentVersions; window.calls=[]; window.unexpected=[]; window.combinations=[]; window.cacheMoved=false; window.cachePurged=false; window.inventoryRevision=0;
   window.terminalFixture=[{profileId:'${id}',name:value.profiles[0].name,cwd:'/synthetic/project',sessions:[],savedTerminals:[
     {id:'entry_frontend',profileId:'${id}',name:'Frontend',kind:'shell',cwd:'/synthetic/project/frontend',browserProfileId:'${id}',status:'saved'},
     {id:'entry_backend',profileId:'${id}',name:'Backend',kind:'claude-code',cwd:'/synthetic/project/backend',claudeAccountName:'Project login',browserProfileId:'${id}',status:'saved'}]}];
@@ -66,7 +72,7 @@ async call(method,args={}) { window.calls.push({method,args}); const copy=value=
  case 'checkRuntimeVerification': return {profileId:args.id,checkedAt:new Date().toISOString(),stale:false,expected:{locale:'ja-JP',timezone:'Asia/Tokyo',ip:'203.0.113.9'},browser:{observed:{locale:'ja-JP',timezone:'Asia/Tokyo',ip:null},checks:{locale:'match',timezone:'match',ip:'unknown'},reason:'partial'},terminal:{sessions:[]}};
  case 'exportSupportDiagnostics': return {canceled:false,exported:true};
  case 'applicationUpdateStatus': return {status:'idle',currentVersion:'1.3.1',latestVersion:null,error:null,canInstall:false};
- case 'componentVersions': return {schema:'envara.component-versions',version:1,checkedAt:new Date().toISOString(),rows:[
+ case 'componentVersions': if(window.componentReport)return copy(window.componentReport);return {schema:'envara.component-versions',version:1,checkedAt:new Date().toISOString(),rows:[
  {id:'app',kind:'application',name:'Envara',version:'1.3.1',runningVersion:'1.3.1',status:'running',versionSource:'running-app',support:'supported',impact:'application',sessions:[],sessionsKnown:true,action:'application-update',blocked:false},
  {id:'cloakbrowser',kind:'browser',name:'CloakBrowser',version:'fixture-1',runningVersion:null,status:'installed',versionSource:'installation-record',support:'supported',impact:'browser',sessions:[{id:'browser_fixture',kind:'browser',name:'Fixture browser',profileName:'Synthetic project workspace'}],sessionsKnown:true,action:'install-engine',blocked:true},
  {id:'proxy',kind:'proxy',name:'Mihomo',version:'fixture-core',runningVersion:null,status:'ready',versionSource:'bundled-package',support:'supported',impact:'bundled',sessions:[],sessionsKnown:true},
@@ -101,8 +107,8 @@ async call(method,args={}) { window.calls.push({method,args}); const copy=value=
   await page.waitForFunction(() => window.toolsReady === true);
 });
 after(async () => { try { await desktop?.close(); } finally { if (directory) await rm(directory, { recursive: true, force: true }); } });
-async function mount(language = 'zh-CN', theme = 'dark') {
-  await page.evaluate(value => window.mountWorkspaceTools(value), snapshot(language, theme));
+async function mount(language = 'zh-CN', theme = 'dark', componentVersions) {
+  await page.evaluate(value => window.mountWorkspaceTools(value), { ...snapshot(language, theme), componentVersions });
   await page.getByRole('heading', { name: translate('环境', language), exact: true }).waitFor();
   await page.locator('.profile-row').waitFor();
 }
@@ -169,6 +175,58 @@ test('settings fills the workspace and adapts every language to wide and narrow 
     assert.equal(await page.evaluate(() => window.calls.some(call => /^(check|download|install)ApplicationUpdate$/.test(call.method))), false);
     await healthy();
   }
+});
+
+test('settings shows verified PF installation without a runtime warning in nine languages and both appearances', { skip: noDisplay }, async () => {
+  const output = path.join(project, 'test-artifacts/pf-component-ui');
+  await mkdir(output, { recursive: true });
+  for (const language of languages) for (const theme of ['dark', 'light']) {
+    await mount(language, theme, pfComponents());
+    await nav('设置', language);
+    const routing = page.locator('.component-version-card').filter({ hasText: 'Envara · PF' });
+    await routing.locator('summary').click();
+    const field = label => routing.locator('.component-version-fields > div').filter({ has: page.getByText(translate(label, language), { exact: true }) }).locator('dd');
+    assert.equal(await routing.locator('.component-version-value').textContent(), '1');
+    assert.equal(await routing.locator('.component-status').textContent(), translate('已安装', language));
+    assert.equal(await routing.locator('.component-status.installed').count(), 1);
+    assert.equal(await routing.locator('.component-status.needs-attention,.component-status.unavailable').count(), 0);
+    assert.equal(await field('版本来源').textContent(), translate('来自已验证的安装清单', language));
+    assert.equal(await field('运行中版本').textContent(), translate('未观测', language));
+    assert.equal(await field('平台支持').textContent(), translate('平台声明支持', language));
+    assert.equal(await routing.locator('.component-status').evaluate(element => getComputedStyle(element).color === getComputedStyle(element.closest('details').querySelector('dt')).color), true, `${language}/${theme}: installation is neutral`);
+    assert.equal(await page.locator('.component-versions-error').count(), 0);
+    for (const width of [900, 1500]) {
+      await page.setViewportSize({ width, height: 940 });
+      await routing.scrollIntoViewIfNeeded();
+      await noHorizontalOverflow(`PF ${language} ${theme} ${width}`);
+      assert.equal(await routing.evaluate(element => [...element.querySelectorAll('summary,.component-version-detail,dd,.button')].every(node => node.scrollWidth <= node.clientWidth + 2)), true, `${language}/${theme}/${width}: PF details fit`);
+      if (language === 'zh-CN' && theme === 'dark') await page.screenshot({ path: path.join(output, `installed-${width}.png`) });
+    }
+    const reads = new Set(['snapshot', 'terminalSnapshot', 'listWorkCombinations', 'linkRouterStatus', 'applicationUpdateStatus', 'componentVersions']);
+    assert.deepEqual((await page.evaluate(() => window.calls.map(call => call.method))).filter(method => !reads.has(method)), [], `${language}/${theme}: settings inspection is read-only`);
+    await healthy();
+  }
+  assert.equal(await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some(view => view.isVisible())), false);
+});
+
+test('refreshing PF with unknown installation evidence clears the old version without inventing runtime or platform support', { skip: noDisplay }, async () => {
+  await page.setViewportSize({ width: 900, height: 940 });
+  await mount('zh-CN', 'dark', pfComponents()); await nav('设置');
+  const routing = page.locator('.component-version-card').filter({ hasText: 'Envara · PF' });
+  await routing.locator('summary').click();
+  assert.equal(await routing.locator('.component-status').textContent(), '已安装');
+  await page.evaluate(report => { window.componentReport = report; }, pfComponents({ installation: { status: 'unknown' }, platform: null, arch: null }));
+  await page.locator('.component-versions').getByRole('button', { name: '刷新', exact: true }).click();
+  await routing.locator('.component-status.unknown').waitFor();
+  assert.equal(await routing.locator('.component-version-value').textContent(), '未知');
+  assert.equal(await routing.getByText('版本来源未知', { exact: true }).count(), 1);
+  assert.equal(await routing.getByText('未观测', { exact: true }).count(), 1);
+  assert.equal(await routing.getByText('未确认', { exact: true }).count(), 1);
+  assert.equal(await routing.locator('.component-status.running,.component-status.ready,.component-status.installed').count(), 0);
+  assert.equal(await page.evaluate(() => window.calls.some(call => call.method === 'setupApplicationRouting')), false);
+  await routing.scrollIntoViewIfNeeded(); await noHorizontalOverflow('PF unknown evidence'); await healthy();
+  await mkdir(path.join(project, 'test-artifacts/pf-component-ui'), { recursive: true });
+  await page.screenshot({ path: path.join(project, 'test-artifacts/pf-component-ui/unknown-900.png') });
 });
 
 test('browser navigation reveals selected-environment cookie controls without background inspection', { skip: noDisplay }, async () => {

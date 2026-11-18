@@ -6,7 +6,8 @@ import './component-versions.css';
 const statusLabels = { running: '运行中', installed: '已安装', missing: '未安装', ready: '已就绪', updating: '正在更新',
   unavailable: '不可用', 'needs-attention': '需要检查', unknown: '未知' };
 const sourceLabels = { 'running-app': '来自当前应用', 'installation-record': '来自安装记录', 'bundled-package': '随应用提供的版本',
-  'installation-report': '来自组件检查', 'validated-installation-entry': '来自已验证的安装入口', unknown: '版本来源未知' };
+  'installation-report': '来自组件检查', 'validated-installation-entry': '来自已验证的安装入口',
+  'validated-installation-manifest': '来自已验证的安装清单', unknown: '版本来源未知' };
 const impactLabels = {
   application: '更新应用需要重启；请先保存并结束运行任务。',
   browser: '安装或更新内核会重启浏览器服务；请先结束运行会话。',

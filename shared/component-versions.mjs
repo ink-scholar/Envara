@@ -4,9 +4,30 @@ const safeId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,96}$/.tes
 const safeName = value => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 160) : '';
 export const componentVersion = value => typeof value === 'string' && /^v?\d[0-9A-Za-z.+_-]{0,95}$/.test(value) ? value : null;
 
+function routingComponentMetadata(routing, installation, platform, arch) {
+  if (routing?.backend !== 'pf-utun') {
+    const version = routing?.installed === true ? componentVersion(routing.verification?.version) : null;
+    return { version, versionSource: version ? 'installation-report' : 'unknown', support: 'unknown',
+      status: !routing ? 'unknown' : routing.ready ? 'ready' : routing.installed ? 'needs-attention' : 'missing' };
+  }
+  // PF verification.version (for example "pf/1") identifies the validation
+  // protocol, not an installed component. Only the independently verified
+  // installation manifest supplies its version. Neither proves a live route.
+  let version = null, status = 'unknown', support = 'unknown';
+  if (installation?.status === 'installed') {
+    version = componentVersion(installation.version);
+    if (version) status = routing.ready === true ? 'ready' : 'installed';
+  } else if (installation?.status === 'missing') status = 'missing';
+  else if (installation?.status === 'untrusted') status = 'needs-attention';
+  if (typeof platform === 'string' && platform && typeof arch === 'string' && arch)
+    support = platform === 'darwin' && arch === 'arm64' ? 'supported' : 'unsupported';
+  return { version, versionSource: version ? 'validated-installation-manifest' : 'unknown', status, support };
+}
+
 // Only explicitly selected public fields leave this projection. Terminal output,
 // credentials, executable paths and backend error messages are never included.
-export function componentVersionSnapshot({ snapshot = {}, terminals = null, claude = [], checkedAt = null } = {}) {
+export function componentVersionSnapshot({ snapshot = {}, terminals = null, claude = [], pfInstallation = null,
+  platform = null, arch = null, checkedAt = null } = {}) {
   const profiles = (Array.isArray(snapshot.profiles) ? snapshot.profiles : []).filter(item => safeId(item?.id));
   const profileNames = new Map(profiles.map(item => [item.id, safeName(item.name) || item.id]));
   const terminalKnown = Array.isArray(terminals?.profiles);
@@ -46,10 +67,9 @@ export function componentVersionSnapshot({ snapshot = {}, terminals = null, clau
     runningVersion: null, status: !core ? 'unknown' : core.supported ? 'ready' : 'unavailable', support: 'unknown',
     impact: 'bundled', sessions: allSessions, sessionsKnown: terminalKnown, action: 'project', blocked: false });
   const routing = snapshot.applicationRouting;
-  const routingVersion = routing?.installed === true ? componentVersion(routing.verification?.version) : null;
-  rows.push({ id: 'application-routing', kind: 'routing', name: safeName(routing?.component?.name), version: routingVersion,
-    bundledVersion: componentVersion(routing?.component?.version), versionSource: routingVersion ? 'installation-report' : 'unknown',
-    runningVersion: null, status: !routing ? 'unknown' : routing.ready ? 'ready' : routing.installed ? 'needs-attention' : 'missing', support: 'unknown',
+  rows.push({ id: 'application-routing', kind: 'routing', name: safeName(routing?.component?.name),
+    ...routingComponentMetadata(routing, pfInstallation, platform, arch),
+    bundledVersion: componentVersion(routing?.component?.version), runningVersion: null,
     impact: 'routing', sessions: allSessions.filter(item => item.kind === 'application'), sessionsKnown: Array.isArray(snapshot.applications),
     action: 'routing', blocked: !routing || routing.ready === true || routing.component?.available !== true || routing.component?.verified !== true || allSessions.some(item => item.kind === 'application') });
   for (const profile of profiles) {

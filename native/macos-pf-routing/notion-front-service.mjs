@@ -71,7 +71,7 @@ async function privateLease(runId) {
     const info = await fs.lstat(current)
     if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== 0 || (info.mode & 0o022) || await fs.realpath(current) !== current ||
         ([run, PF_RUNTIME_ROOT].includes(current) && (info.mode & 0o777) !== 0o700)) fail('LEASE_REFUSED')
-    if (current === '/') break
+    if (current === '/' || path.dirname(current) === current) break
   }
   const handle = await fs.open(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
   let bytes

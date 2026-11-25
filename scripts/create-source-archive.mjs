@@ -13,7 +13,10 @@ const metadataName = () => { throw Object.assign(new Error('ARCHIVE_MACOS_METADA
 
 // tar's portable mode must not silently change source permissions. This is
 // modeFix from the pinned tar API, including its extra directory execute bits.
-function requirePortableMode(info, relative) {
+// Windows has no POSIX modes (Node reports 0o666 for every writable entry), so
+// there is nothing to preserve and tar records its portable defaults.
+export function requirePortableMode(info, relative, platform = process.platform) {
+  if (platform === 'win32') return;
   const mode = info.mode & 0o7777;
   let archived = (mode | 0o600) & ~0o22;
   if (info.isDirectory()) {

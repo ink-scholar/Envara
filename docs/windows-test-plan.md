@@ -7,8 +7,10 @@
 
 ## 1. 准备环境
 
-1. 安装 **Node.js 24 LTS x64**（或 22.12+）、**Go 1.25**、**Git for Windows**。
-2. 普通权限打开 PowerShell（不需要管理员）：
+1. 安装 **Node.js 24 LTS x64**（或 22.12+）、**Go 1.25**、**Git for Windows**。使用 Node 自带的 npm；第 1 轮发现另装的 npm 12 默认拒绝锁文件中的部分地址，锁文件已统一为 registry.npmjs.org，如仍报 `EALLOWREMOTE` 请在报告中注明 npm 版本。
+2. 开启 Windows「开发者模式」（设置 → 系统 → 开发者选项），否则普通权限不能创建符号链接，约 80 项测试会因 `EPERM` 失败。不开也可以继续，在报告中注明即可。
+3. 如果需要代理才能访问 GitHub / npm：除 `HTTPS_PROXY` 外再设置 `$env:ELECTRON_GET_USE_PROXY = "true"`，否则 Electron 首次下载不走代理。不要设置 `NODE_TLS_REJECT_UNAUTHORIZED=0`。
+4. 普通权限打开 PowerShell（不需要管理员）：
 
    ```powershell
    git clone https://github.com/ink-scholar/Envara.git
@@ -17,19 +19,22 @@
    git pull
    ```
 
-3. 运行日志收集脚本。第一次运行会安装依赖并准备后端、终端和代理核心：
+   仓库已加入 `.gitattributes`，文本文件统一以 LF 检出。第 1 轮之前克隆、且系统 `core.autocrlf=true` 的工作区，请在没有本地修改时执行一次 `git rm -r --cached -q . ; git reset --hard` 重新检出，否则内置列表哈希校验会失败。
+
+5. 运行日志收集脚本。第一次运行会安装依赖并准备后端、终端和代理核心：
 
    ```powershell
    powershell -ExecutionPolicy Bypass -File scripts\windows-test-collect.ps1 -Desktop
    ```
 
-   - 脚本依次执行 `npm ci`、`native:prepare`、`backend:prepare`、`proxy:prepare`、`npm test`、`npm run build`、`npm run test:sites`，然后执行 `npm run desktop` 打开应用。
+   - 脚本依次执行 `npm ci`、`native:prepare`、`backend:prepare`、`proxy:prepare`、全部单元测试、`npm run build`、`npm run test:sites`，然后执行 `npm run desktop` 打开应用。
+   - 每一步都有时间限制（默认安装/构建 30 分钟、单元测试整体 60 分钟、单个测试 180 秒、桌面会话 240 分钟），超时会结束该步骤启动的整个进程树并记为 `timeout`；任何一步失败或超时，脚本最后以退出码 1 结束。可用 `-StepTimeoutMinutes`、`-TestTimeoutMinutes`、`-PerTestTimeoutSeconds` 调整。
    - 应用打开后按第 2 节逐项测试，测试结束后退出 Envara，脚本会继续收集日志。
    - 已经安装过依赖时可以加 `-SkipInstall`；只想重新做桌面测试可以加 `-SkipInstall -SkipTests -Desktop`。
    - 输出位于 `test-artifacts\windows\<时间>\` 和同名 `.zip`。脚本会把 Windows 用户名和计算机名替换为占位符，**发送前请再打开检查一遍**，不要包含代理密码、令牌或私人路径。
 
-4. 应用内导出：「设置」中的「导出支持诊断」，把导出的文件一起放进压缩包。
-5. 每个失败项请截图（使用测试数据），并记下发生时间，便于和日志对照。
+6. 应用内导出：「设置」中的「导出支持诊断」，把导出的文件一起放进压缩包。
+7. 每个失败项请截图（使用测试数据），并记下发生时间，便于和日志对照。
 
 如果某一步编译失败，后面的步骤可以不做，直接交回 `summary.json` 和对应步骤的 `.log`。
 
@@ -145,7 +150,15 @@
 由开发者维护，每轮根据测试报告更新。
 
 - [x] Windows 上 POSIX 权限位和 uid 检查误判（Node 在 Windows 上把可写文件报告为 `0o666`、uid 为 0），终端配置、工作组合、缓存维护和诊断存储因此拒绝工作。已改用 `electron/file-trust.mjs`，保留文件类型、符号链接、硬链接和 realpath 检查。Windows 依赖 `%APPDATA%` 默认 ACL，尚未检查 NTFS ACL。
-- [ ] 根据第一轮报告修复编译、启动、浏览器和终端问题。
+- [x] 第 1 轮：`check-native-pty.cjs` 成功后因 ConPTY 句柄不退出，`npm ci` / `native:prepare` 超时转源码编译。改为显式退出，并打印预编译检查失败的原因。
+- [x] 第 1 轮：`proxy:prepare` 在 `create-source-archive.mjs` 因 POSIX 权限位检查失败，缺 `mihomo.exe`。Windows 上没有可保留的权限位，跳过该检查。
+- [x] 第 1 轮：锁文件 283 条 `registry.npmmirror.com` 地址统一为 `registry.npmjs.org`（完整性哈希不变；使用镜像的用户由 npm 自动替换）。
+- [x] 第 1 轮：新增 `.gitattributes`，统一 LF 检出，避免 CRLF 使内置列表哈希校验失败。
+- [x] 第 1 轮：`terminal-browser-broker.mjs` 浏览器会话清理的 uid 比较在 Windows 恒为不一致，改用 `file-trust.mjs`。
+- [x] 第 1 轮：PF 控制器和 Notion 前置服务向上遍历目录只在 `/` 停止，Windows 路径下死循环（`component-versions` 测试 100% CPU）。改为到根目录即停止。
+- [x] 第 1 轮：收集脚本加入超时与进程树结束、失败时退出码 1、按路径和词边界脱敏，记录开发者模式、换行与环境变量是否存在（不记录值）。
+- [ ] 第 2 轮：完成桌面实测（B–G 组）。
+- [ ] 单元测试在 Windows 上的可移植性：约 570 项失败来自测试本身的 POSIX 假设（`/usr/bin/true`、`/tmp`、Unix socket、`process.getuid`、`openssl`、gzip 夹具等）和 macOS 专属测试文件。需要为 macOS 专属测试加平台跳过，并把通用测试改为可移植夹具，以便区分真实的 Windows 缺陷。
 - [ ] `realpath` 与原路径逐字比较：如果出现大小写、8.3 短路径或 `\\?\` 前缀差异导致 `UNSAFE_PATH`，需要改为 Windows 规范化比较。
 - [ ] 终端链接通道使用 Unix socket 路径；Windows 需要改为命名管道（`\\.\pipe\…`），否则终端里打开的链接无法交给环境浏览器。
 - [ ] 终端默认 shell 为 `cmd.exe`，终端附件仅支持 PowerShell；评估是否改为默认 PowerShell 或让用户选择。

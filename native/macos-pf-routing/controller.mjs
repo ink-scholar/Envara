@@ -463,8 +463,10 @@ export async function verifyPFInstallation({ root = PF_INSTALL_ROOT, fileSystem 
         const info = await fileSystem.lstat(current);
         if (info.isSymbolicLink() || info.uid !== 0 || (info.mode & 0o022) !== 0 ||
             (current === target && (regularFile ? !info.isFile() : !info.isDirectory()))) throw new Error();
-        if (current === '/') break;
-        current = path.dirname(current);
+        // Stop at the filesystem root on any platform; win32 roots are not '/'.
+        const parent = path.dirname(current);
+        if (current === '/' || parent === current) break;
+        current = parent;
       }
     };
     await securePath(root); result.available = true;
@@ -761,7 +763,7 @@ export class MacOSPFExecutor {
   async openRuntimeDirectory(target, privateDirectory = false) {
     for (let current = target; ; current = path.dirname(current)) {
       await this.inspectRuntimeDirectory(current, null, current === target && privateDirectory);
-      if (current === '/') break;
+      if (current === '/' || path.dirname(current) === current) break;
     }
     const handle = await this.fs.open(target, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
     try { await this.inspectRuntimeDirectory(target, handle, privateDirectory); return handle; }

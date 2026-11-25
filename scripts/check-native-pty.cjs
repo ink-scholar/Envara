@@ -33,19 +33,20 @@ function finish(error, event) {
   clearTimeout(timeout);
   dataListener?.dispose();
   exitListener?.dispose();
+  // On Windows the ConPTY host can keep handles open after the shell exits,
+  // so always release the terminal and leave explicitly once output is flushed.
+  try { terminal?.kill(); } catch {}
+  try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {}
   if (error) {
-    try { terminal?.kill(); } catch {}
-    console.error(error.message);
-    process.exitCode = 1;
+    process.stderr.write(`${error.message}\n`, () => process.exit(1));
   } else {
-    console.log(JSON.stringify({
+    process.stdout.write(`${JSON.stringify({
       ok: true, electron: process.versions.electron, node: process.versions.node,
       modules: process.versions.modules, napi: process.versions.napi,
       platform: process.platform, arch: process.arch, resize: true, write: true,
       exitCode: event.exitCode,
-    }));
+    })}\n`, () => process.exit(0));
   }
-  fs.rmSync(cwd, { recursive: true, force: true });
 }
 const timeout = setTimeout(() => finish(new Error('Electron PTY check timed out.')), 10000);
 try {

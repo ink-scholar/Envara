@@ -30,3 +30,6 @@ __pycache__/
 /release-*/
 build/local-authorization-archive/
 build/package-resources/
+
+# Tester log archives dropped into the checkout
+/run-*.zip

@@ -184,3 +184,13 @@ test('existing destinations and destinations inside the input are preserved', as
   assert.equal((await readdir(f.temporary)).some(name => name.includes('.stage-')), false);
   await assert.rejects(createSourceArchive({ ...f, destination: path.join(f.sourceDir, 'archive.tar.gz') }), /outside the source tree/);
 });
+
+test('Windows entries have no POSIX modes to preserve; POSIX hosts still reject unportable modes', async () => {
+  const { requirePortableMode } = await import('../scripts/create-source-archive.mjs');
+  const directory = { mode: 0o40666, isDirectory: () => true };
+  const file = { mode: 0o100666, isDirectory: () => false };
+  assert.doesNotThrow(() => requirePortableMode(directory, 'source', 'win32'));
+  assert.doesNotThrow(() => requirePortableMode(file, 'source/go.mod', 'win32'));
+  assert.throws(() => requirePortableMode(file, 'source/go.mod', 'darwin'), /cannot be preserved by portable tar/);
+  assert.doesNotThrow(() => requirePortableMode({ mode: 0o100644, isDirectory: () => false }, 'source/go.mod', 'linux'));
+});

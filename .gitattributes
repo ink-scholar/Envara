@@ -1,0 +1,18 @@
+# Check out text as LF on every platform. Pinned data (tracker lists, provenance
+# and manifest digests) is hashed byte-for-byte, so CRLF conversion on Windows
+# (core.autocrlf=true) would make those checks fail.
+* text=auto eol=lf
+
+# Verbatim third-party text keeps its original bytes.
+third_party/npm-licenses/Microsoft-Terminal-LICENSE -text
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.icns binary
+*.zip binary
+*.gz binary
+*.tgz binary
+*.exe binary
+*.dll binary
+*.sys binary

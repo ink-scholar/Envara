@@ -9,6 +9,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { TERMINAL_TOOLS } from './terminal-browser-mcp.mjs';
 import { describeSshSession } from './terminal-ssh-command.mjs';
 import { sanitizeClaudeKeychainDiagnostic } from './claude-keychain.mjs';
+import { currentUid, ownedBy } from './file-trust.mjs';
 
 const fail = (message, code = 'CLAUDE_BROWSER_UNAVAILABLE') => Object.assign(new Error(message), { code });
 const id = value => { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(value)) throw fail('Invalid browser binding.', 'CLAUDE_BROWSER_INVALID_BINDING'); return value; };
@@ -322,7 +323,7 @@ export class TerminalBrowserBroker {
       if (session.server?.listening) await new Promise(resolve => session.server.close(resolve));
       if (session.directory) {
         const info = await lstat(session.directory).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
-        if (info && (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.())) throw fail('Browser session cleanup path changed.', 'CLAUDE_BROWSER_CLEANUP_UNCONFIRMED');
+        if (info && (!info.isDirectory() || info.isSymbolicLink() || !ownedBy(info, currentUid()))) throw fail('Browser session cleanup path changed.', 'CLAUDE_BROWSER_CLEANUP_UNCONFIRMED');
         if (info) await rm(session.directory, { recursive: true, force: true });
       }
     });

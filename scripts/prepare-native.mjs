@@ -159,7 +159,10 @@ export async function prepareNative({ forceRebuild = false } = {}) {
   let verification;
   if (!forceRebuild) {
     try { await verifyNativeBuildPaths(nodePty.directory); verification = await verifyNativePty(); }
-    catch { console.info('Preparing node-pty from source for the pinned Electron runtime.'); }
+    catch (error) {
+      console.info(`Prebuilt node-pty check failed: ${error?.message || error}`);
+      console.info('Preparing node-pty from source for the pinned Electron runtime.');
+    }
   }
   if (!verification) {
     const rebuildCLI = path.join(path.dirname(requireApp.resolve('@electron/rebuild')), 'cli.js');

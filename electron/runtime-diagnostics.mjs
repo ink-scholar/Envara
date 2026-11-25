@@ -4,6 +4,7 @@ import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { accessibleByOthers } from './file-trust.mjs';
 
 export const RUNTIME_DIAGNOSTIC_STAGES = Object.freeze([
   'ipc.snapshot', 'ipc.terminalSnapshot', 'ipc.writeTerminal', 'ipc.resizeTerminal', 'ipc.openTerminalWindow', 'ipc.other',
@@ -28,7 +29,7 @@ const PENDING_REFRESH_MS = 5000;
 const FLUSH_WAIT_MS = 250;
 const SCHEMA = 'envara.runtime-diagnostics/v1';
 const own = info => typeof process.getuid !== 'function' || info.uid === process.getuid();
-const privateFile = info => info.isFile() && !info.isSymbolicLink() && info.nlink === 1 && own(info) && !(info.mode & 0o077);
+const privateFile = info => info.isFile() && !info.isSymbolicLink() && info.nlink === 1 && own(info) && !accessibleByOthers(info);
 const integer = value => Number.isSafeInteger(value) && value >= 0;
 
 /** Timing evidence only, never execution or cleanup authority. Callers pass a

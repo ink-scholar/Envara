@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { access, chmod, lstat, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { resolveClaudeInstallation } from './claude-code-installation.mjs';
 import { CLAUDE_ACCOUNT_ENV, CLAUDE_CONTEXT_ENV, readClaudeSettings, validateClaudeEnvironment, validateClaudeSettings } from './claude-code-settings.mjs';
+import { currentUid, ownedBy, writableByOthers } from './file-trust.mjs';
 
 const fail = (message, code = 'CLAUDE_CODE_INVALID_CONFIGURATION') => Object.assign(new Error(message), { code });
 const absolute = value => typeof value === 'string' && path.isAbsolute(value) && !/[\0\r\n]/.test(value);
@@ -39,7 +40,7 @@ exec "\${envara_claude}" ${args.map(shellQuote).join(' ')} "$@"
 async function checkedDirectory(root, { owned = false } = {}) {
   if (!absolute(root) || path.resolve(root) !== root) throw fail('Claude Code 会话目录无效。');
   const info = await lstat(root);
-  if (!info.isDirectory() || info.isSymbolicLink() || owned && (info.mode & 0o022 || process.getuid && info.uid !== process.getuid())
+  if (!info.isDirectory() || info.isSymbolicLink() || owned && (writableByOthers(info) || !ownedBy(info, currentUid()))
     || await realpath(root) !== root) throw fail('Claude Code 会话目录包含不安全的链接。', 'CLAUDE_CODE_UNSAFE_PATH');
 }
 

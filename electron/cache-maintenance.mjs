@@ -2,6 +2,7 @@ import path from 'node:path';
 import { constants } from 'node:fs';
 import { lstat, readdir, realpath, mkdir, open, rename, rm } from 'node:fs/promises';
 import { randomUUID, createHash } from 'node:crypto';
+import { accessibleByOthers } from './file-trust.mjs';
 
 // Deliberately narrower than complete profile exports or application-data cleanup.
 // No Cookies, History, Local Storage, IndexedDB, Service Worker or blob_storage.
@@ -114,7 +115,7 @@ export function createCacheMaintenance({ dataDir, profilesRoot, layout = 'browse
   async function recoveryRoot(base, create = false) {
     if (create) { try { await mkdir(path.join(base, 'cache-recovery'), { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; } }
     const recovery = await checked(base, 'cache-recovery', { optional: !create });
-    if (recovery && (await lstat(recovery)).mode & 0o077) throw failure('CACHE_PATH_UNSAFE');
+    if (recovery && accessibleByOthers(await lstat(recovery))) throw failure('CACHE_PATH_UNSAFE');
     return recovery;
   }
   async function writeManifest(base, manifest) {
@@ -128,7 +129,7 @@ export function createCacheMaintenance({ dataDir, profilesRoot, layout = 'browse
   async function readManifest(base, id) {
     identifier(id);
     const batch = await checked(base, path.join('cache-recovery', id));
-    if ((await lstat(batch)).mode & 0o077) throw failure('CACHE_PATH_UNSAFE');
+    if (accessibleByOthers(await lstat(batch))) throw failure('CACHE_PATH_UNSAFE');
     const file = await checked(base, path.join('cache-recovery', id, 'manifest.json'), { directory: false });
     const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     let manifest;

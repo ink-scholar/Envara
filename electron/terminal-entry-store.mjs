@@ -2,6 +2,7 @@ import path from 'node:path';
 import { constants } from 'node:fs';
 import { lstat, open, realpath, rename, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { writableByOthers } from './file-trust.mjs';
 
 const fail = (code, message) => Object.assign(new Error(message), { code });
 const invalid = () => fail('TERMINAL_ENTRY_INVALID', '保存的终端配置无效。');
@@ -69,14 +70,14 @@ export class TerminalEntryStore {
   async checkedRoot() {
     try {
       const info = await lstat(this.root);
-      if (!info.isDirectory() || info.isSymbolicLink() || info.mode & 0o022 || await realpath(this.root) !== this.root) throw unsafePath();
+      if (!info.isDirectory() || info.isSymbolicLink() || writableByOthers(info) || await realpath(this.root) !== this.root) throw unsafePath();
       return info;
     } catch { throw unsafePath(); }
   }
   async checkedFile() {
     try {
       const info = await lstat(this.filename);
-      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.mode & 0o022 || info.size > MAX_BYTES) throw unsafePath();
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || writableByOthers(info) || info.size > MAX_BYTES) throw unsafePath();
       return info;
     } catch (error) { if (error.code === 'ENOENT') return null; throw unsafePath(); }
   }

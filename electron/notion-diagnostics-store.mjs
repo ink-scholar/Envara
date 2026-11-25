@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { mkdir, lstat, realpath, open, rename, unlink } from 'node:fs/promises';
 import { exportPFNotionTrialDiagnostics } from './macos-pf-notion-trial.mjs';
+import { accessibleByOthers } from './file-trust.mjs';
 
 const applicationId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 const refused = () => Object.assign(new Error('试运行诊断无法保存或读取。'), { code: 'PF_NOTION_DIAGNOSTICS_UNAVAILABLE' });
@@ -21,7 +22,7 @@ export class NotionDiagnosticsStore {
   }
   async inspectDirectory() {
     const info = await lstat(this.directory);
-    if (!info.isDirectory() || info.isSymbolicLink() || info.mode & 0o077 ||
+    if (!info.isDirectory() || info.isSymbolicLink() || accessibleByOthers(info) ||
         typeof process.getuid === 'function' && info.uid !== process.getuid() ||
         await realpath(this.directory) !== this.directory) throw refused();
   }
@@ -55,7 +56,7 @@ export class NotionDiagnosticsStore {
       else await this.inspectDirectory();
       handle = await open(path.join(this.directory, `${id}.json`), constants.O_RDONLY | constants.O_NOFOLLOW);
       const info = await handle.stat();
-      if (!info.isFile() || info.nlink !== 1 || info.mode & 0o077 || info.size > 131072 ||
+      if (!info.isFile() || info.nlink !== 1 || accessibleByOthers(info) || info.size > 131072 ||
           typeof process.getuid === 'function' && info.uid !== process.getuid()) throw refused();
       const parsed = JSON.parse(await handle.readFile('utf8'));
       if (parsed.schema !== 'envara.macos-pf-notion-trial-diagnostics/v1' || parsed.applicationId !== id) return null;

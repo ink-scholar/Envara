@@ -1,0 +1,156 @@
+# Windows x64 适配测试计划
+
+本文件给在 Windows 实机上编译、测试 `windows` 分支的同学使用。测试结果是 Windows 行为的唯一证据：macOS 上的单元测试与交叉编译不能代替。每一轮测试后交回**测试报告**（见文末模板）和**日志压缩包**。
+
+> 范围：Windows 10 22H2 / Windows 11，x64。Windows ARM64、虚拟机、Wine 不在本轮范围；如果只有虚拟机，请在报告中写明。
+> 不要使用自己的日常浏览器资料、真实账号或生产代理节点做破坏性测试。请使用一次性测试账号和测试代理。
+
+## 1. 准备环境
+
+1. 安装 **Node.js 24 LTS x64**（或 22.12+）、**Go 1.25**、**Git for Windows**。
+2. 普通权限打开 PowerShell（不需要管理员）：
+
+   ```powershell
+   git clone https://github.com/ink-scholar/Envara.git
+   cd Envara
+   git checkout windows
+   git pull
+   ```
+
+3. 运行日志收集脚本。第一次运行会安装依赖并准备后端、终端和代理核心：
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\windows-test-collect.ps1 -Desktop
+   ```
+
+   - 脚本依次执行 `npm ci`、`native:prepare`、`backend:prepare`、`proxy:prepare`、`npm test`、`npm run build`、`npm run test:sites`，然后执行 `npm run desktop` 打开应用。
+   - 应用打开后按第 2 节逐项测试，测试结束后退出 Envara，脚本会继续收集日志。
+   - 已经安装过依赖时可以加 `-SkipInstall`；只想重新做桌面测试可以加 `-SkipInstall -SkipTests -Desktop`。
+   - 输出位于 `test-artifacts\windows\<时间>\` 和同名 `.zip`。脚本会把 Windows 用户名和计算机名替换为占位符，**发送前请再打开检查一遍**，不要包含代理密码、令牌或私人路径。
+
+4. 应用内导出：「设置」中的「导出支持诊断」，把导出的文件一起放进压缩包。
+5. 每个失败项请截图（使用测试数据），并记下发生时间，便于和日志对照。
+
+如果某一步编译失败，后面的步骤可以不做，直接交回 `summary.json` 和对应步骤的 `.log`。
+
+## 2. 测试用例
+
+结果填写：✅ 通过 / ❌ 失败 / ⚠️ 部分可用 / ⏭️ 未测。**“预期拒绝”项看到明确的错误提示即为通过**；如果它没有报错、静默改走本机直连，请记为 ❌ 并重点说明。
+
+### A. 编译与自动检查
+
+| 编号 | 操作 | 预期 |
+| --- | --- | --- |
+| A1 | `npm ci` | 成功；`node-pty` 使用自带的 Windows 预编译文件 |
+| A2 | `native:prepare` / `backend:prepare` / `proxy:prepare` | 各自成功；`build\backend\BrowseForge-sidecar.exe`、`build\backend\playwright-driver\node.exe`、`build\proxy-core\mihomo.exe` 存在 |
+| A3 | `npm test` | 记录通过/失败/跳过数量；失败的测试名称写进报告 |
+| A4 | `npm run build`、`npm run test:sites` | 成功 |
+
+### B. 首次启动与界面
+
+| 编号 | 操作 | 预期 |
+| --- | --- | --- |
+| B1 | 首次启动 | 先出现工作区窗口，再完成后台初始化；没有长时间白屏或崩溃 |
+| B2 | 语言 | 推荐系统语言并要求确认；切换九种语言后文字不溢出、不被截断 |
+| B3 | 外观 | 浅色 / 深色 / 跟随系统都正常，Windows 系统设置不被修改 |
+| B4 | 布局 | 三栏布局、导航顺序、设置位于底部；窗口缩放、最大化、高 DPI（125%/150%）下显示正常 |
+| B5 | 重启 | 退出后再打开，语言、外观、环境列表都保留 |
+
+### C. 网络环境
+
+| 编号 | 操作 | 预期 |
+| --- | --- | --- |
+| C1 | 添加 HTTP / HTTPS / SOCKS5 代理（带认证） | 能检测到实际出口 IP、地区，并推荐时区 |
+| C2 | 添加 AnyTLS 节点 | 不需要外装 Clash；`mihomo.exe` 由 Envara 启动，检测出口成功 |
+| C3 | 代理断开或密码错误 | 显示失败，不显示本机直连的 IP |
+| C4 | 确认或手动选择位置 | 保存成功；Windows 系统时区不被修改 |
+
+### D. 浏览器
+
+每种内核（CloakBrowser、Camoufox、BrowseForge Chromium）各测一遍：
+
+| 编号 | 操作 | 预期 |
+| --- | --- | --- |
+| D1 | 安装内核 | 下载与安装完成，进度和错误提示正常 |
+| D2 | 启动浏览器 | 窗口打开；访问 IP 检测网站，显示的是代理出口而不是本机 IP |
+| D3 | 登录测试网站后关闭再打开 | 登录状态保留，指纹信息（UA、时区、语言）和第一次一致 |
+| D4 | 克隆环境 | 新环境的指纹与原环境不同 |
+| D5 | 两个环境同时运行 | 互不影响，出口各自正确 |
+
+### E. 终端
+
+| 编号 | 操作 | 预期 |
+| --- | --- | --- |
+| E1 | 新建终端，选择网络和工作目录 | 使用 `cmd.exe` 启动，提示符为 `envara <目录>>`，当前目录正确 |
+| E2 | 输入英文、中文、粘贴、Ctrl+C | 回显正常，无乱码，中断有效 |
+| E3 | 拖动面板、展开工作区、独立窗口 | 内容随尺寸重排（`mode con` 显示的列数随之变化） |
+| E4 | 复制终端 | 新建一个空闲 shell，目录和网络相同，之前的命令不会重放 |
+| E5 | 关闭终端视图后重新打开 | 会话仍在，之前的输出还在 |
+| E6 | 结束会话 | 进程结束；任务管理器中没有残留的 `cmd.exe` / `conhost.exe` / `OpenConsole.exe` |
+| E7 | 使用代理的终端里执行 `set HTTP_PROXY` 和 `curl https://api.ipify.org` | 变量指向本机回环端口，返回代理出口 IP。**注意**：Windows 目前没有网络围栏，不读取代理变量的程序仍可能直连，终端网络说明应为“…代理，仅支持代理配置的命令行工具生效…”，不能显示“围栏阻止直接公网连接”。请记录界面上的实际描述 |
+| E8 | 每个环境的终端执行 `echo %USERPROFILE%` | 指向 Envara 数据目录内该环境自己的 HOME，不是本机用户目录 |
+
+### F. 预期拒绝（未实现部分应明确失败）
+
+| 编号 | 操作 | 预期 |
+| --- | --- | --- |
+| F1 | 新建 Claude Code 专用终端 | 明确报错（需要网络围栏 / 平台不支持），不启动 CLI，也不使用本机安装的 `claude` |
+| F2 | 添加 SSH 连接 | 提示“SSH 连接目前仅支持 macOS” |
+| F3 | 附加应用：选择一个 `.exe` 并尝试启动 | 无法激活或启动，并说明原因；不安装驱动或服务，不弹出 UAC |
+| F4 | 设置中的系统链接路由 | 显示不可用，不修改 Windows 默认浏览器 |
+
+### G. 导出、导入与退出清理
+
+| 编号 | 操作 | 预期 |
+| --- | --- | --- |
+| G1 | 从浏览器详情页导出（设置密码） | 生成加密文件 |
+| G2 | 导入到新环境 | 资料恢复，原有环境不受影响；错误密码时拒绝 |
+| G3 | 退出 Envara | 任务管理器中没有残留的 `BrowseForge-sidecar.exe`、`mihomo.exe`、Envara 启动的 `node.exe` 或浏览器进程 |
+| G4 | 强制结束 Envara（任务管理器结束进程树）后重新打开 | 能正常启动；记录是否有残留进程或报错 |
+
+## 3. 测试报告模板
+
+复制以下内容填写，与日志压缩包一起交回：
+
+```markdown
+# Envara Windows 测试报告
+
+- 测试人 / 日期：
+- 分支与提交：windows @ <git rev-parse --short HEAD>
+- 系统：Windows <10/11> <版本号> x64，实机/虚拟机：
+- 显示缩放：  界面语言：  系统区域：
+- Node / npm / Go 版本：
+- 代理类型（不要写地址和密码）：
+
+## 结果汇总
+| 编号 | 结果 | 说明（现象、错误码、截图文件名、发生时间） |
+| --- | --- | --- |
+| A1 | | |
+| ... | | |
+
+## npm test
+通过 X / 失败 Y / 跳过 Z；失败测试名称：
+
+## 主要问题（按严重程度排序）
+1. 现象 / 复现步骤 / 预期 / 实际 / 对应日志文件与时间
+
+## 附件
+- test-artifacts\windows\<时间>.zip
+- 应用内导出的支持诊断文件
+- 截图
+```
+
+## 4. 开发侧待办（Windows 适配）
+
+由开发者维护，每轮根据测试报告更新。
+
+- [x] Windows 上 POSIX 权限位和 uid 检查误判（Node 在 Windows 上把可写文件报告为 `0o666`、uid 为 0），终端配置、工作组合、缓存维护和诊断存储因此拒绝工作。已改用 `electron/file-trust.mjs`，保留文件类型、符号链接、硬链接和 realpath 检查。Windows 依赖 `%APPDATA%` 默认 ACL，尚未检查 NTFS ACL。
+- [ ] 根据第一轮报告修复编译、启动、浏览器和终端问题。
+- [ ] `realpath` 与原路径逐字比较：如果出现大小写、8.3 短路径或 `\\?\` 前缀差异导致 `UNSAFE_PATH`，需要改为 Windows 规范化比较。
+- [ ] 终端链接通道使用 Unix socket 路径；Windows 需要改为命名管道（`\\.\pipe\…`），否则终端里打开的链接无法交给环境浏览器。
+- [ ] 终端默认 shell 为 `cmd.exe`，终端附件仅支持 PowerShell；评估是否改为默认 PowerShell 或让用户选择。
+- [ ] Windows 终端网络围栏：没有经过验证的边界之前，界面继续显示“仅支持代理配置的命令行工具生效”；Claude 专用会话继续拒绝。
+- [ ] Claude Code：官方 Windows 原生安装的下载校验（`claude-code-download.mjs` 目前仅支持 darwin）与 PE 识别（`claude-code-installation.mjs`）；依赖终端围栏，暂不启用。
+- [ ] SSH、系统链接路由：目前仅限 macOS，Windows 上保持明确提示。
+- [ ] 附加应用：WinDivert 路由的 DNS 归属与守护进程故障阻断两项缺口完成前保持关闭（见 `native/windows-app-routing/README.md`）。
+- [ ] 打包：`npm run dist:win` 安装包的安装、卸载和干净首次启动验收。

@@ -2,6 +2,7 @@ import path from 'node:path';
 import { constants } from 'node:fs';
 import { access, lstat, open, realpath, rename, rm, stat } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
+import { writableByOthers } from './file-trust.mjs';
 import { terminalEntryId } from './terminal-entry-store.mjs';
 
 const MAX_BYTES = 256 * 1024;
@@ -81,13 +82,13 @@ export class WorkCombinations {
   async checkedRoot() {
     try {
       const info = await lstat(this.root);
-      if (!info.isDirectory() || info.isSymbolicLink() || info.mode & 0o022 || await realpath(this.root) !== this.root) throw new Error();
+      if (!info.isDirectory() || info.isSymbolicLink() || writableByOthers(info) || await realpath(this.root) !== this.root) throw new Error();
     } catch { throw failure('WORK_COMBINATION_UNSAFE_PATH'); }
   }
   async checkedFile() {
     try {
       const info = await lstat(this.filename);
-      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.mode & 0o022 || info.size > MAX_BYTES) throw new Error();
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || writableByOthers(info) || info.size > MAX_BYTES) throw new Error();
       return info;
     } catch (error) { if (error.code === 'ENOENT') return null; throw failure('WORK_COMBINATION_UNSAFE_PATH'); }
   }

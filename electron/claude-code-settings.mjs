@@ -95,7 +95,7 @@ export async function readClaudeSettings(filename) {
   try {
     const before = await settingsPath(filename);
     if (!before) return {};
-    if (!before.isFile() || before.size > MAX_SETTINGS_BYTES || before.mode & 0o022) throw invalid();
+    if (!before.isFile() || before.size > MAX_SETTINGS_BYTES || process.platform !== 'win32' && before.mode & 0o022) throw invalid();
     handle = await open(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const opened = await handle.stat();
     if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size > MAX_SETTINGS_BYTES

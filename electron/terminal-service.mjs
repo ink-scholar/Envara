@@ -17,6 +17,7 @@ import { normalizeSshRoute } from './terminal-ssh-route.mjs';
 import { TerminalProtocol } from './terminal-protocol.mjs';
 import { getTerminalTheme } from '../shared/terminal-theme.mjs';
 import { terminalChildEnvironment, terminalShell } from './terminal-launch-config.mjs';
+import { currentUid, ownedBy, writableByOthers } from './file-trust.mjs';
 
 const require = createRequire(import.meta.url);
 const MAX_SESSIONS = 8;
@@ -130,8 +131,8 @@ async function checkedAccountPath(root, components = []) {
     let info;
     try { info = await lstat(target); }
     catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-    if (!info.isDirectory() || info.isSymbolicLink() || info.mode & 0o022
-      || process.getuid && info.uid !== process.getuid() || await realpath(target) !== target)
+    if (!info.isDirectory() || info.isSymbolicLink() || writableByOthers(info)
+      || !ownedBy(info, currentUid()) || await realpath(target) !== target)
       throw codeError('Claude 登录档案删除目录不安全，未执行删除。', 'CLAUDE_ACCOUNT_UNSAFE_PATH');
   }
   return target;

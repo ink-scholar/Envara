@@ -270,7 +270,7 @@ function WorkspaceApp() {
   const start = async (profile, quiet = false) => {
     const runtime = runtimeFor(profile);
     if (runtime.supported === false) {
-      const message = runtime.message || t("当前平台不支持此内核。");
+      const message = t(runtime.message || "当前平台不支持此内核。");
       if (!quiet) setToast({
         type: "error",
         message

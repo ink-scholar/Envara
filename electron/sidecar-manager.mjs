@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BrowseForgeClient } from './browseforge-client.mjs';
 import { BrowserRuntime, parseProcessMetrics } from './runtime.mjs';
+import { enginePlatformHold } from './engine-platform-hold.mjs';
 
 const execute = promisify(execFile);
 const IDS = ['camoufox', 'cloakbrowser', 'browseforge-chromium'];
@@ -46,7 +47,7 @@ export function windowsSystemProxyEnvironment(output) {
 }
 export function sidecarConfig(baseDir, port, states, platform = process.platform) {
   const runtimes = Object.fromEntries(IDS.map(id => [id, {
-    enabled: !!states[id]?.installed, skip_auto_update: true,
+    enabled: !!states[id]?.installed && !enginePlatformHold(id, platform), skip_auto_update: true,
     binary_path: states[id]?.binaryPath ?? '',
     family: id === 'camoufox' ? 'firefox' : 'chromium',
     display_name: { camoufox: 'Camoufox', cloakbrowser: 'CloakBrowser', 'browseforge-chromium': 'BrowseForge Chromium' }[id],
@@ -56,16 +57,17 @@ export function sidecarConfig(baseDir, port, states, platform = process.platform
     host: '127.0.0.1', port: String(port), allow_empty_runtime: true,
     profiles_dir: path.join(baseDir, 'profiles'), data_dir: path.join(baseDir, 'data'),
     fingerprint_dir: path.join(baseDir, 'data'), log_file: path.join(baseDir, 'logs/server.log'),
-    default_runtime_id: IDS.find(id => states[id]?.installed) ?? 'cloakbrowser', runtimes,
+    default_runtime_id: IDS.find(id => states[id]?.installed && !enginePlatformHold(id, platform)) ?? 'cloakbrowser', runtimes,
   };
 }
-export function mergeEngineStates(report, existing = {}) {
+export function mergeEngineStates(report, existing = {}, platform = process.platform) {
   return Object.fromEntries(IDS.map(id => {
     const item = report?.browsers?.find(value => value.name === id);
     const old = existing[id] ?? {};
-    return [id, { ...old, supported: !!item?.platform_supported, installed: !!item?.ready,
+    const hold = enginePlatformHold(id, platform);
+    return [id, { ...old, supported: !hold && !!item?.platform_supported, installed: !!item?.ready,
       binaryPath: item?.ready ? item.path : null, version: item?.ready ? item.installed : null,
-      error: old.error ?? item?.unsupported_reason ?? null }];
+      error: hold ?? old.error ?? item?.unsupported_reason ?? null }];
   }));
 }
 async function availablePort(preferred = 0) {
@@ -234,7 +236,7 @@ export class SidecarManager {
     if (this.installations.size) throw fail('请等待当前内核安装完成。', 'ENGINE_INSTALLING');
     const sessions = (await this.client.request('GET', '/api/sessions')).data ?? [];
     if (sessions.length) throw fail('请先停止所有环境，再安装内核。', 'PROFILE_RUNNING');
-    if (!this.states[id]?.supported) throw fail('当前平台尚不支持此内核。', 'UNSUPPORTED_ENGINE');
+    if (!this.states[id]?.supported) throw fail(enginePlatformHold(id) ?? '当前平台尚不支持此内核。', 'UNSUPPORTED_ENGINE');
     this.states[id] = { ...this.states[id], installing: true, error: null, progress: '正在下载官方内核…' };
     this.changed();
     const task = this.command(['browsers', 'install', '--runtimes', id, '--json'], 15 * 60 * 1000, message => { this.states[id].progress = message; this.changed(); });

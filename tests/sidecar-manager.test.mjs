@@ -116,3 +116,22 @@ test('Windows engine downloads use only an enabled static system proxy from Inte
   assert.deepEqual(windowsSystemProxyEnvironment(query('0x1')), {});
   for (const unsafe of ['user:secret@127.0.0.1:7897', '127.0.0.1', '127.0.0.1:0', '127.0.0.1:70000', 'host name:80']) assert.deepEqual(windowsSystemProxyEnvironment(query('0x1', unsafe)), {}, unsafe);
 });
+
+test('BrowseForge Chromium is withheld on Windows with an explicit reason and never becomes the default', async () => {
+  const { enginePlatformHold, withPlatformHold, WINDOWS_BROWSEFORGE_CHROMIUM_HOLD } = await import('../electron/engine-platform-hold.mjs');
+  assert.equal(enginePlatformHold('browseforge-chromium', 'win32'), WINDOWS_BROWSEFORGE_CHROMIUM_HOLD);
+  for (const [id, platform] of [['browseforge-chromium', 'darwin'], ['cloakbrowser', 'win32'], ['camoufox', 'win32']]) assert.equal(enginePlatformHold(id, platform), null);
+  assert.deepEqual(withPlatformHold({ id: 'browseforge-chromium', platform_supported: true }, 'win32'), { id: 'browseforge-chromium', platform_supported: false, unsupported_reason: WINDOWS_BROWSEFORGE_CHROMIUM_HOLD });
+  const descriptor = { id: 'browseforge-chromium', platform_supported: true };
+  assert.equal(withPlatformHold(descriptor, 'darwin'), descriptor);
+  const report = { browsers: ['camoufox', 'cloakbrowser', 'browseforge-chromium'].map(name => ({ name, platform_supported: true, ready: name === 'browseforge-chromium', path: `/fixture/${name}`, installed: '1' })) };
+  const windows = mergeEngineStates(report, {}, 'win32');
+  assert.equal(windows['browseforge-chromium'].supported, false);
+  assert.equal(windows['browseforge-chromium'].error, WINDOWS_BROWSEFORGE_CHROMIUM_HOLD);
+  assert.equal(windows.cloakbrowser.supported, true);
+  assert.equal(mergeEngineStates(report, {}, 'darwin')['browseforge-chromium'].supported, true);
+  const config = sidecarConfig('/fixture', 4567, windows, 'win32');
+  assert.equal(config.runtimes['browseforge-chromium'].enabled, false);
+  assert.equal(config.default_runtime_id, 'cloakbrowser');
+  assert.equal(sidecarConfig('/fixture', 4567, mergeEngineStates(report, {}, 'darwin'), 'darwin').default_runtime_id, 'browseforge-chromium');
+});

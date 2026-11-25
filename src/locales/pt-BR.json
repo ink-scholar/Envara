@@ -1078,5 +1078,6 @@
   "尚未授权 SSH 连接。保存配置不会自动连接服务器。": "Ainda não há conexões SSH autorizadas. Salvar as configurações não conecta automaticamente a um servidor.",
   "常用写法": "Comando comum",
   "登录钥匙串已锁定。终端仍可使用；需要钥匙串的登录操作请在解锁后重试。": "As chaves de início de sessão estão bloqueadas. Você pode continuar usando o terminal; desbloqueie-as antes de tentar novamente os logins que precisam delas.",
-  "未找到默认钥匙串。终端仍可使用；请检查 macOS 钥匙串后新建终端。": "Nenhum conjunto de chaves padrão foi encontrado. Você pode continuar usando o terminal; verifique o Acesso às Chaves do macOS e abra um novo terminal."
+  "未找到默认钥匙串。终端仍可使用；请检查 macOS 钥匙串后新建终端。": "Nenhum conjunto de chaves padrão foi encontrado. Você pode continuar usando o terminal; verifique o Acesso às Chaves do macOS e abra um novo terminal.",
+  "BrowseForge Chromium 暂不支持 Windows：其运行时缺少启动组件，且无法应用环境时区。请改用 CloakBrowser 或 Camoufox。": "O BrowseForge Chromium ainda não é compatível com o Windows: falta um componente de inicialização no runtime e ele não consegue aplicar o fuso horário do ambiente. Use o CloakBrowser ou o Camoufox."
 }

@@ -128,7 +128,7 @@ export function ProfileForm({
       return;
     }
     if (!profile && runtime?.supported === false) {
-      fail("engine", runtime.message || t("此内核暂不支持当前平台。"));
+      fail("engine", t(runtime.message || "此内核暂不支持当前平台。"));
       return;
     }
     for (const [key, minimum, maximum] of [["width", 800, 7680], ["height", 600, 4320]]) {

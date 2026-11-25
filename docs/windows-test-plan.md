@@ -162,8 +162,9 @@
 - [x] 第 2 轮：`backend:prepare` 每次都从 `raw.githubusercontent.com` 下载 playwright-go LICENSE。现在依次复用 `GOMODCACHE`、仓库内 Go 模块缓存和上一次驱动产物中的同一文件，最后才下载。
 - [x] 第 2 轮：Windows 引擎下载不读系统代理。侧车现在读取 `HKCU\…\Internet Settings` 中已启用的静态代理（不解析 PAC），与 macOS 读取 `scutil --proxy` 的行为一致。
 - [x] 第 2 轮：终端缺少 `APPDATA`/`LOCALAPPDATA`，现指向该环境自己的配置/数据目录；Windows 上不再给 node-pty 传 `encoding`（消除每次启动的警告）；搜索框快捷键在非 macOS 显示 `Ctrl K`。
-- [ ] 第 3 轮：在新提交上复测 A 组原样命令（不再需要预加载/补丁夹具）、E6/G3 终端关闭与退出，以及 `powershell.exe` 子进程数量。
-- [ ] BrowseForge Chromium Windows 运行时（上游 `nczz/browseforge-runtime-chromium` v0.1.6-alpha.0）缺少 `150.0.7871.101.manifest`，`chrome.exe` 因 SxS 配置错误无法启动；补齐后页面时区与 Intl locale 仍取宿主值（`--fingerprint-timezone` 未生效）。两项都在上游发行包，需上游修复或由 Envara 在 Windows 上暂时禁用该内核并给出明确提示；同时 `profile.lastError` 不应把整行 Playwright 命令显示给用户。
+- [ ] 第 3 轮（说明见 `docs/windows-test-round3.md`）：在新提交上复测 A 组原样命令（不再需要预加载/补丁夹具）、E6/G3 终端关闭与退出，以及 `powershell.exe` 子进程数量。
+- [x] BrowseForge Chromium Windows 运行时（上游 `nczz/browseforge-runtime-chromium` v0.1.6-alpha.0）缺少 `150.0.7871.101.manifest`，`chrome.exe` 因 SxS 配置错误无法启动；补齐后页面时区与 Intl locale 仍取宿主值。已在 Windows 上停用该内核（`electron/engine-platform-hold.mjs`）：内核列表显示不可用及原因，安装、新建和启动都给出明确提示，且不会成为默认内核。
+- [ ] 上游发布修复上述两项的 Windows 运行时后，更新固定版本、在 Windows 上验收，再移除停用。
 - [ ] 引擎下载进度：侧车给出字符串进度，界面只显示“安装中…”；失败文案重复大量进度行。
 - [ ] 待在 macOS 上复现后判断：导入时密码错误没有可见提示（G2）；HTTP 代理 407 显示为通用验证失败而非“代理认证失败”（C3）；Camoufox canvas 哈希重开后变化（D3）。
 - [ ] 界面：Windows 上仍显示 macOS 专属的“SSH 连接”导航；系统链接路由控件被隐藏而非显示不可用；设置中“终端链接使用所选浏览器”在链接通道不可用时不成立；Windows 附加软件目录未过滤安装器与系统辅助程序；Claude 拒绝文案应说明“Windows 暂不支持”而非“安装无效”。

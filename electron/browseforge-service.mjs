@@ -17,6 +17,7 @@ import { assertNetworkLocationMatchesEgress, confirmNetworkLocation, networkLoca
 import { browserContextSignature } from './terminal-browser-broker.mjs';
 import { PROVIDER_DEFAULT_DEVICE_PROFILE_ID, validateBrowserDeviceProfileInput } from '../shared/browser-device-profile.mjs';
 import { PROFILE_KEYS, error, object, text, number, fingerprintConfig, deviceProfileInput, normalizeBrowseForgeProfile } from './browseforge-profile-config.mjs';
+import { withPlatformHold } from './engine-platform-hold.mjs';
 
 /** A link an environment's browser will load: web only, never credentials. */
 function linkURL(value) {
@@ -176,7 +177,7 @@ export class BrowseForgeService {
   }
   async remote() {
     const results = await Promise.all([this.request('GET', '/api/profiles'), this.request('GET', '/api/sessions'), this.request('GET', '/api/runtimes'), this.request('GET', '/api/groups')]);
-    return { profiles: array(results[0]), sessions: array(results[1]), descriptors: array(results[2]), defaultEngine: results[2].default_runtime_id ?? null, groups: array(results[3]) };
+    return { profiles: array(results[0]), sessions: array(results[1]), descriptors: array(results[2]).map(descriptor => withPlatformHold(descriptor, this.system.platform)), defaultEngine: results[2].default_runtime_id ?? null, groups: array(results[3]) };
   }
   directory(profile) {
     const target = path.join(this.profilesDir, identifier(profile.id));
@@ -206,7 +207,7 @@ export class BrowseForgeService {
       const state = Array.isArray(managed) ? managed.find((item) => item.id === descriptor.id) ?? {} : managed[descriptor.id] ?? {};
       const binaryPath = state.binaryPath ?? descriptor.binary_path;
       if (binaryPath && path.isAbsolute(binaryPath)) { try { const info = await stat(binaryPath); await access(binaryPath, process.platform === 'win32' ? constants.F_OK : constants.X_OK); installed = info.isFile(); } catch {} }
-      return { id: descriptor.id, displayName: descriptor.display_name, family: descriptor.family, enabled: !!descriptor.enabled, supported: !!descriptor.platform_supported, installed, installing: !!state.installing, version: installed ? state.version ?? null : null, progress: state.progress ?? null, experimental: descriptor.id === 'browseforge-chromium', capabilities: descriptor.capabilities ?? {}, error: state.error ?? descriptor.unsupported_reason ?? null, binaryPath: installed ? binaryPath : null };
+      return { id: descriptor.id, displayName: descriptor.display_name, family: descriptor.family, enabled: !!descriptor.enabled, supported: !!descriptor.platform_supported, ...(descriptor.platform_supported ? {} : { message: descriptor.unsupported_reason ?? null }), installed, installing: !!state.installing, version: installed ? state.version ?? null : null, progress: state.progress ?? null, experimental: descriptor.id === 'browseforge-chromium', capabilities: descriptor.capabilities ?? {}, error: (descriptor.platform_supported ? state.error ?? descriptor.unsupported_reason : descriptor.unsupported_reason ?? state.error) ?? null, binaryPath: installed ? binaryPath : null };
     }));
   }
   proxies(workspace, remote) {
@@ -342,6 +343,7 @@ export class BrowseForgeService {
     const [workspace, remote] = await Promise.all([this.store.read(), this.remote()]);
     if (remote.profiles.length >= 500) throw error('最多支持 500 个环境。');
     const descriptor = remote.descriptors.find((item) => item.id === (profile?.engine ?? remote.defaultEngine));
+    if (descriptor && !descriptor.platform_supported) throw error(descriptor.unsupported_reason || '当前平台不支持所选内核。', 'UNSUPPORTED_ENGINE');
     profile = this.deviceProfileInput(profile, descriptor);
     const metadata = this.metadata(profile, null);
     const payload = this.normalize(profile, descriptor, workspace, remote);
@@ -441,6 +443,7 @@ export class BrowseForgeService {
     profile.runtime_id, this.system.platform, { requireComplete: true });
     if (previous && (await this.health(previous)).alive === true) return { profile, focus: true };
     const engine = (await this.engines(remote.descriptors)).find((item) => item.id === profile.runtime_id);
+    if (engine?.supported === false) throw error(engine.message || '当前平台不支持此内核。', 'UNSUPPORTED_ENGINE');
     if (!engine?.installed || !engine.enabled) throw error('请先安装并启用该环境的浏览器内核。', 'ENGINE_NOT_INSTALLED');
     this.starting.add(profileId); this.lastErrors.delete(profileId); this.resetPreview(profileId);
     return { profile, remote };
@@ -1006,7 +1009,8 @@ export class BrowseForgeService {
       if (this.closed) throw error('应用正在退出。', 'APP_CLOSING');
       if (this.installingEngine || this.starting.size) throw error('请等待内核安装或浏览器启动完成。', 'ENGINE_INSTALL_BUSY');
       const remote = await this.remote();
-      if (!remote.descriptors.some((item) => item.id === selected && item.platform_supported)) throw error('当前平台不支持所选内核。', 'UNSUPPORTED_ENGINE');
+      const held = remote.descriptors.find((item) => item.id === selected && !item.platform_supported)?.unsupported_reason;
+      if (!remote.descriptors.some((item) => item.id === selected && item.platform_supported)) throw error(held || '当前平台不支持所选内核。', 'UNSUPPORTED_ENGINE');
       for (const session of remote.sessions) { if ((await this.health(session)).alive !== false) throw error('安装内核会重启本地服务，请先停止所有浏览器会话。', 'PROFILE_RUNNING'); await this.request('DELETE', `/api/sessions/${encoded(session.session_id)}`); }
       this.installingEngine = selected;
     });

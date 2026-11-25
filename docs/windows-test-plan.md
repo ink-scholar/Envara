@@ -157,7 +157,16 @@
 - [x] 第 1 轮：`terminal-browser-broker.mjs` 浏览器会话清理的 uid 比较在 Windows 恒为不一致，改用 `file-trust.mjs`。
 - [x] 第 1 轮：PF 控制器和 Notion 前置服务向上遍历目录只在 `/` 停止，Windows 路径下死循环（`component-versions` 测试 100% CPU）。改为到根目录即停止。
 - [x] 第 1 轮：收集脚本加入超时与进程树结束、失败时退出码 1、按路径和词边界脱敏，记录开发者模式、换行与环境变量是否存在（不记录值）。
-- [ ] 第 2 轮：完成桌面实测（B–G 组）。
+- [x] 第 2 轮（基于 650fc1e，Windows 11 22631 实机）：B–G 桌面实测已完成。A1/A2 的 PTY 检查、`proxy:prepare`、`component-versions` 挂起和浏览器会话清理已在 8625d34 修复，下一轮需在新提交上复测。
+- [x] 第 2 轮：关闭终端会话 4 次中 3 次卡在 `closing`，并拖住应用退出（E6/G3）。原因：Windows 每次进程快照都新起 `powershell.exe`（约 0.3–1 s），1.5 s 预算在发出 `pty.kill()` 之前就耗尽；之后最终核验只给 100 ms 超时，PowerShell 必然超时，结果永远是“元数据不可用”，重试也无法完成。已改为常驻一个只读元数据进程（空闲 15 s 自动退出，失败时回退单次查询）、Windows 关闭预算 6 s、最终核验至少 3 s、先走 ConPTY 正常关闭再对已核验 PID `taskkill /T /F`；多个终端的周期跟踪共享同一快照（1 s 间隔）。
+- [x] 第 2 轮：`backend:prepare` 每次都从 `raw.githubusercontent.com` 下载 playwright-go LICENSE。现在依次复用 `GOMODCACHE`、仓库内 Go 模块缓存和上一次驱动产物中的同一文件，最后才下载。
+- [x] 第 2 轮：Windows 引擎下载不读系统代理。侧车现在读取 `HKCU\…\Internet Settings` 中已启用的静态代理（不解析 PAC），与 macOS 读取 `scutil --proxy` 的行为一致。
+- [x] 第 2 轮：终端缺少 `APPDATA`/`LOCALAPPDATA`，现指向该环境自己的配置/数据目录；Windows 上不再给 node-pty 传 `encoding`（消除每次启动的警告）；搜索框快捷键在非 macOS 显示 `Ctrl K`。
+- [ ] 第 3 轮：在新提交上复测 A 组原样命令（不再需要预加载/补丁夹具）、E6/G3 终端关闭与退出，以及 `powershell.exe` 子进程数量。
+- [ ] BrowseForge Chromium Windows 运行时（上游 `nczz/browseforge-runtime-chromium` v0.1.6-alpha.0）缺少 `150.0.7871.101.manifest`，`chrome.exe` 因 SxS 配置错误无法启动；补齐后页面时区与 Intl locale 仍取宿主值（`--fingerprint-timezone` 未生效）。两项都在上游发行包，需上游修复或由 Envara 在 Windows 上暂时禁用该内核并给出明确提示；同时 `profile.lastError` 不应把整行 Playwright 命令显示给用户。
+- [ ] 引擎下载进度：侧车给出字符串进度，界面只显示“安装中…”；失败文案重复大量进度行。
+- [ ] 待在 macOS 上复现后判断：导入时密码错误没有可见提示（G2）；HTTP 代理 407 显示为通用验证失败而非“代理认证失败”（C3）；Camoufox canvas 哈希重开后变化（D3）。
+- [ ] 界面：Windows 上仍显示 macOS 专属的“SSH 连接”导航；系统链接路由控件被隐藏而非显示不可用；设置中“终端链接使用所选浏览器”在链接通道不可用时不成立；Windows 附加软件目录未过滤安装器与系统辅助程序；Claude 拒绝文案应说明“Windows 暂不支持”而非“安装无效”。
 - [ ] 单元测试在 Windows 上的可移植性：约 570 项失败来自测试本身的 POSIX 假设（`/usr/bin/true`、`/tmp`、Unix socket、`process.getuid`、`openssl`、gzip 夹具等）和 macOS 专属测试文件。需要为 macOS 专属测试加平台跳过，并把通用测试改为可移植夹具，以便区分真实的 Windows 缺陷。
 - [ ] `realpath` 与原路径逐字比较：如果出现大小写、8.3 短路径或 `\\?\` 前缀差异导致 `UNSAFE_PATH`，需要改为 Windows 规范化比较。
 - [ ] 终端链接通道使用 Unix socket 路径；Windows 需要改为命名管道（`\\.\pipe\…`），否则终端里打开的链接无法交给环境浏览器。

@@ -8,7 +8,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { SidecarManager, sidecarConfig, mergeEngineStates, macSystemProxyEnvironment } from '../electron/sidecar-manager.mjs';
+import { SidecarManager, sidecarConfig, mergeEngineStates, macSystemProxyEnvironment, windowsSystemProxyEnvironment } from '../electron/sidecar-manager.mjs';
 
 test('desktop sidecar explicitly selects the prepared bundled driver without installing on startup', () => {
   const manager = new SidecarManager({ dataDir: path.resolve('unused-data'), resourcesDir: path.resolve('unused-resources') });
@@ -103,4 +103,16 @@ test('macOS downloads inherit the active system proxy without changing preferenc
   assert.deepEqual(macSystemProxyEnvironment('SOCKSEnable : 1\nSOCKSProxy : 127.0.0.1\nSOCKSPort : 7897\n'), { HTTP_PROXY: 'socks5://127.0.0.1:7897', HTTPS_PROXY: 'socks5://127.0.0.1:7897' });
   assert.deepEqual(macSystemProxyEnvironment('SOCKSEnable : 0\nSOCKSProxy : 127.0.0.1\nSOCKSPort : 7897\n'), {});
   assert.deepEqual(macSystemProxyEnvironment('HTTPEnable : 1\nHTTPProxy : invalid/host\nHTTPPort : 8080\n'), {});
+});
+
+test('Windows engine downloads use only an enabled static system proxy from Internet Settings', () => {
+  const key = 'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\r\n';
+  const query = (enable, server) => `${key}    ProxyEnable    REG_DWORD    ${enable}\r\n${server === undefined ? '' : `    ProxyServer    REG_SZ    ${server}\r\n`}    ProxyOverride    REG_SZ    <local>\r\n`;
+  assert.deepEqual(windowsSystemProxyEnvironment(query('0x1', '127.0.0.1:7897')), { HTTP_PROXY: 'http://127.0.0.1:7897', HTTPS_PROXY: 'http://127.0.0.1:7897' });
+  assert.deepEqual(windowsSystemProxyEnvironment(query('0x1', 'http=127.0.0.1:8080;https=127.0.0.1:8443;ftp=127.0.0.1:21')), { HTTP_PROXY: 'http://127.0.0.1:8080', HTTPS_PROXY: 'http://127.0.0.1:8443' });
+  assert.deepEqual(windowsSystemProxyEnvironment(query('0x1', 'http=127.0.0.1:8080;socks=127.0.0.1:1080')), { HTTP_PROXY: 'socks5://127.0.0.1:1080', HTTPS_PROXY: 'socks5://127.0.0.1:1080' });
+  assert.deepEqual(windowsSystemProxyEnvironment(query('0x1', 'http://[::1]:7897')), { HTTP_PROXY: 'http://[::1]:7897', HTTPS_PROXY: 'http://[::1]:7897' });
+  assert.deepEqual(windowsSystemProxyEnvironment(query('0x0', '127.0.0.1:7897')), {});
+  assert.deepEqual(windowsSystemProxyEnvironment(query('0x1')), {});
+  for (const unsafe of ['user:secret@127.0.0.1:7897', '127.0.0.1', '127.0.0.1:0', '127.0.0.1:70000', 'host name:80']) assert.deepEqual(windowsSystemProxyEnvironment(query('0x1', unsafe)), {}, unsafe);
 });

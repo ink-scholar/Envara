@@ -30,6 +30,8 @@ export function terminalChildEnvironment({ directories, timezone, proxyEndpoint,
     for (const key of ['SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT']) if (hostEnvironment[key]) environment[key] = hostEnvironment[key];
     const drive = path.parse(directories.home).root;
     environment.HOMEDRIVE = drive.slice(0, 2); environment.HOMEPATH = directories.home.slice(2);
+    // Windows tools locate per-user state through these; keep them inside the environment's own directories.
+    environment.APPDATA = directories.config; environment.LOCALAPPDATA = directories.data;
   }
   if (proxyEndpoint) for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) environment[key] = proxyEndpoint;
   // Node's built-in fetch/http ignore proxy variables unless this is set.

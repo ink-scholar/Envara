@@ -1,10 +1,17 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const contexts = new WeakMap();
-const WINDOWS_SNAPSHOT = "Get-CimInstance -ClassName Win32_Process | Where-Object { $_.CreationDate } | Select-Object @{Name='pid';Expression={[int]$_.ProcessId}},@{Name='ppid';Expression={[int]$_.ParentProcessId}},@{Name='birth';Expression={$_.CreationDate.ToUniversalTime().Ticks.ToString()}} | ConvertTo-Json -Compress";
+const WINDOWS_QUERY = "Get-CimInstance -ClassName Win32_Process | Where-Object { $_.CreationDate } | Select-Object @{Name='pid';Expression={[int]$_.ProcessId}},@{Name='ppid';Expression={[int]$_.ParentProcessId}},@{Name='birth';Expression={$_.CreationDate.ToUniversalTime().Ticks.ToString()}}";
+const WINDOWS_SNAPSHOT = `${WINDOWS_QUERY} | ConvertTo-Json -Compress`;
+const WINDOWS_END = '<<envara-snapshot-end>>';
+// One long-lived metadata reader answers each "s" line with one JSON line and
+// an end marker. Starting powershell.exe per snapshot costs ~0.3-1 s on
+// Windows, which made periodic tracking churn and exhausted close budgets.
+const WINDOWS_HELPER = `$ErrorActionPreference='Stop'; while ($null -ne ($line = [Console]::In.ReadLine())) { try { $rows = @(${WINDOWS_QUERY}); [Console]::Out.WriteLine((ConvertTo-Json -InputObject $rows -Compress)) } catch { [Console]::Out.WriteLine('!') }; [Console]::Out.WriteLine('${WINDOWS_END}'); [Console]::Out.Flush() }`;
+const WINDOWS_TIMING = { pollMs: 1000, closeMs: 6000, maxCloseMs: 10000, verifyMs: 3000, sharedSnapshotMs: 400 };
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function metadataEnvironment(platform) {
@@ -15,19 +22,101 @@ function metadataEnvironment(platform) {
   return { SystemRoot: systemRoot, WINDIR: systemRoot, PATH: `${systemRoot}\\System32;${systemRoot}\\System32\\WindowsPowerShell\\v1.0` };
 }
 
+class WindowsSnapshotReader {
+  constructor() { this.child = null; this.buffer = ''; this.waiter = null; this.queue = Promise.resolve(); this.idle = null; this.unavailable = false; this.shared = null; }
+  start() {
+    const encoded = Buffer.from(WINDOWS_HELPER, 'utf16le').toString('base64');
+    const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true, env: metadataEnvironment('win32'), stdio: ['pipe', 'pipe', 'ignore'] });
+    this.child = child; this.buffer = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', chunk => {
+      if (this.child !== child) return;
+      this.buffer += chunk;
+      if (this.buffer.length > 8 * 1024 * 1024) return this.discard(child, true);
+      const end = this.buffer.indexOf(WINDOWS_END);
+      if (end < 0 || !this.waiter) return;
+      const text = this.buffer.slice(0, end).trim();
+      this.buffer = this.buffer.slice(end + WINDOWS_END.length).replace(/^\r?\n/, '');
+      const waiter = this.waiter; this.waiter = null;
+      waiter.resolve(text);
+    });
+    child.stdin.on('error', () => this.discard(child, true));
+    child.on('error', error => { if (error?.code === 'ENOENT') this.unavailable = true; this.discard(child, false); });
+    child.on('exit', () => this.discard(child, false));
+    // The reader never keeps the app or a test process alive on its own.
+    child.unref(); child.stdout.unref?.(); child.stdin.unref?.();
+  }
+  discard(child, kill) {
+    if (this.child === child) {
+      this.child = null; this.buffer = '';
+      const waiter = this.waiter; this.waiter = null;
+      waiter?.reject(new Error('Process metadata reader stopped'));
+    }
+    if (kill) { try { child.kill(); } catch {} }
+  }
+  request(timeout) {
+    const enqueued = Date.now();
+    const run = () => new Promise((resolve, reject) => {
+      const remaining = timeout - (Date.now() - enqueued);
+      if (remaining <= 0) return reject(new Error('Process metadata request expired'));
+      if (!this.child) this.start();
+      const child = this.child;
+      clearTimeout(this.idle);
+      const timer = setTimeout(() => this.discard(child, true), remaining);
+      this.waiter = {
+        resolve: text => { clearTimeout(timer); this.scheduleIdle(child); resolve(text); },
+        reject: error => { clearTimeout(timer); reject(error); },
+      };
+      child.stdin.write('s\n');
+    });
+    const result = this.queue.then(run, run);
+    this.queue = result.catch(() => {});
+    return result;
+  }
+  scheduleIdle(child) {
+    clearTimeout(this.idle);
+    this.idle = setTimeout(() => { if (this.child === child) { try { child.stdin.end(); } catch {} this.discard(child, false); } }, 15000);
+    this.idle.unref();
+  }
+  async rows(timeout) {
+    const started = Date.now();
+    let text;
+    if (!this.unavailable) {
+      try { text = await this.request(timeout); } catch {}
+    }
+    // A reader that cannot start or answer falls back to a one-shot query
+    // within whatever remains of the caller's budget.
+    if (text === undefined) {
+      const remaining = timeout - (Date.now() - started);
+      if (remaining < 250) throw new Error('Process metadata unavailable');
+      text = (await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SNAPSHOT], { timeout: remaining, maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: metadataEnvironment('win32') })).stdout;
+    }
+    if (text === '!') throw new Error('Process metadata query failed');
+    const parsed = JSON.parse(text || '[]');
+    return new Map((Array.isArray(parsed) ? parsed : [parsed]).filter(row => row && Number.isSafeInteger(row.pid) && row.birth).map(row => [row.pid, { ...row, state: '' }]));
+  }
+  /** Periodic tracking of several terminals shares one recent snapshot. Close
+   * and capture paths always request a snapshot taken after their call. */
+  sharedRows(timeout) {
+    if (this.shared && Date.now() - this.shared.at < WINDOWS_TIMING.sharedSnapshotMs) return this.shared.promise;
+    const promise = this.rows(timeout);
+    const entry = { at: Date.now(), promise };
+    this.shared = entry;
+    promise.catch(() => { if (this.shared === entry) this.shared = null; });
+    return promise;
+  }
+}
+const windowsSnapshots = new WindowsSnapshotReader();
+
 function validPid(pid) {
   return Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid && pid <= 2147483647;
 }
 
 // Only process metadata is requested. Arguments, commands and environment are never read.
-async function processSnapshot(platform, pid, deadline) {
+async function processSnapshot(platform, pid, deadline, { shared = false } = {}) {
   try {
     const timeout = deadline === undefined ? (platform === 'win32' ? 5000 : 2000) : Math.max(1, Math.min(platform === 'win32' ? 5000 : 2000, deadline - Date.now()));
-    if (platform === 'win32') {
-      const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SNAPSHOT], { timeout, maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: metadataEnvironment(platform) });
-      const parsed = JSON.parse(stdout || '[]');
-      return new Map((Array.isArray(parsed) ? parsed : [parsed]).filter(row => row && Number.isSafeInteger(row.pid) && row.birth).map(row => [row.pid, { ...row, state: '' }]));
-    }
+    if (platform === 'win32') return await (shared ? windowsSnapshots.sharedRows(timeout) : windowsSnapshots.rows(timeout));
     const args = pid === undefined ? ['-axo', 'pid=,ppid=,lstart=,stat='] : ['-p', String(pid), '-o', 'pid=,ppid=,lstart=,stat='];
     const { stdout } = await execFileAsync('/bin/ps', args, { timeout, maxBuffer: 4 * 1024 * 1024, env: metadataEnvironment(platform) });
     const rows = new Map();
@@ -71,8 +160,8 @@ function descendsFromApp(row, snapshot) {
   return false;
 }
 
-async function refresh(state, deadline) {
-  const snapshot = await processSnapshot(state.platform, undefined, deadline);
+async function refresh(state, deadline, options) {
+  const snapshot = await processSnapshot(state.platform, undefined, deadline, options);
   const roots = [state.root, ...state.children.values()];
   const reachable = new Set();
   for (const captured of roots) {
@@ -123,8 +212,8 @@ export async function captureTerminalProcess(pid) {
   contexts.set(identity, state);
   state.timer = setInterval(() => {
     if (state.pending || state.closing) return;
-    state.pending = refresh(state).catch(() => {}).finally(() => { state.pending = null; });
-  }, platform === 'win32' ? 750 : 150);
+    state.pending = refresh(state, undefined, { shared: true }).catch(() => {}).finally(() => { state.pending = null; });
+  }, platform === 'win32' ? WINDOWS_TIMING.pollMs : 150);
   state.timer.unref();
   return identity;
 }
@@ -152,13 +241,16 @@ async function cleanProcessTree(state, pty, timeoutMs) {
     try { return await refresh(state, deadline); } catch { metadataAvailable = false; return new Set(); }
   };
   await refreshSafely();
+  const windows = state.platform === 'win32';
   const targets = () => [...state.children.values(), state.root]; // Children first; PTY shell last.
   const alive = async () => {
     const result = [];
     let snapshot;
-    // One metadata snapshot verifies the whole known tree; signals still get a
-    // separate immediately-before-signal check for each exact PID.
-    try { snapshot = await processSnapshot(state.platform, undefined, Math.max(deadline, Date.now() + 100)); }
+    // One metadata snapshot verifies the whole known tree; on macOS/Linux
+    // signals still get a separate immediately-before-signal check for each
+    // exact PID. The final verification may outlive the signal budget by a
+    // snapshot's real cost, so a slow reader is not mistaken for a live tree.
+    try { snapshot = await processSnapshot(state.platform, undefined, Math.max(deadline, Date.now() + (windows ? WINDOWS_TIMING.verifyMs : 100))); }
     catch { metadataAvailable = false; return targets(); }
     for (const target of targets()) {
       const current = await strongIdentity(snapshot.get(target.pid), state.platform);
@@ -169,19 +261,24 @@ async function cleanProcessTree(state, pty, timeoutMs) {
   };
   const signal = async (target, phase) => {
     if (Date.now() >= deadline) return;
-    let current;
-    try { current = await currentIdentity(state, target.pid, deadline); } catch { metadataAvailable = false; return; }
-    if (!terminalProcessMatches(current, target)) {
-      if (current && !current.state.startsWith('Z')) skipped.add(target.pid);
-      return;
+    if (windows && phase !== 'SIGKILL' && target.pid !== state.root.pid) return; // Console children end with their ConPTY; no graceful signal exists for them.
+    if (!windows) {
+      // A Windows metadata query costs as much as the batch snapshot alive()
+      // just verified, so a per-PID query there adds no tighter guarantee.
+      let current;
+      try { current = await currentIdentity(state, target.pid, deadline); } catch { metadataAvailable = false; return; }
+      if (!terminalProcessMatches(current, target)) {
+        if (current && !current.state.startsWith('Z')) skipped.add(target.pid);
+        return;
+      }
     }
     try {
-      if (state.platform === 'win32' && target.pid === state.root.pid && phase !== 'SIGKILL' && typeof pty.kill === 'function') {
+      if (windows && target.pid === state.root.pid && phase !== 'SIGKILL' && typeof pty.kill === 'function') {
         // ConPTY first gets its normal shutdown path while its shell is still verified.
         pty.kill();
-      } else if (state.platform === 'win32') {
+      } else if (windows) {
         // taskkill receives only a verified numeric PID. /T targets that owned tree.
-        await execFileAsync('taskkill.exe', ['/PID', String(target.pid), '/T', ...(phase === 'SIGKILL' ? ['/F'] : [])], { timeout: Math.min(2000, Math.max(1, deadline - Date.now())), windowsHide: true, maxBuffer: 64 * 1024, env: metadataEnvironment(state.platform) });
+        await execFileAsync('taskkill.exe', ['/PID', String(target.pid), '/T', '/F'], { timeout: Math.min(3000, Math.max(1, deadline - Date.now())), windowsHide: true, maxBuffer: 64 * 1024, env: metadataEnvironment(state.platform) });
       } else if (target.pid === state.root.pid && typeof pty.kill === 'function') {
         // Never call node-pty.kill after the root birth identity no longer matches.
         pty.kill(phase);
@@ -190,17 +287,20 @@ async function cleanProcessTree(state, pty, timeoutMs) {
       }
       signaled.add(target.pid);
     } catch (error) {
-      if (error.code !== 'ESRCH') failures.add(target.pid);
+      // taskkill exits 128 when the verified process ended on its own meanwhile.
+      if (error.code !== 'ESRCH' && !(windows && error.code === 128)) failures.add(target.pid);
     }
   };
-  for (const phase of state.platform === 'win32' ? ['SIGTERM', 'SIGKILL'] : ['SIGHUP', 'SIGTERM', 'SIGKILL']) {
+  const gracePause = windows ? 400 : 150;
+  for (const phase of windows ? ['SIGTERM', 'SIGKILL'] : ['SIGHUP', 'SIGTERM', 'SIGKILL']) {
     if (Date.now() >= deadline) break;
-    if (phase !== 'SIGKILL' && Date.now() + 150 >= deadline) continue;
-    await refreshSafely();
+    if (phase !== 'SIGKILL' && Date.now() + gracePause >= deadline) continue;
+    // Windows: the tree was refreshed just before the first phase; another query there only spends budget.
+    if (!windows || phase === 'SIGKILL') await refreshSafely();
     const living = await alive();
     if (!living.length) break;
     for (const target of living) await signal(target, phase);
-    const pause = phase === 'SIGKILL' ? 0 : Math.min(150, Math.max(0, deadline - Date.now()));
+    const pause = phase === 'SIGKILL' ? 0 : Math.min(gracePause, Math.max(0, deadline - Date.now()));
     if (pause) await delay(pause);
   }
   let remaining = await alive();
@@ -221,11 +321,13 @@ async function cleanProcessTree(state, pty, timeoutMs) {
 }
 
 /** Idempotently close only the captured shell and children whose birth identities still match. */
-export async function closeTerminalProcess({ pty, identity, timeoutMs = 1500 } = {}) {
+export async function closeTerminalProcess({ pty, identity, timeoutMs } = {}) {
   const state = contexts.get(identity);
   if (!state || !pty || pty.pid !== state.root.pid) throw new TypeError('PTY and captured terminal identity must match');
   if (!state.closing) {
-    const boundedTimeout = Number.isFinite(timeoutMs) ? Math.max(250, Math.min(5000, timeoutMs)) : 1500;
+    // Windows metadata queries and ConPTY teardown take far longer than ps/signals.
+    const [fallback, maximum] = state.platform === 'win32' ? [WINDOWS_TIMING.closeMs, WINDOWS_TIMING.maxCloseMs] : [1500, 5000];
+    const boundedTimeout = Number.isFinite(timeoutMs) ? Math.max(250, Math.min(maximum, timeoutMs)) : fallback;
     const attempt = cleanProcessTree(state, pty, boundedTimeout);
     state.closing = attempt;
     // Concurrent callers share this attempt. An uncertain result must allow a

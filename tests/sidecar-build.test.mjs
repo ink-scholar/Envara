@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { deflateRawSync, gzipSync } from 'node:zlib';
 import { copyModuleLicenses, nativeGoTarget } from '../scripts/build-sidecar.mjs';
-import { driverArtifacts, patchDriverBundle, safeArchivePath, selectedZipFiles, tarGzFiles, treeSha256, verifyIntegrity } from '../scripts/prepare-playwright-driver.mjs';
+import { GO_WRAPPER_VERSION, driverArtifacts, patchDriverBundle, wrapperLicenseCandidates, safeArchivePath, selectedZipFiles, tarGzFiles, treeSha256, verifyIntegrity } from '../scripts/prepare-playwright-driver.mjs';
 
 function tar(entries) {
   const chunks = [];
@@ -130,4 +130,17 @@ test('repeated builds can replace license outputs copied from an immutable Go mo
   if (process.platform !== 'win32') await chmod(path.join(output, 'go-chi-LICENSE'), 0o444);
   assert.deepEqual(await copyModuleLicenses(cache, output), ['go-chi-LICENSE']);
   assert.equal(await readFile(path.join(output, 'go-chi-LICENSE'), 'utf8'), 'upstream license');
+});
+
+test('the playwright-go notice is reused from Go module caches and earlier driver outputs before any download', () => {
+  const root = path.resolve('/fixture/repo');
+  const candidates = wrapperLicenseCandidates(root, [path.join(root, 'build/backend/playwright-driver'), null], { GOMODCACHE: path.resolve('/fixture/gomod') });
+  const module = path.join('github.com', 'playwright-community', `playwright-go@${GO_WRAPPER_VERSION}`, 'LICENSE');
+  assert.deepEqual(candidates, [
+    path.join(path.resolve('/fixture/gomod'), module),
+    path.join(root, 'test-artifacts/sidecar-prototype/go-mod-cache', module),
+    path.join(root, '.cache/go-mod', module),
+    path.join(root, 'build/backend/playwright-driver/playwright-go-LICENSE'),
+  ]);
+  assert.equal(wrapperLicenseCandidates(root, [], {}).length, 2);
 });

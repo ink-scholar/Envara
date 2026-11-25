@@ -1034,7 +1034,7 @@ export class TerminalService {
         if (known) this.contexts.set(id, { ...known, network: session.network });
       }
       this.assertStarting(session);
-      const spawned = this.ptyFactory(shell.executable, shell.args, { name: 'xterm-256color', cols: session.columns, rows: session.rows, cwd, env: shell.environment, encoding: 'utf8', handleFlowControl: false });
+      const spawned = this.ptyFactory(shell.executable, shell.args, { name: 'xterm-256color', cols: session.columns, rows: session.rows, cwd, env: shell.environment, ...(process.platform === 'win32' ? {} : { encoding: 'utf8' }), handleFlowControl: false }); // node-pty on Windows always emits UTF-8 strings and warns on `encoding`.
       const pty = typeof spawned?.then === 'function' ? await spawned : spawned;
       // The native factory is synchronous. An injected asynchronous factory can
       // still return a resource after close; reclaim it instead of reusing the

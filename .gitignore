@@ -33,3 +33,4 @@ build/package-resources/
 
 # Tester log archives dropped into the checkout
 /run-*.zip
+/final-*.zip

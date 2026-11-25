@@ -34,6 +34,7 @@ import { LinkBrowserChoices, AttachApplicationForm } from "./AttachApplicationFo
 import { BrowserDetail } from "./BrowserDetail.jsx";
 import { profileConfig, runtimeCatalog, allows } from "./workspace-profile.mjs";
 import { protocolLabel, bytes } from "./workspace-display.mjs";
+const SEARCH_SHORTCUT = typeof navigator !== 'undefined' && /Mac/i.test(navigator.userAgent || '') ? '⌘ K' : 'Ctrl K';
 
 const initialSnapshot = {
   profiles: [],
@@ -758,7 +759,7 @@ function WorkspaceApp() {
         {api.isDesktop && snapshot.legacyMigration?.available && <div className="section-note migration-discovery"><FolderOpen size={18} /><span>{t("发现 {count} 个旧环境", {
               count: snapshot.legacyMigration.count || 0
             })}</span><Button onClick={previewMigration} disabled={pending["previewLegacyMigration:"]}>{t("查看旧环境")}</Button></div>}
-        <div className="environment-toolbar"><div className="search-input"><MagnifyingGlass size={17} /><input ref={searchRef} value={query} onChange={event => setQuery(event.target.value)} placeholder={t("搜索环境")} aria-label={t("搜索环境")} /><kbd>⌘ K</kbd></div><label className="group-filter"><select aria-label={t("分组筛选")} value={groupFilter} onChange={event => setGroupFilter(event.target.value)}><option value="*">{t("全部分组")}</option><option value="">{t("未分组")}</option>{groups.map(group => <option key={group} value={group}>{group}</option>)}</select></label></div>
+        <div className="environment-toolbar"><div className="search-input"><MagnifyingGlass size={17} /><input ref={searchRef} value={query} onChange={event => setQuery(event.target.value)} placeholder={t("搜索环境")} aria-label={t("搜索环境")} /><kbd>{SEARCH_SHORTCUT}</kbd></div><label className="group-filter"><select aria-label={t("分组筛选")} value={groupFilter} onChange={event => setGroupFilter(event.target.value)}><option value="*">{t("全部分组")}</option><option value="">{t("未分组")}</option>{groups.map(group => <option key={group} value={group}>{group}</option>)}</select></label></div>
         {checkedIds.length > 0 && <div className="bulk-toolbar"><span>{t("已选 {count} 个环境", {
               count: checkedIds.length
             })}</span><Button icon={Play} disabled={bulkRunning} onClick={() => runBulk("start")}>{t("启动浏览器")}</Button><Button icon={Stop} disabled={bulkRunning} onClick={() => runBulk("stop")}>{t("停止浏览器")}</Button><Button icon={FolderOpen} disabled={bulkRunning} onClick={() => setModal({

@@ -24,6 +24,26 @@ export function macSystemProxyEnvironment(output) {
   const https = socks ?? endpoint('HTTPS', 'http');
   return { ...(http ? { HTTP_PROXY: http } : {}), ...(https ? { HTTPS_PROXY: https } : {}) };
 }
+/** Parse `reg query` output of HKCU Internet Settings into the same engine
+ * download environment the macOS path derives from scutil. PAC/WPAD scripts
+ * are not evaluated; only an enabled static proxy is used. */
+export function windowsSystemProxyEnvironment(output) {
+  const values = Object.fromEntries([...output.matchAll(/^\s+(ProxyEnable|ProxyServer)\s+REG_\w+\s+(.+?)\s*$/gim)].map(match => [match[1].toLowerCase(), match[2].trim()]));
+  if (!/^(0x0*1|1)$/i.test(values.proxyenable ?? '') || !values.proxyserver) return {};
+  const endpoint = (value, protocol) => {
+    const match = /^(?:[a-z][a-z0-9+.-]*:\/\/)?(\[[0-9a-f:.]+\]|[^\s/@?#:\[\]]+):(\d{1,5})\/?$/i.exec(value?.trim() ?? '');
+    const port = Number(match?.[2]);
+    if (!match || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+    return `${protocol}://${match[1]}:${port}`;
+  };
+  const server = values.proxyserver;
+  if (!server.includes('=')) { const all = endpoint(server, 'http'); return all ? { HTTP_PROXY: all, HTTPS_PROXY: all } : {}; }
+  const parts = Object.fromEntries(server.split(';').map(part => part.split('=')).filter(pair => pair.length === 2).map(([key, value]) => [key.trim().toLowerCase(), value]));
+  const socks = parts.socks ? endpoint(parts.socks, 'socks5') : null;
+  const http = socks ?? endpoint(parts.http, 'http');
+  const https = socks ?? endpoint(parts.https, 'http');
+  return { ...(http ? { HTTP_PROXY: http } : {}), ...(https ? { HTTPS_PROXY: https } : {}) };
+}
 export function sidecarConfig(baseDir, port, states, platform = process.platform) {
   const runtimes = Object.fromEntries(IDS.map(id => [id, {
     enabled: !!states[id]?.installed, skip_auto_update: true,
@@ -167,6 +187,10 @@ export class SidecarManager {
       await access(this.binary, process.platform === 'win32' ? constants.F_OK : constants.X_OK);
       for (const resource of ['package/cli.js', 'package/lib/coreBundle.js', process.platform === 'win32' ? 'node.exe' : 'node']) await access(path.join(this.driver, resource));
       if (process.platform === 'darwin') { try { this.systemProxy = macSystemProxyEnvironment((await execute('/usr/sbin/scutil', ['--proxy'], { timeout: 3000 })).stdout); } catch {} }
+      if (process.platform === 'win32') {
+        const reg = path.join(process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows', 'System32', 'reg.exe');
+        try { this.systemProxy = windowsSystemProxyEnvironment((await execute(reg, ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'], { timeout: 3000, windowsHide: true })).stdout); } catch {}
+      }
       const tokenPath = path.join(this.baseDir, 'data/.envara-token');
       try { this.token = (await readFile(tokenPath, 'utf8')).trim(); if (!/^[a-f0-9]{64}$/.test(this.token)) throw fail('本地服务凭据格式无效。', 'INVALID_LOCAL_TOKEN'); }
       catch (error) { if (error.code !== 'ENOENT') throw error; this.token = randomBytes(32).toString('hex'); await writeFile(tokenPath, this.token, { mode: 0o600, flag: 'wx' }); }

@@ -36,6 +36,7 @@ test('Windows uses only its system allowlist and fresh host inputs without inher
   assert.ok(first.PATH.split(';').includes('C:\\Programs\\nodejs'));
   assert.equal(first.HOMEDRIVE, 'D:'); assert.equal(first.HOMEPATH, '\\Owned\\environment\\home');
   assert.equal(first.ComSpec, 'C:\\System\\cmd.exe'); assert.equal(first.ProgramFiles, undefined);
+  assert.equal(first.APPDATA, options.directories.config); assert.equal(first.LOCALAPPDATA, options.directories.data);
   options.hostEnvironment.ComSpec = 'C:\\System\\replacement.exe';
   assert.equal(terminalChildEnvironment(options).ComSpec, 'C:\\System\\replacement.exe');
   const shell = terminalShell(first, { platform: 'win32', hostEnvironment: options.hostEnvironment });

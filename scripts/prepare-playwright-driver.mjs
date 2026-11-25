@@ -188,6 +188,22 @@ async function validateNode(executable, platform, arch) {
   } catch { return false; }
 }
 
+export function wrapperLicenseCandidates(rootDir, cacheRoots = [], env = process.env) {
+  const modulePath = ['github.com', 'playwright-community', `playwright-go@${GO_WRAPPER_VERSION}`, 'LICENSE'];
+  const moduleCaches = [env.GOMODCACHE, path.join(rootDir, 'test-artifacts', 'sidecar-prototype', 'go-mod-cache'), path.join(rootDir, '.cache', 'go-mod')];
+  return [...new Set([
+    ...moduleCaches.filter(Boolean).map(cache => path.join(path.resolve(cache), ...modulePath)),
+    ...cacheRoots.filter(Boolean).map(cache => path.join(path.resolve(cache), 'playwright-go-LICENSE')),
+  ])];
+}
+
+async function firstReadable(files) {
+  for (const file of files) {
+    try { const bytes = await readFile(file); if (bytes.length) return bytes; } catch {}
+  }
+  return null;
+}
+
 async function cachedSources(caches, artifacts) {
   let packageDir = null;
   let node = null;
@@ -256,9 +272,10 @@ export async function preparePlaywrightDriver({ rootDir = ROOT, outputDir = path
     const bundle = path.join(stage, 'package', 'lib', 'coreBundle.js');
     await writeFile(bundle, patchDriverBundle(await readFile(bundle, 'utf8')), { mode: 0o644 });
     await writeFile(path.join(stage, 'ENVARA_DRIVER_CHANGES.md'), `# Driver compatibility modification\n\nPlaywright ${DRIVER_VERSION} is pre-patched exactly as playwright-go ${GO_WRAPPER_VERSION} patchDriverBundle(): optional access and default values for pageError.location.url, lineNumber, and columnNumber. This makes the Go installer idempotent with read-only packaged resources. Browser binaries are not included.\n\nPatch source: https://github.com/playwright-community/playwright-go/blob/${WRAPPER_COMMIT}/run.go\n`);
-    const wrapperLicensePath = path.join(rootDir, 'test-artifacts', 'sidecar-prototype', 'go-mod-cache', 'github.com', 'playwright-community', `playwright-go@${GO_WRAPPER_VERSION}`, 'LICENSE');
-    const wrapperLicense = await exists(wrapperLicensePath) ? await readFile(wrapperLicensePath)
-      : await downloadImpl(`https://raw.githubusercontent.com/playwright-community/playwright-go/${WRAPPER_COMMIT}/LICENSE`);
+    // The sidecar build already fetched this exact module version, and a
+    // previous driver output carries the same notice; only download as a last resort.
+    const wrapperLicense = await firstReadable(wrapperLicenseCandidates(rootDir, cacheRoots))
+      ?? await downloadImpl(`https://raw.githubusercontent.com/playwright-community/playwright-go/${WRAPPER_COMMIT}/LICENSE`);
     await writeFile(path.join(stage, 'playwright-go-LICENSE'), wrapperLicense);
     for (const file of ['LICENSE', 'NOTICE', 'ThirdPartyNotices.txt']) {
       if (!await exists(path.join(stage, 'package', file))) throw new Error(`Playwright package is missing required notice ${file}.`);

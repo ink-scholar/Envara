@@ -43,3 +43,46 @@ Electron app, ESM throughout (`"type": "module"`); only `electron/preload.cjs` i
 ## Platform status
 
 The only released and accepted target is **macOS arm64**. Windows x64 has build/packaging paths (`npm run dist:win` on a Windows host; `node scripts/prepare-windows-desktop.mjs [--build|--verify <stage>]` for an isolated cross-host stage under `.cache/windows-desktop/`) and `win32` branches in the main process, but no native GUI/PTY/browser/driver/routing acceptance. Package checks and cross-compilation are not proof of Windows behavior; record unverified coverage explicitly rather than claiming support.
+
+## Windows port (branch `windows`)
+
+Work happens on the `windows` branch. The running record is `docs/windows-test-plan.md` §4: checked items are done, with the round and commit noted. Tester guides are `docs/windows-test-round3.md` and `docs/windows-test-round4.md`. Rounds 1–4 accepted on real Windows 11 hardware:
+- the stock install path: prebuilt node-pty without Visual Studio, Mihomo prep, system-proxy engine downloads;
+- terminal close and app exit (Windows/Linux confirm before the last window closes while terminals or apps run);
+- Camoufox via authenticated HTTP exits;
+- the BrowseForge Chromium hold (`electron/engine-platform-hold.mjs`).
+
+Windows facts learned so far:
+- The sidecar build pins `GOTOOLCHAIN=go1.25.0`. Install exactly Go 1.25.0, or Go downloads that toolchain through `proxy.golang.org`.
+- Node reports synthetic mode/uid values on Windows; use `electron/file-trust.mjs`, never raw POSIX permission checks.
+- Process snapshots use one long-lived PowerShell reader (`electron/terminal-process.mjs`); never start a new `powershell.exe` per poll.
+- HTTP/HTTPS proxies are checked through the managed Mihomo route, which hides upstream 407s; `ProxyNetworkProbe.explainFailure` reclassifies them.
+- Native folder/save dialogs block automation; drive them with UI Automation and Win32 messages when testing remotely.
+
+Next work, in order (keep §4 of the test plan updated as items land):
+1. **Make `npm test` portable on Windows.** About 680 tests fail there, mostly from POSIX/macOS assumptions in the tests themselves: `/usr/bin/true`, `/tmp`, Unix sockets, `process.getuid`, `openssl`, gzip fixtures, and Seatbelt/Keychain/PF files.
+   - Skip macOS-only tests by platform, and give the general tests portable fixtures.
+   - Re-run on a Windows machine and triage what is left as real Windows defects.
+   - Watch for `realpath` literal comparisons (case, 8.3 short names, the `\\?\` prefix) and temp-directory leaks (`envara*` under `%TEMP%`).
+2. **Windows UI mismatches**, all small:
+   - hide or disable the macOS-only "SSH 连接" nav item;
+   - show the system link-router control as unavailable instead of hiding it;
+   - drop or explain the "terminal links use the selected browser" setting while the link channel is unavailable;
+   - filter installers and system helpers out of the attached-app catalog;
+   - make the Claude refusal say "Windows not supported yet" rather than "invalid installation";
+   - show engine download progress, and stop the failure text from repeating progress lines.
+
+   Every new string needs all nine languages.
+3. **Terminal link channel on Windows.** `electron/terminal-link-channel.mjs` uses a Unix socket path, and its uid check always fails on Windows (startup logs "终端链接通道目录不安全"). Move it to a named pipe (`\\.\pipe\…`) with an equivalent ownership/ACL check, so terminal-opened links and OAuth handoffs reach the environment browser.
+4. **Packaging acceptance:** `npm run dist:win` installer install, first launch, uninstall and data retention on a clean Windows machine.
+5. **Low priority / noise:**
+   - node-pty `AttachConsole failed` stack traces on session close;
+   - the early "Unable to reach the local BrowseForge service" refresh before the sidecar is ready;
+   - retry `playwright-driver` directory renames on transient EPERM;
+   - declare `allowScripts` before moving to npm 12.
+6. **Blocked or large; keep the explicit refusals until then:**
+   - lift the BrowseForge Chromium hold once upstream ships a Windows runtime with the SxS manifest and working timezone/locale;
+   - Windows terminal network fence;
+   - Claude Code native Windows install;
+   - WinDivert attached-app routing (see `native/windows-app-routing/README.md`);
+   - SSH and system link routing.

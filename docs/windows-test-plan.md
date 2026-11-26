@@ -167,7 +167,15 @@
 - [x] 第 3 轮：HTTP/HTTPS 代理密码错误显示通用“无法完成 HTTPS 验证”。原因：这两种代理经内置 Mihomo 检测，Mihomo 先回应 CONNECT 再连上游，上游的 407 被吞掉。检测失败后，现在对上游代理单独发一次 CONNECT，只读状态行（隧道不发送任何数据并立即关闭）；返回 407 时改报“代理认证失败，请检查凭据”。
 - [x] 第 3 轮：`npm run desktop` 按 Ctrl+C 后 Windows 上残留 Vite 的 `esbuild.exe`；开发启动器现在用 `taskkill /T /F` 结束 Vite 与 Electron 的整个进程树。
 - [x] 第 3 轮：收集脚本对 JSON 转义路径（`C:\\Users\\<用户名>`）脱敏遗漏；`crlfFiles` 把 `attr/-text` 文件误报为 CRLF。均已修正。
-- [ ] 第 4 轮（说明见 `docs/windows-test-round4.md`）：复测关闭最后一个窗口的确认与退出、HTTP 代理认证失败文案；记录 Envara 主进程下来源不明的 `cmd.exe` + `conhost.exe`（同事甲观察到一对，不随关闭次数累积）的命令行和创建时间。
+- [x] 第 4 轮（a2ee471，开发者经 SSH 在 Windows 11 Pro 10.0.28000 实机上用 CDP + UI Automation 脚本实测，用例见 `docs/windows-test-round4.md`）：
+  - 原样安装：`npm ci`（不装 Visual Studio，预编译 node-pty 可用）、`proxy:prepare`、构建、Sites 检查通过；`npm test` 3366 / 2478 通过 / 678 失败 / 7 取消（未开开发者模式），新增测试在 Windows 上全部通过。
+  - `backend:prepare` 固定 `GOTOOLCHAIN=go1.25.0`：本机装的是其他 1.25.x 时，Go 会去 `proxy.golang.org` 下载 1.25.0 工具链，经代理下载中断即失败。安装 Go 1.25.0 本身即可避免（测试机器请直接装 1.25.0）。
+  - Q1 关闭最后一个窗口：有终端时弹出确认（中英文均正确）；取消后窗口与 `ping -t` 继续；“结束并退出”后 14 个进程 3.7 s 内全部退出；无任务时 0.65 s 直接退出；多窗口时先关主窗口不弹窗，关最后的终端窗口弹窗，退出 3.1 s；只开 Camoufox 时不弹窗，3.2 s 内连同浏览器与 Mihomo 一起退出；重开后旧终端未复活。
+  - Q2 HTTP 代理（本机 18080 认证测试代理）：错误密码 0.6 s 显示“代理认证失败，请检查凭据。”；错误端口仍为通用文案；正确密码检测成功。
+  - Q3：主进程下每个终端各一对 `conhost --headless` + `cmd.exe /D /Q`，另有常驻 `powershell.exe`；没有来源不明的进程。同事甲看到的那一对应当就是未关闭的会话。
+  - Q4：`npm run desktop` 收到 Ctrl+C 后 2 s 内无 `esbuild`、Electron、侧车残留。Q5：收集包中 `crlfFiles=0`，无机器名或用户目录路径。
+  - Q6：Camoufox 仅经系统代理安装约 5 分钟；经认证 HTTP 出口启动 16.6 s；该环境终端 `curl` 走测试代理；复制会话与 `ping -t` 会话关闭 1.1–1.3 s，无残留。CloakBrowser、导出/导入本轮未重测。
+- [x] 第 4 轮：终端底栏在网络模式为 `unknown` 时显示原始的 `UNKNOWN`（把内部状态当作协议名大写显示），现在显示“启动后读取环境网络设置。”。
 - [ ] node-pty 在关闭会话时启动的 `conpty_console_list_agent` 偶发 `AttachConsole failed` 并打印完整堆栈（shell 已退出时）。不影响关闭结果，属于日志噪音，待评估是否能避免。
 - [ ] 启动初期偶发 `Unable to refresh workspace: Unable to reach the local BrowseForge service.`（侧车尚未就绪时的刷新），之后恢复；可在侧车就绪前跳过刷新。
 - [ ] `npm test` 在 `%TEMP%` 留下 `envara*` 临时目录（一次约 65 个）；`backend:prepare` 重命名旧 `playwright-driver` 偶发 EPERM（文件被扫描占用），可加短暂重试。

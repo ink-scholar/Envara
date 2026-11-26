@@ -33,14 +33,18 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 
 function Mask([string]$text) {
   if (-not $text) { return $text }
-  if ($env:USERPROFILE) { $text = $text.Replace($env:USERPROFILE, '%USERPROFILE%') }
+  if ($env:USERPROFILE) {
+    $text = $text.Replace($env:USERPROFILE, '%USERPROFILE%')
+    # JSON and escaped strings double every backslash.
+    $text = $text.Replace($env:USERPROFILE.Replace('\', '\\'), '%USERPROFILE%')
+  }
   foreach ($pair in @(@($env:USERNAME, '<user>'), @($env:COMPUTERNAME, '<host>'))) {
     $name = $pair[0]; $label = $pair[1]
     if (-not $name) { continue }
     $escaped = [regex]::Escape($name)
     # Always mask profile paths; mask free-standing words only for names that
     # cannot be mistaken for ordinary numbers or short tokens in test output.
-    $text = [regex]::Replace($text, "(?i)([\\/]Users[\\/])$escaped(?=[\\/\s'`"]|$)", "`$1$label")
+    $text = [regex]::Replace($text, "(?i)([\\/]+Users[\\/]+)$escaped(?=[\\/\s'`"]|$)", "`$1$label")
     if ($name.Length -ge 4 -and $name -notmatch '^\d+$') {
       $text = [regex]::Replace($text, "(?i)(?<![A-Za-z0-9_.-])$escaped(?![A-Za-z0-9_-])", $label)
     }
@@ -117,7 +121,7 @@ $summary.git = [ordered]@{
   branch = (& git rev-parse --abbrev-ref HEAD 2>$null); commit = (& git rev-parse HEAD 2>$null)
   dirty = [bool](& git status --porcelain 2>$null)
   autocrlf = (& git config --get core.autocrlf 2>$null)
-  crlfFiles = @(& git ls-files --eol 2>$null | Where-Object { $_ -match '\sw/crlf\s' -and $_ -notmatch '\s-text\s' }).Count
+  crlfFiles = @(& git ls-files --eol 2>$null | Where-Object { $_ -match '\sw/crlf\s' -and $_ -notmatch '[\s/]-text\s' }).Count
 }
 
 if (-not $SkipInstall) {

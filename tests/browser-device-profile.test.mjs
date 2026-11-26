@@ -5,6 +5,7 @@ import path from 'node:path';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { BrowseForgeService } from '../electron/browseforge-service.mjs';
 import { BROWSER_DEVICE_PROFILES, PROVIDER_DEFAULT_DEVICE_PROFILE_ID, applyBrowserDeviceProfile, defaultBrowserDeviceProfileId, deviceProfileFingerprint, getBrowserDeviceProfile, supportsBrowserDeviceProfiles, validateBrowserDeviceProfileInput } from '../shared/browser-device-profile.mjs';
+import { enginePlatformHold } from '../electron/engine-platform-hold.mjs';
 
 async function fixture(t, platform = 'darwin') {
   const root = await mkdtemp(path.join(os.tmpdir(), 'envara-device-profile-'));
@@ -109,9 +110,14 @@ test('device catalog is versioned, country-independent and limited to tested pro
   assert.throws(() => validateBrowserDeviceProfileInput({ deviceProfileId: 'windows-standard-v1' }, 'cloakbrowser', 'darwin'), { code: 'DEVICE_PROFILE_PLATFORM_UNSUPPORTED' });
 });
 
+// BrowseForge Chromium is withheld on Windows (electron/engine-platform-hold.mjs).
+const heldOnHost = (host, engine) => enginePlatformHold(engine, host) !== null;
+
 test('minimal new environments delegate all device defaults to their selected provider on every host', async t => {
   for (const host of ['darwin', 'win32', 'linux']) for (const engine of ['cloakbrowser', 'camoufox', 'browseforge-chromium']) await t.test(`${host}/${engine}`, async t => {
-    const f = await fixture(t, host), profile = await f.create({ engine });
+    const f = await fixture(t, host);
+    if (heldOnHost(host, engine)) { await assert.rejects(f.create({ engine }), { code: 'UNSUPPORTED_ENGINE' }); return; }
+    const profile = await f.create({ engine });
     assert.equal(profile.deviceProfileId, PROVIDER_DEFAULT_DEVICE_PROFILE_ID);
     assert.equal(profile.platform, null);
     assert.equal(profile.width, null); assert.equal(profile.height, null);
@@ -130,7 +136,9 @@ test('minimal new environments delegate all device defaults to their selected pr
 
 test('an explicit fixed preset persists its native settings for every provider and host', async t => {
   for (const engine of ['cloakbrowser', 'camoufox', 'browseforge-chromium']) for (const [host, id, platform] of [['darwin', 'mac-standard-v1', 'macos'], ['win32', 'windows-standard-v1', 'windows'], ['linux', 'linux-standard-v1', 'linux']]) await t.test(`${engine}/${host}`, async t => {
-    const f = await fixture(t, host), profile = await f.create({ engine, deviceProfileId: id });
+    const f = await fixture(t, host);
+    if (heldOnHost(host, engine)) { await assert.rejects(f.create({ engine, deviceProfileId: id }), { code: 'UNSUPPORTED_ENGINE' }); return; }
+    const profile = await f.create({ engine, deviceProfileId: id });
     assert.equal(profile.deviceProfileId, id); assert.equal(profile.platform, platform);
     assert.deepEqual(f.profiles[0].fingerprint, deviceProfileFingerprint(id, engine));
     assert.equal((await f.service.store.read()).profiles[0].deviceProfileId, id);

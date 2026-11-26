@@ -1809,3 +1809,15 @@ test('a saved node first checked offline is retried after connectivity returns w
   assert.equal(managed.calls.length, 2); assert.equal(managed.calls[1].id, saved.id);
   assert.equal(managed.probes.length, 1); assert.equal(managed.wires.has(saved.id), true);
 });
+
+test('a failed managed HTTP check asks the probe to explain it against the upstream proxy, not the local core', async t => {
+  const managed = managedProxyFixture(), explained = [];
+  managed.networkProbe.probe = async () => ({ ok: false, scope: 'egress', ip: null, errorCode: 'NETWORK_FAILED', message: 'generic' });
+  managed.networkProbe.explainFailure = async (result, upstream) => { explained.push(upstream); return { ...result, errorCode: 'PROXY_AUTH_FAILED', message: '代理认证失败，请检查凭据。' }; };
+  const { service } = await fixture(t, managed);
+  const draft = { protocol: 'http', host: 'draft.example', port: 8080, username: 'draft-user', password: 'wrong-password' };
+  const result = await service.call('checkProxy', { proxy: draft });
+  assert.equal(result.errorCode, 'PROXY_AUTH_FAILED');
+  assert.equal(explained.length, 1);
+  assert.equal(explained[0].host, 'draft.example'); assert.equal(explained[0].port, 8080); assert.equal(explained[0].password, 'wrong-password');
+});

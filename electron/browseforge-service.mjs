@@ -740,7 +740,8 @@ export class BrowseForgeService {
     const { proxy, wire, revision, managed } = draft == null ? await this.serialize(prepare) : await prepare();
     try {
       assertCurrent();
-      const result = await this.networkProbe.probe(wire, { force: true });
+      let result = await this.networkProbe.probe(wire, { force: true });
+      if (managed && this.networkProbe.explainFailure) result = await this.networkProbe.explainFailure(result, proxyConfig(proxy));
       assertCurrent();
       if (managed && revision !== (this.managedProxyRevisions.get(proxy.id) ?? 0)) throw error('代理网络内核在检测期间中断，请重试。', 'PROXY_CORE_STOPPED');
       // Main-only callback keeps optional map context on the exact verified

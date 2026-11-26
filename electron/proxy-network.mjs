@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import https from 'node:https';
 import net from 'node:net';
+import tls from 'node:tls';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import ipaddr from 'ipaddr.js';
@@ -157,6 +158,35 @@ const messages = {
   NETWORK_FAILED: '无法经指定网络出口完成 HTTPS 验证，请检查代理、认证及网络。',
 };
 
+/** Ask an HTTP(S) proxy for one CONNECT to `target` and read only its status
+ * line: true when it answers 407. Nothing is sent through an accepted tunnel,
+ * which is closed at once. Used after a managed route fails, because the
+ * local proxy core accepts CONNECT before dialing upstream and so hides 407. */
+export function httpProxyRejectsAuthentication(input, { target, timeoutMs = 5000, tlsOptions = {} } = {}) {
+  let proxy;
+  try { proxy = proxyValues(input); } catch { return Promise.resolve(false); }
+  if (!proxy || !['http', 'https'].includes(proxy.protocol) || typeof target !== 'string' || !/^[A-Za-z0-9.-]+:\d{1,5}$/.test(target)) return Promise.resolve(false);
+  return new Promise(resolve => {
+    let settled = false, buffered = '';
+    const done = value => { if (settled) return; settled = true; clearTimeout(timer); socket.destroy(); resolve(value); };
+    const timer = setTimeout(() => done(false), timeoutMs);
+    const options = { host: proxy.host, port: proxy.port };
+    const socket = proxy.protocol === 'https' ? tls.connect({ ...options, servername: net.isIP(proxy.host) ? undefined : proxy.host, ...tlsOptions }) : net.connect(options);
+    socket.once(proxy.protocol === 'https' ? 'secureConnect' : 'connect', () => {
+      const auth = proxy.username || proxy.password ? `Proxy-Authorization: Basic ${Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64')}\r\n` : '';
+      socket.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n${auth}\r\n`);
+    });
+    socket.on('data', chunk => {
+      buffered += chunk.toString('latin1');
+      if (buffered.length > 1024) return done(false);
+      const line = buffered.indexOf('\r\n');
+      if (line >= 0) done(/^HTTP\/1\.[01] 407(?:\s|$)/.test(buffered.slice(0, line)));
+    });
+    socket.once('error', () => done(false));
+    socket.once('close', () => done(false));
+  });
+}
+
 /** Injectable transport/endpoints/TLS are trusted native test seams, never IPC options. */
 export class ProxyNetworkProbe {
   constructor({ endpoints = GEO_ENDPOINTS, transport = requestGeoJSON, timeoutMs = 10000, maxBodyBytes = 32768,
@@ -167,6 +197,13 @@ export class ProxyNetworkProbe {
     this.transport = transport; this.timeoutMs = timeoutMs; this.maxBodyBytes = maxBodyBytes;
     this.cacheTtlMs = cacheTtlMs; this.nowMs = nowMs; this.tlsOptions = tlsOptions;
     this.cache = new Map(); this.inflight = new Map(); this.controllers = new Set(); this.closed = false; this.networkRevision = 0;
+  }
+  /** Reclassify a failed managed-route check when the upstream proxy itself refuses the credentials. */
+  async explainFailure(result, upstream) {
+    if (result?.ok !== false || result.errorCode !== 'NETWORK_FAILED' || this.closed) return result;
+    const target = `${new URL(this.endpoints[0].url).hostname}:443`;
+    if (!await httpProxyRejectsAuthentication(upstream, { target, timeoutMs: Math.min(this.timeoutMs, 5000), tlsOptions: this.tlsOptions })) return result;
+    return { ...result, errorCode: 'PROXY_AUTH_FAILED', message: messages.PROXY_AUTH_FAILED };
   }
   peek(proxy) { const entry = this.cache.get(proxyFingerprint(proxy)); return entry ? { ...structuredClone(entry.result), stale: this.nowMs() - entry.timestamp >= this.cacheTtlMs } : null; }
   invalidate(proxy) { const key = proxyFingerprint(proxy); this.cache.delete(key); this.inflight.delete(key); }

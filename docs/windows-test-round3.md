@@ -106,6 +106,7 @@ Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'cmd.exe','conhost.ex
 
 - 保持 2 个终端会话开着（其中 1 个正在 `ping -t`），直接关闭 Envara 最后一个窗口。
 - 预期：约 10 秒内 Envara 全部退出，`electron.exe`、`BrowseForge-sidecar.exe`、`mihomo.exe`、以及上面这些终端进程都没有残留。
+- **更正（第 3 轮之后）**：此预期写错了。e821ae0 上关闭最后一个窗口时，只要还有终端在运行，Envara 会留在后台（沿用 macOS 行为），直到终端结束才退出。之后的提交在 Windows 上改为弹窗确认，见 `docs/windows-test-round4.md`。
 - 退出后再打开一次，确认能正常启动、旧终端会话没有被复活。
 
 ### R4 `powershell.exe` 进程数量

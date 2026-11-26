@@ -162,11 +162,20 @@
 - [x] 第 2 轮：`backend:prepare` 每次都从 `raw.githubusercontent.com` 下载 playwright-go LICENSE。现在依次复用 `GOMODCACHE`、仓库内 Go 模块缓存和上一次驱动产物中的同一文件，最后才下载。
 - [x] 第 2 轮：Windows 引擎下载不读系统代理。侧车现在读取 `HKCU\…\Internet Settings` 中已启用的静态代理（不解析 PAC），与 macOS 读取 `scutil --proxy` 的行为一致。
 - [x] 第 2 轮：终端缺少 `APPDATA`/`LOCALAPPDATA`，现指向该环境自己的配置/数据目录；Windows 上不再给 node-pty 传 `encoding`（消除每次启动的警告）；搜索框快捷键在非 macOS 显示 `Ctrl K`。
-- [ ] 第 3 轮（说明见 `docs/windows-test-round3.md`）：在新提交上复测 A 组原样命令（不再需要预加载/补丁夹具）、E6/G3 终端关闭与退出，以及 `powershell.exe` 子进程数量。
+- [x] 第 3 轮（基于 e821ae0，两台 Windows 11 实机，说明见 `docs/windows-test-round3.md`）：原样安装通过（同事乙那台机器直连 GitHub 不通，需要设代理环境变量，属于网络环境）；`npm test` 约 14.5 分钟跑完，不再挂起；终端关闭 6 种方式共 30 次全部在预算内完成、无残留；常驻 `powershell.exe` 0/1/1 个，空闲约 15 s 退出；只靠系统代理下载内核成功；BrowseForge Chromium 停用提示、APPDATA 隔离、编码警告、`Ctrl K`、简短回归和导入密码错误提示都通过。
+- [x] 第 3 轮：开着终端时关闭最后一个窗口，Envara 留在后台（macOS 的设计，Windows 上没有 Dock 可回到它），两台机器都观察到进程长时间不退出。现在 Windows/Linux 上关闭最后一个窗口时，如仍有运行中的终端或附加软件，弹窗确认“结束并退出”或“取消”（默认取消，九种语言），确认后走统一退出清理；没有运行中的任务就直接退出。macOS 不变。
+- [x] 第 3 轮：HTTP/HTTPS 代理密码错误显示通用“无法完成 HTTPS 验证”。原因：这两种代理经内置 Mihomo 检测，Mihomo 先回应 CONNECT 再连上游，上游的 407 被吞掉。检测失败后，现在对上游代理单独发一次 CONNECT，只读状态行（隧道不发送任何数据并立即关闭）；返回 407 时改报“代理认证失败，请检查凭据”。
+- [x] 第 3 轮：`npm run desktop` 按 Ctrl+C 后 Windows 上残留 Vite 的 `esbuild.exe`；开发启动器现在用 `taskkill /T /F` 结束 Vite 与 Electron 的整个进程树。
+- [x] 第 3 轮：收集脚本对 JSON 转义路径（`C:\\Users\\<用户名>`）脱敏遗漏；`crlfFiles` 把 `attr/-text` 文件误报为 CRLF。均已修正。
+- [ ] 第 4 轮（说明见 `docs/windows-test-round4.md`）：复测关闭最后一个窗口的确认与退出、HTTP 代理认证失败文案；记录 Envara 主进程下来源不明的 `cmd.exe` + `conhost.exe`（同事甲观察到一对，不随关闭次数累积）的命令行和创建时间。
+- [ ] node-pty 在关闭会话时启动的 `conpty_console_list_agent` 偶发 `AttachConsole failed` 并打印完整堆栈（shell 已退出时）。不影响关闭结果，属于日志噪音，待评估是否能避免。
+- [ ] 启动初期偶发 `Unable to refresh workspace: Unable to reach the local BrowseForge service.`（侧车尚未就绪时的刷新），之后恢复；可在侧车就绪前跳过刷新。
+- [ ] `npm test` 在 `%TEMP%` 留下 `envara*` 临时目录（一次约 65 个）；`backend:prepare` 重命名旧 `playwright-driver` 偶发 EPERM（文件被扫描占用），可加短暂重试。
+- [ ] npm 12 默认拦截 `electron-winstaller`、`esbuild`、`node-pty` 的安装脚本（allowScripts），当前未造成影响；升级到 npm 12 前需要在 `package.json` 中声明允许。
 - [x] BrowseForge Chromium Windows 运行时（上游 `nczz/browseforge-runtime-chromium` v0.1.6-alpha.0）缺少 `150.0.7871.101.manifest`，`chrome.exe` 因 SxS 配置错误无法启动；补齐后页面时区与 Intl locale 仍取宿主值。已在 Windows 上停用该内核（`electron/engine-platform-hold.mjs`）：内核列表显示不可用及原因，安装、新建和启动都给出明确提示，且不会成为默认内核。
 - [ ] 上游发布修复上述两项的 Windows 运行时后，更新固定版本、在 Windows 上验收，再移除停用。
 - [ ] 引擎下载进度：侧车给出字符串进度，界面只显示“安装中…”；失败文案重复大量进度行。
-- [ ] 待在 macOS 上复现后判断：导入时密码错误没有可见提示（G2）；HTTP 代理 407 显示为通用验证失败而非“代理认证失败”（C3）；Camoufox canvas 哈希重开后变化（D3）。
+- [ ] 待在 macOS 上复现后判断：Camoufox canvas 哈希重开后变化（D3）。（导入密码错误的提示已在第 3 轮确认正常；HTTP 407 已修正。）
 - [ ] 界面：Windows 上仍显示 macOS 专属的“SSH 连接”导航；系统链接路由控件被隐藏而非显示不可用；设置中“终端链接使用所选浏览器”在链接通道不可用时不成立；Windows 附加软件目录未过滤安装器与系统辅助程序；Claude 拒绝文案应说明“Windows 暂不支持”而非“安装无效”。
 - [ ] 单元测试在 Windows 上的可移植性：约 570 项失败来自测试本身的 POSIX 假设（`/usr/bin/true`、`/tmp`、Unix socket、`process.getuid`、`openssl`、gzip 夹具等）和 macOS 专属测试文件。需要为 macOS 专属测试加平台跳过，并把通用测试改为可移植夹具，以便区分真实的 Windows 缺陷。
 - [ ] `realpath` 与原路径逐字比较：如果出现大小写、8.3 短路径或 `\\?\` 前缀差异导致 `UNSAFE_PATH`，需要改为 Windows 规范化比较。

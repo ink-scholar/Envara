@@ -40,6 +40,8 @@ import { DesktopEnvironmentTransferLock, discardPendingEnvironmentImport, expire
   releaseDeletedEnvironmentImportProfile, withPendingEnvironmentImport } from './environment-import-lifecycle.mjs';
 import { verifyPFInstallation } from '../native/macos-pf-routing/controller.mjs';
 import { applicationWorkspaceContext } from './workspace-context.mjs';
+import { backgroundWork, holdsLastWindowClose, lastWindowCloseDialog } from './last-window-close.mjs';
+import { recommendInterfaceLanguage } from '../shared/interface-languages.mjs';
 import { ProxyNetworkProbe } from './proxy-network.mjs';
 import { createNetworkRecoveryMonitor } from './network-recovery.mjs';
 import { parseGoogleMapsLocation } from '../shared/network-location.mjs';
@@ -660,7 +662,13 @@ async function handleCall(method, args = {}, caller = window) {
 function registerView(view, kind, profileId = null) {
   const contents = view.webContents;
   views.set(contents, { window: view, kind, profileId });
+  lastWindowCloseConfirmed = false;
   contents.on('dom-ready', () => appearance.updateWindow(view));
+  view.on('close', event => {
+    if (!holdsLastWindowClose({ remainingViews: views.size, quitting, confirmed: lastWindowCloseConfirmed })) return;
+    event.preventDefault();
+    void confirmLastWindowClose(view);
+  });
   view.on('closed', () => {
     views.delete(contents);
     for (const [key, item] of terminalWindows) if (item === view) terminalWindows.delete(key);
@@ -742,14 +750,36 @@ const workspaceWindow = createWorkspaceWindowController({ current: () => window,
   canOpen: () => ownsLock && !quitting });
 const showWorkspaceWindow = () => { void workspaceWindow.open().catch(error => console.error('Unable to open workspace:', error.message)); };
 app.on('second-instance', showWorkspaceWindow);
+async function currentBackgroundWork() {
+  return backgroundWork({ terminals: await terminal?.snapshot(), applications: await applications?.snapshot() });
+}
 async function quitWhenIdle() {
   if (quitting || views.size) return;
   const trial = applications?.routing?.controlledNotionTrialSnapshot?.();
   if (notionTrialReserved || trial?.active === true || trial?.cleanupUncertain === true) return;
-  const snapshot = await terminal?.snapshot();
-  if (snapshot?.profiles?.some(profile => profile.sessions?.some(session => ['starting', 'running', 'closing'].includes(session.status)))) return;
-  if ((await applications?.snapshot())?.applications?.some(item => ['starting', 'running', 'stopping'].includes(item.status))) return;
+  if ((await currentBackgroundWork()).any) return;
   if (!views.size) app.quit();
+}
+// Windows and Linux have no Dock to reach a windowless Envara, so the last
+// close asks before ending running terminals and attached applications.
+let lastWindowCloseConfirmed = false;
+let lastWindowCloseChecking = false;
+async function confirmLastWindowClose(view) {
+  if (lastWindowCloseChecking) return;
+  lastWindowCloseChecking = true;
+  try {
+    let work;
+    try { work = await currentBackgroundWork(); }
+    catch (error) { console.error('Unable to check running work before closing:', error.message); work = { any: false }; }
+    if (view.isDestroyed() || quitting) return;
+    if (!work.any) { lastWindowCloseConfirmed = true; view.close(); return; }
+    const settings = await Promise.resolve(service?.store?.read?.()).then(value => value?.settings, () => null);
+    const language = settings?.language ?? recommendInterfaceLanguage(app.getPreferredSystemLanguages());
+    const { response } = await dialog.showMessageBox(view, lastWindowCloseDialog(language, work));
+    if (response !== 0 || view.isDestroyed()) return;
+    lastWindowCloseConfirmed = true;
+    app.quit();
+  } finally { lastWindowCloseChecking = false; }
 }
 app.on('window-all-closed', () => { void quitWhenIdle().catch(() => {}); });
 app.on('activate', showWorkspaceWindow);

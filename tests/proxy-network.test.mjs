@@ -6,7 +6,7 @@ import test from 'node:test';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { ProxyNetworkProbe, isPublicIP, proxyFingerprint } from '../electron/proxy-network.mjs';
+import { ProxyNetworkProbe, isPublicIP, proxyFingerprint, httpProxyRejectsAuthentication } from '../electron/proxy-network.mjs';
 
 // Test-only localhost certificate. Never disable TLS verification in production.
 const key = `-----BEGIN PRIVATE KEY-----
@@ -238,4 +238,24 @@ test('network changes abort old lookup and permit a fresh request without stale 
   const fresh = await probe.probe(proxy); assert.equal(fresh.ip, '1.1.1.1');
   finish(geo); assert.equal((await old).ok, false);
   assert.equal(calls, 2); assert.equal(probe.peek(proxy).ip, '1.1.1.1');
+});
+
+test('a managed-route failure is reported as authentication only when the upstream HTTP proxy answers 407', async (t) => {
+  const target = await serverFixture(t);
+  const rejecting = await connectProxy(t, target.targetPort, 'http', false);
+  const accepting = await connectProxy(t, target.targetPort, 'http', true);
+  const options = { target: 'localhost:443', timeoutMs: 1000 };
+  assert.equal(await httpProxyRejectsAuthentication(rejecting.proxy, options), true);
+  assert.equal(await httpProxyRejectsAuthentication(accepting.proxy, options), false);
+  assert.equal(await httpProxyRejectsAuthentication({ ...rejecting.proxy, protocol: 'socks5' }, options), false);
+  assert.equal(await httpProxyRejectsAuthentication(rejecting.proxy, { ...options, target: 'bad host\r\nX: y' }), false);
+  assert.equal(target.hits(), 0, 'the classifier never sends a request through an accepted tunnel');
+  const probe = target.probe();
+  const failed = { ok: false, errorCode: 'NETWORK_FAILED', message: 'generic' };
+  const explained = await probe.explainFailure(failed, rejecting.proxy);
+  assert.equal(explained.errorCode, 'PROXY_AUTH_FAILED'); assert.equal(explained.message, '代理认证失败，请检查凭据。');
+  assert.equal(await probe.explainFailure(failed, accepting.proxy), failed);
+  const timeout = { ok: false, errorCode: 'NETWORK_TIMEOUT' };
+  assert.equal(await probe.explainFailure(timeout, rejecting.proxy), timeout);
+  assert.equal(rejecting.observations.length, 2);
 });

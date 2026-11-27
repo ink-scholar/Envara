@@ -81,7 +81,7 @@ Next work, in order (keep §4 of the test plan updated as items land):
    - `allowScripts` in package.json is pinned to `node-pty@1.1.0`, `esbuild@0.25.12` and `electron-winstaller@5.4.0` (denied); update the versions with dependency bumps.
 6. **Blocked or large; keep the explicit refusals until then:**
    - BrowseForge Chromium stays held on Windows (owner decision, 2026-11-27): no Envara-side workaround. Revisit only if upstream ships a Windows runtime with the SxS manifest and working timezone/locale (still v0.1.6-alpha.0 as of 2026-11-27);
-   - Windows terminal network fence: feasibility results and options are in `docs/windows-terminal-fence.md`. AppContainer meets the network goals without admin (in-container relay plus a SID-restricted named pipe), but breaks Git for Windows/MSYS2 and `NUL`. Next: retest under ConPTY and a non-elevated UAC user, and compare a dedicated-account plus WFP option;
+   - Windows terminal network fence: feasibility done (`docs/windows-terminal-fence.md` §7). AppContainer plus an in-container relay meets the network goals without admin, but Git, MSYS2 and `NUL` fail inside it, so it cannot host Claude. A dedicated account keeps tools working but needs its own WFP filters (Windows Firewall rules vanish when profiles are off), an in-account ConPTY helper (seclogon APIs reject pseudoconsoles) and a DNS-leak design. Waiting on the owner's choice among the §7 options;
    - Claude Code native Windows install;
    - WinDivert attached-app routing (see `native/windows-app-routing/README.md`);
    - SSH and system link routing.

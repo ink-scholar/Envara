@@ -55,16 +55,41 @@ macOS 用 Seatbelt 把终端整个进程树放进沙箱（`electron/terminal-net
 3. 项目目录要给容器 SID 加访问权限，相当于修改用户文件的 ACL；用户级安装的工具（`%LOCALAPPDATA%\Programs` 下的 Python、Node 等）也要授权才能用。
 4. 设备标识只限制了一部分（`MachineGuid` 可读）。
 
-## 5. 备选：专用本地账户 + WFP
+## 5. 交互终端复测（ConPTY）
 
-终端以一个专用的 Windows 本地账户运行，用 WFP 按该账户的 SID 过滤：只允许连 Envara 的中继端口，其余出站和 DNS 一律拒绝。
+验证程序的 `conpty` 模式通过伪控制台交互运行 `cmd.exe`（与 Envara 终端相同），同一组命令先在容器外跑一遍作对照：
 
-- 优点：普通用户会话，Git、MSYS2、`NUL` 都正常；规则可以精确到端口。
-- 代价：需要管理员创建账户和 WFP 规则（持久规则也要在卸载时清理）；用另一账户启动进程要保存它的凭据；项目目录同样要给该账户授权；宿主 GUI 交互受限。
+| 命令 | 容器外 | AppContainer 内 |
+|---|---|---|
+| `echo x> nul`、`type nul` | ✅ | ❌ 拒绝访问 |
+| `git --version`、`git init` | ✅ | ❌ `CreateNamedPipe failed: Permission denied` |
+| Git Bash | ✅ | ❌ MSYS2 `NtCreateDirectoryObject` 0xC0000022 |
+| curl 外网 | ✅ 200 | ✅ 被阻断（000） |
 
-## 6. 建议的下一步
+结论：Git 和 `NUL` 的问题与 stdio 方式无关，是 AppContainer 本身造成的。Claude Code 在 Windows 上依赖 Git for Windows 的 bash，所以 **AppContainer 不能承载 Claude 会话**。
 
-1. 用 ConPTY 在 AppContainer 里跑一个真正的交互终端，复测 git、`NUL` 和输入输出。如果 `NUL` 和 git 的问题只出在管道式 stdio 上，结论会大不相同。
-2. 在普通用户、开启 UAC 的环境下复测第 2 节。
-3. 对“专用账户 + WFP”做同样的验证，对比兼容性和权限代价。
-4. 根据结果再决定：默认方案、是否作为每个环境可选的“严格隔离”，或两者结合。
+## 6. 备选：专用本地账户（实测）
+
+临时建了一个本地账户，以它的身份运行终端（测完已删除账户、配置文件目录和规则）：
+
+- **兼容性**：✅ Git、Git Bash、`NUL` 都正常（就是普通用户会话）。
+- **启动方式**：❌ `CreateProcessWithLogonW` 和 `LogonUser` + `CreateProcessWithTokenW` 都不接受伪控制台属性（“参数错误”），不带伪控制台时可以启动。能带伪控制台的 `CreateProcessAsUser` 需要通常只有 SYSTEM 服务才有的特权。可行的做法是先以该账户启动 Envara 自己的小助手（不带伪控制台），由助手在自己的身份下创建伪控制台和 shell，再通过限定该账户的命名管道和 Envara 交换输入输出。
+- **网络**：Windows 防火墙规则（`New-NetFirewallRule -LocalUser`）在这台机器上**完全不生效**，因为它的专用和公用防火墙配置文件是关着的。基于防火墙规则的隔离会在用户关闭防火墙后悄悄失效，所以只能直接用 WFP 过滤器（不受防火墙开关影响，需要原生代码和管理员安装）。
+- **DNS**：系统 DNS 解析由 Windows 的 DNS Client 服务以它自己的身份完成，按用户过滤的规则拦不到，查询的域名会走宿主网络泄漏出去。要堵住还需要额外设计。
+- **本地代理端口**：Windows 防火墙不过滤 loopback；要拦宿主的 Clash 等端口，必须用 WFP 的 loopback 条件。
+
+## 7. 结论与选项
+
+Windows 上没有像 macOS Seatbelt 那样“不要管理员、兼容性好、一次满足全部要求”的机制：
+
+| 方案 | 网络要求 | 兼容性 | 管理员 | 能否承载 Claude |
+|---|---|---|---|---|
+| 维持现状（不隔离） | ❌ 只有遵守代理变量的工具走环境网络 | ✅ | 不需要 | 否（继续拒绝） |
+| AppContainer + 容器内中继 | ✅ 全部满足（设备标识部分） | ❌ 无 Git、MSYS2、`NUL` | 不需要 | 否 |
+| 专用账户 + 自有 WFP 过滤器 + 账户内助手 | ⚠️ 外网和 loopback 端口可控，DNS 泄漏待解决 | ✅ | 安装时需要（建账户、WFP、凭据保管） | 有可能，工作量大 |
+
+可选路线：
+
+1. 维持现状，在文档和界面里写清楚。
+2. 把 AppContainer 做成环境可选的“严格隔离（不含 Git）”模式，适合只跑 curl、node、PowerShell 的环境；不解决 Claude。
+3. 投入“专用账户 + WFP”路线（独立设计和安装器、DNS 泄漏方案、卸载清理），这是 Windows 上运行 Claude 的前提。

@@ -166,6 +166,32 @@ Envara 终端 ──wsl.exe──▶ Envara 专用发行版（关闭 Windows int
 
 同一条通道可以承载路由中继、MCP 浏览器 broker、SSH broker 和链接通道，各自用一个套接字名。验证用的多路复用没有逐流流控，一条慢流会拖住其他流；产品实现需要逐流窗口。
 
+### 实测三：交互终端与 Claude Code 首次运行（2026-11-27，yyb）
+
+脚本：`setup3.sh`、`ns-up.sh`、`enter.sh`、`pty-spike.mjs`。链路与产品一致：node-pty（ConPTY）→ `wsl.exe` → `ip netns exec` → `su-exec env bash --login`（uid 1000，`env -i` 后只给 Envara 指定的变量），路由经 wsl.exe stdio 通道；屏幕用 `@xterm/headless` 渲染。测试发行版 `EnvaraSpike3`。
+
+| 检查 | 结果 |
+|---|---|
+| 身份、家目录、TERM、命名空间网卡 | uid 1000、`/home/env`、xterm-256color，只有 lo 和 envtun0 |
+| 初始尺寸 100×30；缩放到 120×40 | `stty size`、`tput` 都跟随 |
+| Ctrl-C 中断 `sleep 30` | 158 ms 回到提示符 |
+| 256 色、真彩色、中文宽字符 | ✅ |
+| 出口 IP | 与路由一致 |
+| 读 `/root`、`/etc/shadow` | 拒绝 |
+| 以 `env` 身份安装 Claude Code（经路由） | ✅ 2.1.332；Alpine 的 `/etc/profile` 会重置 PATH，冲掉 `~/.local/bin`，Envara 需要自己管理 profile |
+| Claude 界面（主题选择、登录方式） | ✅ 渲染正常 |
+
+登录的发现：
+
+- 选“Claude 订阅账户”后，Claude 显示“Browser didn't open? Use the URL below”，给出一个短链接（`https://claude.ai/oauth/authorize?z-…`，以 OSC 8 超链接输出）和“Paste code here if prompted”输入框。
+- Claude **没有尝试打开浏览器**：strace 显示没有执行 `BROWSER`、`xdg-open` 或 `powershell.exe`。设置 `DISPLAY` 或 `/run/.containerenv` 后结果相同。所以 `BROWSER` 链接通道对登录没有用处。
+- Claude 在命名空间里监听 `127.0.0.1:<随机端口>` 作为本地回调，Windows 侧连接被拒（ECONNREFUSED）。二进制里有 `MANUAL_REDIRECT_URL = https://platform.claude.com/oauth/code/callback`，以及“The browser can't return the sign-in to Claude Code automatically. After you sign in, paste the code shown.”，即手动粘贴授权码的流程。
+- Claude 在 WSL 下会执行 `/mnt/c/Windows/System32/reg.exe query HK{LM,CU}\SOFTWARE\Policies\ClaudeCode` 读取 Windows 策略。关闭 interop 后返回 ENOENT，所以 Windows 侧的 Claude 托管策略不会作用到环境里。
+
+产品上的含义：Envara 终端要能点击终端里的超链接（OSC 8 和普通 URL），并在该环境的浏览器里打开。用户登录后把页面显示的授权码粘贴回终端。
+
+**未验证**：用真实账户完整登录一次。需要确认短链接用的是手动回调（页面显示授权码），而不是只回到 localhost。如果是后者，需要把回调经通道转进命名空间。
+
 ### 落地需要的工作
 
 1. 发行版：随 Envara 提供一个最小 rootfs（带校验），首次使用时 `wsl --import` 为 Envara 专用发行版；关闭 interop 和 Windows PATH；卸载时注销。用户需要先装好 WSL2（首次需要管理员，可能要重启）。
@@ -174,5 +200,5 @@ Envara 终端 ──wsl.exe──▶ Envara 专用发行版（关闭 Windows int
 4. 文件：用挂载命名空间只暴露该环境的家目录和用户显式选择的 Windows 文件夹（drvfs，`metadata`），不暴露 Windows 用户目录和 SSH 私钥；shell 不能以 root 运行。界面提示 Windows 文件夹较慢、Windows 侧改动不触发文件监听。
 4a. SSH：命名空间里的 OpenSSH 沿用 macOS 的 broker 模型（ProxyCommand / askpass 经通道交给主进程），凭据留在 Windows 主进程。
 5. 终端：Envara 终端通过 `wsl.exe -d <发行版> --` 启动命名空间内的 shell（node-pty 可以直接运行 wsl.exe）；Claude Code 安装在环境自己的家目录。
-6. 链接和浏览器：Claude 的登录和浏览器操作经已有的 MCP broker 交给 Envara 浏览器，需要一条从命名空间到宿主的专用通道（同样可以用 Unix 套接字）。浏览器侧的 WebRTC 由 Envara 浏览器内核的策略负责，需要单独核实。
+6. 链接和浏览器：Claude 登录不会主动打开浏览器（实测三），所以 Envara 终端要能点击 OSC 8 和普通 URL 并在环境浏览器里打开，用户再粘贴授权码；浏览器操作经已有的 MCP broker 和 stdio 通道交给 Envara 浏览器。浏览器侧的 WebRTC 由 Envara 浏览器内核的策略负责，需要单独核实。
 7. 失败处理：Mihomo、中继或命名空间任何一个缺失时都必须断网（命名空间里没有其他出口，所以天然断网），并在终端里明确提示。

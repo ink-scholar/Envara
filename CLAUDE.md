@@ -70,7 +70,10 @@ Next work, in order (keep §4 of the test plan updated as items land):
    - Follow-up: build the Windows attached-app catalog from Start Menu shortcuts (`.lnk`). The bounded Program Files scan still truncates and lists some vendor helpers.
 3. **Terminal link channel on Windows: done (round 5).** A per-run named pipe; `BROWSER` is a PowerShell command line running `electron/terminal-link-shim.ps1`, never a `.cmd`, because batch files re-parse `&`/`|` in URLs.
    - Limit: only `BROWSER`-honouring tools reach the environment browser; `start <url>` uses the Windows default browser.
-4. **Packaging acceptance:** `npm run dist:win` installer install, first launch, uninstall and data retention on a clean Windows machine.
+4. **Packaging acceptance: done (round 5).** Unsigned NSIS from `npm run dist:win` on Windows.
+   - Accepted: silent install to the default and to a custom (space plus CJK) directory, installed launch, terminal, Camoufox, quit-all, and uninstall that keeps `%APPDATA%\Envara`.
+   - Build prerequisites: Go 1.25.0, network, and an x64 C compiler. Without MSVC, use portable llvm-mingw via `ENVARA_WINDOWS_CC`.
+   - Open: code signing (SmartScreen), upgrade-over-install, and a never-used user profile.
 5. **Low priority / noise:**
    - node-pty `AttachConsole failed` stack traces on session close;
    - the early "Unable to reach the local BrowseForge service" refresh before the sidecar is ready;

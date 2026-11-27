@@ -211,4 +211,10 @@
 - [ ] Claude Code：官方 Windows 原生安装的下载校验（`claude-code-download.mjs` 目前仅支持 darwin）与 PE 识别（`claude-code-installation.mjs`）；依赖终端围栏，暂不启用。
 - [ ] SSH、系统链接路由：目前仅限 macOS，Windows 上保持明确提示。
 - [ ] 附加应用：WinDivert 路由的 DNS 归属与守护进程故障阻断两项缺口完成前保持关闭（见 `native/windows-app-routing/README.md`）。
-- [ ] 打包：`npm run dist:win` 安装包的安装、卸载和干净首次启动验收。
+- [x] 打包验收（第 5 轮，Windows 11 Pro 10.0.28000 实机，提交 63d4164 + 工作区）：`npm run dist:win` 在 Windows 上 132 s 生成未签名 NSIS 安装包 `Envara-1.3.2-win-x64.exe`（186 MB，按用户安装，可改目录）。构建需要 Go 1.25.0 和一个 x64 C 编译器：没有 MSVC 时用便携 llvm-mingw，设 `ENVARA_WINDOWS_CC=<llvm-mingw>\bin\x86_64-w64-mingw32-gcc.exe`；下载 NSIS 和 WinDivert 需要网络。
+  - 静默安装到默认目录（`%LOCALAPPDATA%\Programs\Envara`，612 MB）用时 16 s：开始菜单、桌面快捷方式和卸载登记都已建立，`%APPDATA%\Envara` 不受影响。
+  - 安装版首次启动：从 `app.asar` 运行，识别已有的环境与 Camoufox；侧车、Playwright 驱动和 Mihomo 都从安装目录运行；终端（打包后的 node-pty / ConPTY）和命名管道链接通道正常；Camoufox 经认证代理启动用时 18 s；组件版本中平台不支持的项显示“不可用”；应用更新显示“此平台暂不支持应用内更新”。
+  - 开着终端和浏览器时关闭窗口会弹出确认；选“结束并退出”后，22 个进程（含 9 个 camoufox）在 3.1 s 内全部退出。
+  - 静默卸载约 10 s：安装目录、两个快捷方式和卸载登记都已删除；用户数据前后都是 855 个文件、1005 MB，未变。
+  - 安装到含空格和中文的自定义目录（`…\自定义 安装\Envara`）：安装、启动（侧车从该目录运行）、退出、卸载都正常。
+  - 未覆盖：代码签名（未配置证书，安装时会出现 SmartScreen 提示）；从未运行过 Envara 的全新用户首次启动（开发版已验证过空数据下的语言选择首屏）；覆盖升级安装。

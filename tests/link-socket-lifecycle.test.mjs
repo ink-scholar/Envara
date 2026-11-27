@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { TerminalLinkChannel } from '../electron/terminal-link-channel.mjs';
+const unixSocketTransport = process.platform === 'win32' && 'Unix-socket transport; Windows named pipe pending';
 
 async function bounded(operation, message) {
   let timer;
@@ -15,7 +16,7 @@ async function bounded(operation, message) {
   } finally { clearTimeout(timer); }
 }
 
-test('closing a link channel revokes it and closes a connection whose opener is still pending', async t => {
+test('closing a link channel revokes it and closes a connection whose opener is still pending', { skip: unixSocketTransport }, async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'envara-link-close-'));
   let entered;
   const handling = new Promise(resolve => { entered = resolve; });
@@ -42,7 +43,7 @@ test('closing a link channel revokes it and closes a connection whose opener is 
   await assert.rejects(stat(socketPath), { code: 'ENOENT' });
 });
 
-test('a closed link channel cannot issue new credentials or be reopened', async t => {
+test('a closed link channel cannot issue new credentials or be reopened', { skip: unixSocketTransport }, async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'envara-link-ended-'));
   const channel = new TerminalLinkChannel({ root, onLink: async () => ({ opened: 'environment' }) });
   t.after(async () => { await channel.close(); await rm(root, { recursive: true, force: true }); });

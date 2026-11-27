@@ -108,12 +108,15 @@ app.whenReady().then(async () => {
   const { TerminalProtocol } = await import(${JSON.stringify(pathToFileURL(path.join(rootDirectory, 'electron/terminal-protocol.mjs')).href)});
   app.dock?.hide();
   session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (_, done) => done({ cancel: true }));
-  const view = new BrowserWindow({ show: false, width: 1200, height: 760, webPreferences: { sandbox: true, preload: ${JSON.stringify(preload)} } });
+  const view = new BrowserWindow({ ...(process.platform === 'win32' ? { show: true, x: -3000, y: 0, frame: false, thickFrame: false } : { show: false }), width: 1200, height: 760, webPreferences: { sandbox: true, preload: ${JSON.stringify(preload)} } });
   let sequence = 0, replay = '', columns = 100, rows = 12;
   const replies = [], userWrites = [], failures = [];
-  const child = ptyModule.spawn(process.execPath, [${JSON.stringify(programPath)}, ${JSON.stringify(reportPath)}], {
+  // electron.exe is a GUI-subsystem binary on Windows and never gets a console
+  // TTY under ConPTY; there the query program runs on the console node.exe.
+  const child = ptyModule.spawn(${JSON.stringify(process.platform === 'win32' ? process.execPath : '')} || process.execPath, [${JSON.stringify(programPath)}, ${JSON.stringify(reportPath)}], {
     name: 'xterm-256color', cols: columns, rows, cwd: ${JSON.stringify(directory)}, encoding: 'utf8', handleFlowControl: false,
-    env: { PATH: process.env.PATH || '', TERM: 'xterm-256color', ELECTRON_RUN_AS_NODE: '1' },
+    // Windows processes cannot initialize without SystemRoot.
+    env: { PATH: process.env.PATH || '', TERM: 'xterm-256color', ELECTRON_RUN_AS_NODE: '1', ...(process.platform === 'win32' ? { SystemRoot: process.env.SystemRoot } : {}) },
   });
   let exited = false;
   const exit = new Promise(resolve => child.onExit(() => { exited = true; resolve(); }));
@@ -205,7 +208,10 @@ async function query(round) {
   return value;
 }
 
-test('real PTY queries survive hidden, absent and multiple views without stealing keyboard input', { skip: noDisplay }, async () => {
+// ConPTY answers cursor-position queries itself and does not forward OSC 11, so
+// on Windows no query reaches Envara's protocol layer for it to answer.
+const conptyConsumesQueries = process.platform === 'win32' && 'ConPTY answers or consumes terminal queries before Envara sees them';
+test('real PTY queries survive hidden, absent and multiple views without stealing keyboard input', { skip: noDisplay || conptyConsumesQueries }, async () => {
   await page.evaluate(() => window.fixture.mount({ visible: false }));
   await page.locator('.xterm-helper-textarea').waitFor({ state: 'attached' });
   let value = await query(1);

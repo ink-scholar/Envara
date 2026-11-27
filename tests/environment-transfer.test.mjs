@@ -10,6 +10,7 @@ import { EXPORT_SCHEMA, readEnvironmentExport, writeEnvironmentExport } from '..
 import { applyPendingApplicationData, assertEnvironmentIdle, checkedExportManifest, exportEnvironment, restoreEnvironment } from '../electron/environment-transfer.mjs';
 import { finishPendingEnvironmentImport } from '../electron/environment-import-lifecycle.mjs';
 import { pfApplicationRegistrationId, pfAttachEnvironmentId } from '../native/macos-pf-routing/policy.mjs';
+const macOSFeature = process.platform !== 'darwin' && 'macOS-only feature';
 
 const PASSWORD = 'test export password';
 const PROFILE_ID = 'prof_transfer_source';
@@ -89,7 +90,7 @@ test('exportEnvironment refuses invalid passwords and live environments before r
   await absent(file);
 });
 
-test('an encrypted environment transfer preserves browser sign-ins, terminal/Claude profiles and scoped application data without programs, caches or another environment', async t => {
+test('an encrypted environment transfer preserves browser sign-ins, terminal/Claude profiles and scoped application data without programs, caches or another environment', { skip: macOSFeature }, async t => {
   const f = await fixture(t), account = await f.terminal.claudeAccounts.create(PROFILE_ID, 'Work login');
   await f.terminal.claudeAccounts.rename(PROFILE_ID, 'default', 'Primary login');
   const sourceBrowser = path.join(await f.service.checkedDirectory({ id: PROFILE_ID }), 'browser-data');
@@ -280,7 +281,7 @@ test('restoreEnvironment refuses existing terminal directories and files rather 
   });
 });
 
-test('restoreEnvironment retains pending application data when a local application is absent, changed or refused', async t => {
+test('restoreEnvironment retains pending application data when a local application is absent, changed or refused', { skip: macOSFeature }, async t => {
   for (const reason of ['missing', 'identity-mismatch', 'inspection-error']) await t.test(reason, async t => {
     const f = await fixture(t), staging = path.join(f.root, 'staging');
     await put(staging, 'app-0/UserData/Cookies', 'pending-auth');
@@ -363,7 +364,7 @@ async function pendingFixture(t) {
   return { ...f, application, registration };
 }
 
-test('applyPendingApplicationData leaves other environments and other application identities untouched', async t => {
+test('applyPendingApplicationData leaves other environments and other application identities untouched', { skip: macOSFeature }, async t => {
   const f = await pendingFixture(t);
   assert.deepEqual(await applyPendingApplicationData({ ...f, application: { ...f.application, profileId: OTHER_ID }, root: f.appRoot }), { applied: false });
   assert.deepEqual(await applyPendingApplicationData({ ...f, application: { ...f.application, identity: 'different-identity' }, root: f.appRoot }), { applied: false });
@@ -371,7 +372,7 @@ test('applyPendingApplicationData leaves other environments and other applicatio
   assert.deepEqual(await applyPendingApplicationData({ ...f, root: f.appRoot }), { applied: true });
 });
 
-test('applyPendingApplicationData rejects a target owned by another uid without replacing existing data', async t => {
+test('applyPendingApplicationData rejects a target owned by another uid without replacing existing data', { skip: macOSFeature }, async t => {
   const f = await pendingFixture(t);
   await assert.rejects(applyPendingApplicationData({ ...f, root: f.appRoot, uid: (process.getuid?.() ?? 0) + 1 }), { code: 'IMPORT_TARGET_UNSAFE' });
   for (const name of ['UserData', 'Home', 'Extensions']) assert.equal(await readFile(path.join(f.registration, name, 'existing'), 'utf8'), `${name}-existing`);
@@ -389,7 +390,7 @@ test('applyPendingApplicationData validates every target leaf before replacing a
   assert.equal(await readFile(path.join(outside, 'must-remain'), 'utf8'), 'outside-secret');
 });
 
-test('a re-export before the first application stop preserves pending imported sign-ins rather than first-run data', async t => {
+test('a re-export before the first application stop preserves pending imported sign-ins rather than first-run data', { skip: macOSFeature }, async t => {
   const f = await pendingFixture(t), file = path.join(f.root, 'reexport.envara');
   const applications = { ...f.applications, async snapshot() { return { applications: [f.application] }; } };
   const service = { ...f.service, async call(method, request) { assert.equal(method, 'exportProfiles'); assert.deepEqual(request, { id: IMPORTED_ID }); return { ...profileDocument(), profiles: [{ id: IMPORTED_ID, name: 'Imported environment' }] }; } };
@@ -453,7 +454,7 @@ test('a missing later application leaf refuses restoration before changing earli
   assert.equal(await readFile(path.join(f.registration, 'Home', 'existing'), 'utf8'), 'Home-existing');
 });
 
-test('application-data restoration refuses a symlinked ancestor and leaves both old data and pending sign-ins intact', async t => {
+test('application-data restoration refuses a symlinked ancestor and leaves both old data and pending sign-ins intact', { skip: macOSFeature }, async t => {
   const f = await pendingFixture(t), environment = path.dirname(f.registration), outside = path.join(f.root, 'other-application-environment');
   await rename(environment, outside);
   await symlink(outside, environment);
@@ -511,7 +512,7 @@ test('application exports filter machine-local security data from bound and lega
   });
 });
 
-test('legacy encrypted application imports discard machine-local entries before pending storage, and apply filters tampered old pending data again', async t => {
+test('legacy encrypted application imports discard machine-local entries before pending storage, and apply filters tampered old pending data again', { skip: macOSFeature }, async t => {
   for (const scoped of [false, true]) await t.test(scoped ? 'scoped archive' : 'whole archive', async t => {
     const f = await fixture(t), source = path.join(f.root, 'legacy-application');
     await put(source, LOCAL_SELECTOR, 'foreign-machine-selector'); await put(source, LOCAL_KEYCHAIN, 'foreign-keychain');
@@ -535,7 +536,7 @@ test('legacy encrypted application imports discard machine-local entries before 
   });
 });
 
-test('pending Home replacement refuses existing nonempty local Keychains before altering any leaf', async t => {
+test('pending Home replacement refuses existing nonempty local Keychains before altering any leaf', { skip: macOSFeature }, async t => {
   const f = await pendingFixture(t), pending = await pendingApplicationDirectory(f);
   await put(f.registration, LOCAL_SELECTOR, 'keep-local-selector');
   await put(f.registration, LOCAL_KEYCHAIN, 'keep-local-keychain');
@@ -583,7 +584,7 @@ test('local selector directory checks reject writable or root-owned chains witho
   });
 });
 
-test('a later transaction failure restores the original local selector and every old application leaf', async t => {
+test('a later transaction failure restores the original local selector and every old application leaf', { skip: macOSFeature }, async t => {
   const f = await pendingFixture(t), pending = await pendingApplicationDirectory(f);
   await put(f.registration, LOCAL_SELECTOR, 'rollback-local-selector');
   await put(pending, LOCAL_SELECTOR, 'must-never-replace-selector');

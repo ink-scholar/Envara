@@ -25,7 +25,7 @@ test('terminal entries persist names and native timestamps without requiring the
   const restarted = await openStore(f.root);
   assert.deepEqual(await restarted.get('profile_one', entry.id), entry);
   assert.deepEqual(await restarted.list('profile_two'), []);
-  assert.equal((await lstat(f.filename)).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal((await lstat(f.filename)).mode & 0o777, 0o600);
   assert.deepEqual(Object.keys(JSON.parse(await readFile(f.filename, 'utf8'))).sort(), ['entries', 'schema', 'version']);
   entry.networkRef.kind = 'managed'; entry.name = 'client mutation';
   assert.equal((await store.get('profile_one', entry.id)).name, '工作台');
@@ -112,9 +112,14 @@ test('symbolic or hard-linked files and a changed storage root are rejected with
   assert.equal(await readFile(target, 'utf8'), secret); await unlink(f.filename); await writeFile(f.filename, before, { mode: 0o600 });
   const alias = path.join(f.root, 'root-alias'); await symlink(f.root, alias);
   await assert.rejects(openStore(alias), hasCode('TERMINAL_ENTRY_UNSAFE_PATH'));
-  await chmod(f.root, 0o777);
-  await assert.rejects(store.rename('profile_one', entry.id, 'unsafe'), hasCode('TERMINAL_ENTRY_UNSAFE_PATH'));
-  await chmod(f.root, 0o700); assert.equal(await readFile(f.filename, 'utf8'), before);
+  // A world-writable storage root is a POSIX notion; Windows reports synthetic
+  // modes and relies on the profile directory's ACL instead.
+  if (process.platform !== 'win32') {
+    await chmod(f.root, 0o777);
+    await assert.rejects(store.rename('profile_one', entry.id, 'unsafe'), hasCode('TERMINAL_ENTRY_UNSAFE_PATH'));
+    await chmod(f.root, 0o700);
+  }
+  assert.equal(await readFile(f.filename, 'utf8'), before);
 });
 
 test('malformed, excessive, duplicated and runtime-bearing stored records fail with bounded sanitized errors', async t => {

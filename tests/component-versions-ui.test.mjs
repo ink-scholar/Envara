@@ -52,7 +52,7 @@ window.ready=true;` }, bundle: true, write: false, format: 'iife', platform: 'br
   await writeFile(path.join(directory, 'fixture.js'), output.outputFiles[0].text);
   const css = (await Promise.all(['styles.css', 'component-versions.css'].map(name => readFile(path.join(project, 'src', name), 'utf8')))).join('\n');
   await writeFile(path.join(directory, 'index.html'), `<!doctype html><html><meta charset="utf-8"><style>${css}\nbody{overflow:auto;min-width:0}#root{max-width:880px;padding:24px;margin:auto}</style><body><main id="root"></main><script src="fixture.js"></script></body></html>`);
-  await writeFile(path.join(directory, 'main.cjs'), `process.on('uncaughtException', error => { process.stderr.write(String(error?.stack || error)); process.exit(1); }); process.on('unhandledRejection', error => { process.stderr.write(String(error?.stack || error)); process.exit(1); }); const {app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(path.join(directory, 'data'))});app.whenReady().then(()=>{app.dock?.hide();const view=new BrowserWindow({show:false,width:1100,height:1000,useContentSize:true,webPreferences:{sandbox:true,backgroundThrottling:false}});view.loadFile(${JSON.stringify(path.join(directory, 'index.html'))});});`);
+  await writeFile(path.join(directory, 'main.cjs'), `process.on('uncaughtException', error => { process.stderr.write(String(error?.stack || error)); process.exit(1); }); process.on('unhandledRejection', error => { process.stderr.write(String(error?.stack || error)); process.exit(1); }); const {app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(path.join(directory, 'data'))});app.whenReady().then(()=>{app.dock?.hide();const view=new BrowserWindow({...(process.platform === 'win32' ? { show: true, x: -3000, y: 0, frame: false, thickFrame: false } : { show: false }),width:1100,height:1000,useContentSize:true,webPreferences:{sandbox:true,backgroundThrottling:false}});view.loadFile(${JSON.stringify(path.join(directory, 'index.html'))});});`);
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
   desktop = await _electron.launch({ executablePath: electron, args: [path.join(directory, 'main.cjs')], env });
   page = await desktop.firstWindow(); page.on('pageerror', error => rendererErrors.push(error.message)); await page.waitForFunction(() => window.ready === true);
@@ -86,7 +86,7 @@ test('inline load callback rerenders read once, disclosure clicks do not update 
   await install.getByRole('button', { name: '安装内核', exact: true }).click();
   await page.waitForFunction(() => window.loads === 2);
   assert.deepEqual(await page.evaluate(() => window.actions), [['engine', 'cloakbrowser']]);
-  assert.equal(await desktop.evaluate(({BrowserWindow}) => BrowserWindow.getAllWindows().some(view=>view.isVisible())), false);
+  assert.equal(await desktop.evaluate(({BrowserWindow}) => BrowserWindow.getAllWindows().some(view=>view.isVisible()&&view.getBounds().x>-1000)), false);
 });
 
 test('nine languages and both appearances preserve long names, unknown values and bounded layouts', { skip: noDisplay }, async () => {

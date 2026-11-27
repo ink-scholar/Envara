@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
 import { ClaudeAccountStore } from '../electron/claude-account-store.mjs';
+const macOSFeature = process.platform !== 'darwin' && 'macOS-only feature';
 
 const DEFAULT = { id: 'default', name: '默认', default: true };
 const SYNTHETIC_AUTH = 'SYNTHETIC_AUTH_MARKER_DO_NOT_INCLUDE_IN_ERRORS';
@@ -29,7 +30,7 @@ function hasCode(code) {
   };
 }
 
-test('account labels persist while the default remains implicit and compatible', async t => {
+test('account labels persist while the default remains implicit and compatible', { skip: macOSFeature }, async t => {
   const f = await fixture(t);
   const store = await openStore(f.root);
   assert.deepEqual(await store.list('env_one'), [DEFAULT]);

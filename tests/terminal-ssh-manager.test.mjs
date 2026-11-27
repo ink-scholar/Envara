@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import test from 'node:test';
+import { macOSOnly as test } from './support/platform-test.mjs';
 import { TerminalSshManager } from '../electron/terminal-ssh-manager.mjs';
 import { parseSshPublicKey } from '../electron/terminal-ssh-key.mjs';
 

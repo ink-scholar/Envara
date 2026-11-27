@@ -7,7 +7,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough, Readable, Writable } from 'node:stream';
-import test from 'node:test';
+import { macOSOnly as test } from './support/platform-test.mjs';
 import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { readSshTargets, runSshProxy, sameSshTarget, validateSshProxyUrl, validateSshTarget } from '../electron/terminal-ssh-proxy.mjs';

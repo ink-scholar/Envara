@@ -5,11 +5,13 @@ import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import * as asar from '@electron/asar';
 import { gzipSync } from 'node:zlib';
 import { scanPublicSource, scanPublicApp, scanPublicSourceArchive } from '../scripts/verify-public-release.mjs';
 import { inspectSourceArchive } from '../scripts/source-archive.mjs';
+const macOSFeature = process.platform !== 'darwin' && 'macOS-only feature';
 
 const execute = promisify(execFile);
 const scannerPath = new URL('../scripts/verify-public-release.mjs', import.meta.url);
@@ -126,7 +128,7 @@ test('runtime, signing and evidence files are refused while an empty environment
   assert.equal(count(report, 'saved/previous-runtime.json', 'LOCAL_RUNTIME_FILE'), 1);
 });
 
-test('app scanning reads nested asar entries and external binary resources without modifying upstream content', async t => {
+test('app scanning reads nested asar entries and external binary resources without modifying upstream content', { skip: macOSFeature }, async t => {
   const f = await fixture(t), upstream = path.join(path.dirname(f.home), 'vendor-builder', 'build', 'ws');
   const a = await application(f, { 'main.js': 'export {};', 'nested/profile.dat': Buffer.from(`${f.home}/session`, 'utf16le') });
   const binary = path.join(a.app, 'Contents/Resources/node');
@@ -139,7 +141,7 @@ test('app scanning reads nested asar entries and external binary resources witho
   assert.deepEqual(await readFile(binary), original);
 });
 
-test('a complete app with only upstream paths passes, but packaged runtime configuration is blocked', async t => {
+test('a complete app with only upstream paths passes, but packaged runtime configuration is blocked', { skip: macOSFeature }, async t => {
   const f = await fixture(t), a = await application(f, { 'main.js': 'export {};', 'assets/about.txt': 'Public application' });
   await writeFile(path.join(a.app, 'Contents/Resources/node'), `${path.join(path.dirname(f.home), 'vendor-builder', 'build', 'ws')}`);
   assert.equal((await a.scan()).ok, true);
@@ -160,7 +162,7 @@ test('missing or unreadable asar does not become a successful app scan and exter
 test('CLI findings fail the command and never print the private value', async t => {
   const f = await fixture(t), key = privateKey();
   await f.put('leak.txt', key);
-  await assert.rejects(execute(process.execPath, [scannerPath.pathname, '--repo', f.repoRoot]), error => {
+  await assert.rejects(execute(process.execPath, [fileURLToPath(scannerPath), '--repo', f.repoRoot]), error => {
     assert.equal(error.code, 1);
     const report = JSON.parse(error.stdout);
     assert.equal(report.ok, false); assert.equal(report.source.findings[0].rule, 'PRIVATE_KEY');
@@ -199,7 +201,7 @@ test('clean portable source retains public upstream fixtures and valid PAX paths
   assert.match(seen[2].bytes.toString(), /BEGIN PRIVATE KEY/, 'metadata inspection does not relabel public upstream test content');
 });
 
-test('nested source metadata is inspected in asar and external authorization resources', async t => {
+test('nested source metadata is inspected in asar and external authorization resources', { skip: macOSFeature }, async t => {
   const f = await fixture(t), dirty = sourceTar([{ name: 'source/file', uname: 'private-builder' }]);
   const a = await application(f, { 'main.js': 'export {};', 'vendor/mihomo-corresponding-source.tar.gz': dirty });
   const relative = 'Contents/Resources/local-authorization/Carrier.app/Contents/Resources/mihomo-corresponding-source.tar.gz';

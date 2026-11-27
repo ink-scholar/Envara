@@ -84,7 +84,7 @@ window.networkReady = true;
   const entry = path.join(directory, 'main.cjs');
   await writeFile(entry, `const { app, BrowserWindow } = require('electron');
 app.setPath('userData', ${JSON.stringify(path.join(directory, 'data'))});
-app.whenReady().then(() => { app.dock?.hide(); const window = new BrowserWindow({ show: false, width: 1280, height: 900, webPreferences: { sandbox: true } }); window.loadURL(${JSON.stringify(pathToFileURL(path.join(directory, 'index.html')).href)}); });`);
+app.whenReady().then(() => { app.dock?.hide(); const window = new BrowserWindow({ ...(process.platform === 'win32' ? { show: true, x: -3000, y: 0, frame: false, thickFrame: false } : { show: false }), width: 1280, height: 900, webPreferences: { sandbox: true } }); window.loadURL(${JSON.stringify(pathToFileURL(path.join(directory, 'index.html')).href)}); });`);
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
   desktop = await _electron.launch({ args: [entry], env, timeout: 15000 });
   page = await desktop.firstWindow();

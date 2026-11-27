@@ -58,12 +58,14 @@ Windows facts learned so far:
 - Process snapshots use one long-lived PowerShell reader (`electron/terminal-process.mjs`); never start a new `powershell.exe` per poll.
 - HTTP/HTTPS proxies are checked through the managed Mihomo route, which hides upstream 407s; `ProxyNetworkProbe.explainFailure` reclassifies them.
 - Native folder/save dialogs block automation; drive them with UI Automation and Win32 messages when testing remotely.
+- Tests: macOS-only files use `macOSOnly` from `tests/support/platform-test.mjs`, and Unix-socket transports use `unixSocketOnly`; skips always carry a reason.
+- Windows does not paint hidden windows, so Electron UI fixtures show a frameless window off-screen on win32.
+- `electron.exe` gets no console TTY under ConPTY, and ConPTY itself answers or swallows terminal queries.
+- WSL mirrored networking can hold loopback ports that no listener reports, so tests must bind port 0, not fixed ports.
 
 Next work, in order (keep §4 of the test plan updated as items land):
-1. **Make `npm test` portable on Windows.** About 680 tests fail there, mostly from POSIX/macOS assumptions in the tests themselves: `/usr/bin/true`, `/tmp`, Unix sockets, `process.getuid`, `openssl`, gzip fixtures, and Seatbelt/Keychain/PF files.
-   - Skip macOS-only tests by platform, and give the general tests portable fixtures.
-   - Re-run on a Windows machine and triage what is left as real Windows defects.
-   - Watch for `realpath` literal comparisons (case, 8.3 short names, the `\\?\` prefix) and temp-directory leaks (`envara*` under `%TEMP%`).
+1. **`npm test` on Windows: done (round 5).** 1 failure remains, `browseforge-service` legacy migration, which fails on macOS too and is unrelated to Windows; the full run takes about 45 s.
+   - Open decision: cache maintenance stays read-only on Windows until an NTFS ACL check exists.
 2. **Windows UI mismatches**, all small:
    - hide or disable the macOS-only "SSH 连接" nav item;
    - show the system link-router control as unavailable instead of hiding it;

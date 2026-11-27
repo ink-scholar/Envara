@@ -11,6 +11,8 @@ import tls from 'node:tls';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import { createProxyCompatibilityBridge } from '../electron/proxy-compatibility-bridge.mjs';
+import { opensslCommand, opensslUnavailable } from './support/openssl.mjs';
+const opensslSkip = opensslUnavailable;
 
 const fixtureAuth = `Basic ${Buffer.from('upstream-user:upstream-private-password').toString('base64')}`;
 const localAuth = bridge => `Basic ${Buffer.from(`${bridge.username}:${bridge.password}`).toString('base64')}`;
@@ -22,7 +24,7 @@ async function tlsFixture(t) {
   t.after(() => rm(directory, { recursive: true, force: true }));
   const keyPath = join(directory, 'fixture.key');
   const certPath = join(directory, 'fixture.crt');
-  await execute('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-sha256', '-days', '1', '-nodes',
+  await execute(opensslCommand, ['req', '-x509', '-newkey', 'rsa:2048', '-sha256', '-days', '1', '-nodes',
     '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
     '-keyout', keyPath, '-out', certPath], { timeout: 10000, maxBuffer: 16384 });
   await Promise.all([chmod(keyPath, 0o600), chmod(certPath, 0o600)]);
@@ -219,7 +221,7 @@ test('limits and unsafe upstream settings fail without including supplied privat
   }
 });
 
-test('HTTPS upstream keeps original SNI and rejects an untrusted certificate without insecure fallback', async t => {
+test('HTTPS upstream keeps original SNI and rejects an untrusted certificate without insecure fallback', { skip: opensslSkip }, async t => {
   const { key, cert } = await tlsFixture(t);
   const names = []; let hits = 0; let fatal = 0;
   const server = https.createServer({ key, cert, SNICallback(name, callback) { names.push(name); callback(null, tls.createSecureContext({ key, cert })); } });
@@ -266,7 +268,7 @@ test('pending target bytes remain bounded, and closing during a proxy handshake 
   await until(() => bridge.snapshot().ownedSockets === 0);
 });
 
-test('verified HTTPS upstream forwards HTTP and opaque CONNECT using its original SNI', async t => {
+test('verified HTTPS upstream forwards HTTP and opaque CONNECT using its original SNI', { skip: opensslSkip }, async t => {
   const { key, cert } = await tlsFixture(t);
   const names = []; const targets = []; const seen = [];
   const server = https.createServer({ key, cert, SNICallback(name, callback) { names.push(name); callback(null, tls.createSecureContext({ key, cert })); } }, (request, response) => {

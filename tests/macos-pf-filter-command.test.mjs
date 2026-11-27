@@ -1,6 +1,6 @@
 // Every executable below is an inert user-owned fixture. The actual private CLI
 // is not invoked; PF/issued-lease APIs are never allowed to open a real device.
-import test from 'node:test';
+import { macOSOnly as test } from './support/platform-test.mjs';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';

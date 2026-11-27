@@ -8,6 +8,7 @@ import { DesktopEnvironmentTransferLock } from '../electron/environment-import-l
 import { LinkRouter } from '../electron/link-router.mjs';
 import { TerminalBrowserBroker } from '../electron/terminal-browser-broker.mjs';
 import { requestBrowserBroker } from '../electron/terminal-browser-mcp.mjs';
+const unixSocketTransport = process.platform === 'win32' && 'Unix-socket transport; Windows named pipe pending';
 
 // Own Unix IPC and in-memory backend only: no app, browser or personal data.
 const deferred = () => {
@@ -129,7 +130,7 @@ for (const fails of [false, true]) test(`an in-flight background link holds B un
   assert.equal(await f.lock.transfer(async () => 'B unlocked', 'prof_b'), 'B unlocked'); idle(f.lock);
 });
 
-test('exporting B refuses bound REST, MCP and open-link actions before launch while status and C remain usable', { timeout: 5000 }, async t => {
+test('exporting B refuses bound REST, MCP and open-link actions before launch while status and C remain usable', { skip: unixSocketTransport, timeout: 5000 }, async t => {
   const f = await fixture(t), binding = await f.create(), other = await f.create('prof_c');
   const finishExport = await f.holdExport('prof_b');
   for (const [name, args] of [['browser_navigate', { url: 'https://example.test/' }], ['browser_fill', { selector: '#name', value: 'fixture' }]]) {
@@ -152,7 +153,7 @@ test('exporting B refuses bound REST, MCP and open-link actions before launch wh
 for (const [wire, tool, args] of [
   ['rest', 'browser_navigate', { url: 'https://example.test/full-action' }],
   ['mcp', 'browser_fill', { selector: '#name', value: 'fixture' }],
-]) test(`the entire bound ${wire.toUpperCase()} action holds the destination through validation, startup and backend work`, { timeout: 5000 }, async t => {
+]) test(`the entire bound ${wire.toUpperCase()} action holds the destination through validation, startup and backend work`, { skip: unixSocketTransport, timeout: 5000 }, async t => {
   const f = await fixture(t), binding = await f.create(), other = await f.create('prof_c');
   const validating = f.pause('validation'), starting = f.pause('ensure', { profileId: 'prof_b' }), writing = f.pause(wire, { profileId: 'prof_b' });
   const action = f.send(binding, tool, args);
@@ -170,7 +171,7 @@ for (const [wire, tool, args] of [
   assert.equal(await f.lock.transfer(async () => 'completed action released B', 'prof_b'), 'completed action released B'); idle(f.lock);
 });
 
-for (const failure of ['binding', 'rest', 'mcp']) test(`a ${failure} refusal releases the browser reservation for export and retry`, { timeout: 5000 }, async t => {
+for (const failure of ['binding', 'rest', 'mcp']) test(`a ${failure} refusal releases the browser reservation for export and retry`, { skip: unixSocketTransport, timeout: 5000 }, async t => {
   const f = await fixture(t), binding = await f.create();
   if (failure === 'binding') f.contexts.get('prof_b').timezone = 'Europe/London';
   else {
@@ -186,7 +187,7 @@ for (const failure of ['binding', 'rest', 'mcp']) test(`a ${failure} refusal rel
   idle(f.lock);
 });
 
-test('the authenticated asynchronous link endpoint cannot bypass an active destination export', { timeout: 5000 }, async t => {
+test('the authenticated asynchronous link endpoint cannot bypass an active destination export', { skip: unixSocketTransport, timeout: 5000 }, async t => {
   const f = await fixture(t), binding = await f.create(), finishExport = await f.holdExport('prof_b');
   const body = JSON.stringify({ url: 'https://example.test/oauth' });
   const reply = await new Promise((resolve, reject) => {

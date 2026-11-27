@@ -5,11 +5,15 @@ import os from 'node:os';
 import { chmod, copyFile, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { TerminalService } from '../electron/terminal-service.mjs';
 import { ensureClaudeInstallation } from '../electron/claude-code-installation.mjs';
+const claudeCodeMacOSOnly = process.platform !== 'darwin' && 'Claude Code sessions are macOS-only';
+
+// Any small native executable stands in for the downloaded Claude binary.
+const fakeNativeSource = process.platform === 'win32' ? path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'whoami.exe') : '/usr/bin/true';
 
 async function fixture(t) {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'envara-saved-terminal-')));
   const cwd = path.join(root, 'project'); await mkdir(cwd);
-  const native = path.join(root, '2.1.296'); await copyFile('/usr/bin/true', native); await chmod(native, 0o700);
+  const native = path.join(root, '2.1.296'); await copyFile(fakeNativeSource, native); await chmod(native, 0o700);
   const records = [], resolutions = [], contexts = new Map([
     ['chosen', { id: 'chosen', name: 'Workspace', timezone: 'Asia/Manila', locale: 'en-US', proxyId: 'node-one', managedProxy: true,
       proxy: { protocol: 'http', host: '127.0.0.1', port: 45670, username: 'fixture-user', password: 'fixture-secret' } }],
@@ -80,7 +84,7 @@ test('saved terminal organization persists without changing live sessions or sav
   assert.deepEqual((await f.saved()).map(entry => [entry.id, entry.pinned]), [[first.savedTerminalId, true], [second.savedTerminalId, false]]);
 });
 
-test('fresh saved-terminal launch creates an idle independent process while ordinary reopen retains its existing behavior', async t => {
+test('fresh saved-terminal launch creates an idle independent process while ordinary reopen retains its existing behavior', { skip: claudeCodeMacOSOnly }, async t => {
   const f = await fixture(t), { account } = await f.service.createClaudeAccount({ id: 'chosen', name: 'Combination login' });
   const first = await f.start({ kind: 'claude-code', browserProfileId: 'chosen', claudeAccountId: account.id });
   await f.service.write({ sessionId: first.sessionId, data: 'synthetic old input' });
@@ -117,7 +121,7 @@ test('after app restart the entry uses fresh verified context and its own direct
   assert.equal((await f.saved()).length, 1);
 });
 
-test('named Claude entries retain the exact account data and open a manual idle shell after restart', async t => {
+test('named Claude entries retain the exact account data and open a manual idle shell after restart', { skip: claudeCodeMacOSOnly }, async t => {
   const f = await fixture(t), { account } = await f.service.createClaudeAccount({ id: 'chosen', name: 'Work login' });
   const first = await f.start({ kind: 'claude-code', browserProfileId: 'chosen', claudeAccountId: account.id });
   const selectedDirectory = f.records[0].options.env.CLAUDE_CONFIG_DIR;
@@ -133,7 +137,7 @@ test('named Claude entries retain the exact account data and open a manual idle 
   assert.ok(!f.records.at(-1).args.some(value => value === 'claude' || value.includes('--resume')));
 });
 
-test('removed accounts remain explicit invalid references and never fall back to the default account', async t => {
+test('removed accounts remain explicit invalid references and never fall back to the default account', { skip: claudeCodeMacOSOnly }, async t => {
   const f = await fixture(t), { account } = await f.service.createClaudeAccount({ id: 'chosen', name: 'Temporary login' });
   const session = await f.start({ kind: 'claude-code', browserProfileId: 'chosen', claudeAccountId: account.id });
   await f.service.close({ sessionId: session.sessionId });

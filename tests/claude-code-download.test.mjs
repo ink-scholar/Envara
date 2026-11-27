@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { macOSOnly as test } from './support/platform-test.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';

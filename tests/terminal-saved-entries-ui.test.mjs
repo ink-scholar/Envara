@@ -112,7 +112,7 @@ window.savedReady = true;
   css.unshift(await readFile(new URL('../node_modules/@xterm/xterm/css/xterm.css', import.meta.url), 'utf8'));
   await writeFile(path.join(fixture, 'index.html'), `<html lang="zh-CN" data-theme="dark"><head><style>${css.join('\n')}</style></head><body><div id="root"></div><script src="renderer.js"></script></body></html>`);
   const main = path.join(fixture, 'main.cjs');
-  await writeFile(main, `const { app, BrowserWindow } = require('electron'); app.setPath('userData', ${JSON.stringify(path.join(fixture, 'data'))}); app.whenReady().then(() => { app.dock?.hide(); const view = new BrowserWindow({ show: false, width: 1120, height: 760, webPreferences: { sandbox: true, backgroundThrottling: false } }); view.loadFile(${JSON.stringify(path.join(fixture, 'index.html'))}); });`);
+  await writeFile(main, `const { app, BrowserWindow } = require('electron'); app.setPath('userData', ${JSON.stringify(path.join(fixture, 'data'))}); app.whenReady().then(() => { app.dock?.hide(); const view = new BrowserWindow({ ...(process.platform === 'win32' ? { show: true, x: -3000, y: 0, frame: false, thickFrame: false } : { show: false }), width: 1120, height: 760, webPreferences: { sandbox: true, backgroundThrottling: false } }); view.loadFile(${JSON.stringify(path.join(fixture, 'index.html'))}); });`);
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
   desktop = await _electron.launch({ args: [main], env, timeout: 15000 });
   page = await desktop.firstWindow();

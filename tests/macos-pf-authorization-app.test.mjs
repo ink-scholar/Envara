@@ -1,4 +1,4 @@
-import test from 'node:test';
+import { macOSOnly as test } from './support/platform-test.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { appendFile, chmod, mkdir, mkdtemp, readFile, realpath, readdir, rm, symlink, writeFile } from 'node:fs/promises';

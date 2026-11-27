@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
-import test from 'node:test';
+import { macOSOnly as test } from './support/platform-test.mjs';
 import { createSshChildEnvironment, describeSshSession, parseSshInvocation, runSshCommand, SSH_SESSION_SCHEMA, SSH_SESSION_VERSION } from '../electron/terminal-ssh-command.mjs';
 
 const now = 1_800_000_000_000;

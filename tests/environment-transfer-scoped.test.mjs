@@ -8,6 +8,7 @@ import { BrowseForgeService } from '../electron/browseforge-service.mjs';
 import { EXPORT_SCHEMA, readEnvironmentExport } from '../electron/environment-export.mjs';
 import { applyPendingApplicationData, assertEnvironmentIdle, checkedExportManifest, exportEnvironment, restoreEnvironment } from '../electron/environment-transfer.mjs';
 import { pfApplicationRegistrationId, pfAttachEnvironmentId } from '../native/macos-pf-routing/policy.mjs';
+const macOSFeature = process.platform !== 'darwin' && 'macOS-only feature';
 
 const PASSWORD = 'scoped archive test password';
 const SOURCE = 'prof_scoped_source', DESTINATION = 'prof_scoped_imported', OTHER = 'prof_scoped_other';
@@ -259,7 +260,7 @@ test('terminal account metadata survives an encrypted roundtrip before any sessi
   });
 });
 
-test('application export carries only the selected application and restores its data after a clean stop', async t => {
+test('application export carries only the selected application and restores its data after a clean stop', { skip: macOSFeature }, async t => {
   const f = await fixture(t);
   f.profile.status = 'running';
   f.sessions.push({ status: 'running' });

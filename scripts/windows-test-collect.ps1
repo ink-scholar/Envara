@@ -131,8 +131,9 @@ if (-not $SkipInstall) {
   Step '04-proxy-prepare' 'npm run proxy:prepare' $StepTimeoutMinutes
 }
 if (-not $SkipTests) {
-  Step '10-npm-test' "node --test --test-timeout=$($PerTestTimeoutSeconds * 1000) `"tests/*.test.mjs`"" $TestTimeoutMinutes
-  Step '11-build' 'npm run build' $StepTimeoutMinutes
+  # Build first: tests/sites-worker.test.mjs checks the emitted dist/ files.
+  Step '10-build' 'npm run build' $StepTimeoutMinutes
+  Step '11-npm-test' "node --test --test-timeout=$($PerTestTimeoutSeconds * 1000) `"tests/*.test.mjs`"" $TestTimeoutMinutes
   Step '12-test-sites' 'npm run test:sites' $StepTimeoutMinutes
 }
 if ($Desktop) {

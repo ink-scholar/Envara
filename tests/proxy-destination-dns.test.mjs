@@ -12,6 +12,8 @@ import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createProxyDestinationResolver, destinationDNSQuestion, isPublicDestinationIPv4,
   parseDestinationDNSAnswer, PROXY_DESTINATION_DOH_ENDPOINTS } from '../electron/proxy-destination-dns.mjs';
+import { opensslCommand, opensslUnavailable } from './support/openssl.mjs';
+const opensslSkip = opensslUnavailable;
 
 const proxy = { protocol: 'https', host: 'upstream.example.test', port: 8443, username: 'fixture-user', password: 'fixture-secret' };
 const unavailable = error => error.code === 'PROXY_DESTINATION_DNS_UNAVAILABLE';
@@ -179,7 +181,7 @@ function fixtureCertificate() {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'envara-destination-dns-tls-'));
     try {
       const keyPath = path.join(directory, 'fixture.key'), certPath = path.join(directory, 'fixture.crt');
-      await promisify(execFile)('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-sha256', '-days', '1', '-nodes',
+      await promisify(execFile)(opensslCommand, ['req', '-x509', '-newkey', 'rsa:2048', '-sha256', '-days', '1', '-nodes',
         '-keyout', keyPath, '-out', certPath, '-subj', '/CN=cloudflare-dns.com',
         '-addext', 'subjectAltName=DNS:cloudflare-dns.com,DNS:dns.google,DNS:localhost,IP:127.0.0.1'], { timeout: 10000, maxBuffer: 16384 });
       const [key, cert] = await Promise.all([readFile(keyPath, 'utf8'), readFile(certPath, 'utf8')]);
@@ -246,7 +248,7 @@ async function fixture(t, { protocol = 'http', proxyHost = '127.0.0.1', response
     observations, hits: () => targetHits, sockets: upstream.sockets };
 }
 
-for (const protocol of ['http', 'https']) test(`real DNS-wire HTTPS uses authenticated ${protocol} proxy CONNECT and never system target DNS`, async t => {
+for (const protocol of ['http', 'https']) test(`real DNS-wire HTTPS uses authenticated ${protocol} proxy CONNECT and never system target DNS`, { skip: opensslSkip }, async t => {
   const local = await fixture(t, { protocol });
   const originalLookup = dns.lookup, previousNoProxy = process.env.NO_PROXY;
   dns.lookup = () => { throw new Error('system DNS forbidden in fixture'); }; process.env.NO_PROXY = '*';
@@ -258,7 +260,7 @@ for (const protocol of ['http', 'https']) test(`real DNS-wire HTTPS uses authent
   assert.equal(local.observations.every(item => item.auth === `Basic ${Buffer.from('fixture-user:fixture-secret').toString('base64')}`), true);
 });
 
-test('IPv4 source binding chooses IPv4 proxy resolution while preserving HTTPS proxy SNI', async t => {
+test('IPv4 source binding chooses IPv4 proxy resolution while preserving HTTPS proxy SNI', { skip: opensslSkip }, async t => {
   const local = await fixture(t, { protocol: 'https', proxyHost: 'localhost' }), originalLookup = dns.lookup, families = [];
   dns.lookup = (hostname, options, callback) => {
     assert.equal(hostname, 'localhost'); families.push(options.family);
@@ -272,7 +274,7 @@ test('IPv4 source binding chooses IPv4 proxy resolution while preserving HTTPS p
   assert.equal(local.observations.every(item => item.servername === 'localhost'), true);
 });
 
-test('real transport subtracts HTTP Age and rejects malformed or duplicate Age headers', async t => {
+test('real transport subtracts HTTP Age and rejects malformed or duplicate Age headers', { skip: opensslSkip }, async t => {
   for (const age of ['59', '60', '61', 'invalid', ['1', '2']]) {
     const local = await fixture(t, { response: (query, reply) => {
       reply.writeHead(200, { 'Content-Type': 'application/dns-message', Age: age }); reply.end(answer(query));
@@ -284,7 +286,7 @@ test('real transport subtracts HTTP Age and rejects malformed or duplicate Age h
   }
 });
 
-test('bounded proxy headers, origin headers/body, auth refusal, redirects and wrong content types fail closed', async t => {
+test('bounded proxy headers, origin headers/body, auth refusal, redirects and wrong content types fail closed', { skip: opensslSkip }, async t => {
   const cases = [
     { handshake: socket => socket.end('HTTP/1.1 502 Bad Gateway\r\nX-Oversize: ' + 'a'.repeat(9000) + '\r\n\r\n') },
     { handshake: socket => socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n') },
@@ -300,7 +302,7 @@ test('bounded proxy headers, origin headers/body, auth refusal, redirects and wr
   }
 });
 
-test('untrusted proxy TLS fails before CONNECT; hung handshakes and body streams close owned sockets', async t => {
+test('untrusted proxy TLS fails before CONNECT; hung handshakes and body streams close owned sockets', { skip: opensslSkip }, async t => {
   const untrusted = await fixture(t, { protocol: 'https' }), denied = untrusted.resolver({ ca: undefined });
   await assert.rejects(denied.resolve('tls.test'), unavailable); assert.equal(untrusted.observations.length, 0); denied.close();
   for (const options of [{ handshake: () => {} }, { response: () => {} }]) {

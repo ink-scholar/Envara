@@ -80,7 +80,7 @@ app.setPath('userData', ${JSON.stringify(path.join(directory, 'data'))});
 app.whenReady().then(() => {
   app.dock?.hide();
   session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (_, done) => done({ cancel: true }));
-  const window = new BrowserWindow({ show: false, width: 1280, height: 720, webPreferences: { sandbox: true, backgroundThrottling: false } });
+  const window = new BrowserWindow({ ...(process.platform === 'win32' ? { show: true, x: -3000, y: 0, frame: false, thickFrame: false } : { show: false }), width: 1280, height: 720, webPreferences: { sandbox: true, backgroundThrottling: false } });
   window.loadURL('data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Cdiv%20id%3D%22root%22%3E%3C%2Fdiv%3E');
 });`);
   const env = { ...process.env };

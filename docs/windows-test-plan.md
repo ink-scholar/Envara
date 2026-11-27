@@ -176,6 +176,14 @@
   - Q4：`npm run desktop` 收到 Ctrl+C 后 2 s 内无 `esbuild`、Electron、侧车残留。Q5：收集包中 `crlfFiles=0`，无机器名或用户目录路径。
   - Q6：Camoufox 仅经系统代理安装约 5 分钟；经认证 HTTP 出口启动 16.6 s；该环境终端 `curl` 走测试代理；复制会话与 `ping -t` 会话关闭 1.1–1.3 s，无残留。CloakBrowser、导出/导入本轮未重测。
 - [x] 第 4 轮：终端底栏在网络模式为 `unknown` 时显示原始的 `UNKNOWN`（把内部状态当作协议名大写显示），现在显示“启动后读取环境网络设置。”。
+- [x] 测试可移植性（第 5 轮，开发者在 Windows 11 实机上逐项排查）：`npm test` 在 Windows 上从 678 项失败降到 1 项（`browseforge-service` 旧版迁移，macOS 上同样失败，与平台无关），全量从约 14 分钟缩短到 45 秒。
+  - 只测 macOS 功能的 37 个文件改用 `tests/support/platform-test.mjs` 的 `macOSOnly`；混合文件中的 macOS 功能单项用 `skip: process.platform !== 'darwin' && '原因'`；终端浏览器代理与链接通道用 `unixSocketOnly`（Windows 命名管道待做）。跳过都在测试输出中带原因。
+  - 测试数据改为可移植：openssl 取 PATH 或 Git for Windows 自带（`tests/support/openssl.mjs`）；假的原生可执行文件在 Windows 上用 `whoami.exe`；附件测试在 Windows 上用 PowerShell 前台；POSIX 权限位断言只在 macOS/Linux 检查；代理内核测试改用系统分配的空闲端口（WSL 镜像网络会占用固定端口）。
+  - Electron 界面测试：Windows 不绘制隐藏窗口，截图会一直等待。Windows 上改为在屏幕外显示无边框窗口（`frame: false, thickFrame: false`），“窗口不可见”的断言改为“屏幕上没有可见窗口”；像素断言容许设备像素取整与浮点误差。
+  - PTY 测试：`electron.exe` 是 GUI 子系统程序，在 ConPTY 下没有 TTY，Windows 上改用控制台 `node.exe`；ConPTY 自己应答或吞掉终端查询（光标位置、OSC 11），“Envara 应答终端查询”的测试在 Windows 上跳过。
+  - 产品修复：`prepare-native` 在 Windows 上无法覆盖带只读属性的旧许可文件。
+- [ ] 缓存清理在 Windows 上按设计保持只读（代码要求有 NTFS ACL 检查才开放），测试已按此断言。是否实现 ACL 检查，待决定。
+- [ ] `browseforge-service` 的旧版迁移测试（`ERR_FS_CP_EEXIST`）在 macOS 与 Windows 上都失败，与 Windows 无关，单独排查。
 - [ ] node-pty 在关闭会话时启动的 `conpty_console_list_agent` 偶发 `AttachConsole failed` 并打印完整堆栈（shell 已退出时）。不影响关闭结果，属于日志噪音，待评估是否能避免。
 - [ ] 启动初期偶发 `Unable to refresh workspace: Unable to reach the local BrowseForge service.`（侧车尚未就绪时的刷新），之后恢复；可在侧车就绪前跳过刷新。
 - [ ] `npm test` 在 `%TEMP%` 留下 `envara*` 临时目录（一次约 65 个）；`backend:prepare` 重命名旧 `playwright-driver` 偶发 EPERM（文件被扫描占用），可加短暂重试。

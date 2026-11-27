@@ -1,4 +1,4 @@
-import test from 'node:test';
+import { unixSocketOnly as test } from './support/platform-test.mjs';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import path from 'node:path';

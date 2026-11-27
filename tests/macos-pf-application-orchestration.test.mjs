@@ -1,4 +1,4 @@
-import test from 'node:test';
+import { macOSOnly as test } from './support/platform-test.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';

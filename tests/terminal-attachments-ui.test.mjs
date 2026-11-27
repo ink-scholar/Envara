@@ -7,6 +7,8 @@ import { mkdtemp, realpath, mkdir, writeFile, readFile, rm } from 'node:fs/promi
 import { build } from 'esbuild';
 import { _electron } from 'playwright-core';
 
+// Windows accepts attachments only for a PowerShell foreground.
+const shellForeground = process.platform === 'win32' ? 'powershell.exe' : 'zsh';
 // Actual production preload, TerminalDock, xterm, attachment controller and
 // storage in an isolated Electron window. Synthetic clipboard events use real
 // DOM File objects; the host clipboard and user terminals are never touched.
@@ -37,12 +39,12 @@ const {app,BrowserWindow,ipcMain}=require('electron');
 app.setPath('userData',${JSON.stringify(path.join(directory, 'data'))});
 app.whenReady().then(async()=>{
   app.dock?.hide(); const {TerminalController}=await import(${JSON.stringify(controller)});
-  const sessions=${JSON.stringify(sessions)}; const owned=new Map(sessions.map(item=>[item.sessionId,{...item,pty:{process:'zsh'},abortController:new AbortController()}]));
+  const sessions=${JSON.stringify(sessions)}; const owned=new Map(sessions.map(item=>[item.sessionId,{...item,pty:{process:${JSON.stringify(shellForeground)}},abortController:new AbortController()}]));
   globalThis.fixtureWrites=[]; globalThis.fixtureStages=[]; globalThis.fixtureDelay=false; globalThis.fixtureReleases=[]; globalThis.fixtureWriteDelay=false; globalThis.fixtureWriteReleases=[]; globalThis.fixtureOwned=owned;
   const terminal={ready:Promise.resolve(), profilesDir:${JSON.stringify(profilesDir)}, session:id=>{const session=owned.get(id);if(!session)throw new Error('unknown fixture');return session;}, snapshot:async()=>({profiles:[{profileId:'owned',cwd:${JSON.stringify(directory)},savedTerminals:[],sessions}]}), write:async args=>{globalThis.fixtureWrites.push(args);if(globalThis.fixtureWriteDelay)await new Promise(resolve=>globalThis.fixtureWriteReleases.push(resolve));return {accepted:true}}, resize:async()=>({}), listClaudeAccounts:async()=>({accounts:[]}), listTerminalSshConnections:async()=>({supported:false,connections:[]})};
   const service={snapshot:async()=>({profiles:[{id:'owned',name:'Synthetic attachment environment'}],proxies:[]})};
   const controller=new TerminalController({terminal,service}); globalThis.fixtureController=controller;
-  const view=new BrowserWindow({show:false,width:1100,height:720,webPreferences:{preload:${JSON.stringify(preload)},contextIsolation:true,sandbox:true,backgroundThrottling:false}});
+  const view=new BrowserWindow({...(process.platform === 'win32' ? { show: true, x: -3000, y: 0, frame: false, thickFrame: false } : { show: false }),width:1100,height:720,webPreferences:{preload:${JSON.stringify(preload)},contextIsolation:true,sandbox:true,backgroundThrottling:false}});
   ipcMain.handle('envara:call',async(event,{method,args})=>{try{
     if(event.sender!==view.webContents||event.senderFrame!==event.sender.mainFrame)throw new Error('invalid sender');
     if(method==='stageTerminalAttachments') { globalThis.fixtureStages.push({sessionId:args.sessionId,files:args.files.map(file=>({name:file.name,path:!!file.path,bytes:file.bytes?.byteLength}))}); if(globalThis.fixtureDelay)await new Promise(resolve=>globalThis.fixtureReleases.push(resolve)); }
@@ -75,7 +77,7 @@ test('image paste crosses the real File bridge and inserts one owned quoted path
   await waitIdle();
   for (let index = 0; index < 100 && !(await writes()).length; index++) await new Promise(resolve => setTimeout(resolve, 10));
   const sent = await writes(); assert.equal(sent.length, 1); assert.equal(sent[0].sessionId, id(1));
-  assert.match(sent[0].data, /^'.*\/owned\/attachments\/batch-.*\/1-screen\.png' $/);
+  assert.match(sent[0].data, /^'.*[\\/]owned[\\/]attachments[\\/]batch-.*[\\/]1-screen\.png' $/);
   assert.equal(/[\r\n]/.test(sent[0].data), false);
   const stages = await desktop.evaluate(() => globalThis.fixtureStages); assert.deepEqual(stages[0].files, [{ name: 'screen.png', path: false, bytes: 8 }]);
   assert.equal((await readFile(sent[0].data.slice(1, -2))).length, 8);
@@ -115,7 +117,7 @@ test('SSH foreground refuses attachments and regular text paste remains ordinary
   await activeInput().evaluate(element => { const data = new DataTransfer(); data.setData('text/plain', 'plain text'); element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data })); });
   for (let index = 0; index < 100 && !(await writes()).length; index++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal((await writes()).map(item => item.data).join(''), 'plain text');
-  await desktop.evaluate((_electron, sessionId) => { globalThis.fixtureOwned.get(sessionId).pty.process = 'zsh'; }, id(2));
+  await desktop.evaluate((_electron, [sessionId, foreground]) => { globalThis.fixtureOwned.get(sessionId).pty.process = foreground; }, [id(2), shellForeground]);
 });
 
 test('a tab switch during the write acknowledgement keeps files already committed to the former terminal', { skip: noDisplay }, async () => {

@@ -22,7 +22,7 @@ before(async () => {
   const entry = path.join(fixture, 'main.cjs');
   await writeFile(entry, `const { app, BrowserWindow } = require('electron');
 app.setPath('userData', ${JSON.stringify(path.join(fixture, 'data'))});
-app.whenReady().then(() => { app.dock?.hide(); const window = new BrowserWindow({ show: false, width: 1440, height: 600, webPreferences: { sandbox: true } }); window.loadURL(${JSON.stringify(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)}); });`);
+app.whenReady().then(() => { app.dock?.hide(); const window = new BrowserWindow({ ...(process.platform === 'win32' ? { show: true, x: -3000, y: 0, frame: false, thickFrame: false } : { show: false }), width: 1440, height: 600, webPreferences: { sandbox: true } }); window.loadURL(${JSON.stringify(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)}); });`);
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   desktop = await _electron.launch({ args: [entry], env, timeout: 15000 });
@@ -90,7 +90,9 @@ test('keyboard focus stays visible and reduced motion disables action transition
     await control.focus();
     const focused = await style(control);
     assert.equal(focused.outline, 'solid', `${classes[i]} retains a keyboard focus ring`);
-    assert.equal(focused.outlineWidth, '2px');
+    // Chromium snaps border widths to whole device pixels (2px at 125% is 1.6 CSS px).
+    const scale = await page.evaluate(() => devicePixelRatio);
+    assert.ok(Math.abs(parseFloat(focused.outlineWidth) - Math.floor(2 * scale + 1e-6) / scale) < 0.01, focused.outlineWidth);
     assert.equal(focused.transition, '0s');
   }
   await page.emulateMedia({ reducedMotion: 'no-preference' });

@@ -6,13 +6,15 @@ import { EventEmitter } from 'node:events';
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile, symlink, stat } from 'node:fs/promises';
 import { TerminalAttachments, quoteTerminalAttachmentPath } from '../electron/terminal-attachments.mjs';
 
+// Windows accepts attachments only for a PowerShell foreground.
+const shellForeground = process.platform === 'win32' ? 'powershell.exe' : 'zsh';
 const transferId = 'a'.repeat(32), sessionId = `term_${'b'.repeat(32)}`;
 async function fixture(t) {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'envara-attachments-test-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const profilesDir = path.join(root, 'profiles');
   await mkdir(profilesDir); await mkdir(path.join(profilesDir, 'owned'));
-  const session = { sessionId, profileId: 'owned', kind: 'shell', status: 'running', pty: { process: 'zsh' }, abortController: new AbortController() };
+  const session = { sessionId, profileId: 'owned', kind: 'shell', status: 'running', pty: { process: shellForeground }, abortController: new AbortController() };
   const owner = Object.assign(new EventEmitter(), { isDestroyed: () => false });
   const writes = [];
   const terminal = { profilesDir, ready: Promise.resolve(), write: async value => { writes.push(value); return { accepted: true }; }, session: id => { assert.equal(id, sessionId); return session; } };
@@ -28,7 +30,7 @@ test('attachments are private owned copies in the actual session environment and
   const f = await fixture(t);
   const result = await f.manager.stage(f.request, f.context);
   assert.equal(result.count, 1); assert.equal(result.transferId, transferId);
-  assert.match(result.quotedPaths, /\/owned\/attachments\/batch-.*\/1-shot\.png' $/);
+  assert.match(result.quotedPaths, /[\\/]owned[\\/]attachments[\\/]batch-.*[\\/]1-shot\.png' $/);
   assert.equal(/[\r\n]/.test(result.quotedPaths), false);
   const target = result.quotedPaths.slice(1, -2);
   assert.deepEqual([...await readFile(target)], [1, 2, 3]);
@@ -117,7 +119,7 @@ test('commit rechecks foreground before input and preserves files once a write m
   const f = await fixture(t);
   await f.manager.stage(f.request, f.context); f.session.pty.process = 'ssh';
   await assert.rejects(f.manager.finish({ sessionId, transferId, accepted: true }, f.context), { code: 'TERMINAL_ATTACHMENT_REMOTE' });
-  assert.deepEqual(f.writes, []); f.session.pty.process = 'zsh';
+  assert.deepEqual(f.writes, []); f.session.pty.process = shellForeground;
   let release;
   f.terminal.write = value => { f.writes.push(value); return new Promise(resolve => { release = resolve; }); };
   const pending = f.manager.finish({ sessionId, transferId, accepted: true, bracketedPaste: true }, f.context);

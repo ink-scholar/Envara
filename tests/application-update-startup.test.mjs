@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { waitForApplicationUpdateStartup } from '../electron/application-update-startup.mjs';
 import { createDesktopStartup } from '../electron/desktop-startup.mjs';
+const macOSFeature = process.platform !== 'darwin' && 'macOS-only feature';
 
 const status = active => ({ active });
 const pending = () => ({ stageRoot: '/synthetic/application-updates/update-abcdef', version: '1.2.4', originatingPid: 12345, outcome: 'pending', error: null, receipt: null });
@@ -165,7 +166,7 @@ test('a replaced or disappearing marker during the wait does not open startup ad
   });
 });
 
-test('production private-marker reading and abandoned inspection leave synthetic configuration and staging byte-for-byte intact', async t => {
+test('production private-marker reading and abandoned inspection leave synthetic configuration and staging byte-for-byte intact', { skip: macOSFeature }, async t => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'envara-update-startup-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const stageRoot = path.join(root, 'update-abcdef'); await mkdir(stageRoot, { mode: 0o700 });

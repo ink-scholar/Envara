@@ -7,6 +7,7 @@ import { chmod, lchmod, link, lstat, mkdir, mkdtemp, readFile, readdir, rm, syml
 import { list } from 'tar';
 import { createSourceArchive } from '../scripts/create-source-archive.mjs';
 import { inspectSourceArchive } from '../scripts/source-archive.mjs';
+const posixModes = process.platform === 'win32' && 'POSIX permission bits do not exist on Windows';
 
 async function fixture(t) {
   const temporary = await mkdtemp(path.join(tmpdir(), 'envara-source-archive-'));
@@ -49,7 +50,7 @@ function headers(archive) {
   return result;
 }
 
-test('portable source archive preserves bytes, executable mode, license, hardlinks and long PAX paths', async t => {
+test('portable source archive preserves bytes, executable mode, license, hardlinks and long PAX paths', { skip: posixModes }, async t => {
   const f = await fixture(t);
   await f.file('LICENSE', 'Upstream copyright and license\n');
   await f.file('run.sh', '#!/bin/sh\nexit 0\n', 0o755);
@@ -109,7 +110,8 @@ test('safe relative symlinks retain their targets and long linkpath PAX when the
   await symlink(target, filename);
   if (process.platform === 'darwin') await lchmod(filename, 0o755);
   const mode = (await lstat(filename)).mode & 0o7777;
-  if (mode !== ((mode | 0o600) & ~0o22)) {
+  // Windows reports a synthetic 0o666 for links; only POSIX modes can be unrepresentable.
+  if (process.platform !== 'win32' && mode !== ((mode | 0o600) & ~0o22)) {
     await assert.rejects(createSourceArchive(f), /cannot be preserved by portable tar/);
     assert.equal((await lstat(filename)).mode & 0o7777, mode);
     return;
@@ -118,7 +120,8 @@ test('safe relative symlinks retain their targets and long linkpath PAX when the
   const output = await entries(f.destination), item = output.get(path.basename(f.sourceDir) + '/source-link');
   assert.equal(item.type, 'SymbolicLink');
   assert.equal(item.linkpath, target);
-  assert.equal(item.mode, mode);
+  // Windows modes are synthetic; the archive records the portable 0644 instead.
+  assert.equal(item.mode, process.platform === 'win32' ? 0o644 : mode);
   assert.ok(headers(await readFile(f.destination)).some(entry => entry.type === 'x' && entry.body.includes(Buffer.from('linkpath=' + target))));
   assert.equal((await inspectSourceArchive(f.destination)).verified, true);
 });
@@ -142,7 +145,7 @@ test('absolute, escaping and indirectly escaping symlinks are refused without fo
   }
 });
 
-test('read-only and group-writable modes are rejected rather than silently rewritten', async t => {
+test('read-only and group-writable modes are rejected rather than silently rewritten', { skip: posixModes }, async t => {
   for (const mode of [0o444, 0o664]) {
     const f = await fixture(t);
     const filename = await f.file('source.txt', 'mode must remain unchanged', mode);

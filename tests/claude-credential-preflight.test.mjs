@@ -1,4 +1,4 @@
-import test from 'node:test';
+import { macOSOnly as test } from './support/platform-test.mjs';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import os from 'node:os';

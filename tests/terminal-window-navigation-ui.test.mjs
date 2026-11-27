@@ -75,7 +75,7 @@ export function TerminalDock(props) {
   const entry = path.join(directory, 'main.cjs');
   await writeFile(entry, `const { app, BrowserWindow, session } = require('electron');
 app.setPath('userData', ${JSON.stringify(path.join(directory, 'data'))});
-app.whenReady().then(() => { app.dock?.hide(); session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (_, done) => done({ cancel: true })); const view = new BrowserWindow({ show: false, width: 1120, height: 720, webPreferences: { sandbox: true } }); view.loadURL(${JSON.stringify(pathToFileURL(path.join(directory, 'index.html')).href)}); });`);
+app.whenReady().then(() => { app.dock?.hide(); session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (_, done) => done({ cancel: true })); const view = new BrowserWindow({ ...(process.platform === 'win32' ? { show: true, x: -3000, y: 0, frame: false, thickFrame: false } : { show: false }), width: 1120, height: 720, webPreferences: { sandbox: true } }); view.loadURL(${JSON.stringify(pathToFileURL(path.join(directory, 'index.html')).href)}); });`);
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
   desktop = await _electron.launch({ args: [entry], env, timeout: 15000 });
   page = await desktop.firstWindow(); page.on('pageerror', error => errors.push(error.message));
@@ -135,7 +135,10 @@ test('nine-language independent headers stay compact and the dock fills the rema
       for (const label of ['终端', 'SSH 连接']) {
         const tab = page.getByRole('tab', { name: translate(label, language), exact: true });
         assert.equal(await tab.evaluate(element => element.scrollWidth <= element.clientWidth), true);
-        assert.ok((await tab.boundingBox()).height >= 30);
+        // Heights snap to whole device pixels (30px at 125% scale is 29.6 CSS px);
+        // allow floating-point error in the reported scale and box.
+        const scale = await page.evaluate(() => devicePixelRatio);
+        assert.ok((await tab.boundingBox()).height >= Math.floor(30 * scale + 1e-6) / scale - 0.01);
       }
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     }

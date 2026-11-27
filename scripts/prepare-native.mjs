@@ -61,8 +61,19 @@ async function packageDirectory(name, from = root) {
 async function atomicWrite(destination, contents) {
   const temporary = `${destination}.tmp-${process.pid}`;
   await fs.writeFile(temporary, contents, { mode: 0o644 });
-  try { await fs.rename(temporary, destination); }
-  finally { await fs.rm(temporary, { force: true }); }
+  try {
+    try { await fs.rename(temporary, destination); }
+    catch (error) {
+      // Windows refuses to replace a file carrying the read-only attribute
+      // (POSIX replaces it). Clear only that attribute on our own regular
+      // output file, then replace it atomically as on other platforms.
+      if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+      const existing = await fs.lstat(destination).catch(() => null);
+      if (!existing?.isFile() || (existing.mode & 0o200)) throw error;
+      await fs.chmod(destination, 0o644);
+      await fs.rename(temporary, destination);
+    }
+  } finally { await fs.rm(temporary, { force: true }); }
 }
 
 export async function copyDependencyLicenses(destination = path.join(root, 'build/native/licenses')) {

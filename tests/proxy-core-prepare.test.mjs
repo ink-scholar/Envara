@@ -8,6 +8,7 @@ import { gzipSync, gunzipSync } from 'node:zlib';
 import { c as createTar } from 'tar';
 import { extractProxyCoreBinary, extractProxyCoreCA, prepareProxyCore, proxyCoreArtifacts, verifyProxyCoreHash,
   PROXY_CORE_VERSION, PROXY_CORE_COMMIT, SOURCE_ARCHIVE_METADATA_POLICY } from '../scripts/prepare-proxy-core.mjs';
+const gzipFixture = process.platform === 'win32' && 'fixture builds the macOS/Linux gzip artifact; the Windows zip path is exercised by proxy:prepare';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 async function fixture(t) {
@@ -83,7 +84,7 @@ test('native preparation rejects a cross platform target before any download', a
   assert.equal(f.counts().downloads, 0);
 });
 
-test('prepared bundle includes executable, full source, license and immutable provenance', async t => {
+test('prepared bundle includes executable, full source, license and immutable provenance', { skip: gzipFixture }, async t => {
   const f = await fixture(t);
   const prepared = await prepareProxyCore(f.options);
   const files = await readdir(prepared.outputDir);
@@ -113,7 +114,7 @@ function withSyntheticOwner(archive) {
   return gzipSync(bytes);
 }
 
-test('legacy provenance and owner-bearing source caches are rebuilt even with matching hashes', async t => {
+test('legacy provenance and owner-bearing source caches are rebuilt even with matching hashes', { skip: gzipFixture }, async t => {
   const f = await fixture(t);
   const first = await prepareProxyCore(f.options);
   const provenanceFile = path.join(first.outputDir, 'provenance.json');
@@ -134,7 +135,7 @@ test('legacy provenance and owner-bearing source caches are rebuilt even with ma
   assert.equal(f.counts().sourceBuilds, 3);
 });
 
-test('new source with correct digest but host metadata cannot replace the previous clean bundle', async t => {
+test('new source with correct digest but host metadata cannot replace the previous clean bundle', { skip: gzipFixture }, async t => {
   const f = await fixture(t);
   const first = await prepareProxyCore(f.options);
   const before = await readFile(path.join(first.outputDir, 'provenance.json'));
@@ -148,7 +149,7 @@ test('new source with correct digest but host metadata cannot replace the previo
   assert.deepEqual(await readFile(path.join(first.outputDir, 'mihomo-corresponding-source.tar.gz')), f.completeSource);
 });
 
-test('reuse checks both executable and source hashes and runs native version validation', async t => {
+test('reuse checks both executable and source hashes and runs native version validation', { skip: gzipFixture }, async t => {
   const f = await fixture(t);
   await prepareProxyCore(f.options);
   const again = await prepareProxyCore(f.options);
@@ -161,7 +162,7 @@ test('reuse checks both executable and source hashes and runs native version val
   assert.deepEqual(f.counts(), { downloads: 2, validations: 3, sourceBuilds: 2 });
 });
 
-test('a corrupted archive cache is evicted instead of silently reused', async t => {
+test('a corrupted archive cache is evicted instead of silently reused', { skip: gzipFixture }, async t => {
   const f = await fixture(t);
   const cacheDir = path.join(f.rootDir, '.cache', 'proxy-core');
   await mkdir(cacheDir, { recursive: true });
@@ -172,7 +173,7 @@ test('a corrupted archive cache is evicted instead of silently reused', async t 
   assert.equal(f.counts().downloads, 2);
 });
 
-test('failed integrity or corresponding source preparation preserves the prior usable bundle', async t => {
+test('failed integrity or corresponding source preparation preserves the prior usable bundle', { skip: gzipFixture }, async t => {
   const f = await fixture(t);
   const old = await prepareProxyCore(f.options);
   const before = await readFile(path.join(old.outputDir, 'provenance.json'));
@@ -185,7 +186,7 @@ test('failed integrity or corresponding source preparation preserves the prior u
   assert.deepEqual(await readFile(path.join(old.outputDir, 'provenance.json')), before);
 });
 
-test('incomplete source and an incorrect native version cannot replace the prior bundle', async t => {
+test('incomplete source and an incorrect native version cannot replace the prior bundle', { skip: gzipFixture }, async t => {
   const f = await fixture(t);
   const old = await prepareProxyCore(f.options);
   await assert.rejects(prepareProxyCore({ ...f.options, force: true, prepareSourceImpl: async ({ destination }) => {

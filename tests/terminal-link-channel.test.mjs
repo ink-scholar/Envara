@@ -1,4 +1,4 @@
-import test from 'node:test';
+import { unixSocketOnly as test } from './support/platform-test.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';

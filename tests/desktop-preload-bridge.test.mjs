@@ -63,7 +63,7 @@ app.whenReady().then(() => {
   app.dock?.hide();
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => callback({ cancel: !details.url.startsWith('file:') }));
-  const window = new BrowserWindow({ show: false, width: 480, height: 320,
+  const window = new BrowserWindow({ ...(process.platform === 'win32' ? { show: true, x: -3000, y: 0, frame: false, thickFrame: false } : { show: false }), width: 480, height: 320,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.loadFile(path.join(__dirname, 'index.html'));
@@ -101,7 +101,8 @@ test('the bridge fixture uses a hidden sandboxed window with isolated production
   const options = await desktop.evaluate(({ app, BrowserWindow }) => {
     const window = BrowserWindow.getAllWindows()[0];
     const preferences = window.webContents.getLastWebPreferences();
-    return { visible: window.isVisible(), sandbox: preferences.sandbox, contextIsolation: preferences.contextIsolation,
+    // Windows paints only shown windows, so its fixture is shown off-screen instead.
+    return { visible: window.isVisible() && window.getBounds().x > -1000, sandbox: preferences.sandbox, contextIsolation: preferences.contextIsolation,
       nodeIntegration: preferences.nodeIntegration, userData: app.getPath('userData') };
   });
   assert.deepEqual(options, { visible: false, sandbox: true, contextIsolation: true, nodeIntegration: false,

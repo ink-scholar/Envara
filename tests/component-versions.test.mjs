@@ -6,6 +6,7 @@ import { mkdtemp, mkdir, readdir, realpath, rm, symlink, writeFile } from 'node:
 import { componentVersionSnapshot } from '../shared/component-versions.mjs';
 import { inspectClaudeComponent, inspectPFComponent, readComponentVersions } from '../electron/component-versions.mjs';
 import { PF_INSTALL_ROOT, PF_MANIFEST_FILES, pfInstallationPlan } from '../native/macos-pf-routing/controller.mjs';
+const macOSFeature = process.platform !== 'darwin' && 'macOS-only feature';
 
 const workspace = () => ({ system: { appVersion: '1.2.3', proxyCore: { supported: true, version: 'v1.19.5' } },
   profiles: [{ id: 'one', name: 'First', engine: 'camoufox', status: 'stopped' }, { id: 'two', name: 'Second', engine: 'cloakbrowser', status: 'running' }],
@@ -110,7 +111,7 @@ test('PF inventory distinguishes absent paths, inaccessible inspections and reje
   assert.deepEqual(reads, [PF_INSTALL_ROOT, PF_INSTALL_ROOT]);
 });
 
-test('the PF installation plan version matches the real verifier contract and cannot bypass file integrity', async () => {
+test('the PF installation plan version matches the real verifier contract and cannot bypass file integrity', { skip: macOSFeature }, async () => {
   for (const [version, expectedFileReads] of [[pfInstallationPlan().manifest.version, 1], ['unrecognized-version', 0]]) {
     const fileReads = [];
     const manifest = { ...pfInstallationPlan().manifest, version,
@@ -212,7 +213,7 @@ test('CLI inspection uses only a validated local installation entry and preserve
   assert.deepEqual(await readdir(path.dirname(binary)), ['2.1.7']);
 });
 
-test('the reader scopes installation inspection to owned environment homes and isolates partial failures', async () => {
+test('the reader scopes installation inspection to owned environment homes and isolates partial failures', { skip: macOSFeature }, async () => {
   const calls = [], snapshot = workspace();
   const terminal = { profilesDir: '/owned/profiles', ready: Promise.resolve(), snapshot: async () => { throw new Error('private failure'); } };
   const result = await readComponentVersions({ snapshot, terminal, platform: 'darwin', arch: 'arm64', now: () => 0,

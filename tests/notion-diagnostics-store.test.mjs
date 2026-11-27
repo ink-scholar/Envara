@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir, stat, symlink, rm, realpath } from 'node:fs
 import os from 'node:os';
 import path from 'node:path';
 import { NotionDiagnosticsStore } from '../electron/notion-diagnostics-store.mjs';
+const macOSFeature = process.platform !== 'darwin' && 'macOS-only feature';
 const runId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const environmentId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const record = { applicationId: 'app_fixture', runId, environmentId, phase: 'cleanup-required', active: false,
@@ -29,7 +30,7 @@ test('support reads do not create absent history directories or change existing 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('persisted diagnostic survives restart without private input or routing authority', async () => {
+test('persisted diagnostic survives restart without private input or routing authority', { skip: macOSFeature }, async () => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'envara-diagnostics-')));
   try {
     const directory = path.join(root, 'history');

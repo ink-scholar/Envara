@@ -125,7 +125,7 @@ window.sshReady = true;
   const css = await Promise.all(['styles.css', 'terminal.css', 'ssh-workspace.css'].map(name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')));
   await writeFile(path.join(fixture, 'index.html'), `<html lang="zh-CN" data-theme="dark"><head><style>${css.join('\n')}</style></head><body><div id="root"></div><script src="renderer.js"></script></body></html>`);
   const entry = path.join(fixture, 'main.cjs');
-  await writeFile(entry, `const { app, BrowserWindow } = require('electron'); app.setPath('userData', ${JSON.stringify(path.join(fixture, 'data'))}); app.whenReady().then(() => { app.dock?.hide(); const view = new BrowserWindow({ show: false, width: 1120, height: 720, useContentSize: true, webPreferences: { sandbox: true } }); view.loadFile(${JSON.stringify(path.join(fixture, 'index.html'))}); });`);
+  await writeFile(entry, `const { app, BrowserWindow } = require('electron'); app.setPath('userData', ${JSON.stringify(path.join(fixture, 'data'))}); app.whenReady().then(() => { app.dock?.hide(); const view = new BrowserWindow({ ...(process.platform === 'win32' ? { show: true, x: -3000, y: 0, frame: false, thickFrame: false } : { show: false }), width: 1120, height: 720, useContentSize: true, webPreferences: { sandbox: true } }); view.loadFile(${JSON.stringify(path.join(fixture, 'index.html'))}); });`);
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
   desktop = await _electron.launch({ args: [entry], env, timeout: 15000 });
   page = await desktop.firstWindow();

@@ -7,6 +7,7 @@ import { once } from 'node:events';
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { ApplicationService, inspectLocalApplication } from '../electron/application-service.mjs';
 import { APPLICATION_ROUTING_CHECKS } from '../electron/application-routing.mjs';
+const macOSFeature = process.platform !== 'darwin' && 'macOS-only feature';
 
 const capabilities = () => Object.fromEntries(APPLICATION_ROUTING_CHECKS.map(key => [key, true]));
 const verified = () => ({ passed: true, version: 'fixture-only/1', checks: capabilities() });
@@ -241,7 +242,7 @@ test('cleanup failures for a missing native session retain ownership until an ex
   assert.equal(f.service.hasActiveProfile('profile_a'), false); assert.equal(f.service.hasActiveProxy('node_a'), false);
 });
 
-test('local application inspection accepts complete bundles and rejects escaped executables, bad inputs and directories', async t => {
+test('local application inspection accepts complete bundles and rejects escaped executables, bad inputs and directories', { skip: macOSFeature }, async t => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'envara-app-inspect-'))); t.after(() => rm(root, { recursive: true, force: true }));
   const bundle = path.join(root, 'Fixture.app'); await mkdir(path.join(bundle, 'Contents/MacOS'), { recursive: true });
   await writeFile(path.join(bundle, 'Contents/Info.plist'), '<plist><dict><key>CFBundleIdentifier</key><string>io.envara.fixture</string><key>CFBundleExecutable</key><string>fixture</string></dict></plist>');

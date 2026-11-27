@@ -17,9 +17,20 @@ const node = (extra = {}) => ({ id: 'fixture-node', protocol: 'anytls', host: 'n
 const code = expected => error => error.code === expected;
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
+// Recovery really re-binds the original loopback port before restarting, so the
+// fixture must hand out ports that are free on this host. A fixed range is not:
+// Windows (e.g. WSL mirrored networking) can hold ports no listener reports.
+async function unusedLoopbackPort() {
+  const server = net.createServer();
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  const { port } = server.address();
+  await new Promise(resolve => server.close(resolve));
+  return port;
+}
+
 async function fixture(t, overrides = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'envara-proxy-core-test-'));
-  const calls = [], bridges = []; let nextPort = 42000;
+  const calls = [], bridges = [];
   const createCompatibilityBridge = async (settings, options) => {
     const entry = { settings: structuredClone(settings), options, closes: 0, updates: [] };
     entry.bridge = { protocol: 'http', host: '127.0.0.1', port: 45000 + bridges.length,
@@ -41,7 +52,7 @@ async function fixture(t, overrides = {}) {
     return child;
   };
   const manager = new ProxyCoreManager({ dataDir: directory, resourcesDir: directory,
-    resolveBinary: async () => process.execPath, spawn, choosePort: async () => nextPort++,
+    resolveBinary: async () => process.execPath, spawn, choosePort: unusedLoopbackPort,
     probeListener: async () => {}, createCompatibilityBridge, detectInterface: async () => 'en0', resolveBootstrapHost: async () => '93.184.215.14',
     bootstrapAddress: () => '192.0.2.10', startupTimeoutMs: 2000, retryDelayMs: 1, stopTimeoutMs: 5, ...overrides });
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });

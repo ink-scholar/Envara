@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { copyDependencyLicenses, nativeRebuildEnvironment, verifyNativeBuildPaths } from '../scripts/prepare-native.mjs';
+const macOSFeature = process.platform !== 'darwin' && 'macOS-only feature';
 
 test('license preparation includes runtime dependency graph and safely replaces read-only previous output', async t => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'envara-license-test-'));
@@ -50,7 +51,7 @@ test('non-macOS native preparation preserves compiler and linker flags', async (
   }
 });
 
-test('both macOS PTY products must be free of checkout and build-user paths before reuse', async t => {
+test('both macOS PTY products must be free of checkout and build-user paths before reuse', { skip: macOSFeature }, async t => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'envara-native-path-test-'));
   t.after(() => fs.rm(temporary, { recursive: true, force: true }));
   const release = path.join(temporary, 'build/Release'); await fs.mkdir(release, { recursive: true });

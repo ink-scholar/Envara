@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm, lstat } fro
 import path from 'node:path';
 import net from 'node:net';
 import { PassThrough, Writable } from 'node:stream';
-import test from 'node:test';
+import { macOSOnly as test } from './support/platform-test.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createPasswordSshBroker } from '../electron/terminal-ssh-broker.mjs';
 import { runSshAskpass } from '../electron/terminal-ssh-askpass.mjs';

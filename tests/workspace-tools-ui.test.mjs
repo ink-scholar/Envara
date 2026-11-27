@@ -98,7 +98,7 @@ async call(method,args={}) { window.calls.push({method,args}); const copy=value=
   await writeFile(path.join(directory, 'styles.css'), (await Promise.all(cssFiles.map(file => readFile(path.join(project, 'src', file), 'utf8')))).join('\n'));
   await writeFile(path.join(directory, 'index.html'), '<!doctype html><html><meta charset="utf-8"><link rel="stylesheet" href="styles.css"><div id="root"></div><script src="fixture.js"></script></html>');
   const entry = path.join(directory, 'main.cjs');
-  await writeFile(entry, `process.on('uncaughtException', error => { process.stderr.write(String(error?.stack || error)); process.exit(1); }); process.on('unhandledRejection', error => { process.stderr.write(String(error?.stack || error)); process.exit(1); }); const{app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(path.join(directory, 'data'))});app.whenReady().then(()=>{app.dock?.hide();const w=new BrowserWindow({show:false,width:1280,height:900,webPreferences:{sandbox:true}});w.loadURL(${JSON.stringify(pathToFileURL(path.join(directory, 'index.html')).href)});});`);
+  await writeFile(entry, `process.on('uncaughtException', error => { process.stderr.write(String(error?.stack || error)); process.exit(1); }); process.on('unhandledRejection', error => { process.stderr.write(String(error?.stack || error)); process.exit(1); }); const{app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(path.join(directory, 'data'))});app.whenReady().then(()=>{app.dock?.hide();const w=new BrowserWindow({...(process.platform === 'win32' ? { show: true, x: -3000, y: 0, frame: false, thickFrame: false } : { show: false }),width:1280,height:900,webPreferences:{sandbox:true}});w.loadURL(${JSON.stringify(pathToFileURL(path.join(directory, 'index.html')).href)});});`);
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
   desktop = await _electron.launch({ executablePath: electron, args: [entry], env });
   page = await desktop.firstWindow(); page.setDefaultTimeout(5000);
@@ -206,7 +206,7 @@ test('settings shows verified PF installation without a runtime warning in nine 
     assert.deepEqual((await page.evaluate(() => window.calls.map(call => call.method))).filter(method => !reads.has(method)), [], `${language}/${theme}: settings inspection is read-only`);
     await healthy();
   }
-  assert.equal(await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some(view => view.isVisible())), false);
+  assert.equal(await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some(view => view.isVisible() && view.getBounds().x > -1000)), false);
 });
 
 test('refreshing PF with unknown installation evidence clears the old version without inventing runtime or platform support', { skip: noDisplay }, async () => {

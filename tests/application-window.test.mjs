@@ -6,6 +6,7 @@ import path from 'node:path';
 import { managedApplicationProcess, showManagedApplicationWindow } from '../electron/application-window.mjs';
 import { eraseAttachedApplicationData } from '../electron/application-data.mjs';
 import { pfAttachEnvironmentId } from '../native/macos-pf-routing/policy.mjs';
+const macOSFeature = process.platform !== 'darwin' && 'macOS-only feature';
 
 const registration = '4bf0f214-bcaa-4cea-af6f-b7e29800b4c5', other = '11111111-2222-4333-8444-555555555555';
 const keeper = '/Library/PrivilegedHelperTools/io.envara.pf-routing/envara-pf-native';
@@ -45,7 +46,7 @@ test('the window is reopened by process id only, and a missing instance or macOS
   assert.deepEqual(calls.map(call => call[0]), ['/bin/ps'], 'nothing is sent without a running managed instance');
 });
 
-test('sign-in data is cleared for one application or a whole environment, only inside user-owned UserData', async t => {
+test('sign-in data is cleared for one application or a whole environment, only inside user-owned UserData', { skip: macOSFeature }, async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'envara-app-data-')); t.after(() => rm(root, { recursive: true, force: true }));
   const environment = path.join(root, pfAttachEnvironmentId('prof_fixture_owner'));
   for (const id of [registration, other]) {

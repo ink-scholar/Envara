@@ -1,9 +1,15 @@
-import test from 'node:test';
+import nodeTest from 'node:test';
+import { platformTest } from './support/platform-test.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, lstat, symlink, link, rm, chmod } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { createCacheMaintenance } from '../electron/cache-maintenance.mjs';
+
+// Moving and deleting cache files is verified by POSIX ownership. Windows has no
+// user ID, so the service stays read-only there until an NTFS ACL check exists;
+// these tests exercise the enabled service and run where it can be enabled.
+const test = platformTest(['darwin', 'linux'], 'cache maintenance stays read-only on Windows until an NTFS ACL check exists');
 
 async function fixture(t, options = {}) {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'envara-cache-maintenance-'));
@@ -237,4 +243,18 @@ test('unverified filesystem ownership keeps inventory read-only, including perma
   await rejectsCode(readonly.restore({ batchId }), 'CACHE_MAINTENANCE_UNAVAILABLE');
   await rejectsCode(readonly.purge({ batchId, confirmed: true }), 'CACHE_MAINTENANCE_UNAVAILABLE');
   assert.equal((await f.service.inventory()).batches[0].entryCount, 1);
+});
+
+nodeTest('on Windows the service lists caches but never moves, restores or deletes them', { skip: process.platform !== 'win32' && 'Windows behavior' }, async t => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'envara-cache-maintenance-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const cache = path.join(dataDir, 'browseforge', 'profiles', 'fixture', 'browser-data', 'Default', 'Cache');
+  await mkdir(cache, { recursive: true }); await writeFile(path.join(cache, 'data_0'), 'regenerable fixture cache');
+  const service = createCacheMaintenance({ dataDir, listProfiles: async () => [{ id: 'fixture', name: 'Fixture environment' }],
+    assertProfileIdle: async () => {}, withMaintenance: async (_ids, operation) => operation() });
+  const inventory = await service.inventory();
+  assert.equal(inventory.maintenanceAvailable, false); assert.equal(inventory.purgeAvailable, false);
+  assert.deepEqual(inventory.entries.map(item => [item.cacheName, item.status]), [['Default/Cache', 'unavailable']]);
+  await rejectsCode(service.quarantine({ inventoryId: inventory.inventoryId, entryIds: inventory.entries.map(item => item.id) }), 'CACHE_MAINTENANCE_UNAVAILABLE');
+  assert.equal(await readFile(path.join(cache, 'data_0'), 'utf8'), 'regenerable fixture cache');
 });

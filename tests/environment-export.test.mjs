@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { EXPORT_SCHEMA, isEnvironmentExport, readEnvironmentExport, writeEnvironmentExport } from '../electron/environment-export.mjs';
+const windowsUnrepresentableName = process.platform === 'win32' && 'fixture file name is not representable on Windows';
 
 async function fixture(t) {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'envara-export-test-')));
@@ -28,7 +29,7 @@ test('an export round-trips data, skips links and excluded names, and starts wit
   const written = await writeEnvironmentExport({ file, password: 'correct horse', manifest: f.manifest, sources: f.sources });
   assert.equal(written.bytes, 4 + 10);
   assert.equal(await isEnvironmentExport(file), true);
-  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal((await stat(file)).mode & 0o777, 0o600);
   assert.equal((await readFile(file)).includes(Buffer.from('Cookies')), false, 'names are encrypted');
   const staging = path.join(f.root, 'staging');
   const manifest = await readEnvironmentExport({ file, password: 'correct horse', staging });
@@ -36,8 +37,8 @@ test('an export round-trips data, skips links and excluded names, and starts wit
   assert.deepEqual(await readFile(path.join(staging, 'browser', 'Default', 'Cookies')), Buffer.from([0, 1, 2, 255]));
   assert.deepEqual((await readdir(path.join(staging, 'browser', 'Default'))).sort(), ['Cookies', 'Empty']);
   assert.deepEqual((await readdir(path.join(staging, 'browser'))).sort(), ['Default', 'run.sh']);
-  assert.equal((await stat(path.join(staging, 'browser', 'run.sh'))).mode & 0o777, 0o700);
-  assert.equal((await stat(path.join(staging, 'browser', 'Default', 'Cookies'))).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal((await stat(path.join(staging, 'browser', 'run.sh'))).mode & 0o777, 0o700);
+  if (process.platform !== 'win32') assert.equal((await stat(path.join(staging, 'browser', 'Default', 'Cookies'))).mode & 0o777, 0o600);
 });
 
 test('a wrong password or one altered byte stages nothing', async t => {
@@ -109,7 +110,7 @@ test('a staging write failure closes its plaintext handle before removing failed
   }
 });
 
-test('unsupported source path names are refused before replacing an existing archive', async t => {
+test('unsupported source path names are refused before replacing an existing archive', { skip: windowsUnrepresentableName }, async t => {
   const f = await fixture(t), file = path.join(f.root, 'path.envara');
   await writeFile(file, 'existing export');
   await writeFile(path.join(f.sources[0].root, 'unsupported\\name'), 'fixture');

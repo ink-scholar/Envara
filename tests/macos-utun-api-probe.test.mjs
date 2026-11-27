@@ -1,4 +1,4 @@
-import test from 'node:test';
+import { macOSOnly as test } from './support/platform-test.mjs';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';

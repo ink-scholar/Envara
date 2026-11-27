@@ -1,7 +1,7 @@
 // Source contract checks only: all executor and fixture I/O is inert JavaScript.
 // CLI refusal checks start only Node with missing/invalid approval flags.
 // No native process, authorization, network listener or system operation.
-import test from 'node:test';
+import { macOSOnly as test } from './support/platform-test.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';

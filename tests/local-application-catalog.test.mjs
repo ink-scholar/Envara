@@ -5,6 +5,7 @@ import os from 'node:os';
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { LocalApplicationCatalog, localApplicationRoots } from '../electron/local-application-catalog.mjs';
 import { inspectLocalApplication } from '../electron/application-service.mjs';
+const macOSFeature = process.platform !== 'darwin' && 'macOS-only feature';
 
 async function fixture(t) {
   const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'envara-catalog-')));
@@ -112,7 +113,7 @@ test('Windows source discovery inspects bounded exe installation roots without a
   assert.match(result.applications[0].identity, /^path:[a-f0-9]{64}$/); assert.equal(result.scanComplete, true);
 });
 
-test('unsupported platforms and invalid renderer queries cannot expand filesystem scope', async t => {
+test('unsupported platforms and invalid renderer queries cannot expand filesystem scope', { skip: macOSFeature }, async t => {
   assert.deepEqual(await new LocalApplicationCatalog({ platform: 'unsupported', roots: [] }).list(),
     { applications: [], platform: 'unsupported', available: false, scanComplete: true, truncated: false });
   const f = await fixture(t), catalog = f.catalog();

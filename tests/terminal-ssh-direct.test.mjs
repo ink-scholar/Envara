@@ -5,7 +5,7 @@ import { chmod, lstat, mkdtemp, readFile, readdir, realpath, rename, rm, symlink
 import net from 'node:net';
 import path from 'node:path';
 import { PassThrough, Readable, Writable } from 'node:stream';
-import test from 'node:test';
+import { macOSOnly as test } from './support/platform-test.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { createSshDirectTransport, runSshDirect, runSshDirectCli } from '../electron/terminal-ssh-direct.mjs';

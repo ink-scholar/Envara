@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
-import { access, chmod, copyFile, cp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, copyFile, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { gunzipSync, inflateRawSync } from 'node:zlib';
+import { renameWithRetry } from './rename-with-retry.mjs';
 
 const execFile = promisify(execFileCallback);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -296,13 +297,13 @@ export async function preparePlaywrightDriver({ rootDir = ROOT, outputDir = path
       licenses: ['node-LICENSE', 'playwright-go-LICENSE', 'package/LICENSE', 'package/NOTICE', 'package/ThirdPartyNotices.txt', 'package/lib/*.LICENSE'],
     };
     await writeFile(path.join(stage, 'provenance.json'), `${JSON.stringify(provenance, null, 2)}\n`);
-    if (await exists(outputDir)) { await rename(outputDir, previous); oldMoved = true; }
-    await rename(stage, outputDir);
+    if (await exists(outputDir)) { await renameWithRetry(outputDir, previous); oldMoved = true; }
+    await renameWithRetry(stage, outputDir);
     if (oldMoved) await rm(previous, { recursive: true, force: true });
     return { outputDir, nodePath: path.join(outputDir, artifacts.nodeExecutable), cliPath: path.join(outputDir, 'package', 'cli.js'), provenance };
   } catch (error) {
     await rm(stage, { recursive: true, force: true });
-    if (oldMoved && !await exists(outputDir)) await rename(previous, outputDir);
+    if (oldMoved && !await exists(outputDir)) await renameWithRetry(previous, outputDir);
     throw error;
   }
 }

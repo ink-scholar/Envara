@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, fork, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 
@@ -143,6 +143,32 @@ async function strongIdentity(row, platform) {
   } catch {
     return undefined;
   }
+}
+
+/* node-pty's Windows kill() lists the console's processes by forking its
+ * conpty_console_list agent (an Electron process inside the app) with the
+ * parent's stdio. When the shell has already exited the agent's AttachConsole
+ * fails and a full stack trace lands in the app log; node-pty then waits five
+ * seconds before falling back to the shell PID. Keep that fallback cleanup, but
+ * run the agent silently and settle as soon as it exits. */
+export function quietConsoleListAgent(pty, agentScript, forkProcess = fork) {
+  const agent = pty?._agent;
+  if (!agent || typeof agent._getConsoleProcessList !== 'function' || typeof agentScript !== 'string') return false;
+  agent._getConsoleProcessList = function quietConsoleProcessList() {
+    const shellPid = this._innerPid;
+    return new Promise(resolve => {
+      let settled = false, child = null, timer = null;
+      const finish = list => { if (settled) return; settled = true; clearTimeout(timer); resolve(list); };
+      try { child = forkProcess(agentScript, [String(shellPid)], { silent: true }); }
+      catch { finish([shellPid]); return; }
+      child.stdout?.resume(); child.stderr?.resume();
+      child.once('message', message => finish(Array.isArray(message?.consoleProcessList) ? message.consoleProcessList : [shellPid]));
+      child.once('exit', () => finish([shellPid]));
+      child.once('error', () => finish([shellPid]));
+      timer = setTimeout(() => { try { child.kill(); } catch {} finish([shellPid]); }, 5000);
+    });
+  };
+  return true;
 }
 
 export function terminalProcessMatches(current, captured) {

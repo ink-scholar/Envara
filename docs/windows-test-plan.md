@@ -193,10 +193,10 @@
 - [ ] Windows 附加软件列表仍会因目录数量上限而扫描不完整，也还有厂商辅助程序。更可靠的来源是开始菜单快捷方式（需要解析 `.lnk`），待做。
 - [ ] 缓存清理在 Windows 上按设计保持只读（代码要求有 NTFS ACL 检查才开放），测试已按此断言。是否实现 ACL 检查，待决定。
 - [ ] `browseforge-service` 的旧版迁移测试（`ERR_FS_CP_EEXIST`）在 macOS 与 Windows 上都失败，与 Windows 无关，单独排查。
-- [ ] node-pty 在关闭会话时启动的 `conpty_console_list_agent` 偶发 `AttachConsole failed` 并打印完整堆栈（shell 已退出时）。不影响关闭结果，属于日志噪音，待评估是否能避免。
-- [ ] 启动初期偶发 `Unable to refresh workspace: Unable to reach the local BrowseForge service.`（侧车尚未就绪时的刷新），之后恢复；可在侧车就绪前跳过刷新。
-- [ ] `npm test` 在 `%TEMP%` 留下 `envara*` 临时目录（一次约 65 个）；`backend:prepare` 重命名旧 `playwright-driver` 偶发 EPERM（文件被扫描占用），可加短暂重试。
-- [ ] npm 12 默认拦截 `electron-winstaller`、`esbuild`、`node-pty` 的安装脚本（allowScripts），当前未造成影响；升级到 npm 12 前需要在 `package.json` 中声明允许。
+- [x] node-pty 关闭会话时会 fork 一个列出控制台进程的 agent（在应用里是 Electron 进程），继承应用的 stdout/stderr；shell 已退出时 AttachConsole 失败，完整堆栈会打进日志，node-pty 还要等 5 s 才回退。现在只对 Envara 自己创建的 PTY，改为静默运行同一个 agent，它一退出就回退到 shell PID（`quietConsoleListAgent`），保留原有的兜底清理。
+- [x] `Unable to refresh workspace: Unable to reach the local BrowseForge service`：来源是安装内核后侧车 stop/start 的空档期正好碰上 4 s 一次的定时刷新。现在这段时间标记 `restarting`、跳过刷新，重启完成后侧车会自己触发刷新。
+- [x] `npm test` 在 `%TEMP%` 留下的 `envara*` 目录来自中途崩溃、没跑到清理的测试，第 5 轮修好这些测试后已不再新增。`playwright-driver` / `proxy-core` 输出目录的重命名，在 Windows 上遇到 EPERM/EBUSY/EACCES 时会短暂重试（`scripts/rename-with-retry.mjs`），其他错误和其他平台立即报错。
+- [x] npm 12：`package.json` 的 `allowScripts` 允许 `node-pty@1.1.0`、`esbuild@0.25.12`，拒绝 `electron-winstaller@5.4.0`（它的脚本只为 Squirrel 准备 7-Zip，Envara 打的是 NSIS 包）。在 Windows 上用 npm 12.2.3 实测：`npm ci` 没有警告，`install-scripts ls` 显示没有未审查的包，PTY 检查、构建和 `dist:win` 都通过；npm 11 和 npm 12 打出的包逐目录字节数相同。升级这三个依赖时，记得同步更新这里的版本号。
 - [x] BrowseForge Chromium Windows 运行时（上游 `nczz/browseforge-runtime-chromium` v0.1.6-alpha.0）缺少 `150.0.7871.101.manifest`，`chrome.exe` 因 SxS 配置错误无法启动；补齐后页面时区与 Intl locale 仍取宿主值。已在 Windows 上停用该内核（`electron/engine-platform-hold.mjs`）：内核列表显示不可用及原因，安装、新建和启动都给出明确提示，且不会成为默认内核。
 - [ ] 上游发布修复上述两项的 Windows 运行时后，更新固定版本、在 Windows 上验收，再移除停用。
 - [ ] 引擎下载进度：侧车给出字符串进度，界面只显示“安装中…”；失败文案重复大量进度行。

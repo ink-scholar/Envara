@@ -9,6 +9,7 @@ import { gunzipSync } from 'node:zlib';
 import { selectedZipFiles, tarGzFiles } from './prepare-playwright-driver.mjs';
 import { createSourceArchive } from './create-source-archive.mjs';
 import { inspectSourceArchive } from './source-archive.mjs';
+import { renameWithRetry } from './rename-with-retry.mjs';
 
 const execFile = promisify(execFileCallback);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -212,13 +213,13 @@ export async function prepareProxyCore({ rootDir = ROOT, outputDir = path.join(r
       relationship: 'Unmodified upstream executable invoked as a separate process; Envara does not link Mihomo code.',
     };
     await writeFile(path.join(stage, 'provenance.json'), `${JSON.stringify(provenance, null, 2)}\n`);
-    if (await exists(outputDir)) { await rename(outputDir, previous); oldMoved = true; }
-    await rename(stage, outputDir);
+    if (await exists(outputDir)) { await renameWithRetry(outputDir, previous); oldMoved = true; }
+    await renameWithRetry(stage, outputDir);
     if (oldMoved) await rm(previous, { recursive: true, force: true });
     return { outputDir, binaryPath: path.join(outputDir, artifact.binaryName), provenance, reused: false };
   } catch (error) {
     await rm(stage, { recursive: true, force: true });
-    if (oldMoved && !await exists(outputDir)) await rename(previous, outputDir);
+    if (oldMoved && !await exists(outputDir)) await renameWithRetry(previous, outputDir);
     throw error;
   }
 }

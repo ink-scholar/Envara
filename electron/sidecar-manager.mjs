@@ -261,7 +261,13 @@ export class SidecarManager {
       if (next !== this.states[id].progress) { this.states[id].progress = next; this.changed(); }
     });
     this.installations.set(id, task);
-    try { await task; await this.probe(); await this.stop(); await this.start(); }
+    try {
+      await task; await this.probe();
+      // The service is briefly down while it reloads the installed engine; the
+      // workspace refresh skips this window instead of reporting it unreachable.
+      this.restarting = true;
+      try { await this.stop(); await this.start(); } finally { this.restarting = false; }
+    }
     catch (error) { this.states[id].error = error.message; throw error; }
     finally { this.installations.delete(id); this.states[id].installing = false; this.states[id].progress = null; this.changed(); }
     return { installedEngine: id };

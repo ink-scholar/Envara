@@ -74,11 +74,11 @@ Next work, in order (keep §4 of the test plan updated as items land):
    - Accepted: silent install to the default and to a custom (space plus CJK) directory, installed launch, terminal, Camoufox, quit-all, and uninstall that keeps `%APPDATA%\Envara`.
    - Build prerequisites: Go 1.25.0, network, and an x64 C compiler. Without MSVC, use portable llvm-mingw via `ENVARA_WINDOWS_CC`.
    - Open: code signing (SmartScreen), upgrade-over-install, and a never-used user profile.
-5. **Low priority / noise:**
-   - node-pty `AttachConsole failed` stack traces on session close;
-   - the early "Unable to reach the local BrowseForge service" refresh before the sidecar is ready;
-   - retry `playwright-driver` directory renames on transient EPERM;
-   - declare `allowScripts` before moving to npm 12.
+5. **Low priority / noise: done.**
+   - node-pty's console-list agent runs silently (`quietConsoleListAgent`).
+   - The workspace refresh skips the sidecar restart after an engine install.
+   - Windows prepare renames retry transient EPERM.
+   - `allowScripts` in package.json is pinned to `node-pty@1.1.0`, `esbuild@0.25.12` and `electron-winstaller@5.4.0` (denied); update the versions with dependency bumps.
 6. **Blocked or large; keep the explicit refusals until then:**
    - lift the BrowseForge Chromium hold once upstream ships a Windows runtime with the SxS manifest and working timezone/locale;
    - Windows terminal network fence;

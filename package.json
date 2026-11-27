@@ -47,6 +47,11 @@
     "routing:prepare:mac:package": "node scripts/prepare-macos-pf-package.mjs",
     "routing:test:mac:pf": "node scripts/test-macos-pf-routing.mjs"
   },
+  "allowScripts": {
+    "electron-winstaller@5.4.0": false,
+    "esbuild@0.25.12": true,
+    "node-pty@1.1.0": true
+  },
   "dependencies": {
     "@xterm/headless": "6.0.0",
     "cloakbrowser": "0.5.12",

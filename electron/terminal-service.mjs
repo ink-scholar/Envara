@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { createHash, randomUUID } from 'node:crypto';
 import { access, chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { captureTerminalProcess, closeTerminalProcess } from './terminal-process.mjs';
+import { captureTerminalProcess, closeTerminalProcess, quietConsoleListAgent } from './terminal-process.mjs';
 import { TerminalNetworkFence } from './terminal-network-fence.mjs';
 import { findClaudeExecutable, prepareClaudeSession } from './claude-code-session.mjs';
 import { ClaudeKeychainManager, sanitizeClaudeKeychainDiagnostic } from './claude-keychain.mjs';
@@ -96,9 +96,11 @@ function safeTimezone(value) {
 function defaultPtyFactory(shell, args, options) {
   // Windows workers need a physical package; Unix node-pty maps its helper to
   // app.asar.unpacked itself, so its require must retain the virtual ASAR path.
-  const module = process.platform === 'win32' && process.versions.electron && import.meta.url.includes('/app.asar/')
-    ? require(path.join(process.resourcesPath, 'app.asar.unpacked/node_modules/node-pty')) : require('node-pty');
-  return module.spawn(shell, args, options);
+  const packaged = process.platform === 'win32' && process.versions.electron && import.meta.url.includes('/app.asar/');
+  const modulePath = packaged ? path.join(process.resourcesPath, 'app.asar.unpacked/node_modules/node-pty') : 'node-pty';
+  const pty = require(modulePath).spawn(shell, args, options);
+  if (process.platform === 'win32') quietConsoleListAgent(pty, path.join(path.dirname(require.resolve(modulePath)), 'conpty_console_list_agent.js'));
+  return pty;
 }
 async function privateDirectory(parent, name, { owned = false } = {}) {
   const parentInfo = await lstat(parent);

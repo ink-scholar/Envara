@@ -152,7 +152,7 @@ test('the actual publish callback suppresses partial settings snapshots while ba
   assert.ok(declaration);
   let reads = 0, sends = 0;
   const context = {
-    desktopStartup: f.startup, quitting: false, requestEpoch: 0, publishing: false, needsPublish: false,
+    desktopStartup: f.startup, quitting: false, requestEpoch: 0, publishing: false, needsPublish: false, sidecar: null,
     service: { snapshot: async () => { reads++; return snapshot(); } },
     views: new Map([[{}, { window: { isDestroyed: () => false, webContents: { send() { sends++; } } }, kind: 'workspace' }]]),
     fullWorkspaceSnapshot: async value => value, terminalViewSnapshot, console,

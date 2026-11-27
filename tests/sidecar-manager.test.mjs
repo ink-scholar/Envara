@@ -135,3 +135,23 @@ test('BrowseForge Chromium is withheld on Windows with an explicit reason and ne
   assert.equal(config.default_runtime_id, 'cloakbrowser');
   assert.equal(sidecarConfig('/fixture', 4567, mergeEngineStates(report, {}, 'darwin'), 'darwin').default_runtime_id, 'browseforge-chromium');
 });
+
+test('an engine install marks only its service restart, so the workspace refresh can skip that window', async () => {
+  const seen = [];
+  const manager = Object.assign(Object.create(SidecarManager.prototype), {
+    installations: new Map(), states: { camoufox: { supported: true } }, changed() {},
+    client: { request: async () => ({ data: [] }) },
+    command: async () => { seen.push(['download', manager.restarting === true]); return {}; },
+    probe: async () => { seen.push(['probe', manager.restarting === true]); },
+    stop: async () => { seen.push(['stop', manager.restarting === true]); },
+    start: async () => { seen.push(['start', manager.restarting === true]); },
+  });
+  await manager.installEngine('camoufox');
+  assert.deepEqual(seen, [['download', false], ['probe', false], ['stop', true], ['start', true]]);
+  assert.equal(manager.restarting, false);
+  manager.start = async () => { throw new Error('fixture start failed'); };
+  await assert.rejects(manager.installEngine('camoufox'), /fixture start failed/);
+  assert.equal(manager.restarting, false, 'a failed restart must not leave the refresh suppressed');
+  const main = await readFile(new URL('../electron/main.mjs', import.meta.url), 'utf8');
+  assert.match(main, /if \(sidecar\?\.restarting\) return;/);
+});

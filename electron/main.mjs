@@ -232,6 +232,8 @@ const shutdownOwnedServices = async ({ strict = false } = {}) => {
 
 async function publish() {
   if (desktopStartup.phase !== 'ready' || quitting || !service || !views.size) return;
+  // An engine install restarts the sidecar; it publishes again once it is back.
+  if (sidecar?.restarting) return;
   if (publishing) { needsPublish = true; return; }
   publishing = true;
   const publishEpoch = requestEpoch;

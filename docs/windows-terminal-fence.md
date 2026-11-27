@@ -128,12 +128,51 @@ Envara 终端 ──wsl.exe──▶ Envara 专用发行版（关闭 Windows int
 - 没有显式拒绝时，Mihomo 对 HTTP 上游无法转发的 UDP 会回落到 DIRECT（因为没有路由才失败）。规则里必须写 `NETWORK,udp,REJECT`，不能依赖“没有路由”。如果节点支持 UDP，可以改为经节点转发。
 - WSL2 的所有发行版共用一个虚拟机网络。命名空间可以与用户已有的发行版完全隔离，但宿主侧的中继只能绑定在 Unix 套接字上，不能监听 TCP 端口。
 
+### 实测二：Windows 文件夹与 Windows↔发行版通道（2026-11-27，yyb）
+
+脚本：`setup2.sh`、`files-spike.sh` + `files-inner.sh` + `bench_fs.py`、`channel-host.mjs` + `channel-agent.py` + `channel-spike.sh`、`rtt-host.mjs` + `rtt-agent.py`。测试发行版 `EnvaraSpike2`（Alpine，关闭 automount 和 interop）事后已注销。yyb 为 mirrored 网络模式。
+
+**Windows 文件夹**：发行版关闭 automount 后没有任何 drvfs 挂载。root 在环境的网络 + 挂载命名空间里执行 `mount -t drvfs 'C:\…\work 空格 中文' /work -o metadata,uid=1000,gid=1000,umask=022`，shell 以非 root 的 `env` 账户运行。
+
+| 检查 | 结果 |
+|---|---|
+| interop 关闭时挂载 drvfs（路径含空格和中文） | ✅ |
+| 读 Windows 写的文件、写 UTF-8 文件后 Windows 读取 | ✅ 双向正常 |
+| 可执行位（`metadata`），重新挂载后 | ✅ 755 保留，脚本可运行 |
+| 挂载是否泄漏到发行版根命名空间 | 没有 |
+| `env` 自己挂载 `C:\` | 拒绝（permission denied） |
+| `env` 在新的用户命名空间里挂载 `C:\` | 拒绝（No such device，9p 不允许用户命名空间挂载） |
+| `env` 经 `/proc/1/root` 读发行版根 | 拒绝 |
+| 命名空间内的网络 | 无（文件走 9P，不经网络栈，不影响隔离） |
+| inotify：Linux 侧写入 | ✅ 有事件 |
+| inotify：Windows 侧写入 | ❌ 没有事件（watch 和热更新需改用轮询） |
+| 大小写 | 不区分：`Case.txt` 与 `case.txt` 是同一个文件，Linux 新建的目录也一样（`case=dir` 选项未测） |
+| 符号链接 | Linux 侧可用；Windows 侧看到的是 WSL 重解析点，Windows 程序不能跟随 |
+| 1000 个小文件：创建 / 遍历 / git add+commit / git status | drvfs 2775 / 1396 / 7716 / 684 ms；ext4 99 / 5 / 42 / 17 ms |
+
+结论：挂载用户选定的 Windows 文件夹可行，隔离成立，前提是 shell 不是 root。性能比 ext4 慢 30–40 倍，Windows 侧改动不触发 inotify。默认把项目放在环境家目录（ext4），Windows 文件夹作为显式选项并提示这两点。Windows 侧通过 `\\wsl.localhost\<发行版>\…` 访问家目录。
+
+**Windows↔发行版通道**：WSL2 不支持跨 Windows/Linux 的 AF_UNIX；验证一用的是 mirrored 模式下的 Windows 回环 TCP，NAT 模式下不成立，也需要在宿主侧监听端口。改为由 Envara 主进程以管道启动 `wsl.exe -d <发行版> -- <agent>`，在它的 stdin/stdout 上做多路复用：发行版内的 agent 在 `/run/envara/*.sock` 上接受连接，以 OPEN（带套接字名）/ DATA / CLOSE 帧转给 Windows 侧，由 Windows 侧决定每个名字能连到哪里。全程不监听任何 TCP 端口，与 WSL 网络模式无关。
+
+| 检查 | 结果 |
+|---|---|
+| wsl.exe 管道往返延迟（1 B–64 KB） | 中位数 0.3–0.7 ms |
+| wsl.exe 管道吞吐（100 MB 往返回显） | 477 MB/s |
+| 多路复用后单向吞吐（200 MB） | 164 MB/s |
+| 命名空间 → Mihomo TUN → 通道 → Windows → 路由：出口 IP | 与路由一致 |
+| HTTPS 延迟、8 路并发、20 MB 下载、5 MB 上传、git clone | ✅ 与直连路由相同（瓶颈在路由本身：下载 612 KB/s，直连 618 KB/s） |
+| Windows 侧结束 wsl.exe 后，发行版里的进程 | 随之退出 |
+| agent 的 stdin 结束（Envara 退出） | agent 退出，环境失去唯一出口，天然断网 |
+
+同一条通道可以承载路由中继、MCP 浏览器 broker、SSH broker 和链接通道，各自用一个套接字名。验证用的多路复用没有逐流流控，一条慢流会拖住其他流；产品实现需要逐流窗口。
+
 ### 落地需要的工作
 
 1. 发行版：随 Envara 提供一个最小 rootfs（带校验），首次使用时 `wsl --import` 为 Envara 专用发行版；关闭 interop 和 Windows PATH；卸载时注销。用户需要先装好 WSL2（首次需要管理员，可能要重启）。
 2. 命名空间管理：每个环境一个命名空间，启动或关闭终端时创建和清理；`/etc/netns/<ns>/resolv.conf` 指向 fake-ip；所有进程不继承代理变量。
-3. 路由：宿主侧中继通过 Unix 套接字接到该环境已有的认证路由（Mihomo 节点），不经过用户自己的代理客户端。
-4. 文件：用挂载命名空间只暴露该环境的工作目录和家目录，不暴露 Windows 用户目录和 SSH 私钥。
+3. 路由：命名空间内的中继经 Unix 套接字和 wsl.exe stdio 通道（见实测二）接到该环境已有的认证路由（Mihomo 节点），不经过用户自己的代理客户端。通道需要逐流流控。
+4. 文件：用挂载命名空间只暴露该环境的家目录和用户显式选择的 Windows 文件夹（drvfs，`metadata`），不暴露 Windows 用户目录和 SSH 私钥；shell 不能以 root 运行。界面提示 Windows 文件夹较慢、Windows 侧改动不触发文件监听。
+4a. SSH：命名空间里的 OpenSSH 沿用 macOS 的 broker 模型（ProxyCommand / askpass 经通道交给主进程），凭据留在 Windows 主进程。
 5. 终端：Envara 终端通过 `wsl.exe -d <发行版> --` 启动命名空间内的 shell（node-pty 可以直接运行 wsl.exe）；Claude Code 安装在环境自己的家目录。
 6. 链接和浏览器：Claude 的登录和浏览器操作经已有的 MCP broker 交给 Envara 浏览器，需要一条从命名空间到宿主的专用通道（同样可以用 Unix 套接字）。浏览器侧的 WebRTC 由 Envara 浏览器内核的策略负责，需要单独核实。
 7. 失败处理：Mihomo、中继或命名空间任何一个缺失时都必须断网（命名空间里没有其他出口，所以天然断网），并在终端里明确提示。

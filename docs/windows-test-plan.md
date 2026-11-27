@@ -182,6 +182,15 @@
   - Electron 界面测试：Windows 不绘制隐藏窗口，截图会一直等待。Windows 上改为在屏幕外显示无边框窗口（`frame: false, thickFrame: false`），“窗口不可见”的断言改为“屏幕上没有可见窗口”；像素断言容许设备像素取整与浮点误差。
   - PTY 测试：`electron.exe` 是 GUI 子系统程序，在 ConPTY 下没有 TTY，Windows 上改用控制台 `node.exe`；ConPTY 自己应答或吞掉终端查询（光标位置、OSC 11），“Envara 应答终端查询”的测试在 Windows 上跳过。
   - 产品修复：`prepare-native` 在 Windows 上无法覆盖带只读属性的旧许可文件。
+- [x] Windows 界面与平台能力对齐（第 5 轮，开发者在 Windows 实机上逐项查看）：
+  - 侧栏与独立终端窗口在 macOS 以外不再显示“SSH 连接”（`src/workspace-navigation.mjs`；平台未知的浏览器预览仍全部显示）。
+  - 设置“打开链接”：macOS 以外显示“附加应用链接接管”为“系统链接接管目前仅支持 macOS”并禁用按钮；终端链接通道不可用时，说明改为终端链接使用系统浏览器（环境外）。
+  - Claude Code：macOS 以外在创建或重开前即拒绝，错误码 `CLAUDE_CODE_UNSUPPORTED_PLATFORM`、文案“Claude Code 会话目前仅支持 macOS”；新建终端里的 Claude Code 选项禁用并说明原因。
+  - 组件版本：平台不支持且未安装的组件显示“不可用”（不再是“未安装/需要检查”）；Windows 应用网络组件因启动闸门关闭标为不支持。
+  - 附加软件列表：只列 GUI 子系统程序（读取 PE 头），跳过 Windows 自带组件目录，并按文件名排除卸载、安装、更新、崩溃报告和辅助程序。实测从 462 项（大多是 Git 的命令行工具）降到 65 项，Chrome、Edge、Everything 等都在列表中。
+  - 内核安装：界面显示下载百分比；失败信息不再重复几十行进度。
+  - 启动诊断：排队中的写入合并为最新一份，连续多个阶段只写两次（Windows 上每次写入较慢，之前会超出 250 ms 的确认等待）。
+- [ ] Windows 附加软件列表仍会因目录数量上限而扫描不完整，也还有厂商辅助程序。更可靠的来源是开始菜单快捷方式（需要解析 `.lnk`），待做。
 - [ ] 缓存清理在 Windows 上按设计保持只读（代码要求有 NTFS ACL 检查才开放），测试已按此断言。是否实现 ACL 检查，待决定。
 - [ ] `browseforge-service` 的旧版迁移测试（`ERR_FS_CP_EEXIST`）在 macOS 与 Windows 上都失败，与 Windows 无关，单独排查。
 - [ ] node-pty 在关闭会话时启动的 `conpty_console_list_agent` 偶发 `AttachConsole failed` 并打印完整堆栈（shell 已退出时）。不影响关闭结果，属于日志噪音，待评估是否能避免。

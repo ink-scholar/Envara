@@ -1079,5 +1079,8 @@
   "常用写法": "Üblicher Befehl",
   "登录钥匙串已锁定。终端仍可使用；需要钥匙串的登录操作请在解锁后重试。": "Der Anmeldeschlüsselbund ist gesperrt. Das Terminal bleibt nutzbar. Entsperre den Schlüsselbund, bevor du Anmeldungen erneut versuchst, die ihn benötigen.",
   "未找到默认钥匙串。终端仍可使用；请检查 macOS 钥匙串后新建终端。": "Kein Standardschlüsselbund gefunden. Das Terminal bleibt nutzbar. Prüfe die macOS-Schlüsselbundverwaltung und öffne anschließend ein neues Terminal.",
-  "BrowseForge Chromium 暂不支持 Windows：其运行时缺少启动组件，且无法应用环境时区。请改用 CloakBrowser 或 Camoufox。": "BrowseForge Chromium wird unter Windows noch nicht unterstützt: Der Laufzeit fehlt eine Startkomponente, und die Zeitzone der Umgebung kann nicht angewendet werden. Verwenden Sie stattdessen CloakBrowser oder Camoufox."
+  "BrowseForge Chromium 暂不支持 Windows：其运行时缺少启动组件，且无法应用环境时区。请改用 CloakBrowser 或 Camoufox。": "BrowseForge Chromium wird unter Windows noch nicht unterstützt: Der Laufzeit fehlt eine Startkomponente, und die Zeitzone der Umgebung kann nicht angewendet werden. Verwenden Sie stattdessen CloakBrowser oder Camoufox.",
+  "系统链接接管目前仅支持 macOS。": "Die Übernahme von Systemlinks ist derzeit nur unter macOS verfügbar.",
+  "Claude Code 会话目前仅支持 macOS。": "Claude-Code-Sitzungen sind derzeit nur unter macOS verfügbar.",
+  "境舱内的链接使用所选浏览器；关闭后转到系统浏览器（环境外）。此平台暂不支持转交终端中打开的链接，终端链接使用系统浏览器（环境外）。": "Links in Envara verwenden den ausgewählten Browser. Wenn Sie dies ausschalten, wird der Systembrowser außerhalb der Umgebung verwendet. Diese Plattform kann im Terminal geöffnete Links noch nicht übergeben; sie verwenden den Systembrowser außerhalb der Umgebung."
 }

@@ -66,15 +66,8 @@ Windows facts learned so far:
 Next work, in order (keep §4 of the test plan updated as items land):
 1. **`npm test` on Windows: done (round 5).** 1 failure remains, `browseforge-service` legacy migration, which fails on macOS too and is unrelated to Windows; the full run takes about 45 s.
    - Open decision: cache maintenance stays read-only on Windows until an NTFS ACL check exists.
-2. **Windows UI mismatches**, all small:
-   - hide or disable the macOS-only "SSH 连接" nav item;
-   - show the system link-router control as unavailable instead of hiding it;
-   - drop or explain the "terminal links use the selected browser" setting while the link channel is unavailable;
-   - filter installers and system helpers out of the attached-app catalog;
-   - make the Claude refusal say "Windows not supported yet" rather than "invalid installation";
-   - show engine download progress, and stop the failure text from repeating progress lines.
-
-   Every new string needs all nine languages.
+2. **Windows UI mismatches: done (round 5).**
+   - Follow-up: build the Windows attached-app catalog from Start Menu shortcuts (`.lnk`). The bounded Program Files scan still truncates and lists some vendor helpers.
 3. **Terminal link channel on Windows.** `electron/terminal-link-channel.mjs` uses a Unix socket path, and its uid check always fails on Windows (startup logs "终端链接通道目录不安全"). Move it to a named pipe (`\\.\pipe\…`) with an equivalent ownership/ACL check, so terminal-opened links and OAuth handoffs reach the environment browser.
 4. **Packaging acceptance:** `npm run dist:win` installer install, first launch, uninstall and data retention on a clean Windows machine.
 5. **Low priority / noise:**

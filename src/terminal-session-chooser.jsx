@@ -10,11 +10,13 @@ import { liveSessions, statusLabels } from './terminal-session-status.mjs';
 
 // Render the dock-owned launch/account draft. Requests and stale-selection
 // guards stay in the dock so opening or closing this form cannot reset them.
-export function TerminalSessionChooser({ t, newSession, setNewSession, networks, activeProfileId, host,
+export function TerminalSessionChooser({ t, systemPlatform = null, newSession, setNewSession, networks, activeProfileId, host,
   directoryFor, defaultBrowser, terminalProfiles, claudeAccounts, claudeInstallation, accountEditor, setAccountEditor,
   pending, cancellingSessionId, setAccountsReload, setInstallationReload, createChosenAccount, mutateAccount,
   chooseNewSessionDirectory, confirmNewSession, closeSession, onFocusAccountSession }) {
   const claude = newSession.kind === CLAUDE_SESSION;
+  // Claude Code sessions are macOS-only; an unknown platform (preview) keeps the choice.
+  const claudeSupported = !systemPlatform || systemPlatform === 'darwin';
   const manageOnly = newSession.manageAccount === true;
   const availableNetworks = sessionNetworks(networks, newSession.kind);
   const network = availableNetworks.find(item => item.id === newSession.networkId);
@@ -40,7 +42,8 @@ export function TerminalSessionChooser({ t, newSession, setNewSession, networks,
   return <div className={`terminal-new-session ${manageOnly ? 'terminal-manage-account' : ''}`} role="dialog" aria-modal="false" aria-label={t(manageOnly ? '管理登录档案' : '新建终端')}>
     <div className="terminal-new-session-head"><strong>{t(manageOnly ? '管理登录档案' : '新建终端')}</strong><button className="terminal-icon-button" aria-label={t(opening && claude ? '取消安装' : '取消')} disabled={!!pending && (!startingSession || !!cancellingSessionId)} onClick={cancelCreation}><X size={14} /></button></div>
     {!manageOnly && <>
-    <div className="terminal-session-kind" role="group" aria-label={t('会话类型')}><button disabled={!!pending} aria-pressed={!claude} onClick={() => setNewSession(changeSessionKind(networks, newSession, 'shell', activeProfileId))}>{t('普通终端')}</button><button disabled={!!pending} aria-pressed={claude} onClick={() => setNewSession(changeSessionKind(networks, newSession, CLAUDE_SESSION, activeProfileId))}>Claude Code</button></div>
+    <div className="terminal-session-kind" role="group" aria-label={t('会话类型')}><button disabled={!!pending} aria-pressed={!claude} onClick={() => setNewSession(changeSessionKind(networks, newSession, 'shell', activeProfileId))}>{t('普通终端')}</button><button disabled={!!pending || !claudeSupported} title={claudeSupported ? undefined : t('Claude Code 会话目前仅支持 macOS。')} aria-pressed={claude} onClick={() => setNewSession(changeSessionKind(networks, newSession, CLAUDE_SESSION, activeProfileId))}>Claude Code</button></div>
+    {!claudeSupported && <p className="terminal-claude-note">{t('Claude Code 会话目前仅支持 macOS。')}</p>}
     {claude && <p className="terminal-claude-note"><strong>{t('进入终端后运行 claude。')}</strong></p>}
     {claude && !availableNetworks.length && <div className="terminal-new-session-error">{t('先添加网络出口，并为它创建一个境舱浏览器。')}</div>}
     <label><span>{t('网络出口')}</span><select value={network?.id || ''} disabled={!!pending || !availableNetworks.length} onChange={event => { const next = availableNetworks.find(item => item.id === event.target.value); if (next) setNewSession({ ...newSession, networkId: next.id, browserId: defaultBrowser(next), error: '' }); }}>{availableNetworks.map(item => <option key={item.id} value={item.id}>{item.name || t('本机网络')}</option>)}</select>

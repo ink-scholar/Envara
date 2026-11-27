@@ -7,7 +7,9 @@ export const componentVersion = value => typeof value === 'string' && /^v?\d[0-9
 function routingComponentMetadata(routing, installation, platform, arch) {
   if (routing?.backend !== 'pf-utun') {
     const version = routing?.installed === true ? componentVersion(routing.verification?.version) : null;
-    return { version, versionSource: version ? 'installation-report' : 'unknown', support: 'unknown',
+    // The Windows routing helper's launch gate is closed until its DNS
+    // ownership and fail-closed daemon gaps are resolved (see its README).
+    return { version, versionSource: version ? 'installation-report' : 'unknown', support: platform === 'win32' ? 'unsupported' : 'unknown',
       status: !routing ? 'unknown' : routing.ready ? 'ready' : routing.installed ? 'needs-attention' : 'missing' };
   }
   // PF verification.version (for example "pf/1") identifies the validation

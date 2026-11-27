@@ -1079,5 +1079,8 @@
   "常用写法": "常用寫法",
   "登录钥匙串已锁定。终端仍可使用；需要钥匙串的登录操作请在解锁后重试。": "登入鑰匙圈已鎖定。終端機仍可使用；需要鑰匙圈的登入操作請在解鎖後重試。",
   "未找到默认钥匙串。终端仍可使用；请检查 macOS 钥匙串后新建终端。": "找不到預設鑰匙圈。終端機仍可使用；請檢查 macOS「鑰匙圈存取」後開啟新的終端機。",
-  "BrowseForge Chromium 暂不支持 Windows：其运行时缺少启动组件，且无法应用环境时区。请改用 CloakBrowser 或 Camoufox。": "BrowseForge Chromium 暫不支援 Windows：其執行環境缺少啟動元件，且無法套用環境時區。請改用 CloakBrowser 或 Camoufox。"
+  "BrowseForge Chromium 暂不支持 Windows：其运行时缺少启动组件，且无法应用环境时区。请改用 CloakBrowser 或 Camoufox。": "BrowseForge Chromium 暫不支援 Windows：其執行環境缺少啟動元件，且無法套用環境時區。請改用 CloakBrowser 或 Camoufox。",
+  "系统链接接管目前仅支持 macOS。": "系統連結接管目前僅支援 macOS。",
+  "Claude Code 会话目前仅支持 macOS。": "Claude Code 工作階段目前僅支援 macOS。",
+  "境舱内的链接使用所选浏览器；关闭后转到系统浏览器（环境外）。此平台暂不支持转交终端中打开的链接，终端链接使用系统浏览器（环境外）。": "境艙內的連結使用所選瀏覽器；關閉後改用系統瀏覽器（環境外）。此平台暫不支援轉交終端中開啟的連結，終端連結使用系統瀏覽器（環境外）。"
 }

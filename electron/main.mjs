@@ -342,7 +342,10 @@ const linkPreferencesFile = () => path.join(app.getPath('userData'), 'link-prefe
 const linkPreferences = new LinkPreferences({ file: linkPreferencesFile });
 async function linkRouterStatus() {
   const saved = linkPreferences.snapshot();
-  const preference = { preference: saved.openInEnvironment, declined: Boolean(saved.declinedAt) };
+  // systemRoutingSupported: the platform has a system link router at all.
+  // terminalLinks: terminal-opened links reach the environment browser.
+  const preference = { preference: saved.openInEnvironment, declined: Boolean(saved.declinedAt),
+    systemRoutingSupported: process.platform === 'darwin', terminalLinks: linkChannel !== null };
   if (process.platform !== 'darwin') return { available: false, enabled: false, handler: null, previous: null, ...preference };
   try {
     // The bundled helper reads the same per-user state without installing or

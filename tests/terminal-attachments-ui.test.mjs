@@ -106,7 +106,8 @@ test('pending attachment blocks keyboard input and switching tabs discards the l
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.deepEqual(await writes(), []);
   await activeInput().focus(); await page.keyboard.type('new-tab');
-  for (let index = 0; index < 100 && !(await writes()).length; index++) await new Promise(resolve => setTimeout(resolve, 10));
+  // Typed input may arrive in more than one write; wait for all of it.
+  for (let index = 0; index < 200 && (await writes()).map(item => item.data).join('').length < 'new-tab'.length; index++) await new Promise(resolve => setTimeout(resolve, 10));
   const sent = await writes(); assert.ok(sent.length); assert.ok(sent.every(item => item.sessionId === id(2))); assert.equal(sent.map(item => item.data).join(''), 'new-tab');
 });
 

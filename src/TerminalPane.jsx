@@ -32,7 +32,7 @@ const savedTerminalErrors = {
   CLAUDE_ACCOUNT_NOT_FOUND: '此 Claude 登录档案已不存在，请重新选择。',
 };
 
-export function TerminalDock({ profiles = [], visible = true, onHide, openRequest = null, onError, onProfilesChange, onSelectProfile, standalone = false, workspace = false, selectedProfileId = null, refreshKey = 0, expanded = false, onToggleExpanded, onHeightChange, onResizeStart, minHeight = 320, maxHeight, screenReaderMode = false, onExport, onConfigureLinkBrowser, exportDisabled = false }) {
+export function TerminalDock({ systemPlatform = null, profiles = [], visible = true, onHide, openRequest = null, onError, onProfilesChange, onSelectProfile, standalone = false, workspace = false, selectedProfileId = null, refreshKey = 0, expanded = false, onToggleExpanded, onHeightChange, onResizeStart, minHeight = 320, maxHeight, screenReaderMode = false, onExport, onConfigureLinkBrowser, exportDisabled = false }) {
   const { t } = useI18n();
   const desktopAvailable = api.isDesktop && typeof api.onTerminalEvent === 'function';
   const storeRef = useRef(new TerminalStreamStore());
@@ -661,7 +661,7 @@ export function TerminalDock({ profiles = [], visible = true, onHide, openReques
         {allSessions.map(session => <TerminalSession key={session.sessionId} session={session} active={session.sessionId === selectedSession?.sessionId && session.profileId === activeProfileId} visible={shown} autoFocus={!contextOpen && !savedMenuOpen && !entryEditor && !newSession} focusRequest={`${openRequest?.profileId === session.profileId ? `${openRequest.nonce}:${openRequest.sessionId || ''}` : ''}:${focusVersion}`} preserveTabFocusRef={preserveTabFocusRef} register={register} onError={reportError} screenReaderMode={screenReaderMode} />)}
         {!selectedSession && <div className="terminal-empty"><TerminalWindow size={25} /><div><strong>{t(!desktopAvailable ? '真实终端需使用桌面应用' : !selectedProfile ? '先创建一个环境' : loading ? '正在读取终端会话…' : sessionUnavailable ? '该会话已不可用' : '打开此环境的终端')}</strong>{(!desktopAvailable || sessionUnavailable) && <p>{t(!desktopAvailable ? '网页预览不连接本机 Shell。' : '可选择其他会话或新建会话。')}</p>}</div>{desktopAvailable && selectedProfile && <button className="terminal-empty-start" disabled={!!pending || loading} onClick={openNewSessionChooser}>{t(pending.startsWith('open:') ? '启动中…' : sessionUnavailable ? '新建会话' : '打开终端')}</button>}</div>}
       </div>
-      {newSession && <TerminalSessionChooser t={t} newSession={newSession} setNewSession={setNewSession}
+      {newSession && <TerminalSessionChooser t={t} systemPlatform={systemPlatform} newSession={newSession} setNewSession={setNewSession}
         networks={networks} activeProfileId={activeProfileId} host={chooserHost(newSession)} directoryFor={directoryFor} defaultBrowser={defaultBrowser}
         terminalProfiles={terminalState.profiles} claudeAccounts={claudeAccounts} claudeInstallation={claudeInstallation}
         accountEditor={accountEditor} setAccountEditor={setAccountEditor} pending={pending} cancellingSessionId={cancellingSessionId}

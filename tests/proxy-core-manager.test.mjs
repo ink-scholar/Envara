@@ -407,7 +407,9 @@ test('port collisions retry with fresh credentials but startup timeouts remove e
 
 test('silent listener collisions retry even when the core stays alive without diagnostic output', async t => {
   let calls;
-  const data = await fixture(t, { startupTimeoutMs: 60, probeListener: async () => {
+  // A 60 ms budget leaves no room for real port allocation; nothing here recovers.
+  let port = 42000;
+  const data = await fixture(t, { startupTimeoutMs: 60, choosePort: async () => port++, probeListener: async () => {
     if (calls.length === 1) throw new Error('wrong-listener-credentials');
   } });
   calls = data.calls;

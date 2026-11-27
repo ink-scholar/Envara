@@ -29,7 +29,7 @@ export function createStartupDiagnostics({ directory, version, clock = () => per
   const uptime = Number.isFinite(entryUptimeMs) ? milliseconds(entryUptimeMs) : 0;
   const stages = [];
   let elapsed = 0, failureCode = null, rotated = false;
-  let writes = Promise.resolve(false);
+  let latest = null, draining = null;
   const now = () => (elapsed = Math.max(elapsed, milliseconds(finiteClock(clock, origin) - origin)));
 
   function snapshot() {
@@ -75,11 +75,19 @@ export function createStartupDiagnostics({ directory, version, clock = () => per
   }
 
   function flush() {
-    const document = snapshot();
     // The actual writer remains serialized even if a caller's bounded wait
     // expires. A timed-out write cannot race the next snapshot onto disk.
-    const pending = writes.then(() => persist(document)).catch(() => false);
-    writes = pending;
+    // Only the newest snapshot matters, so snapshots queued behind a write
+    // collapse into one: a burst of stages costs two writes, not one each
+    // (each write costs several file operations, slow on Windows).
+    latest = snapshot();
+    draining ??= (async () => {
+      let result = false;
+      while (latest) { const document = latest; latest = null; result = await persist(document).catch(() => false); }
+      draining = null;
+      return result;
+    })();
+    const pending = draining;
     let timer;
     const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(false), FLUSH_WAIT_MS); });
     return Promise.race([pending, timeout]).finally(() => clearTimeout(timer));

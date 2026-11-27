@@ -28,6 +28,23 @@ export function macSystemProxyEnvironment(output) {
 /** Parse `reg query` output of HKCU Internet Settings into the same engine
  * download environment the macOS path derives from scutil. PAC/WPAD scripts
  * are not evaluated; only an enabled static proxy is used. */
+// The sidecar reports downloads on stderr as carriage-return updates such as
+// "\r  12 / 300 MB (4%)". Keep the latest percentage for the UI, and keep those
+// updates out of failure text, where they used to repeat dozens of times.
+const DOWNLOAD_PROGRESS = /\r?[ \t]*\d+ \/ \d+ MB \((\d{1,3})%\)/g;
+
+/** Latest download percentage in a stderr chunk, or `previous` when none. */
+export function engineInstallProgress(chunk, previous = null) {
+  let percent = null;
+  for (const match of String(chunk).matchAll(DOWNLOAD_PROGRESS)) percent = Math.min(100, Number(match[1]));
+  return percent ?? previous;
+}
+
+/** Diagnostic text without download progress updates, bounded for display. */
+export function engineInstallDiagnostic(text, limit = 500) {
+  return String(text).replace(DOWNLOAD_PROGRESS, '').replace(/\r/g, '\n').replace(/\n{2,}/g, '\n').trim().slice(-limit);
+}
+
 export function windowsSystemProxyEnvironment(output) {
   const values = Object.fromEntries([...output.matchAll(/^\s+(ProxyEnable|ProxyServer)\s+REG_\w+\s+(.+?)\s*$/gim)].map(match => [match[1].toLowerCase(), match[2].trim()]));
   if (!/^(0x0*1|1)$/i.test(values.proxyenable ?? '') || !values.proxyserver) return {};
@@ -152,7 +169,7 @@ export class SidecarManager {
       });
       child.stderr.on('data', chunk => {
         diagnostic = (diagnostic + chunk).slice(-6000);
-        if (progress) progress(String(chunk).replaceAll(this.token ?? '', '[redacted]').slice(-400));
+        if (progress) progress(String(chunk).replaceAll(this.token ?? '', '[redacted]'));
       });
       const timer = setTimeout(() => terminate(fail('本地浏览器服务操作超时。', 'BACKEND_COMMAND_TIMEOUT')), timeout);
       timer.unref();
@@ -165,7 +182,7 @@ export class SidecarManager {
           const result = JSON.parse(output);
           if (code === 0 || (args.includes('status') && Array.isArray(result.browsers))) finish(null, result);
           else finish(fail(result.error ?? `内核安装失败 (${code})`, 'ENGINE_INSTALL_FAILED'));
-        } catch { finish(fail(`本地内核服务失败 (${code})：${diagnostic.replaceAll(this.token ?? '', '[redacted]').slice(-500)}`, 'BACKEND_COMMAND_FAILED')); }
+        } catch { finish(fail(`本地内核服务失败 (${code})：${engineInstallDiagnostic(diagnostic.replaceAll(this.token ?? '', '[redacted]'))}`, 'BACKEND_COMMAND_FAILED')); }
       });
     });
   }
@@ -237,9 +254,12 @@ export class SidecarManager {
     const sessions = (await this.client.request('GET', '/api/sessions')).data ?? [];
     if (sessions.length) throw fail('请先停止所有环境，再安装内核。', 'PROFILE_RUNNING');
     if (!this.states[id]?.supported) throw fail(enginePlatformHold(id) ?? '当前平台尚不支持此内核。', 'UNSUPPORTED_ENGINE');
-    this.states[id] = { ...this.states[id], installing: true, error: null, progress: '正在下载官方内核…' };
+    this.states[id] = { ...this.states[id], installing: true, error: null, progress: null };
     this.changed();
-    const task = this.command(['browsers', 'install', '--runtimes', id, '--json'], 15 * 60 * 1000, message => { this.states[id].progress = message; this.changed(); });
+    const task = this.command(['browsers', 'install', '--runtimes', id, '--json'], 15 * 60 * 1000, message => {
+      const next = engineInstallProgress(message, this.states[id].progress);
+      if (next !== this.states[id].progress) { this.states[id].progress = next; this.changed(); }
+    });
     this.installations.set(id, task);
     try { await task; await this.probe(); await this.stop(); await this.start(); }
     catch (error) { this.states[id].error = error.message; throw error; }

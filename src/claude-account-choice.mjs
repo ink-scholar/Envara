@@ -20,6 +20,7 @@ const downloadErrors = {
   CLAUDE_CODE_DOWNLOAD_INTEGRITY_FAILED: 'Claude 下载大小或校验值不一致，请重试。',
   CLAUDE_CODE_DOWNLOAD_SIGNATURE_FAILED: '无法验证 Claude 官方程序签名，请重试。',
   CLAUDE_CODE_PLATFORM_UNSUPPORTED: '当前平台尚不支持 Claude 专用安装。',
+  CLAUDE_CODE_UNSUPPORTED_PLATFORM: 'Claude Code 会话目前仅支持 macOS。',
 };
 
 const keychainErrors = {

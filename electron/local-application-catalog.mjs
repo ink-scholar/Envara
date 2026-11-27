@@ -1,6 +1,6 @@
 import path from 'node:path';
 import os from 'node:os';
-import { lstat, opendir, realpath } from 'node:fs/promises';
+import { lstat, open, opendir, realpath } from 'node:fs/promises';
 import { inspectLocalApplication } from './application-service.mjs';
 import { inspectApplicationCompatibility } from './application-compatibility.mjs';
 
@@ -11,6 +11,54 @@ const contained = (root, filename) => {
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 };
 const validPath = value => typeof value === 'string' && path.isAbsolute(value) && value.length <= 8192 && !/[\0\r\n]/.test(value);
+
+/** Windows installation folders also hold executables nobody launches directly:
+ * uninstallers, installers, updaters, crash reporters and helper processes.
+ * They are omitted by file name. The list is conservative: anything not
+ * clearly auxiliary stays listed, and selection is re-inspected anyway. */
+const WINDOWS_AUXILIARY_EXECUTABLE = new RegExp('^(?:' + [
+  'unins\\d*', 'uninst(?:all(?:er)?)?\\d*(?:[-_ ].*)?', '.*[-_ ]uninstall(?:er)?', 'setup(?:[-_ ].*)?', '.*[-_ ]?setup', 'install(?:er)?', '.*[-_ ]installer',
+  'update', 'updater', '.*[-_ ]?update(?:r|check)?(?:32|64)?', 'squirrel', 'maintenancetool',
+  'crashpad_handler', '.*crash[-_ ]?(?:handler|report(?:er)?|pad)', '.*[-_ ]?reporter', 'werfault',
+  '.*[-_ ]?helper', '.*[-_ ]service', 'elevation_service', 'notification_helper', '.*subprocess',
+  'vc_?redist.*', '.*redist', 'dxsetup', 'dotnet', 'node', 'python[w0-9.]*', 'java[w]?', 'msedgewebview2',
+].join('|') + ')\\.exe$', 'i');
+
+export const windowsAuxiliaryExecutable = name => WINDOWS_AUXILIARY_EXECUTABLE.test(name);
+
+// Folders of Windows itself and shared runtimes under Program Files. They hold
+// system services and components, not applications a user attaches, and they
+// are large enough to exhaust the bounded scan before real applications.
+const WINDOWS_COMPONENT_DIRECTORIES = new Set(['common files', 'internet explorer', 'microsoft update health tools', 'modifiablewindowsapps',
+  'msbuild', 'reference assemblies', 'uninstall information', 'windows defender', 'windows defender advanced threat protection',
+  'windows mail', 'windows media player', 'windows multimedia platform', 'windows nt', 'windows photo viewer', 'windows portable devices',
+  'windows security', 'windows sidebar', 'windowsapps', 'windowspowershell', 'windows kits', 'wsl', 'dotnet', 'microsoft.net', 'packagemanagement']);
+
+export const windowsComponentDirectory = name => WINDOWS_COMPONENT_DIRECTORIES.has(String(name).toLowerCase());
+
+/** PE optional-header subsystem of a Windows executable header, or null.
+ * 2 is a desktop (GUI) program and 3 a console program. */
+export function peSubsystem(header) {
+  if (!Buffer.isBuffer(header) || header.length < 0x40 || header.readUInt16LE(0) !== 0x5a4d) return null;
+  const pe = header.readUInt32LE(0x3c);
+  if (pe + 24 + 70 > header.length || header.readUInt32LE(pe) !== 0x00004550) return null;
+  const optional = pe + 24, magic = header.readUInt16LE(optional);
+  if (magic !== 0x10b && magic !== 0x20b) return null;
+  return header.readUInt16LE(optional + 68);
+}
+
+// Attached applications are desktop programs. Console tools (Git's usr\bin,
+// runtimes, CLIs) fill Program Files and crowd real applications out of the
+// bounded scan, so only GUI-subsystem executables are listed on Windows.
+async function windowsDesktopExecutable(filename) {
+  let handle;
+  try {
+    handle = await open(filename, 'r');
+    const header = Buffer.alloc(4096), { bytesRead } = await handle.read(header, 0, header.length, 0);
+    return peSubsystem(header.subarray(0, bytesRead)) === 2;
+  } catch { return false; }
+  finally { await handle?.close().catch(() => {}); }
+}
 
 /** Fixed installation roots only; renderer requests cannot select a scan directory. */
 export function localApplicationRoots({ platform = process.platform, home = os.homedir(), environment = process.env } = {}) {
@@ -42,11 +90,12 @@ async function bundleIsBounded(bundle) {
 /** Read-only, bounded discovery. Selection is re-inspected by ApplicationService before binding/launch. */
 export class LocalApplicationCatalog {
   constructor({ platform = process.platform, roots = localApplicationRoots({ platform }), inspectApplication = inspectLocalApplication,
-    inspectCompatibility = inspectApplicationCompatibility,
+    inspectCompatibility = inspectApplicationCompatibility, desktopExecutable = windowsDesktopExecutable,
     cacheMs = 15000, timeoutMs = 4000, maxEntries = 4096, maxDirectories = 256, maxCandidates = 750, now = Date.now } = {}) {
     if (!Array.isArray(roots) || roots.length > 8 || roots.some(root => !validPath(root)) || typeof inspectApplication !== 'function' || typeof inspectCompatibility !== 'function' || typeof now !== 'function' ||
         ![cacheMs, timeoutMs, maxEntries, maxDirectories, maxCandidates].every(value => Number.isSafeInteger(value) && value > 0) ||
         cacheMs > 60000 || timeoutMs > 10000 || maxEntries > 8192 || maxDirectories > 512 || maxCandidates > 1000) throw invalid();
+    this.desktopExecutable = desktopExecutable;
     this.platform = platform; this.roots = [...new Set(roots)]; this.inspectApplication = inspectApplication; this.inspectCompatibility = inspectCompatibility;
     this.cacheMs = cacheMs; this.timeoutMs = timeoutMs; this.maxEntries = maxEntries; this.maxDirectories = maxDirectories;
     this.maxCandidates = maxCandidates; this.now = now; this.cached = null; this.pending = null;
@@ -100,7 +149,8 @@ export class LocalApplicationCatalog {
           try {
             const item = await lstat(filename);
             if (item.isSymbolicLink()) continue;
-            const isApplication = this.platform === 'darwin' ? item.isDirectory() && /\.app$/i.test(name) : item.isFile() && /\.exe$/i.test(name);
+            const isApplication = this.platform === 'darwin' ? item.isDirectory() && /\.app$/i.test(name)
+              : item.isFile() && /\.exe$/i.test(name) && !windowsAuxiliaryExecutable(name) && await this.desktopExecutable(filename);
             if (isApplication) {
               candidates++;
               const canonical = await realpath(filename);
@@ -118,7 +168,7 @@ export class LocalApplicationCatalog {
               applications.push({ path: inspected.path, executablePath: inspected.executablePath, name: inspected.name, identity: inspected.identity,
                 compatibility: { supported: compatibility.supported === true, adapter: compatibility.supported === true ? 'chromium-front' : 'unsupported',
                   reasonCode: compatibility.supported === true ? null : 'APPLICATION_ADAPTER_UNSUPPORTED', dataScope: compatibility.supported === true ? 'environment' : 'unavailable', verification: 'pending' } });
-            } else if (item.isDirectory() && depth < maxDepth) queue.push({ root, directory: filename, depth: depth + 1 });
+            } else if (item.isDirectory() && depth < maxDepth && !(this.platform === 'win32' && depth === 0 && windowsComponentDirectory(name))) queue.push({ root, directory: filename, depth: depth + 1 });
           } catch { /* Broken or changing bundles are omitted; no file contents or paths are logged. */ }
         }
       } catch { scanComplete = false; }

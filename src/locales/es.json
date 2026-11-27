@@ -1079,5 +1079,8 @@
   "常用写法": "Comando habitual",
   "登录钥匙串已锁定。终端仍可使用；需要钥匙串的登录操作请在解锁后重试。": "El llavero de inicio de sesión está bloqueado. Puedes seguir usando la terminal; desbloquéalo antes de volver a intentar los inicios de sesión que lo necesiten.",
   "未找到默认钥匙串。终端仍可使用；请检查 macOS 钥匙串后新建终端。": "No se encontró un llavero predeterminado. Puedes seguir usando la terminal; revisa Acceso a Llaveros de macOS y abre una terminal nueva.",
-  "BrowseForge Chromium 暂不支持 Windows：其运行时缺少启动组件，且无法应用环境时区。请改用 CloakBrowser 或 Camoufox。": "BrowseForge Chromium aún no es compatible con Windows: a su entorno de ejecución le falta un componente de inicio y no puede aplicar la zona horaria del entorno. Usa CloakBrowser o Camoufox."
+  "BrowseForge Chromium 暂不支持 Windows：其运行时缺少启动组件，且无法应用环境时区。请改用 CloakBrowser 或 Camoufox。": "BrowseForge Chromium aún no es compatible con Windows: a su entorno de ejecución le falta un componente de inicio y no puede aplicar la zona horaria del entorno. Usa CloakBrowser o Camoufox.",
+  "系统链接接管目前仅支持 macOS。": "La gestión de enlaces del sistema por ahora solo está disponible en macOS.",
+  "Claude Code 会话目前仅支持 macOS。": "Las sesiones de Claude Code por ahora solo están disponibles en macOS.",
+  "境舱内的链接使用所选浏览器；关闭后转到系统浏览器（环境外）。此平台暂不支持转交终端中打开的链接，终端链接使用系统浏览器（环境外）。": "Los enlaces de Envara usan el navegador seleccionado. Desactívalo para usar el navegador del sistema fuera del entorno. Esta plataforma aún no puede transferir los enlaces abiertos en una terminal, así que esos enlaces usan el navegador del sistema fuera del entorno."
 }

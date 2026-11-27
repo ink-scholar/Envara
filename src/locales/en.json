@@ -1025,5 +1025,8 @@
   "Envara 境舱": "Envara",
   "TLS 服务器名称": "TLS server name",
   "TLS 服务器名称 / SNI（选填）": "TLS server name / SNI (optional)",
-  "BrowseForge Chromium 暂不支持 Windows：其运行时缺少启动组件，且无法应用环境时区。请改用 CloakBrowser 或 Camoufox。": "BrowseForge Chromium is not supported on Windows yet: its runtime is missing a startup component and cannot apply the environment time zone. Use CloakBrowser or Camoufox instead."
+  "BrowseForge Chromium 暂不支持 Windows：其运行时缺少启动组件，且无法应用环境时区。请改用 CloakBrowser 或 Camoufox。": "BrowseForge Chromium is not supported on Windows yet: its runtime is missing a startup component and cannot apply the environment time zone. Use CloakBrowser or Camoufox instead.",
+  "系统链接接管目前仅支持 macOS。": "System link takeover is currently available only on macOS.",
+  "Claude Code 会话目前仅支持 macOS。": "Claude Code sessions are currently available only on macOS.",
+  "境舱内的链接使用所选浏览器；关闭后转到系统浏览器（环境外）。此平台暂不支持转交终端中打开的链接，终端链接使用系统浏览器（环境外）。": "Links in Envara use the selected browser. Turn this off to use the system browser outside the environment. This platform cannot yet hand over links opened in a terminal, so terminal links use the system browser outside the environment."
 }

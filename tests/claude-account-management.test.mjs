@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { TerminalService } from '../electron/terminal-service.mjs';
 import { TerminalController } from '../electron/terminal-controller.mjs';
+const claudeCodeMacOSOnly = process.platform !== 'darwin' && 'Claude Code sessions are macOS-only';
 
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const absent = target => assert.rejects(fs.lstat(target), { code: 'ENOENT' });
@@ -58,7 +59,7 @@ test('active and queued Claude launches block deletion, including controller que
   await f.remove();
 });
 
-test('service queued starts and duplicate reservations refuse deletion until their work settles', async t => {
+test('service queued starts and duplicate reservations refuse deletion until their work settles', { skip: claudeCodeMacOSOnly }, async t => {
   const f = await fixture(t), { service } = f, gate = deferred();
   service.settings.set('env_one', { cwd: f.root });
   service.profileQueues.set('env_one', gate.promise);
@@ -108,7 +109,7 @@ test('a failed rollback keeps its detached copy and refuses recovery over a comp
   assert.equal(await fs.readFile(f.marker, 'utf8'), 'selected fixture');
 });
 
-test('committed cleanup failure retains only detached data, rejects new starts, and retries cleanup', async t => {
+test('committed cleanup failure retains only detached data, rejects new starts, and retries cleanup', { skip: claudeCodeMacOSOnly }, async t => {
   const f = await fixture(t), remove = fs.rm;
   fs.rm = async (target, options) => { if (target === f.detached) throw new Error('Synthetic cleanup failure'); return remove(target, options); };
   syncBuiltinESMExports();
@@ -151,7 +152,7 @@ test('linked account or quarantine paths are refused without modifying their tar
   });
 });
 
-test('a deletion holds a synchronous reservation against a later launch', async t => {
+test('a deletion holds a synchronous reservation against a later launch', { skip: claudeCodeMacOSOnly }, async t => {
   const f = await fixture(t), gate = deferred();
   f.service.profileQueues.set('env_one', gate.promise);
   const deletion = f.remove();

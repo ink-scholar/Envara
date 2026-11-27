@@ -5,6 +5,9 @@ import './component-versions.css';
 
 const statusLabels = { running: '运行中', installed: '已安装', missing: '未安装', ready: '已就绪', updating: '正在更新',
   unavailable: '不可用', 'needs-attention': '需要检查', unknown: '未知' };
+// A component this platform does not support reads as unavailable, not as a
+// missing install or something to check, unless it is actually present.
+const shownStatus = row => row.support === 'unsupported' && !['installed', 'running', 'ready', 'updating'].includes(row.status) ? 'unavailable' : row.status;
 const sourceLabels = { 'running-app': '来自当前应用', 'installation-record': '来自安装记录', 'bundled-package': '随应用提供的版本',
   'installation-report': '来自组件检查', 'validated-installation-entry': '来自已验证的安装入口',
   'validated-installation-manifest': '来自已验证的安装清单', unknown: '版本来源未知' };
@@ -76,7 +79,7 @@ export function ComponentVersions({ load, onInstallEngine, onSetupRouting, onOpe
       <summary><Package size={17} aria-hidden="true" /><span className="component-name"><strong>{row.kind === 'routing' ? t('应用网络组件') : row.name}</strong>
         <small>{row.profileName || (row.kind === 'proxy' ? t('内置代理核心') : row.kind === 'routing' ? row.name : '')}</small></span>
         <span className="component-version-value">{row.version || t('未知')}</span>
-        <span className={`component-status ${row.status}`}>{t(statusLabels[row.status] || '未知')}</span><CaretDown size={15} aria-hidden="true" /></summary>
+        <span className={`component-status ${shownStatus(row)}`}>{t(statusLabels[shownStatus(row)] || '未知')}</span><CaretDown size={15} aria-hidden="true" /></summary>
       <div className="component-version-detail">
         <dl className="component-version-fields">
           <div><dt>{t('版本来源')}</dt><dd>{t(sourceLabels[row.versionSource] || '版本来源未知')}</dd></div>

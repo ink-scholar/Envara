@@ -30,6 +30,9 @@ const OUTPUT_CHUNK_BYTES = 32 * 1024;
 const FALLBACK_EXIT_TIMEOUT_MS = 1000;
 const ACCOUNT_DELETIONS_DIRECTORY = 'claude-account-deletions';
 const codeError = (message, code = 'TERMINAL_VALIDATION_ERROR') => Object.assign(new Error(message), { code });
+// Claude Code sessions depend on the macOS network fence, Keychain profiles and
+// the verified macOS download; elsewhere they are refused before any install.
+const claudeUnsupported = () => codeError('Claude Code 会话目前仅支持 macOS。', 'CLAUDE_CODE_UNSUPPORTED_PLATFORM');
 const storageFailure = error => ['EACCES', 'EPERM', 'EROFS', 'ENOSPC'].includes(error?.code)
   ? codeError('无法写入此环境的独立终端配置，请检查应用数据目录的权限与剩余空间。', 'TERMINAL_STORAGE_UNAVAILABLE') : error;
 const validId = value => {
@@ -155,7 +158,7 @@ export class TerminalService {
     /* Links a fenced terminal asks to open come back through this channel and
      * are opened by the app, never by the host's default browser. */
     linkChannel = null, browserBroker = null, sshManager = null, resolveSshContext = resolveContext, claudeExecutableResolver = findClaudeExecutable, claudeInstaller = ensureClaudeInstallation, claudeKeychain = new ClaudeKeychainManager(), availableLocales = null,
-    getTheme = () => getTerminalTheme('dark'), diagnostics = null }) {
+    getTheme = () => getTerminalTheme('dark'), diagnostics = null, claudePlatform = process.platform }) {
     if (!path.isAbsolute(dataDir ?? '') || typeof resolveContext !== 'function') throw codeError('终端数据目录或环境解析器无效。');
     this.dataDir = path.resolve(dataDir);
     this.onEvent = onEvent;
@@ -181,6 +184,7 @@ export class TerminalService {
     this.sshManager = sshManager;
     this.claudeExecutableResolver = claudeExecutableResolver;
     this.claudeInstaller = claudeInstaller;
+    this.claudePlatform = claudePlatform;
     if (!claudeKeychain || typeof claudeKeychain.prepare !== 'function') throw codeError('Claude 登录凭据存储暂不可用，请检查钥匙串后重试。', 'CLAUDE_KEYCHAIN_UNAVAILABLE');
     this.claudeKeychain = claudeKeychain;
     if (availableLocales !== null && (!Array.isArray(availableLocales) || availableLocales.some(value => typeof value !== 'string'))) throw codeError('终端语言区域列表无效。');
@@ -765,6 +769,7 @@ export class TerminalService {
   shell(environment) { return terminalShell(environment, { platform: process.platform, hostEnvironment: process.env }); }
   async create({ id, columns, rows, fresh = false, directory = null, kind = 'shell', browserProfileId = null, claudeAccountId: accountId = null, claudeInstallSource, requestId = null }) {
     if (!['shell', 'claude-code'].includes(kind)) throw codeError('终端会话类型无效。');
+    if (kind === 'claude-code' && this.claudePlatform !== 'darwin') throw claudeUnsupported();
     if (kind === 'claude-code' && (browserProfileId !== id || browserProfileId === 'system')) throw codeError('Claude Code 必须使用创建终端时选定的境舱浏览器。', 'CLAUDE_BROWSER_REQUIRED');
     if (requestId != null) validId(requestId);
     if (kind !== 'claude-code' && accountId != null) throw codeError('普通终端不能选择 Claude 登录档案。', 'CLAUDE_ACCOUNT_INVALID');
@@ -895,6 +900,7 @@ export class TerminalService {
     return result;
   }
   async startSession({ id, cwd, columns, rows, context: copiedContext, source, kind = 'shell', browserProfileId = null, account = null, requestId = null, claudeInstallSource = 'download', savedEntry = null }) {
+    if (kind === 'claude-code' && this.claudePlatform !== 'darwin') throw claudeUnsupported();
     if ([...this.sessions.values()].filter(session => ['starting', 'running', 'closing'].includes(session.status)).length >= MAX_SESSIONS) throw codeError('最多同时打开 8 个终端会话。', 'TERMINAL_LIMIT');
     const session = { sessionId: `term_${randomUUID().replaceAll('-', '')}`, profileId: id, kind, requestId, claudeAccountId: account?.id ?? null, claudeAccountName: account?.name ?? null, claudeInstallSource: kind === 'claude-code' ? claudeInstallSource : null, abortController: new AbortController(), browserProfileId: kind === 'claude-code' ? browserProfileId : null, status: 'starting', cwd, columns: integer(columns, 100, 20, 400), rows: integer(rows, 30, 5, 150), startedAt: new Date().toISOString(), sequence: 0, replay: '', events: [], queuedBytes: 0, secretTail: '', secrets: [], disposables: [], finished: false, pumping: false };
     if (savedEntry) { session.savedTerminalId = savedEntry.id; session.savedTerminalName = savedEntry.name; }

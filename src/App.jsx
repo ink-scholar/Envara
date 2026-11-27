@@ -26,7 +26,7 @@ import { supportsAttachedApplication } from "./application-capability.mjs";
 import { environmentTransferModalPending, cancelEnvironmentImportModal } from "./environment-transfer-ui.mjs";
 import { completeWorkspaceOperation, workspaceOperationWarning } from "./workspace-operation.mjs";
 import { Button, IconButton, Modal } from "./workspace-ui.jsx";
-import { navItems, useSidebarPreference, WorkspaceSidebar } from "./WorkspaceSidebar.jsx";
+import { navItems, pageAvailable, useSidebarPreference, WorkspaceSidebar } from "./WorkspaceSidebar.jsx";
 import { ProfileForm, GroupForm } from "./ProfileForm.jsx";
 import { MigrationForm, ExportDataForm, ImportPasswordForm, ImportMappingForm } from "./EnvironmentTransferForms.jsx";
 import { NetworkResult, ProxyForm } from "./ProxyForm.jsx";
@@ -666,6 +666,10 @@ function WorkspaceApp() {
     setTerminalExpanded(false);
     if (profileId) setTerminalRequest({ profileId, nonce: Date.now() });
   };
+  // A page the platform does not offer (SSH outside macOS) falls back to environments.
+  useEffect(() => {
+    if (!pageAvailable(page, system.platform)) setPage("profiles");
+  }, [page, system.platform]);
   const navigate = target => {
     if (target === "terminals") { openTerminalWorkspace(); return; }
     setPage(target);
@@ -744,7 +748,7 @@ function WorkspaceApp() {
     "--terminal-height": `${Math.min(terminalHeight, terminalMaxHeight)}px`
   }}>
     {api.isDesktop && <div className="desktop-titlebar" aria-hidden="true" />}
-    <WorkspaceSidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(value => !value)} page={page} onNavigate={navigate} count={profiles.length} totalBytes={totalBytes} language={language} t={t} />
+    <WorkspaceSidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(value => !value)} page={page} onNavigate={navigate} count={profiles.length} totalBytes={totalBytes} language={language} platform={system.platform} t={t} />
     <main className={`main-panel${page === "ssh" ? " ssh-main-panel" : ""}`}>
       {!terminalWorkspace && <header className="page-header"><div className="page-heading"><div className="heading-line"><h1 tabIndex={-1}>{t(page === "settings" ? "设置" : navItems.find(item => item.id === page)?.label)}</h1>{!api.isDesktop && <span className="preview-badge">{t("界面预览")}</span>}</div></div>
         {page === "profiles" && <div className="header-actions"><Button icon={UploadSimple} onClick={() => importProfiles()} disabled={pending["importProfiles:"]}>{t("导入")}</Button><Button icon={Plus} className="primary" onClick={() => setModal({
@@ -849,9 +853,13 @@ function WorkspaceApp() {
         {api.isDesktop && snapshot.legacyMigration?.available && <div className="settings-card settings-rows migration-settings"><div className="settings-row"><div><strong>{t("旧版本工作区")}</strong></div><Button onClick={previewMigration} disabled={pending["previewLegacyMigration:"]}>{t("迁移旧环境")}</Button></div></div>}
             </section>
             {api.isDesktop && linkRouter && <section className="settings-section"><div className="section-heading"><h2>{t("打开链接")}</h2></div><div className="settings-card settings-rows">
-          <div className="settings-row"><div><strong>{t("境舱内打开链接")}</strong><details className="settings-help"><summary>{t("使用说明")}</summary><p>{t("境舱及普通终端链接使用所选浏览器；关闭后转到系统浏览器（环境外）。Claude 会话不变。")}</p></details></div>
+          <div className="settings-row"><div><strong>{t("境舱内打开链接")}</strong><details className="settings-help"><summary>{t("使用说明")}</summary><p>{t(linkRouter.terminalLinks === false ? "境舱内的链接使用所选浏览器；关闭后转到系统浏览器（环境外）。此平台暂不支持转交终端中打开的链接，终端链接使用系统浏览器（环境外）。" : "境舱及普通终端链接使用所选浏览器；关闭后转到系统浏览器（环境外）。Claude 会话不变。")}</p></details></div>
             <label className="proxy-check-option settings-switch"><input type="checkbox" aria-label={t("境舱内打开链接")} checked={linkRouter.preference !== false} disabled={linkRoutingPending} onChange={async event => { const result = await perform("setLinkRouter", { enabled: event.target.checked }); if (result.ok && result.result) setLinkRouter(result.result); }} /><span>{t(linkRouter.preference !== false ? "已开启" : "已关闭")}</span></label>
           </div>
+          {linkRouter.systemRoutingSupported === false && <div className="settings-row"><div><strong>{t("附加应用链接接管（可选）")}</strong>
+            <span>{t("系统链接接管目前仅支持 macOS。")}</span></div>
+            <Button disabled>{t("不可用")}</Button>
+          </div>}
           {linkRouter.available && <div className="settings-row"><div><strong>{t("附加应用链接接管（可选）")}</strong>
             <span>{t(linkRouter.enabled ? "已接管系统链接；恢复原默认浏览器不影响境舱内偏好。" : "仅接管附加应用的系统链接。macOS 将请求把境舱设为默认浏览器；无关应用仍用原浏览器，终端无需此授权。")}</span>
             {!linkRouter.enabled && linkRouter.preference === false && <span>{t("请先开启境舱内链接。")}</span>}
@@ -899,7 +907,7 @@ function WorkspaceApp() {
       })} onStop={() => perform("stopProfile", {
         id: selected.id
       }, t("会话已停止"))} onEdit={() => editSelected(selected)} onClear={() => confirmClear(selected)} onExport={() => setModal({ type: "exportData", scope: "browser", profile: selected })} editingDisabled={activeInEnvironment(selected)} t={t} /> : <ContextDetail profile={selected} proxy={selectedProxy} workspace={selectedWorkspace} onEdit={() => editSelected(selected)} onDirectory={chooseDirectory} directoryDisabled={!api.isDesktop || !selected || activeInEnvironment(selected) || !!pending[`chooseWorkspaceDirectory:${selected?.id}`]} onNavigate={navigate} onClone={() => cloneProfile(selected)} onDelete={() => confirmDelete(selected)} editingDisabled={activeInEnvironment(selected)} t={t} />}</aside>}
-    <TerminalDock profiles={terminalContextProfiles} screenReaderMode={snapshot.system?.accessibilitySupportEnabled === true} selectedProfileId={selectedId} onSelectProfile={setSelectedId} visible={terminalVisible} workspace={terminalWorkspace} onExport={profileId => {
+    <TerminalDock systemPlatform={system.platform} profiles={terminalContextProfiles} screenReaderMode={snapshot.system?.accessibilitySupportEnabled === true} selectedProfileId={selectedId} onSelectProfile={setSelectedId} visible={terminalVisible} workspace={terminalWorkspace} onExport={profileId => {
       const profile = profiles.find(item => item.id === profileId);
       if (api.isDesktop && profile && !terminalActive(profile.id)) { setSelectedId(profile.id); setModal({ type: "exportData", scope: "terminal", profile }); }
     }} onConfigureLinkBrowser={profileId => {

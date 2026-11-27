@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { LocalApplicationCatalog, localApplicationRoots } from '../electron/local-application-catalog.mjs';
+import { LocalApplicationCatalog, localApplicationRoots, peSubsystem } from '../electron/local-application-catalog.mjs';
 import { inspectLocalApplication } from '../electron/application-service.mjs';
 const macOSFeature = process.platform !== 'darwin' && 'macOS-only feature';
 
@@ -103,10 +103,28 @@ test('missing roots are normal, unsafe root aliases and inaccessible scan result
   assert.equal((await unsafe.list()).scanComplete, false); assert.equal((await unsafe.list()).applications.length, 0);
 });
 
+// Inert PE image header (never run) with the given optional-header subsystem.
+function peHeader(subsystem) {
+  const header = Buffer.alloc(512); header.write('MZ', 0, 'latin1'); header.writeUInt32LE(0x80, 0x3c);
+  header.write('PE\0\0', 0x80, 'latin1'); header.writeUInt16LE(0x20b, 0x80 + 24); header.writeUInt16LE(subsystem, 0x80 + 24 + 68);
+  return header;
+}
+
+test('PE subsystem distinguishes desktop programs from console tools and rejects other files', () => {
+  assert.equal(peSubsystem(peHeader(2)), 2); assert.equal(peSubsystem(peHeader(3)), 3);
+  assert.equal(peSubsystem(Buffer.from('owned inert fixture')), null);
+  const truncated = peHeader(2).subarray(0, 0x90); assert.equal(peSubsystem(truncated), null);
+  const wrong = peHeader(2); wrong.write('XX', 0x80, 'latin1'); assert.equal(peSubsystem(wrong), null);
+});
+
 test('Windows source discovery inspects bounded exe installation roots without accepting shortcuts or symlinks', async t => {
   const f = await fixture(t), install = path.join(f.system, 'Vendor/Product'); await mkdir(install, { recursive: true });
-  const exe = path.join(install, 'Workspace.exe'); await writeFile(exe, 'owned inert fixture; never run');
+  const exe = path.join(install, 'Workspace.exe'); await writeFile(exe, peHeader(2));
   await writeFile(path.join(install, 'shortcut.lnk'), 'not followed'); await writeFile(path.join(install, 'config.json'), '{}');
+  // A console tool and an uninstaller are not desktop applications to attach.
+  await writeFile(path.join(install, 'workspace-cli.exe'), peHeader(3));
+  await writeFile(path.join(install, 'Uninstall Workspace.exe'), peHeader(2));
+  await writeFile(path.join(install, 'workspace-text.exe'), 'not an executable image');
   await symlink(exe, path.join(f.system, 'Alias.exe'));
   const result = await new LocalApplicationCatalog({ platform: 'win32', roots: [f.system] }).list({ query: 'workspace' });
   assert.equal(result.applications.length, 1); assert.equal(result.applications[0].path, exe);

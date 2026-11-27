@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { chmod, mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TerminalService } from '../electron/terminal-service.mjs';
+import { windowsBrowserCommand } from '../electron/terminal-launch-config.mjs';
 
 class FakePty {
   constructor(options) { this.pid = 123456; this.options = options; this.data = new Set(); this.exits = new Set(); this.written = []; this.pauses = 0; }
@@ -728,7 +729,9 @@ test('a terminal receives its link channel, and the channel token is masked like
   assert.equal(env.ENVARA_LINK_SOCKET, '/private/tmp/envara-link-test.sock');
   assert.equal(env.ENVARA_LINK_TOKEN, 'a1b2c3d4'.repeat(8), 'without these the open shim can only refuse');
   assert.ok(env.PATH.startsWith(path.join(os.tmpdir(), 'envara-link-bin-test')), 'the shim comes first on PATH');
-  assert.equal(env.BROWSER, path.join(os.tmpdir(), 'envara-link-bin-test', 'browser'));
+  assert.equal(env.BROWSER, process.platform === 'win32'
+    ? windowsBrowserCommand(path.join(os.tmpdir(), 'envara-link-bin-test'), process.env.SystemRoot ?? 'C:\\Windows')
+    : path.join(os.tmpdir(), 'envara-link-bin-test', 'browser'));
   f.fakes[0].output(`ENVARA_LINK_TOKEN=${'a1b2c3d4'.repeat(8)}\n`);
   await delay(80);
   const shown = f.events.filter(event => event.type === 'data').map(event => event.data).join('');

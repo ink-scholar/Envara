@@ -204,7 +204,8 @@
 - [ ] 界面：Windows 上仍显示 macOS 专属的“SSH 连接”导航；系统链接路由控件被隐藏而非显示不可用；设置中“终端链接使用所选浏览器”在链接通道不可用时不成立；Windows 附加软件目录未过滤安装器与系统辅助程序；Claude 拒绝文案应说明“Windows 暂不支持”而非“安装无效”。
 - [ ] 单元测试在 Windows 上的可移植性：约 570 项失败来自测试本身的 POSIX 假设（`/usr/bin/true`、`/tmp`、Unix socket、`process.getuid`、`openssl`、gzip 夹具等）和 macOS 专属测试文件。需要为 macOS 专属测试加平台跳过，并把通用测试改为可移植夹具，以便区分真实的 Windows 缺陷。
 - [ ] `realpath` 与原路径逐字比较：如果出现大小写、8.3 短路径或 `\\?\` 前缀差异导致 `UNSAFE_PATH`，需要改为 Windows 规范化比较。
-- [ ] 终端链接通道使用 Unix socket 路径；Windows 需要改为命名管道（`\\.\pipe\…`），否则终端里打开的链接无法交给环境浏览器。
+- [x] 终端链接通道（第 5 轮）：Windows 上改用命名管道 `\\.\pipe\envara-link-<每次启动随机>`，环境令牌照旧逐请求校验；目录检查改用 `file-trust.mjs`，不再报“终端链接通道目录不安全”。终端里的 `BROWSER` 是一条 PowerShell 命令行，运行 `electron/terminal-link-shim.ps1`，**不用 .cmd 批处理**，否则 URL 里的 `&`、`|` 会被 cmd 当成命令执行。脚本只接受 http/https 链接，通过管道交给 Envara，按环境浏览器打开。实测带 `&`、`|` 的链接原样送达、没有执行任何命令；令牌错误、通道缺失、非网页参数都会拒绝，也不会改用宿主浏览器。macOS 专用的系统链接接管通道在其他平台不再创建（启动时不再报错）。
+  - 限制：只有遵循 `BROWSER` 的工具会走环境浏览器（Python `webbrowser`、`gh`、`gcloud` 等）。cmd 的 `start <url>`、`explorer <url>` 等直接调用 Windows 默认浏览器，不经过 Envara；Windows 没有 macOS `open` 那样能在 PATH 里替换的入口。
 - [ ] 终端默认 shell 为 `cmd.exe`，终端附件仅支持 PowerShell；评估是否改为默认 PowerShell 或让用户选择。
 - [ ] Windows 终端网络围栏：没有经过验证的边界之前，界面继续显示“仅支持代理配置的命令行工具生效”；Claude 专用会话继续拒绝。
 - [ ] Claude Code：官方 Windows 原生安装的下载校验（`claude-code-download.mjs` 目前仅支持 darwin）与 PE 识别（`claude-code-installation.mjs`）；依赖终端围栏，暂不启用。

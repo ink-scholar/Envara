@@ -850,10 +850,14 @@ async function initializeDesktopServices({ checkOpen }) {
     linkChannel = new TerminalLinkChannel({ root: dataDir, onLink: request => reportLink(request, '终端'),
       log: message => console.info(`Envara link channel: ${message}`) });
     await initializeStep('terminal-link-listen', () => linkChannel.listen().catch(error => { console.error(`Envara link channel unavailable: ${error.message}`); linkChannel = null; }));
-    routerChannel = new LinkSocketServer({ root: dataDir, socketPath: LINK_ROUTER_SOCKET_PATH, sender: 'owner',
-      onLink: request => linkRouter.openFromProcess(request),
-      log: message => console.info(`Envara link router: ${message}`) });
-    await initializeStep('system-link-listen', () => routerChannel.listen().catch(error => { console.error(`Envara link router unavailable: ${error.message}`); routerChannel = null; }));
+    // The system link router is the macOS default-browser helper; other
+    // platforms have none, so its socket is not created there.
+    if (process.platform === 'darwin') {
+      routerChannel = new LinkSocketServer({ root: dataDir, socketPath: LINK_ROUTER_SOCKET_PATH, sender: 'owner',
+        onLink: request => linkRouter.openFromProcess(request),
+        log: message => console.info(`Envara link router: ${message}`) });
+      await initializeStep('system-link-listen', () => routerChannel.listen().catch(error => { console.error(`Envara link router unavailable: ${error.message}`); routerChannel = null; }));
+    }
     terminalBrowserBroker = new TerminalBrowserBroker({ service, dataDir, protectBrowserOperation,
       nodeExecutable: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'build'), 'backend', 'playwright-driver', process.platform === 'win32' ? 'node.exe' : 'node'),
       onError: event => { for (const { window: view, kind } of views.values()) if (!view.isDestroyed() && kind === 'workspace') view.webContents.send('envara:link-event', { ...event, type: 'error' }); } });

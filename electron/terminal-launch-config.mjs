@@ -1,5 +1,18 @@
 import nodePath from 'node:path';
 
+/** The Windows link shim's file name in an environment's link directory. */
+export const WINDOWS_LINK_SCRIPT = 'envara-open.ps1';
+
+/** The $BROWSER value for a Windows terminal: a PowerShell command line whose
+ * last argument receives the link, never a batch file, which would re-parse
+ * `&` or `|` in a URL as commands. Paths use forward slashes, which Windows
+ * accepts and which survive the POSIX-style splitting callers apply. */
+export function windowsBrowserCommand(directory, systemRoot = 'C:\\Windows') {
+  const slash = value => value.replaceAll('\\', '/');
+  const powershell = slash(nodePath.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'));
+  return `"${powershell}" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${slash(nodePath.win32.join(directory, WINDOWS_LINK_SCRIPT))}" %s`;
+}
+
 const pathFor = platform => platform === 'win32' ? nodePath.win32 : nodePath.posix;
 
 /** Build only the owned child's environment. Callers provide current host
@@ -38,7 +51,8 @@ export function terminalChildEnvironment({ directories, timezone, proxyEndpoint,
   if (proxyEndpoint) environment.NODE_USE_ENV_PROXY = '1';
   // Supported tool opt-outs apply only to this owned shell and its children.
   if (linkShim) {
-    environment.BROWSER = path.join(linkShim.directory, 'browser');
+    // Windows: a PowerShell command line, never a batch file (see terminal-link-channel.mjs).
+    environment.BROWSER = platform === 'win32' ? windowsBrowserCommand(linkShim.directory, systemRoot) : path.join(linkShim.directory, 'browser');
     // The open shim reports links over this channel; without these it can only refuse.
     for (const key of ['ENVARA_LINK_SOCKET', 'ENVARA_LINK_TOKEN']) if (typeof linkShim[key] === 'string' && linkShim[key] && !/[\0\r\n]/.test(linkShim[key])) environment[key] = linkShim[key];
   }

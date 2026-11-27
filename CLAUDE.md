@@ -68,7 +68,8 @@ Next work, in order (keep §4 of the test plan updated as items land):
    - Open decision: cache maintenance stays read-only on Windows until an NTFS ACL check exists.
 2. **Windows UI mismatches: done (round 5).**
    - Follow-up: build the Windows attached-app catalog from Start Menu shortcuts (`.lnk`). The bounded Program Files scan still truncates and lists some vendor helpers.
-3. **Terminal link channel on Windows.** `electron/terminal-link-channel.mjs` uses a Unix socket path, and its uid check always fails on Windows (startup logs "终端链接通道目录不安全"). Move it to a named pipe (`\\.\pipe\…`) with an equivalent ownership/ACL check, so terminal-opened links and OAuth handoffs reach the environment browser.
+3. **Terminal link channel on Windows: done (round 5).** A per-run named pipe; `BROWSER` is a PowerShell command line running `electron/terminal-link-shim.ps1`, never a `.cmd`, because batch files re-parse `&`/`|` in URLs.
+   - Limit: only `BROWSER`-honouring tools reach the environment browser; `start <url>` uses the Windows default browser.
 4. **Packaging acceptance:** `npm run dist:win` installer install, first launch, uninstall and data retention on a clean Windows machine.
 5. **Low priority / noise:**
    - node-pty `AttachConsole failed` stack traces on session close;

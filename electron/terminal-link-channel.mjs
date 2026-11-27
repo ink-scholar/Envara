@@ -13,7 +13,12 @@ import net from 'node:net';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import os from 'node:os';
+import { accessibleByOthers, currentUid, ownedBy } from './file-trust.mjs';
+import { WINDOWS_LINK_SCRIPT } from './terminal-launch-config.mjs';
+
+export { WINDOWS_LINK_SCRIPT };
 
 const MAX_REQUEST_BYTES = 8192;
 const LINK_TOKEN = /^[A-Za-z0-9_-]{32,128}$/;
@@ -22,10 +27,25 @@ const fail = message => Object.assign(new Error(message), { code: 'LINK_CHANNEL_
 export const TERMINAL_LINK_SOCKET = 'link.sock';
 export const TERMINAL_LINK_BIN = 'bin';
 
+/* Windows has no /bin/sh, and curl cannot reach a named pipe. Its shim is a
+ * PowerShell script that $BROWSER runs as a command line, never a .cmd: a
+ * batch file re-parses its arguments, so `&` or `|` in a URL could run commands.
+ * Callers that honour $BROWSER (Python webbrowser, gh, gcloud) split that line
+ * into arguments and pass the link as one of them. */
+
+// A real PowerShell source file (electron/terminal-link-shim.ps1, packaged
+// with the app) rather than a string, so its quoting is PowerShell's own.
+let windowsShimSource;
+function windowsLinkShim() {
+  windowsShimSource ??= readFileSync(new URL('./terminal-link-shim.ps1', import.meta.url), 'utf8');
+  return windowsShimSource;
+}
+
 /** The scripts an environment's PATH carries. `open` is replaced; a real
  * executable is never shadowed for anything that is not a web link, and a
  * failed report is never silent: the real browser is not started instead. */
-export function linkShimScripts() {
+export function linkShimScripts(platform = process.platform) {
+  if (platform === 'win32') return { [WINDOWS_LINK_SCRIPT]: windowsLinkShim() };
   const opener = `#!/bin/sh
 # Envara: open a web link in this environment's browser.
 # Every expansion is braced: macOS /bin/sh (bash 3.2) in a UTF-8 locale would
@@ -80,7 +100,8 @@ export class LinkSocketServer {
   /* Two kinds of caller. A terminal's shim presents its environment's token and
    * sends a lone url. The system link helper has no token: it is trusted by the
    * socket itself (this user's alone, 0600) and says which process sent the link. */
-  constructor({ root, onLink, log = () => {}, socketDirectory = null, socketPath = null, socketOwner = process.getuid?.() ?? null, sender = 'token' }) {
+  constructor({ root, onLink, log = () => {}, socketDirectory = null, socketPath = null, socketOwner = process.getuid?.() ?? null, sender = 'token', platform = process.platform }) {
+    this.platform = platform;
     if (!['token', 'owner'].includes(sender)) throw fail('终端链接通道无效。');
     this.sender = sender;
     if (typeof root !== 'string' || !path.isAbsolute(root) || typeof onLink !== 'function') throw fail('终端链接通道无效。');
@@ -118,13 +139,18 @@ export class LinkSocketServer {
       if (!info?.isDirectory() || !inside) throw fail('终端链接通道目录不安全。');
     } else {
       const info = await lstat(directory);
-      if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.() || (info.mode & 0o077)) throw fail('终端链接通道目录不安全。');
-      await chmod(directory, 0o700);
+      // POSIX ownership and modes where they exist; on Windows the directory
+      // lives under the user's profile and its ACL (see file-trust.mjs).
+      if (!info.isDirectory() || info.isSymbolicLink() || !ownedBy(info, currentUid(this.platform)) || accessibleByOthers(info, this.platform)) throw fail('终端链接通道目录不安全。');
+      if (this.platform !== 'win32') await chmod(directory, 0o700);
     }
     if (this.closing) throw fail('终端链接通道已关闭。');
     this.directory = directory;
-    this.socketPath = this.flatSocketPath ?? path.join(directory, socketName);
-    try { await rm(this.socketPath, { force: true }); } catch {}
+    /* Windows has no filesystem sockets: a named pipe with an unguessable name
+     * per run. The environment's token still authorizes every request. */
+    this.pipe = this.platform === 'win32' && !flat;
+    this.socketPath = this.pipe ? `\\\\.\\pipe\\envara-link-${randomUUID()}` : this.flatSocketPath ?? path.join(directory, socketName);
+    if (!this.pipe) try { await rm(this.socketPath, { force: true }); } catch {}
     if (this.closing) throw fail('终端链接通道已关闭。');
     this.server = net.createServer(socket => {
       this.sockets.add(socket); socket.once('close', () => this.sockets.delete(socket));
@@ -134,7 +160,7 @@ export class LinkSocketServer {
     });
     await new Promise((resolve, reject) => { this.server.once('error', reject); this.server.listen(this.socketPath, resolve); }).catch(error => { throw fail(`终端链接通道无法监听：${error.message}`); });
     if (this.closing) throw fail('终端链接通道已关闭。');
-    await chmod(this.socketPath, 0o600);
+    if (!this.pipe) await chmod(this.socketPath, 0o600);
     if (this.closing) throw fail('终端链接通道已关闭。');
     return this.socketPath;
   }
@@ -211,7 +237,7 @@ export class LinkSocketServer {
       const closed = server ? new Promise(resolve => server.close(() => resolve())) : Promise.resolve();
       for (const socket of this.sockets) socket.destroy();
       await closed;
-      if (socketPath) await rm(socketPath, { force: true }).catch(() => {});
+      if (socketPath && !this.pipe) await rm(socketPath, { force: true }).catch(() => {});
     })();
     return this.closePromise;
   }
@@ -222,7 +248,7 @@ export class LinkSocketServer {
     const perProfile = path.join(this.directory, 'bin', profileId);
     await mkdir(perProfile, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700).catch(() => {}); await chmod(perProfile, 0o700);
-    for (const [name, source] of Object.entries(linkShimScripts())) {
+    for (const [name, source] of Object.entries(linkShimScripts(this.platform))) {
       const target = path.join(perProfile, name);
       try { const info = await lstat(target); if (info.isFile() && !info.isSymbolicLink() && info.size === Buffer.byteLength(source)) continue; } catch {}
       await writeFile(target, source, { mode: 0o700 });

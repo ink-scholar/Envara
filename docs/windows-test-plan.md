@@ -198,7 +198,7 @@
 - [x] `npm test` 在 `%TEMP%` 留下的 `envara*` 目录来自中途崩溃、没跑到清理的测试，第 5 轮修好这些测试后已不再新增。`playwright-driver` / `proxy-core` 输出目录的重命名，在 Windows 上遇到 EPERM/EBUSY/EACCES 时会短暂重试（`scripts/rename-with-retry.mjs`），其他错误和其他平台立即报错。
 - [x] npm 12：`package.json` 的 `allowScripts` 允许 `node-pty@1.1.0`、`esbuild@0.25.12`，拒绝 `electron-winstaller@5.4.0`（它的脚本只为 Squirrel 准备 7-Zip，Envara 打的是 NSIS 包）。在 Windows 上用 npm 12.2.3 实测：`npm ci` 没有警告，`install-scripts ls` 显示没有未审查的包，PTY 检查、构建和 `dist:win` 都通过；npm 11 和 npm 12 打出的包逐目录字节数相同。升级这三个依赖时，记得同步更新这里的版本号。
 - [x] BrowseForge Chromium Windows 运行时（上游 `nczz/browseforge-runtime-chromium` v0.1.6-alpha.0）缺少 `150.0.7871.101.manifest`，`chrome.exe` 因 SxS 配置错误无法启动；补齐后页面时区与 Intl locale 仍取宿主值。已在 Windows 上停用该内核（`electron/engine-platform-hold.mjs`）：内核列表显示不可用及原因，安装、新建和启动都给出明确提示，且不会成为默认内核。
-- [ ] 上游发布修复上述两项的 Windows 运行时后，更新固定版本、在 Windows 上验收，再移除停用。
+- [ ] BrowseForge Chromium 在 Windows 上保持停用（2026-11-27 决定），不在 Envara 侧补 manifest 或时区。只有上游发布修好 Windows 运行时后才重新评估（截至 2026-11-27 仍是 v0.1.6-alpha.0）。
 - [ ] 引擎下载进度：侧车给出字符串进度，界面只显示“安装中…”；失败文案重复大量进度行。
 - [ ] 待在 macOS 上复现后判断：Camoufox canvas 哈希重开后变化（D3）。（导入密码错误的提示已在第 3 轮确认正常；HTTP 407 已修正。）
 - [ ] 界面：Windows 上仍显示 macOS 专属的“SSH 连接”导航；系统链接路由控件被隐藏而非显示不可用；设置中“终端链接使用所选浏览器”在链接通道不可用时不成立；Windows 附加软件目录未过滤安装器与系统辅助程序；Claude 拒绝文案应说明“Windows 暂不支持”而非“安装无效”。
